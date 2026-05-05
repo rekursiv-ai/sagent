@@ -57,9 +57,31 @@ logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
 _NOW_PLACEHOLDER = "{{NOW}}"
-_RECIPE_NAME = "sagent"
+_DEFAULT_RECIPE = "sagent"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
+_recipe_path_override: Path | None = None
 _recipe_cache: dict[str, object] | None = None
+
+
+def resolve_recipe(name_or_path: str) -> Path:
+    """Resolve a recipe spec to a yaml path.
+
+    Accepts either a bare name (looked up in ``assets/<name>.yaml``) or
+    a filesystem path (anything containing ``/`` or ending in
+    ``.yaml``/``.yml``). The path is expanded and resolved.
+    """
+    looks_like_path = "/" in name_or_path or name_or_path.endswith((".yaml", ".yml"))
+    base = (
+        Path(name_or_path) if looks_like_path else _ASSETS_DIR / f"{name_or_path}.yaml"
+    )
+    return base.expanduser().resolve()
+
+
+def set_recipe(name_or_path: str) -> None:
+    """Switch the active recipe; clears the load cache."""
+    global _recipe_path_override, _recipe_cache  # noqa: PLW0603 -- process-level state
+    _recipe_path_override = resolve_recipe(name_or_path)
+    _recipe_cache = None
 
 
 def _load_recipe() -> dict[str, object]:
@@ -67,7 +89,7 @@ def _load_recipe() -> dict[str, object]:
     global _recipe_cache  # noqa: PLW0603 -- module-level cache
     if _recipe_cache is not None:
         return _recipe_cache
-    recipe_path = _ASSETS_DIR / f"{_RECIPE_NAME}.yaml"
+    recipe_path = _recipe_path_override or (_ASSETS_DIR / f"{_DEFAULT_RECIPE}.yaml")
     loaded = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
     _recipe_cache = cast(dict[str, object], loaded) if isinstance(loaded, dict) else {}
     return _recipe_cache
@@ -147,7 +169,9 @@ def load_tool_description(name: str) -> str:
     by_lower = {k.lower(): v for k, v in tool_descs.items()}
     key = name.lower()
     if key not in by_lower:
-        logger.error("Tool %r not in recipe %r", name, _RECIPE_NAME)
+        logger.error(
+            "Tool %r not in recipe %s", name, _recipe_path_override or _DEFAULT_RECIPE
+        )
         return ""
     text = read_asset(str(by_lower[key])).rstrip()
     if _NOW_PLACEHOLDER in text:

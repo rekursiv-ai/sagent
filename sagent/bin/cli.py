@@ -59,6 +59,7 @@ from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
 from sagent.repl import run_repl
 from sagent.tools.advisor import Advisor
+from sagent.tools.core import set_recipe
 
 
 _DEFAULT_PROVIDER = "Anthropic"
@@ -242,13 +243,13 @@ def parse_agent_args(
         help="Additional system prompt instructions.",
     )
     parser.add_argument(
-        "--bare-system",
-        dest="bare_system",
-        action="store_true",
+        "--recipe",
+        default=None,
+        metavar="NAME_OR_PATH",
         help=(
-            "Skip the default system-prompt scaffolding (static prompt,"
-            " environment, AGENTS.md walk, memory). Only ``--system`` text"
-            " is sent. Useful for benchmarks that want minimal input tokens."
+            "Active prompt recipe (yaml). Either a bare name resolved"
+            " under ``assets/<name>.yaml`` (e.g. ``sagent``, ``bare``)"
+            " or a filesystem path to a yaml. Default: sagent."
         ),
     )
     parser.add_argument(
@@ -495,10 +496,14 @@ def main() -> None:
     """Parse args and launch the REPL or headless runner."""
     parser = argparse.ArgumentParser(description="Interactive CLI agent.")
     args, remaining = _parse_cli_args(parser)
-
+    if remaining == ["login"]:
+        _do_login(args)
+        return
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
     _configure_logging(args.log_level)
+    if args.recipe is not None:
+        set_recipe(args.recipe)
     try:
         provider, model, resolved_auth = _build_provider_model(args)
     except (AttributeError, RuntimeError, ValueError) as e:
@@ -533,7 +538,6 @@ def main() -> None:
             model.model_id,
             custom=args.system,
             include_memory=not args.no_session,
-            bare=args.bare_system,
         ),
         tools=agent_tools,
         compactor=compactor,
@@ -555,6 +559,60 @@ def main() -> None:
                 output_format=args.output_format,
             )
         )
+
+
+from sagent import providers  # noqa: E402
+
+
+def _add_login_subparser(parser: argparse.ArgumentParser) -> None:  # pyright: ignore[reportUnusedFunction] - used by tests; guarded for export
+    """Register the ``login`` subcommand on ``parser``."""
+    subparsers = parser.add_subparsers(dest="command", required=False)
+    login_p = subparsers.add_parser(
+        "login",
+        help=(
+            "Run the provider's OAuth login and save credentials to"
+            " the named account slot. Exits after saving."
+        ),
+    )
+    login_p.add_argument(
+        "--account",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Credential account to save into. Omit for 'default' (the"
+            " legacy single-account file)."
+        ),
+    )
+    login_p.add_argument(
+        "--provider",
+        default="OpenAISubscription",
+        help="Provider class name (must implement ``login``).",
+    )
+
+
+def _do_login(args: argparse.Namespace) -> None:
+    """Run the OAuth flow for ``args.provider`` and save under ``args.account``.
+
+    Fails fast if the provider class doesn't expose both ``login``
+    and ``save`` classmethods. Output of the login flow goes to
+    stderr so pipes and scripts can capture them cleanly.
+    """
+    cls = getattr(providers, args.provider, None)
+    if cls is None:
+        sys.stderr.write(f"Error: unknown provider {args.provider!r}\n")
+        sys.exit(1)
+    login_fn = getattr(cls, "login", None)
+    save_fn = getattr(cls, "save", None)
+    if login_fn is None or save_fn is None:
+        sys.stderr.write(
+            f"Error: {args.provider} does not support interactive login.\n"
+        )
+        sys.exit(1)
+    account = args.account or "default"
+    sys.stderr.write(f"[login] provider={args.provider} account={account!r}\n")
+    creds = login_fn(output=sys.stderr)
+    save_fn(creds, account=args.account)
+    sys.stderr.write(f"[login] saved credentials for account '{account}'.\n")
 
 
 if __name__ == "__main__":
