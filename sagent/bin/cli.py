@@ -242,6 +242,16 @@ def parse_agent_args(
         help="Additional system prompt instructions.",
     )
     parser.add_argument(
+        "--bare-system",
+        dest="bare_system",
+        action="store_true",
+        help=(
+            "Skip the default system-prompt scaffolding (static prompt,"
+            " environment, AGENTS.md walk, memory). Only ``--system`` text"
+            " is sent. Useful for benchmarks that want minimal input tokens."
+        ),
+    )
+    parser.add_argument(
         "--compact",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -523,6 +533,7 @@ def main() -> None:
             model.model_id,
             custom=args.system,
             include_memory=not args.no_session,
+            bare=args.bare_system,
         ),
         tools=agent_tools,
         compactor=compactor,
