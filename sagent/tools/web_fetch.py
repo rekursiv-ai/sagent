@@ -1,4 +1,4 @@
-"""WebFetch tool: fetch a URL and extract its main content."""
+"""WebFetch tool: fetch a URL (GET or POST) and extract its content."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import socket
 import cachetools
 
 from sagent.custom_types import Message, TextMessage
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
@@ -158,11 +158,33 @@ def _url_is_safe(url: str) -> str | None:
     return None
 
 
-def _safe_fetch(url: str) -> bytes:
-    """Fetch with SSRF check on the initial URL and every redirect."""
+def _safe_fetch(
+    url: str,
+    *,
+    method: str = "GET",
+    json_body: JSONValue = None,
+    form_body: dict[str, str] | None = None,
+) -> bytes:
+    """Fetch with SSRF check on the initial URL and every redirect.
+
+    Args:
+      url: Fully-qualified URL to fetch.
+      method: HTTP method. Restricted to GET or POST.
+      json_body: JSON-serializable body (POST only). Mutually exclusive
+        with ``form_body``.
+      form_body: Form fields encoded as application/x-www-form-urlencoded
+        (POST only). Mutually exclusive with ``json_body``.
+
+    Returns:
+      Response body bytes.
+
+    """
     _check_ssrf(url)
     return fetch(
         url,
+        method=method,
+        json=json_body,
+        data=form_body,
         on_redirect=_check_ssrf,
         validated_hosts=_validated_host,
         timeout_sec=15,
@@ -181,6 +203,30 @@ class WebFetch:
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to fetch."},
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST"],
+                    "description": (
+                        "HTTP method. Defaults to GET. Use POST to call"
+                        " JSON or form APIs."
+                    ),
+                },
+                "json": {
+                    "description": (
+                        "JSON-serializable body for POST requests. Sets"
+                        " Content-Type: application/json. Mutually"
+                        " exclusive with 'form'."
+                    ),
+                },
+                "form": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": (
+                        "Form fields for POST requests. Sets Content-Type:"
+                        " application/x-www-form-urlencoded. Mutually"
+                        " exclusive with 'json'."
+                    ),
+                },
             },
             "required": ["url"],
         }
@@ -215,7 +261,8 @@ class WebFetch:
         """Fetch the URL, extract main content, and return as text.
 
         Args:
-          msg: Directive message containing the target URL.
+          msg: Directive message containing the target URL and optional
+            ``method``/``json``/``form`` for POST requests.
 
         Returns:
           result: Extracted page text or an error message.
@@ -223,14 +270,46 @@ class WebFetch:
         """
         directive = get_directive(msg)
         raw_url = str(directive.get("url", ""))
-        reddit = _is_reddit_url(raw_url)
+        method = str(directive.get("method", "GET")).upper()
+        if method not in ("GET", "POST"):
+            return TextMessage(
+                f"Unsupported method {method!r}; only GET and POST allowed.",
+                "text/x-error",
+            )
+        json_body: JSONValue = None
+        form_body: dict[str, str] | None = None
+        if method == "POST":
+            raw_json = directive.get("json")
+            raw_form = directive.get("form")
+            if raw_json is not None and raw_form is not None:
+                return TextMessage(
+                    "'json' and 'form' are mutually exclusive.",
+                    "text/x-error",
+                )
+            if raw_json is not None:
+                json_body = json_unfreeze(raw_json)
+            elif raw_form is not None:
+                form_body = {
+                    str(k): str(v)
+                    for k, v in cast(dict[str, Any], json_unfreeze(raw_form)).items()
+                }
+
+        reddit = _is_reddit_url(raw_url) and method == "GET"
         url = _to_reddit_json_url(raw_url) if reddit else _normalize_url(raw_url)
-        cache_key = raw_url
-        cached = _WEBFETCH_CACHE.get(cache_key)
-        if cached is not None:
-            return TextMessage(cached, "text/plain")
+        # Cache GETs only; POSTs are non-idempotent.
+        cache_key = raw_url if method == "GET" else None
+        if cache_key is not None:
+            cached = _WEBFETCH_CACHE.get(cache_key)
+            if cached is not None:
+                return TextMessage(cached, "text/plain")
         try:
-            body = await asyncio.to_thread(_safe_fetch, url)
+            body = await asyncio.to_thread(
+                _safe_fetch,
+                url,
+                method=method,
+                json_body=json_body,
+                form_body=form_body,
+            )
         except (FetchError, ValueError, OSError) as e:
             return TextMessage(f"Fetch failed: {e}", "text/x-error")
         content = body.decode("utf-8", errors="replace")
@@ -241,6 +320,10 @@ class WebFetch:
                 text = content[:TOOL_RESULT_MAX_CHARS]
             else:
                 text = _format_reddit_json(data)
+        elif method == "POST" or content.lstrip().startswith(("{", "[")):
+            # POST responses and JSON-shaped bodies pass through verbatim;
+            # trafilatura would mangle them.
+            text = content[:TOOL_RESULT_MAX_CHARS]
         else:
             extracted = await asyncio.to_thread(
                 trafilatura.extract,
@@ -250,5 +333,6 @@ class WebFetch:
             )
             text = extracted or content[:TOOL_RESULT_MAX_CHARS]
         truncated = truncate(text, TOOL_RESULT_MAX_CHARS)
-        _WEBFETCH_CACHE[cache_key] = truncated
+        if cache_key is not None:
+            _WEBFETCH_CACHE[cache_key] = truncated
         return TextMessage(truncated, "text/plain")

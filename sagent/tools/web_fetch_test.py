@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -19,7 +19,7 @@ from sagent.custom_types import (
     TextMessage,
 )
 from sagent.lib.json import JSON, JSONValue, json_freeze
-from sagent.lib.web.fetch import FetchError, HTTPConn
+from sagent.lib.web.fetch import FetchError
 from sagent.tools.web_fetch import WebFetch
 
 import sagent.tools.web_fetch as wfm
@@ -47,27 +47,17 @@ class _FetchRouter:
     ) -> None:
         self._responses = responses or {}
         self._default = default
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, str, JSONValue, dict[str, str] | None]] = []
 
     def __call__(
         self,
         url: str,
         *,
         method: str = "GET",
-        data: dict[str, str] | None = None,
-        json: JSONValue = None,
-        headers: dict[str, str] | None = None,
-        cookies: dict[str, str] | None = None,
-        retries: int = 0,
-        timeout_sec: float = 30,
-        max_redirects: int = 10,
-        on_redirect: Callable[[str], None] | None = None,
-        return_connection: bool = False,
-        http_conn: HTTPConn | None = None,
+        json_body: JSONValue = None,
+        form_body: dict[str, str] | None = None,
     ) -> bytes:
-        del method, data, json, headers, cookies, retries, timeout_sec
-        del max_redirects, on_redirect, return_connection, http_conn
-        self.calls.append(url)
+        self.calls.append((url, method, json_body, form_body))
         for pattern, val in self._responses.items():
             if pattern in url:
                 if isinstance(val, Exception):
@@ -83,14 +73,10 @@ def _patch_fetch(
     responses: dict[str, bytes | Exception] | None = None,
     *,
     default: bytes | None = None,
-) -> Generator[None]:
+) -> Generator[_FetchRouter]:
     router = _FetchRouter(responses, default=default)
-
-    def _side_effect(url: str) -> bytes:
-        return router(url)
-
-    with patch.object(wfm, "_safe_fetch", side_effect=_side_effect):
-        yield
+    with patch.object(wfm, "_safe_fetch", side_effect=router):
+        yield router
 
 
 class TestWebfetch:
@@ -290,6 +276,147 @@ class TestSSRFGuard:
 
         assert isinstance(conn, FakeConnection)
         assert conn.host == "93.184.216.34"
+
+
+class TestPostSupport:
+    @pytest.fixture(autouse=True)
+    def _reset(self) -> Iterator[None]:
+        wfm._WEBFETCH_CACHE.clear()
+        with patch.object(wfm, "_url_is_safe", return_value=None):
+            yield
+
+    @pytest.mark.anyio
+    async def test_post_with_json_body(self) -> None:
+        with _patch_fetch(default=b'{"ok":true}') as router:
+            result = await webfetch.run(
+                _msg(
+                    json_freeze(
+                        {
+                            "url": "https://api.example.com/search",
+                            "method": "POST",
+                            "json": {"q": "openai", "limit": 10},
+                        }
+                    )
+                )
+            )
+        assert isinstance(result, TextMessage)
+        assert '"ok":true' in result.content
+        assert len(router.calls) == 1
+        url, method, json_body, form_body = router.calls[0]
+        assert url == "https://api.example.com/search"
+        assert method == "POST"
+        assert json_body == {"q": "openai", "limit": 10}
+        assert form_body is None
+
+    @pytest.mark.anyio
+    async def test_post_with_form_body(self) -> None:
+        with _patch_fetch(default=b"submitted") as router:
+            await webfetch.run(
+                _msg(
+                    json_freeze(
+                        {
+                            "url": "https://example.com/submit",
+                            "method": "POST",
+                            "form": {"name": "alice", "x": "1"},
+                        }
+                    )
+                )
+            )
+        _, method, json_body, form_body = router.calls[0]
+        assert method == "POST"
+        assert json_body is None
+        assert form_body == {"name": "alice", "x": "1"}
+
+    @pytest.mark.anyio
+    async def test_post_response_passthrough_no_extract(self) -> None:
+        # An HTML-shaped POST response should NOT be run through trafilatura.
+        body = b"<html><body><p>do not extract me</p></body></html>"
+        with _patch_fetch(default=body):
+            result = await webfetch.run(
+                _msg(
+                    json_freeze(
+                        {
+                            "url": "https://example.com/x",
+                            "method": "POST",
+                            "json": {"a": 1},
+                        }
+                    )
+                )
+            )
+        assert isinstance(result, TextMessage)
+        assert "<html>" in result.content  # raw, not extracted
+
+    @pytest.mark.anyio
+    async def test_post_not_cached(self) -> None:
+        with _patch_fetch(default=b'{"v":1}') as router:
+            await webfetch.run(
+                _msg(
+                    json_freeze(
+                        {
+                            "url": "https://api.example.com/q",
+                            "method": "POST",
+                            "json": {"x": 1},
+                        }
+                    )
+                )
+            )
+            await webfetch.run(
+                _msg(
+                    json_freeze(
+                        {
+                            "url": "https://api.example.com/q",
+                            "method": "POST",
+                            "json": {"x": 1},
+                        }
+                    )
+                )
+            )
+        # Both calls hit the network; no cache shortcut.
+        assert len(router.calls) == 2
+
+    @pytest.mark.anyio
+    async def test_get_still_cached(self) -> None:
+        with _patch_fetch(default=b"<p>x</p>") as router:
+            await webfetch.run(_msg(json_freeze({"url": "https://example.com/g"})))
+            await webfetch.run(_msg(json_freeze({"url": "https://example.com/g"})))
+        assert len(router.calls) == 1
+
+    @pytest.mark.anyio
+    async def test_unsupported_method_rejected(self) -> None:
+        result = await webfetch.run(
+            _msg(json_freeze({"url": "https://example.com/", "method": "DELETE"}))
+        )
+        assert result.descriptor == "text/x-error"
+        assert isinstance(result, TextMessage)
+        assert "Unsupported method" in result.content
+
+    @pytest.mark.anyio
+    async def test_json_and_form_mutually_exclusive(self) -> None:
+        result = await webfetch.run(
+            _msg(
+                json_freeze(
+                    {
+                        "url": "https://example.com/",
+                        "method": "POST",
+                        "json": {"a": 1},
+                        "form": {"a": "1"},
+                    }
+                )
+            )
+        )
+        assert result.descriptor == "text/x-error"
+        assert isinstance(result, TextMessage)
+        assert "mutually exclusive" in result.content
+
+    @pytest.mark.anyio
+    async def test_json_response_for_get_passes_through(self) -> None:
+        # A GET that returns JSON should also bypass trafilatura.
+        with _patch_fetch(default=b'{"id":42,"name":"x"}'):
+            result = await webfetch.run(
+                _msg(json_freeze({"url": "https://api.example.com/data"}))
+            )
+        assert isinstance(result, TextMessage)
+        assert '"id":42' in result.content
 
 
 if __name__ == "__main__":
