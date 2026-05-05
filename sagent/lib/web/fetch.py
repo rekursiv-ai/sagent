@@ -69,15 +69,88 @@ class ValidatedHost:
 
 ValidatedHosts = Callable[[str], ValidatedHost]
 
-_DEFAULT_HEADERS: dict[str, str] = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br, zstd",
-}
+# Chrome request signature -- (major version, sec-ch-ua brand list,
+# platform). UA, sec-ch-ua, and sec-ch-ua-platform must agree; servers
+# that observe these headers flag drift between them. Hardcoding
+# "Linux" (rather than platform.system()) keeps the signature
+# reproducible across machines and matches the UA token.
+_CHROME_SIGNATURE: tuple[str, str, str] = (
+    "125",
+    '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
+    '"Linux"',
+)
+_CHROME_UA = (
+    f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    f"(KHTML, like Gecko) Chrome/{_CHROME_SIGNATURE[0]}.0.0.0 Safari/537.36"
+)
+_NAV_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+    "image/avif,image/webp,image/apng,*/*;q=0.8,"
+    "application/signed-exchange;v=b3;q=0.7"
+)
+
+
+def _build_headers(
+    *,
+    method: str,
+    url: str,
+    content_type: str | None,
+    extra: dict[str, str] | None,
+) -> dict[str, str]:
+    """Build canonical-order Chrome request headers.
+
+    Header order, names, and the presence of ``sec-ch-ua`` /
+    ``Sec-Fetch-*`` are observable to servers; a minimal HTTP/1.1
+    request that omits modern browser headers is materially different
+    from typical user traffic, and many web gateways return 403 to
+    such requests. The layout below mirrors a real Chrome 125 wire
+    shape so that legitimate fetches are not mistaken for malformed
+    clients:
+      - GET/HEAD: top-level navigation (Sec-Fetch-Mode=navigate,
+        Upgrade-Insecure-Requests, Accept=text/html...).
+      - POST: fetch/XHR (Sec-Fetch-Mode=cors, Origin set, Accept=*/*,
+        Content-Type spliced between Accept and Sec-Fetch-*).
+
+    Host is omitted -- http.client.putrequest auto-adds it first on the
+    wire, and the connection path overrides explicitly when
+    validated_hosts forces an SNI/connect-IP split.
+
+    Content-Length is also omitted -- http.client._send_request adds it
+    automatically right after Host when body is present, which matches
+    Chrome's POST wire order.
+    """
+    h: dict[str, str] = {
+        "Connection": "keep-alive",
+        "sec-ch-ua": _CHROME_SIGNATURE[1],
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": _CHROME_SIGNATURE[2],
+    }
+    if method in ("GET", "HEAD"):
+        h["Upgrade-Insecure-Requests"] = "1"
+        h["User-Agent"] = _CHROME_UA
+        h["Accept"] = _NAV_ACCEPT
+        h["Sec-Fetch-Site"] = "none"
+        h["Sec-Fetch-Mode"] = "navigate"
+        h["Sec-Fetch-User"] = "?1"
+        h["Sec-Fetch-Dest"] = "document"
+    else:
+        h["User-Agent"] = _CHROME_UA
+        h["Accept"] = "*/*"
+        if content_type:
+            h["Content-Type"] = content_type
+        parsed = urlparse(url)
+        h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+        h["Sec-Fetch-Site"] = "cross-site"
+        h["Sec-Fetch-Mode"] = "cors"
+        h["Sec-Fetch-Dest"] = "empty"
+    h["Accept-Encoding"] = "gzip, deflate, br, zstd"
+    h["Accept-Language"] = "en-US,en;q=0.9"
+    if extra:
+        # Caller wins; dict.update preserves slot for existing keys and
+        # appends new ones at the end.
+        h.update(extra)
+    return h
+
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_REDIRECTS = 10
@@ -199,16 +272,22 @@ def fetch(
     if params:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{urlencode(params)}"
-    merged = {**_DEFAULT_HEADERS, **(headers or {})}
-    if cookies:
-        merged["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
     body_bytes: bytes | None = None
+    body_content_type: str | None = None
     if data is not None:
         body_bytes = urlencode(data).encode()
-        merged.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        body_content_type = "application/x-www-form-urlencoded"
     elif json is not None:
         body_bytes = json_mod.dumps(json).encode()
-        merged.setdefault("Content-Type", "application/json")
+        body_content_type = "application/json"
+    merged = _build_headers(
+        method=method,
+        url=url,
+        content_type=body_content_type,
+        extra=headers,
+    )
+    if cookies:
+        merged["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
     use_conn_path = (
         return_connection
@@ -385,6 +464,19 @@ def _hostname(netloc: str) -> str:
     return parsed.hostname or netloc
 
 
+def _bracket_ipv6(host: str) -> str:
+    """Wrap an IPv6 literal in brackets for http.client compatibility.
+
+    http.client splits the host string on the last ':' to extract a
+    port, so a bare IPv6 address like ``2606:4700::6810:7c60`` is
+    misparsed as ``host=2606:4700::6810`` + ``port=7c60``. Bracketing
+    avoids the heuristic. Hostnames and IPv4 addresses pass through.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def _open_connection(
     scheme: str,
     host: str,
@@ -392,7 +484,7 @@ def _open_connection(
     resolved_ip: str = "",
 ) -> HTTPConn:
     """Open a new HTTP or HTTPS connection."""
-    connect_host = resolved_ip or host
+    connect_host = _bracket_ipv6(resolved_ip or host)
     if scheme == "https":
         ctx = ssl.create_default_context()
         if resolved_ip:
@@ -434,9 +526,9 @@ def _fetch_connection(
     connect_host = validated.ip if validated is not None else ""
     request_headers = headers
     if validated is not None:
-        # Host first: Cloudflare bot-fingerprints header order, and real
-        # browsers (and http.client's auto-generated Host header) send Host
-        # before User-Agent/Accept/etc. Putting it last triggers 403s.
+        # Host first: real browsers and http.client's own auto-generated
+        # Host header both place it before User-Agent/Accept/etc. Servers
+        # that observe header order return 403 when Host is trailing.
         request_headers = {"Host": validated.host, **headers}
 
     if (
