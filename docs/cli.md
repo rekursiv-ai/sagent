@@ -75,6 +75,10 @@ parsing.
 When `SAGENT_SELFHOSTED_DEVICE` is unset, SelfHosted uses MPS if available,
 then CUDA if available, then the PyTorch CPU default.
 
+Set `SAGENT_SELFHOSTED_COMPILE=1` to opt into `torch.compile` for the loaded
+SelfHosted model. It is disabled by default because compile can add significant
+first-request latency and backend-specific variance.
+
 ## Tool flags
 
 ```bash

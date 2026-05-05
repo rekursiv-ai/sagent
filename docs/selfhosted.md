@@ -64,13 +64,17 @@ HuggingFace repo ID or a local snapshot path:
 export SAGENT_SELFHOSTED_MODEL=Qwen/Qwen3.6-27B
 export SAGENT_SELFHOSTED_DEVICE=cuda
 export SAGENT_SELFHOSTED_DTYPE=bfloat16
+export SAGENT_SELFHOSTED_COMPILE=0
 sagent --provider SelfHosted
 ```
 
-`SAGENT_SELFHOSTED_DEVICE` and `SAGENT_SELFHOSTED_DTYPE` are optional. When no
-device is set, SelfHosted uses MPS if available, then CUDA if available, then
-the PyTorch CPU default. Supported dtype values are `float16`, `bfloat16`, and
-`float32`.
+`SAGENT_SELFHOSTED_DEVICE`, `SAGENT_SELFHOSTED_DTYPE`, and
+`SAGENT_SELFHOSTED_COMPILE` are optional. When no device is set, SelfHosted uses
+MPS if available, then CUDA if available, then the PyTorch CPU default.
+Supported dtype values are `float16`, `bfloat16`, and `float32`. Compile is off
+by default; set `SAGENT_SELFHOSTED_COMPILE=1` to wrap the loaded model with
+`torch.compile`. Keep it opt-in because compile can add a large first-request
+cost and may vary by device/backend.
 
 To force a local cache path, pass it in the same places:
 
