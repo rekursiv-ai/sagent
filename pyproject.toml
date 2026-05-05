@@ -52,7 +52,7 @@ sagent-slack = "sagent.bin.slack:main"
 
 [project.optional-dependencies]
 selfhosted = [
-    "accelerate",
+    "accelerate>=1.13.0",
     "compressed-tensors",
     "protobuf",
     "sentencepiece",

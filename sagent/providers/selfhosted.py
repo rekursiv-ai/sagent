@@ -346,6 +346,12 @@ class SelfHosted:
             model_id,
             max_request_tokens,
         )
+        # device="auto" delegates placement to accelerate's device_map,
+        # sharding weights across all visible GPUs. Required for models
+        # that exceed a single GPU's VRAM.
+        shard_auto = isinstance(device, str) and device == "auto"
+        if shard_auto:
+            load_kwargs["device_map"] = "auto"
         model = cast(
             "nn.Module",
             transformers_lib.AutoModelForCausalLM.from_pretrained(  # pyright: ignore[reportUnknownMemberType] -- no stubs  # ty: ignore[possibly-missing-attribute] -- lazy import; ty can't resolve
@@ -353,7 +359,7 @@ class SelfHosted:
                 **load_kwargs,
             ),
         )
-        if device is not None:
+        if device is not None and not shard_auto:
             model = model.to(device)
         model.eval()
         if compile_model:
