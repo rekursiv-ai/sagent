@@ -193,6 +193,7 @@ def build_system_dict(
     custom: str = "",
     *,
     include_memory: bool = True,
+    bare: bool = False,
 ) -> dict[str, str | Callable[[], str]]:
     """Assemble core scaffolding for the system prompt.
 
@@ -205,11 +206,16 @@ def build_system_dict(
       model_id: Provider-specific model identifier.
       custom: Optional user instructions appended to the prompt.
       include_memory: Whether to include persistent project memory.
+      bare: If ``True``, skip all default scaffolding and return only
+        ``custom`` as a single section. Useful for benchmarks where
+        the goal is to minimize input tokens.
 
     Returns:
       sections: Ordered dict of section name to string or callable.
 
     """
+    if bare:
+        return {"user_instructions": custom} if custom else {}
     sections: dict[str, str | Callable[[], str]] = {
         "static": _load_static(),
         "environment": lambda: environment(model_id),

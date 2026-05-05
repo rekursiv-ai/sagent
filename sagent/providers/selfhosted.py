@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Protocol, cast, runtime_checkable
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -330,6 +331,9 @@ class SelfHosted:
             dtype,
             trust_remote_code,
         )
+        if os.environ.get("SAGENT_SELFHOSTED_DISABLE_DEEPGEMM") == "1":
+            _disable_transformers_deepgemm()
+            logger.info("DeepGEMM disabled via env; using Triton FP8 fallback")
         load_kwargs: dict[str, object] = {"trust_remote_code": trust_remote_code}
         if dtype is not None:
             load_kwargs["dtype"] = dtype
@@ -765,6 +769,26 @@ def _generate(
 def _compile_model(model: nn.Module) -> nn.Module:
     """Wrap a model with torch.compile."""
     return cast("nn.Module", cast(Callable[[object], object], torch.compile)(model))
+
+
+def _disable_transformers_deepgemm() -> None:
+    """Force-route transformers' FP8 dispatch through the Triton fallback.
+
+    DeepGEMM's FP8 kernel ships with layout recipes only for sm_90
+    (Hopper) and sm_100 (Blackwell DC); sm_120 (consumer Blackwell, e.g.
+    RTX 5090) trips an "Unknown recipe" C++ assertion at runtime.
+    Transformers' dispatch in ``w8a8_fp8_matmul`` only catches
+    ``ImportError``, so the assertion is not recoverable from Python.
+    Setting the module's private ``_deepgemm_available`` flag to False
+    causes ``_load_deepgemm_kernel`` to raise ``ImportError`` on its
+    next call, which the dispatch catches and falls back to the
+    universal Triton FP8 kernel (slower but functional).
+    """
+    finegrained_fp8 = importlib.import_module(
+        "transformers.integrations.finegrained_fp8"
+    )
+    # Monkey-patch the module-level flag; no public knob exists upstream.
+    setattr(finegrained_fp8, "_deepgemm_available", False)  # noqa: B010
 
 
 def _module_device(model: nn.Module) -> str:
