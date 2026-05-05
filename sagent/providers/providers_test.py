@@ -21,6 +21,32 @@ from sagent.providers.anthropic import Anthropic
         # Other providers
         ("kimi-k2", "Anthropic", ("Moonshot", "env")),
         ("qwen3-235b", "Anthropic", ("DashScope", "env")),
+        # Local model paths route to the native self-hosted provider.
+        (
+            "/opt/models/qwen3.6-27b",
+            "Anthropic",
+            ("SelfHosted", "/opt/models/qwen3.6-27b"),
+        ),
+        (
+            "./models/qwen3.6-27b",
+            "Anthropic",
+            ("SelfHosted", "./models/qwen3.6-27b"),
+        ),
+        (
+            "~/models/qwen3.6-27b",
+            "Anthropic",
+            ("SelfHosted", "~/models/qwen3.6-27b"),
+        ),
+        (
+            "../models/qwen3.6-27b",
+            "Anthropic",
+            ("SelfHosted", "../models/qwen3.6-27b"),
+        ),
+        (
+            "/opt/models/qwen3.6-27b",
+            "SelfHosted",
+            ("SelfHosted", "/opt/models/qwen3.6-27b"),
+        ),
     ],
 )
 def test_infer_provider(

@@ -43,6 +43,9 @@ def infer_provider(
           be mapped.
 
     """
+    if _is_local_model_path(model_id):
+        return ("SelfHosted", model_id)
+
     prefer_account = current_provider in _ACCOUNT_PROVIDERS
     for prefix, base_prov in _MODEL_PROVIDER_MAP:
         if model_id.startswith(prefix):
@@ -56,6 +59,11 @@ def infer_provider(
             auth = "credentials" if target in _ACCOUNT_PROVIDERS else "env"
             return (target, auth)
     return None
+
+
+def _is_local_model_path(model_id: str) -> bool:
+    """Return whether ``model_id`` looks like a local HF snapshot path."""
+    return model_id.startswith(("/", "./", "../", "~/"))
 
 
 def build_provider(

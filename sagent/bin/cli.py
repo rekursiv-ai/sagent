@@ -41,16 +41,19 @@ Usage::
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import argparse
 import asyncio
 import json
+import logging
+import os
 import sys
 
 from sagent import sessions, tools
 from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import ModelSpec, Tool
+from sagent.custom_types import Model, ModelSpec, Provider, Tool
 from sagent.lib.json import json_freeze
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
@@ -102,6 +105,8 @@ def resolve_tools(names: list[str]) -> list[Tool]:
       SystemExit: If a tool name is not found in the tools module.
 
     """
+    if names == ["none"]:
+        return []
     # First pass: instantiate every non-Bash tool.
     non_bash: dict[str, Tool] = {}
     for name in names:
@@ -290,6 +295,14 @@ def parse_agent_args(
             " batch/automated runs."
         ),
     )
+    parser.add_argument(
+        "--max-response-tokens",
+        dest="max_response_tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum response tokens for one model call. Default: model limit.",
+    )
     return parser.parse_known_args(argv)
 
 
@@ -378,7 +391,49 @@ def _parse_cli_args(
             " Default: unlimited (bounded by --max-tool-call-rounds)."
         ),
     )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Enable stderr logging at this level. Overrides SAGENT_LOG_LEVEL.",
+    )
     return parse_agent_args(parser, argv)
+
+
+def _build_provider_model(
+    args: argparse.Namespace,
+) -> tuple[Provider, Model, str]:
+    """Build the provider/model pair requested by CLI flags.
+
+    ``SelfHosted`` is path-backed: ``--model /path/to/hf-snapshot`` is the
+    model load path, so the provider must be built from that path before
+    ``provider.model(...)`` can validate the bound model id.
+    """
+    auth = str(args.auth)
+    model_id = cast(str | None, args.model)
+    if args.provider == "SelfHosted":
+        auth = model_id or "env"
+    provider = build_provider(str(args.provider), auth, account=args.account)
+    model = provider.model(model_id)
+    return provider, model, auth
+
+
+def _configure_logging(level: str | None) -> None:
+    """Configure CLI logging from flag or environment."""
+    raw = level or os.environ.get("SAGENT_LOG_LEVEL")
+    if not raw:
+        return
+    name = raw.upper()
+    value = getattr(logging, name, None)
+    if not isinstance(value, int):
+        valid = ", ".join(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
+        raise SystemExit(f"invalid log level {raw!r}; use {valid}")
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("sagent").setLevel(value)
+    logging.getLogger("sagent").setLevel(value)
 
 
 async def _run_headless(
@@ -433,15 +488,15 @@ def main() -> None:
 
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+    _configure_logging(args.log_level)
     try:
-        provider = build_provider(args.provider, args.auth, account=args.account)
-        model = provider.model(args.model)
+        provider, model, resolved_auth = _build_provider_model(args)
     except (AttributeError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
     model_spec = ModelSpec(
         provider=args.provider,
-        auth=args.auth,
+        auth=resolved_auth,
         model_id=model.model_id,
         account=args.account,
     )
@@ -476,6 +531,8 @@ def main() -> None:
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
     )
+    if args.max_response_tokens is not None:
+        agent.max_response_tokens = args.max_response_tokens
     agent.tool_state.additional_dirs = list(args.add_dir)
     if args.output_format == "text" and args.input_format == "text":
         asyncio.run(run_repl(agent, name=args.name, history=args.history))

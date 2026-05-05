@@ -73,6 +73,18 @@ If your endpoint has OpenAI-compatible chat completions, subclassing
 let Sagent reuse the same agent loop, tools, sessions, compaction, and cost
 tracking.
 
+For HuggingFace models loaded locally through `transformers`, use
+`SelfHosted` instead:
+
+```bash
+pip install "sagent[selfhosted]"
+hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
+sagent --provider SelfHosted
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B \
+  --tools none --effort none --max-tool-call-rounds 1
+```
+
 ## More docs
 
 - [Tutorial](../docs/tutorial.md)

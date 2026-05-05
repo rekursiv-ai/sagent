@@ -131,6 +131,25 @@ class TestHandleSlashModel:
             handle_slash_model(a, c, " custom")
         mock_bp.assert_called_once_with("Anthropic", "env", account=None)
 
+    def test_selfhosted_local_path_updates_auth(self) -> None:
+        a = _agent(
+            model_spec=ModelSpec(
+                provider="SelfHosted",
+                auth="/old/model",
+                model_id="/old/model",
+            ),
+            model=MagicMock(model_id="/old/model"),
+        )
+        c, _ = _console()
+        with patch("sagent.repl.slash_commands.build_provider") as mock_bp:
+            mock_bp.return_value.model.return_value = MagicMock(model_id="/new/model")
+            handle_slash_model(a, c, " /new/model")
+        mock_bp.assert_called_once_with("SelfHosted", "/new/model", account=None)
+        spec = a.swap_model.call_args.kwargs["spec"]
+        assert spec.provider == "SelfHosted"
+        assert spec.auth == "/new/model"
+        assert spec.model_id == "/new/model"
+
     def test_build_provider_error(self) -> None:
         a = _agent()
         c, buf = _console()

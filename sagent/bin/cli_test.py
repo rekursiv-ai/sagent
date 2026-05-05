@@ -12,6 +12,8 @@ import pytest
 
 from sagent import sessions
 from sagent.bin.cli import (
+    _build_provider_model,
+    _configure_logging,
     _parse_cli_args,
     _resolve_continue,
     _resolve_resume,
@@ -43,6 +45,21 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     ns, _ = _parse_cli_args(parser, argv)
     return ns
+
+
+class TestParseCliArgs:
+    def test_max_response_tokens(self) -> None:
+        assert _parse(["--max-response-tokens", "12"]).max_response_tokens == 12
+
+    def test_log_level(self) -> None:
+        assert _parse(["--log-level", "DEBUG"]).log_level == "DEBUG"
+
+    def test_configure_logging_rejects_invalid_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SAGENT_LOG_LEVEL", "LOUD")
+        with pytest.raises(SystemExit, match="invalid log level"):
+            _configure_logging(None)
 
 
 class TestBuildProvider:
@@ -84,6 +101,56 @@ class TestBuildProvider:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         with pytest.raises(RuntimeError):
             build_provider("Anthropic", "env")
+
+    def test_selfhosted_model_path_is_load_path(self) -> None:
+        args = argparse.Namespace(
+            provider="SelfHosted",
+            auth="env",
+            account=None,
+            model="/opt/models/qwen3.6-27b",
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_model.model_id = "/opt/models/qwen3.6-27b"
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with(
+            "SelfHosted",
+            "/opt/models/qwen3.6-27b",
+            account=None,
+        )
+        mock_provider.model.assert_called_once_with("/opt/models/qwen3.6-27b")
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "/opt/models/qwen3.6-27b"
+
+    def test_selfhosted_defaults_to_env_auth(self) -> None:
+        args = argparse.Namespace(
+            provider="SelfHosted",
+            auth="credentials",
+            account=None,
+            model=None,
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_model.model_id = "Qwen/Qwen3.6-27B"
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with("SelfHosted", "env", account=None)
+        mock_provider.model.assert_called_once_with(None)
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "env"
 
 
 class TestResolveSessionDir:
@@ -252,6 +319,9 @@ class TestResolveResume:
 
 
 class TestResolveTools:
+    def test_none_disables_tools(self) -> None:
+        assert resolve_tools(["none"]) == []
+
     def test_unknown_tool_raises(self) -> None:
         with pytest.raises(SystemExit, match="unknown tool"):
             resolve_tools(["NotARealTool"])

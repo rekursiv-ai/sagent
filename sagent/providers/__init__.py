@@ -24,6 +24,7 @@ from sagent.providers.moonshot import Moonshot
 from sagent.providers.openai import OpenAI
 from sagent.providers.openai_compat import OpenAICompat
 from sagent.providers.providers import build_provider, infer_provider
+from sagent.providers.selfhosted import SelfHosted, SelfHostedModel
 
 
 ProviderName = Literal[
@@ -34,6 +35,7 @@ ProviderName = Literal[
     "Moonshot",
     "OpenAI",
     "OpenAICompat",
+    "SelfHosted",
 ]
 
 PROVIDER_NAMES: tuple[ProviderName, ...] = get_args(ProviderName)
@@ -49,6 +51,8 @@ __all__ = [
     "OpenAI",
     "OpenAICompat",
     "ProviderName",
+    "SelfHosted",
+    "SelfHostedModel",
     "build_provider",
     "infer_provider",
 ]
