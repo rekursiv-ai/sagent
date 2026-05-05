@@ -19,7 +19,7 @@ async def main() -> None:
         max_depth=0,
     )
     agent = Agent(
-        model=Google.from_env().model("gemini-2.5-flash"),
+        model=Google.from_env().model("gemini-3.1-pro-preview"),
         system=(
             "Draft the answer, then use AgentSpawn to get an independent review "
             "before returning the final version."

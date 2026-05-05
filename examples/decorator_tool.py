@@ -20,7 +20,7 @@ def word_count(text: str) -> str:
 async def main() -> None:
     """Run an agent with the decorator-created tool."""
     agent = Agent(
-        model=Google.from_env().model("gemini-2.5-flash"),
+        model=Google.from_env().model("gemini-3.1-pro-preview"),
         system="Use WordCount whenever exact word counts matter.",
         tools=[word_count],
     )

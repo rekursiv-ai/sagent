@@ -25,8 +25,7 @@ class TestMiniMax:
 
     def test_max_request_tokens_is_long(self) -> None:
         m = MiniMax.from_key("mm-x").model()
-        # M1 advertises ~1M context.
-        assert m.max_request_tokens >= 500_000
+        assert m.max_request_tokens == 204_800
 
     def test_thinking_surface(self) -> None:
         m = MiniMax.from_key("mm-x").model()

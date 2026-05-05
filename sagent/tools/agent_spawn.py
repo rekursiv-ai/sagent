@@ -143,8 +143,8 @@ class AgentSpawn:
                     "type": "string",
                     "description": (
                         "Model ID for the chosen provider (e.g."
-                        " ``claude-sonnet-4-6``, ``gemini-2.5-flash``,"
-                        " ``gpt-4o``). Defaults to inheriting the parent's"
+                        " ``claude-sonnet-4-6``, ``gemini-3.1-pro-preview``,"
+                        " ``gpt-5.5``). Defaults to inheriting the parent's"
                         " model id."
                     ),
                 },

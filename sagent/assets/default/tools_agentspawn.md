@@ -20,11 +20,11 @@ Arguments:
   `auth` is the suffix of a zero-argument `from_<auth>` classmethod on that
   provider (for example, `env` for API-key environment variables);
   `model_id` is the provider-specific model string (e.g.
-  `claude-sonnet-4-6`, `gemini-2.5-flash`); `account` selects among
+  `claude-sonnet-4-6`, `gemini-3.1-pro-preview`); `account` selects among
   named credential slots. Each defaults to inheriting
   the parent's value, so passing none = same backend as parent.
   Common use: `provider="Google", auth="env",
-  model_id="gemini-2.5-flash"` to delegate a review to Gemini
+  model_id="gemini-3.1-pro-preview"` to delegate a review to Gemini
   Flash while staying on Claude for the main loop.
 - `tools` (optional) — a list of tool names; the child gets only
   these. Defaults to inheriting this agent's full toolset

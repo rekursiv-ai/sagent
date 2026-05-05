@@ -15,7 +15,7 @@ from sagent.providers import Google
 
 async def main() -> None:
     agent = Agent(
-        model=Google.from_env().model("gemini-2.5-flash"),
+        model=Google.from_env().model("gemini-3.1-pro-preview"),
         system="You summarize files concisely.",
         tools=[tools.Read(), tools.Glob(), tools.Grep()],
     )
@@ -135,7 +135,7 @@ A `Provider` constructs `Model` objects:
 
 ```python
 provider = Google.from_env()
-model = provider.model("gemini-2.5-flash")
+model = provider.model("gemini-3.1-pro-preview")
 utility = provider.utility_model()
 ```
 

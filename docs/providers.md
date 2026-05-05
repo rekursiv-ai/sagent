@@ -6,12 +6,12 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-6+1m` | `claude-haiku-4-5` | Anthropic API-key provider. |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-4o` | `gpt-4o-mini` | OpenAI API provider. |
-| `Google` | `GOOGLE_API_KEY` | `gemini-2.5-pro` | `gemini-2.0-flash` | Google Gemini provider. |
-| `Moonshot` | `MOONSHOT_API_KEY` | provider-defined | provider-defined | OpenAI-compatible Kimi provider. |
-| `DashScope` | `DASHSCOPE_API_KEY` | provider-defined | provider-defined | Alibaba DashScope provider. |
-| `MiniMax` | `MINIMAX_API_KEY` | provider-defined | provider-defined | MiniMax provider. |
+| `Anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7+1m` | `claude-haiku-4-5` | Anthropic API-key provider. |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5` | `gpt-5.4-mini` | OpenAI API provider. |
+| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` | Google Gemini provider. |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |
+| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` | provider-defined | MiniMax provider. |
 | `OpenAICompat` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
 The public package is designed around API-key providers.
@@ -22,7 +22,7 @@ The public package is designed around API-key providers.
 from sagent.providers import Google
 
 provider = Google.from_env()
-model = provider.model("gemini-2.5-flash")
+model = provider.model("gemini-3.1-pro-preview")
 utility = provider.utility_model()
 ```
 
@@ -40,7 +40,7 @@ ProviderClass.from_env().utility_model()
 ## CLI dispatch
 
 ```bash
-sagent --provider Google --auth env --model gemini-2.5-flash
+sagent --provider Google --auth env --model gemini-3.1-pro-preview
 ```
 
 `--provider` is the provider class name from `sagent.providers`. `--auth env` calls `Google.from_env()`.
@@ -48,7 +48,7 @@ sagent --provider Google --auth env --model gemini-2.5-flash
 If the named factory does not exist, Sagent treats `--auth` as a literal API key and calls `from_key(...)`:
 
 ```bash
-sagent --provider Google --auth "$GOOGLE_API_KEY" --model gemini-2.5-flash
+sagent --provider Google --auth "$GOOGLE_API_KEY" --model gemini-3.1-pro-preview
 ```
 
 Prefer environment variables so keys do not land in shell history.
@@ -74,7 +74,7 @@ Anthropic model IDs may include window tags such as:
 
 ```bash
 sagent --provider Anthropic --model claude-sonnet-4-6+200k
-sagent --provider Anthropic --model claude-opus-4-6+1m
+sagent --provider Anthropic --model claude-opus-4-7+1m
 ```
 
 The provider strips the tag for API calls and uses it to select the request-token budget.

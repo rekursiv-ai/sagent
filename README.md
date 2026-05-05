@@ -50,7 +50,7 @@ from sagent.lib.json import json_freeze
 from sagent.providers import Google
 
 agent = Agent(
-    model=Google.from_env().model("gemini-2.5-flash"),
+    model=Google.from_env().model("gemini-3.1-pro-preview"),
     system="You are a scientist.",
     tools=[tools.Read(), tools.Glob(), tools.Grep()],
 )
@@ -105,14 +105,14 @@ Sagent requires Python 3.12.
 
 ```bash
 export GOOGLE_API_KEY=...
-sagent --provider Google --model gemini-2.5-flash
+sagent --provider Google --model gemini-3.1-pro-preview
 ```
 
 For non-interactive use, pipe a prompt on stdin:
 
 ```bash
 printf 'Say hi in one sentence.' | \
-  sagent --provider Google --model gemini-2.5-flash \
+  sagent --provider Google --model gemini-3.1-pro-preview \
   --output-format json
 ```
 
@@ -160,11 +160,11 @@ export MINIMAX_API_KEY=...
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-4o` |
-| `Google` | `GOOGLE_API_KEY` | `gemini-2.5-flash` |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2-0905-preview` |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3-235b-a22b-instruct-2507` |
-| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M1` |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5` |
+| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
+| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
 
 See [Providers](docs/providers.md) for more detail.
 
@@ -302,27 +302,75 @@ Sagent does not currently include:
 This comparison focuses on the runtime shape rather than every feature
 of each project.
 
-| Project | Lang | Programmatic | Multi-provider | Compactor | Multi-agent |
-| --- | --- | --- | --- | --- | --- |
-| Sagent | Python | yes | yes | yes | inbox tools |
-| aider | Python | no | yes | partial | no |
-| Claude Code | closed | limited | Anthropic | yes | spawn-wait |
-| Codex CLI | Rust | limited | OpenAI | no | no |
-| Gemini CLI | TypeScript | limited | Google | yes | no |
-| Cline | TypeScript | no | yes | partial | no |
-| OpenClaw | TypeScript | limited | yes | no | yes |
-| LangChain/LangGraph | Python | yes | yes | app-defined | graph state |
+| | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Python library | ✅ | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Multi-provider | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Context compaction | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ❌ | ✅ |
+| User-initiated backend swap | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Agent-initiated backend swap | ✅ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Agent self-mutation | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ |
+| Context hot-swap | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ |
+| Recursive agent spawn | ✅ | ❌ | ✅ | 🟡 | ❌ | ✅ | ❌ | ❌ |
+| Multi-agent | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
+| GitHub stars | -- | 44.4k | 135.8k | 368.6k | 61.4k | -- | 80.1k | 103.2k |
 
-Positioning:
+✅ = yes, 🟡 = partial, ❌ = no. Corrections welcome --
+[open a PR](https://github.com/rekursiv-ai/sagent/pulls).
 
-- **aider** is a git-native pair programmer centered on text edits and
-  repo maps, not a general agent runtime.
-- **Claude Code, Codex CLI, and Gemini CLI** are strong vendor CLIs,
-  but not reusable Python libraries.
-- **Cline** is an editor extension rather than an importable runtime.
-- **OpenClaw** is a personal assistant platform with many channels.
-- **LangChain/LangGraph** is a broad application framework; Sagent is a
-  smaller typed agent runtime with a concrete inbox loop.
+### How each project works
+
+**[aider](https://github.com/Aider-AI/aider)** --
+Git-native pair programmer. The LLM emits markdown-formatted edits (14
+edit formats) and aider parses them -- there is no structured tool calling.
+All providers route through litellm as a single string-addressed transport.
+`/model` switches the backend mid-session by raising `SwitchCoder`, which
+reconstructs the entire `Coder` object; conversation history carries over
+but the swap is destructive. A tree-sitter repo map with PageRank ranking
+provides structural code awareness that Sagent lacks. No multi-agent
+capabilities beyond a synchronous Architect-to-Editor handoff. Importable
+via `Coder.create()` but the scripting API is explicitly unsupported and
+may change without notice.
+
+**[LangChain/LangGraph](https://github.com/langchain-ai/langchain)** --
+Broad Python application framework for LLM pipelines. Multi-provider,
+multi-agent (via LangGraph state machines), and fully programmatic. Context
+compaction, backend swapping, and agent self-mutation are all possible but
+application-defined rather than built-in -- the framework provides building
+blocks, not an opinionated agent loop. Sagent is a smaller, more
+opinionated runtime with typed protocols, a concrete inbox loop, and
+built-in session persistence.
+
+**[OpenClaw](https://github.com/openclaw/openclaw)** --
+Multi-platform personal assistant (desktop, mobile, web) with multi-provider
+and multi-agent support. Agents coordinate across channels but the system
+is oriented toward end-user assistant workflows rather than developer
+tooling. TypeScript-based, not available as a Python library.
+
+**[Cline](https://github.com/cline/cline)** --
+VS Code extension with multi-provider support. Users can switch models in
+the settings panel mid-conversation, but the extension is not importable as
+a library. Single-agent with no spawn or coordination primitives. Context
+management is truncation-based rather than structured compaction.
+
+**[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (Anthropic) --
+Closed-source vendor CLI with strong tool-use capabilities and structured
+context compaction. Agents can spawn recursive sub-agents and compact their
+own context, but cannot switch providers (Anthropic-only) or dynamically
+adjust token limits. Not available as a Python library; the SDK is
+JavaScript. No user-initiated backend swap since there is only one backend.
+
+**[Codex CLI](https://github.com/openai/codex)** (OpenAI) --
+Rust-based CLI locked to OpenAI models. Single-agent, single-provider, no
+compaction, no programmatic API. Clean local-execution model with
+sandboxing, but no extensibility surface for custom tools, provider
+swapping, or multi-agent coordination.
+
+**[Gemini CLI](https://github.com/google-gemini/gemini-cli)** (Google) --
+TypeScript CLI locked to Google models. Has context compaction via
+summarization. Single-agent, single-provider, no programmatic API, no
+custom tool protocol. Designed as a terminal interface for Gemini, not as a
+composable runtime.
 
 ## Architecture map
 

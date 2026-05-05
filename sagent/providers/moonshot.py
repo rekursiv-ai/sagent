@@ -5,7 +5,7 @@ Usage::
     from sagent.providers import Moonshot
 
     provider = Moonshot.from_env()          # MOONSHOT_API_KEY
-    model = provider.model()            # kimi-k2-0905-preview
+    model = provider.model()            # kimi-k2.6
     response = await model.buffer(request)
 
 Self-hosted::
@@ -36,7 +36,7 @@ class _MoonshotModel(OpenAICompatModel):
 class Moonshot(OpenAICompat):
     """Moonshot AI provider."""
 
-    DEFAULT_MODEL: ClassVar[str] = "kimi-k2-0905-preview"
+    DEFAULT_MODEL: ClassVar[str] = "kimi-k2.6"
     ENV_VAR: ClassVar[str] = "MOONSHOT_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.moonshot.ai/v1"
     # Model limits and pricing.
@@ -46,6 +46,24 @@ class Moonshot(OpenAICompat):
     # To add a new model: check the Moonshot platform docs for the
     # model's context window and max output tokens.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "kimi-k2.6": ModelProfile(
+            max_request_tokens=256_000,
+            max_response_tokens=96_000,
+            pricing=Pricing(
+                request=0.95,
+                response=4.00,
+                cache_read=0.16,
+            ),
+        ),
+        "kimi-k2.5": ModelProfile(
+            max_request_tokens=256_000,
+            max_response_tokens=96_000,
+            pricing=Pricing(
+                request=0.60,
+                response=3.00,
+                cache_read=0.10,
+            ),
+        ),
         "kimi-k2-0905-preview": ModelProfile(
             max_request_tokens=256_000,
             max_response_tokens=32_768,

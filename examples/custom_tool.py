@@ -50,7 +50,7 @@ class CharacterCount:
 async def main() -> None:
     """Run the example agent."""
     agent = Agent(
-        model=Google.from_env().model("gemini-2.5-flash"),
+        model=Google.from_env().model("gemini-3.1-pro-preview"),
         system="Use CharacterCount whenever exact string length matters.",
         tools=[CharacterCount()],
     )

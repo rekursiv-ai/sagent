@@ -6,7 +6,7 @@ Usage::
 
     provider = Google.from_key("AIza...")
     # or: export GOOGLE_API_KEY=AIza... and use Google.from_env()
-    flash = provider.model("gemini-2.0-flash")
+    flash = provider.model("gemini-3-flash-preview")
     response = await flash.buffer(request)
 """
 
@@ -73,8 +73,8 @@ _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 class Google:
     """Google provider - creates Gemini model backends."""
 
-    DEFAULT_MODEL = "gemini-2.5-pro"
-    DEFAULT_UTILITY_MODEL = "gemini-2.0-flash"
+    DEFAULT_MODEL = "gemini-3.1-pro-preview"
+    DEFAULT_UTILITY_MODEL = "gemini-3-flash-preview"
 
     # Model limits and pricing.
     # Limits: https://ai.google.dev/gemini-api/docs/models
@@ -84,12 +84,30 @@ class Google:
     # To add a new model: check the Gemini API docs for the model's
     # input token limit and max output tokens.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "gemini-3-flash-preview": ModelProfile(
+            max_request_tokens=1_048_576,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=0.50,
+                response=3.00,
+                cache_read=0.05,
+            ),
+        ),
+        "gemini-3.1-pro-preview": ModelProfile(
+            max_request_tokens=1_048_576,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=2.00,
+                response=12.00,
+                cache_read=0.20,
+            ),
+        ),
         "gemini-2.0-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(
-                request=0.1,
-                response=0.4,
+                request=0.10,
+                response=0.40,
                 cache_read=0.025,
             ),
         ),
@@ -97,8 +115,8 @@ class Google:
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(
-                request=0.3,
-                response=2.5,
+                request=0.30,
+                response=2.50,
                 cache_read=0.075,
             ),
         ),
@@ -171,7 +189,7 @@ class Google:
         """Create a model backend. ``None`` → ``DEFAULT_MODEL``.
 
         Args:
-          model_id: Model ID (e.g. ``"gemini-2.0-flash"``). ``None`` for default.
+          model_id: Model ID (e.g. ``"gemini-3-flash-preview"``). ``None`` for default.
           max_request_tokens: Max request tokens; ``None`` uses the provider default.
 
         Returns:

@@ -39,9 +39,9 @@ The returned `result` is still the final assistant message.
 ## CLI output formats
 
 ```bash
-printf 'Say hi' | sagent --provider Google --model gemini-2.5-flash
-printf 'Say hi' | sagent --provider Google --model gemini-2.5-flash --output-format json
-printf 'Say hi' | sagent --provider Google --model gemini-2.5-flash --output-format stream-json
+printf 'Say hi' | sagent --provider Google --model gemini-3.1-pro-preview
+printf 'Say hi' | sagent --provider Google --model gemini-3.1-pro-preview --output-format json
+printf 'Say hi' | sagent --provider Google --model gemini-3.1-pro-preview --output-format stream-json
 ```
 
 `text` prints final message content.
@@ -67,7 +67,7 @@ printf 'Say hi' | sagent --provider Google --model gemini-2.5-flash --output-for
 `--input-format stream-json` reads newline-delimited JSON objects and collects each object's `prompt` field. Blank lines and objects without `prompt` are ignored. Prompts are joined with blank lines into one agent request.
 
 ```bash
-cat <<'EOF' | sagent --provider Google --model gemini-2.5-flash --input-format stream-json --output-format json
+cat <<'EOF' | sagent --provider Google --model gemini-3.1-pro-preview --input-format stream-json --output-format json
 {"prompt":"Summarize file A."}
 {"prompt":"Then compare it with file B."}
 EOF
