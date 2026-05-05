@@ -50,7 +50,7 @@ from sagent.lib.json import json_freeze
 from sagent.providers import Google
 
 agent = Agent(
-    model=Google.from_env().model("gemini-2.5-flash"),
+    model=Google.from_env().model("gemini-3.1-pro-preview"),
     system="You are a scientist.",
     tools=[tools.Read(), tools.Glob(), tools.Grep()],
 )
@@ -105,14 +105,14 @@ Sagent requires Python 3.12.
 
 ```bash
 export GOOGLE_API_KEY=...
-sagent --provider Google --model gemini-2.5-flash
+sagent --provider Google --model gemini-3.1-pro-preview
 ```
 
 For non-interactive use, pipe a prompt on stdin:
 
 ```bash
 printf 'Say hi in one sentence.' | \
-  sagent --provider Google --model gemini-2.5-flash \
+  sagent --provider Google --model gemini-3.1-pro-preview \
   --output-format json
 ```
 
@@ -160,11 +160,11 @@ export MINIMAX_API_KEY=...
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-4o` |
-| `Google` | `GOOGLE_API_KEY` | `gemini-2.5-flash` |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2-0905-preview` |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3-235b-a22b-instruct-2507` |
-| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M1` |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5` |
+| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
+| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
 
 See [Providers](docs/providers.md) for more detail.
 

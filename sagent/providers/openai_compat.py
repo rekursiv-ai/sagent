@@ -4,7 +4,7 @@ Concrete providers (OpenAI, Kimi, Qwen, MiniMax, any local vLLM/SGLang
 box) subclass ``OpenAICompat`` and override a handful of class attrs::
 
     class Kimi(OpenAICompat):
-        DEFAULT_MODEL = "kimi-k2-0905-preview"
+        DEFAULT_MODEL = "kimi-k2.6"
         ENV_VAR = "MOONSHOT_API_KEY"
         BASE_URL = "https://api.moonshot.ai/v1"
         KNOWN_MODELS = {...}

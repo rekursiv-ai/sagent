@@ -5,15 +5,15 @@ Usage::
     from sagent.providers import MiniMax
 
     provider = MiniMax.from_env()       # MINIMAX_API_KEY
-    model = provider.model()            # MiniMax-M1
+    model = provider.model()            # MiniMax-M2.7
     response = await model.buffer(request)
 
 Self-hosted::
 
     provider = MiniMax.from_key("empty", base_url="http://gpu-box:8000/v1")
 
-MiniMax-M1 exposes long context (1M tokens) and lightning-attention
-reasoning. Tool-calling uses the standard ``tool_calls`` block.
+MiniMax-M2.7 exposes long context and reasoning traces. Tool-calling
+uses the standard ``tool_calls`` block.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class _MiniMaxModel(OpenAICompatModel):
 class MiniMax(OpenAICompat):
     """MiniMax provider (api.minimax.io)."""
 
-    DEFAULT_MODEL: ClassVar[str] = "MiniMax-M1"
+    DEFAULT_MODEL: ClassVar[str] = "MiniMax-M2.7"
     ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
     # Model limits and pricing.
@@ -46,6 +46,30 @@ class MiniMax(OpenAICompat):
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "MiniMax-M2.7": ModelProfile(
+            max_request_tokens=204_800,
+            max_response_tokens=32_768,
+            pricing=Pricing(
+                request=0.30,
+                response=1.20,
+            ),
+        ),
+        "MiniMax-M2.7-highspeed": ModelProfile(
+            max_request_tokens=204_800,
+            max_response_tokens=32_768,
+            pricing=Pricing(
+                request=0.60,
+                response=2.40,
+            ),
+        ),
+        "MiniMax-M2.5": ModelProfile(
+            max_request_tokens=204_800,
+            max_response_tokens=32_768,
+            pricing=Pricing(
+                request=0.30,
+                response=1.20,
+            ),
+        ),
         "MiniMax-M1": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=16_384,

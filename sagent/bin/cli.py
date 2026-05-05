@@ -16,15 +16,15 @@ Usage::
     ./cli.py --provider Anthropic
 
     # OpenAI
-    ./cli.py --provider OpenAI --model gpt-4o
+    ./cli.py --provider OpenAI --model gpt-5.5
 
     # Google
-    ./cli.py --provider Google --auth env --model gemini-2.5-flash
+    ./cli.py --provider Google --auth env --model gemini-3.1-pro-preview
 
     # Moonshot / DashScope / MiniMax (OpenAI chat-completions compatible)
-    ./cli.py --provider Moonshot --model kimi-k2-0905-preview
-    ./cli.py --provider DashScope --model qwen3-235b-a22b-instruct-2507
-    ./cli.py --provider MiniMax --model MiniMax-M1
+    ./cli.py --provider Moonshot --model kimi-k2.6
+    ./cli.py --provider DashScope --model qwen3.6-plus
+    ./cli.py --provider MiniMax --model MiniMax-M2.7
 
     # Model + window tag (append +1m or +200k; 200K is the default)
     ./cli.py --model claude-sonnet-4-6+1m

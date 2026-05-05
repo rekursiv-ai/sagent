@@ -8,7 +8,7 @@
     from sagent.lib.json import json_freeze
 
     agent = Agent(
-        model=Google.from_env().model("gemini-2.5-flash"),
+        model=Google.from_env().model("gemini-3.1-pro-preview"),
         system="You are a scientist.",
         tools=[tools.Bash(), tools.Read(), tools.Grep()],
     )

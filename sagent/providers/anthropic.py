@@ -139,7 +139,7 @@ class Anthropic:
     """
 
     # Latest model we roll to when ``model_id`` is None. Bump on release.
-    DEFAULT_MODEL = "claude-opus-4-6+1m"
+    DEFAULT_MODEL = "claude-opus-4-7+1m"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {

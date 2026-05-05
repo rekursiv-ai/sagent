@@ -47,7 +47,7 @@ Usage
     export SLACK_APP_TOKEN=xapp-...
     export SLACK_BOT_TOKEN=xoxb-...
     ./slack.py
-    ./slack.py --provider Google --auth env --model gemini-2.5-flash
+    ./slack.py --provider Google --auth env --model gemini-3.1-pro-preview
     ./slack.py --persona-dir ./personas
 '''
 # fmt: on

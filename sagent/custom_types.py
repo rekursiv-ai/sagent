@@ -346,7 +346,7 @@ class Model(Protocol):
 
     @property
     def model_id(self) -> str:
-        """Provider-specific model identifier, e.g. ``"claude-opus-4-6+1m"``."""
+        """Provider-specific model identifier, e.g. ``"claude-opus-4-7+1m"``."""
         ...
 
     @property

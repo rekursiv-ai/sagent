@@ -6,7 +6,7 @@ Usage::
 
     provider = OpenAI.from_key("sk-...")
     # or: export OPENAI_API_KEY=sk-... and use OpenAI.from_env()
-    gpt = provider.model("gpt-4o")
+    gpt = provider.model("gpt-5.5")
     response = await gpt.buffer(request)
 """
 
@@ -41,9 +41,9 @@ class _OpenAIModel(OpenAICompatModel):
 class OpenAI(OpenAICompat):
     """OpenAI provider."""
 
-    # Best value for API-key users ($2.50/$10 per 1M tok).
-    DEFAULT_MODEL: ClassVar[str] = "gpt-4o"
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-4o-mini"
+    # Current frontier default for API-key users.
+    DEFAULT_MODEL: ClassVar[str] = "gpt-5.5"
+    DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.4-mini"
 
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"

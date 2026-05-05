@@ -11,7 +11,7 @@ Usage::
     from sagent import tools
 
     provider = Anthropic.from_env()
-    opus1m = provider.model("claude-opus-4-6+1m")
+    opus1m = provider.model("claude-opus-4-7+1m")
 
     # Simple - string system prompt. Bash takes its sibling tools as
     # ``peers`` so its ``[bash-lint]`` feature can suggest dedicated

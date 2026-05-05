@@ -5,7 +5,7 @@ Usage::
     from sagent.providers import DashScope
 
     provider = DashScope.from_env()          # DASHSCOPE_API_KEY
-    model = provider.model()            # qwen3-235b-a22b-instruct-2507
+    model = provider.model()            # qwen3.6-plus
     response = await model.buffer(request)
 
 Self-hosted (vLLM/SGLang on localhost)::
@@ -72,7 +72,7 @@ class _DashScopeModel(OpenAICompatModel):
 class DashScope(OpenAICompat):
     """DashScope (Alibaba) provider."""
 
-    DEFAULT_MODEL: ClassVar[str] = "qwen3-235b-a22b-instruct-2507"
+    DEFAULT_MODEL: ClassVar[str] = "qwen3.6-plus"
     ENV_VAR: ClassVar[str] = "DASHSCOPE_API_KEY"
     # International endpoint. For mainland China use
     # dashscope.aliyuncs.com via the ``base_url=`` override.
@@ -84,6 +84,30 @@ class DashScope(OpenAICompat):
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "qwen3.6-max-preview": ModelProfile(
+            max_request_tokens=262_144,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=1.60,
+                response=6.40,
+            ),
+        ),
+        "qwen3.6-plus": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=0.50,
+                response=3.00,
+            ),
+        ),
+        "qwen3.6-flash": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=0.05,
+                response=0.20,
+            ),
+        ),
         "qwen3-235b-a22b-instruct-2507": ModelProfile(
             max_request_tokens=262_144,
             max_response_tokens=65_536,
