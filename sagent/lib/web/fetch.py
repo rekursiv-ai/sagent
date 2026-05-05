@@ -434,7 +434,10 @@ def _fetch_connection(
     connect_host = validated.ip if validated is not None else ""
     request_headers = headers
     if validated is not None:
-        request_headers = {**headers, "Host": validated.host}
+        # Host first: Cloudflare bot-fingerprints header order, and real
+        # browsers (and http.client's auto-generated Host header) send Host
+        # before User-Agent/Accept/etc. Putting it last triggers 403s.
+        request_headers = {"Host": validated.host, **headers}
 
     if (
         http_conn is not None
@@ -487,7 +490,7 @@ def _fetch_connection(
                 connect_host = validated.ip if validated is not None else ""
                 request_headers = headers
                 if validated is not None:
-                    request_headers = {**headers, "Host": validated.host}
+                    request_headers = {"Host": validated.host, **headers}
                 raw_conn = _open_connection(
                     scheme,
                     host,
