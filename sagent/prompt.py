@@ -30,6 +30,7 @@ from sagent.tools import get_tool_state
 from sagent.tools.core import (
     read_asset,
     recipe_dict,
+    recipe_list,
 )
 
 
@@ -41,9 +42,10 @@ _GIT = shutil.which("git") or "git"
 @cache
 def _load_static() -> str:
     sp = recipe_dict("system_prompt")
-    return read_asset(sp["base"]).replace(
-        "{keep_recent}", str(MICROCOMPACT_KEEP_RECENT)
-    )
+    base = sp.get("base", "")
+    if not base:
+        return ""
+    return read_asset(base).replace("{keep_recent}", str(MICROCOMPACT_KEEP_RECENT))
 
 
 # Per-model marketing name + knowledge cutoff.
@@ -188,12 +190,30 @@ def build_system(
     return "\n\n".join(parts)
 
 
+_DEFAULT_SECTIONS: tuple[str, ...] = (
+    "static",
+    "environment",
+    "agents_md",
+    "memory",
+    "user_instructions",
+)
+
+
+def _enabled_sections() -> set[str]:
+    """Return the section names the active recipe says to include.
+
+    Recipes may declare ``system_prompt.sections`` (a list of names) to
+    restrict assembly. Absent ⇒ default = all five sections.
+    """
+    listed = recipe_list("system_prompt", "sections")
+    return set(listed) if listed else set(_DEFAULT_SECTIONS)
+
+
 def build_system_dict(
     model_id: str,
     custom: str = "",
     *,
     include_memory: bool = True,
-    bare: bool = False,
 ) -> dict[str, str | Callable[[], str]]:
     """Assemble core scaffolding for the system prompt.
 
@@ -202,42 +222,45 @@ def build_system_dict(
     environment section is a callable re-evaluated each model request,
     so the working directory stays current after ``cd``.
 
+    The active recipe (see ``tools.core.set_recipe``) controls which
+    sections are emitted via ``system_prompt.sections``. Authoring a
+    recipe with ``sections: [user_instructions]`` produces a "bare"
+    prompt of just the ``custom`` text (useful for benchmarks).
+
     Args:
       model_id: Provider-specific model identifier.
       custom: Optional user instructions appended to the prompt.
       include_memory: Whether to include persistent project memory.
-      bare: If ``True``, skip all default scaffolding and return only
-        ``custom`` as a single section. Useful for benchmarks where
-        the goal is to minimize input tokens.
 
     Returns:
       sections: Ordered dict of section name to string or callable.
 
     """
-    if bare:
-        return {"user_instructions": custom} if custom else {}
-    sections: dict[str, str | Callable[[], str]] = {
-        "static": _load_static(),
-        "environment": lambda: environment(model_id),
+    enabled = _enabled_sections()
+    sections: dict[str, str | Callable[[], str]] = {}
+    if "static" in enabled:
+        sections["static"] = _load_static()
+    if "environment" in enabled:
+        sections["environment"] = lambda: environment(model_id)
+    if "agents_md" in enabled:
         # AGENTS.md walk runs per-request so edits to project instructions
         # take effect without restarting the CLI.
         # Conditional ``.sagent/rules/*.md`` files (``paths:`` frontmatter)
         # are NOT loaded here - they're injected into Read/Edit/Write
         # tool results by the Agent so rules influence the same request's
         # subsequent tool calls.
-        "agents_md": lambda: agents_md.build_section(
+        sections["agents_md"] = lambda: agents_md.build_section(
             Path(get_tool_state().bash_cwd),
             config=agents_md.AgentsMdConfig(
                 additional_dirs=[Path(d) for d in get_tool_state().additional_dirs],
             )
             if get_tool_state().additional_dirs
             else None,
-        ),
-    }
-    if include_memory:
+        )
+    if include_memory and "memory" in enabled:
         sections["memory"] = lambda: memory.build_system_section(
             get_tool_state().bash_cwd
         )
-    if custom:
+    if custom and "user_instructions" in enabled:
         sections["user_instructions"] = f"# User instructions\n{custom}"
     return sections

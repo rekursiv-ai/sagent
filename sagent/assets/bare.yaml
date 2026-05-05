@@ -1,0 +1,36 @@
+# Bare prompt recipe: only ``--system`` text is sent.
+# No static prompt, no environment, no AGENTS.md walk, no memory.
+# Use for benchmarks / minimal-input runs.
+
+system_prompt:
+  sections:
+    - user_instructions
+
+# Compactor + tool descriptions inherit from default for the cases
+# where this recipe is paired with tools.
+compactor:
+  full: default/compactor.md
+  partial: default/compactor_partial.md
+  system: default/compactor_system.md
+  no_tools_preamble: default/compactor_no_tools.md
+  no_tools_trailer: default/compactor_no_tools_reminder.md
+  continuation: default/compactor_continuation.md
+
+tool_descriptions:
+  Read: default/tools_read.md
+  Write: default/tools_write.md
+  Edit: default/tools_edit.md
+  Grep: default/tools_grep.md
+  Bash: default/tools_bash.md
+  Glob: default/tools_glob.md
+  List: default/tools_list.md
+  WebSearch: default/tools_websearch.md
+  WebFetch: default/tools_webfetch.md
+  AgentSelf: default/tools_agentself.md
+  AgentSpawn: default/tools_agentspawn.md
+  AgentSend: default/tools_agentsend.md
+  BackgroundTask: default/tools_backgroundtask.md
+  PaperSearch: default/tools_papersearch.md
+  PaperDetails: default/tools_paperdetails.md
+  PaperAuthor: default/tools_paperauthor.md
+  PaperFetch: default/tools_paperfetch.md

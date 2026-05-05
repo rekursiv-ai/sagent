@@ -23,6 +23,7 @@ from sagent.providers.minimax import MiniMax
 from sagent.providers.moonshot import Moonshot
 from sagent.providers.openai import OpenAI
 from sagent.providers.openai_compat import OpenAICompat
+from sagent.providers.openai_sub import OpenAISubscription
 from sagent.providers.providers import build_provider, infer_provider
 from sagent.providers.selfhosted import SelfHosted, SelfHostedModel
 
@@ -35,6 +36,7 @@ ProviderName = Literal[
     "Moonshot",
     "OpenAI",
     "OpenAICompat",
+    "OpenAISubscription",
     "SelfHosted",
 ]
 
@@ -50,6 +52,7 @@ __all__ = [
     "Moonshot",
     "OpenAI",
     "OpenAICompat",
+    "OpenAISubscription",
     "ProviderName",
     "SelfHosted",
     "SelfHostedModel",
