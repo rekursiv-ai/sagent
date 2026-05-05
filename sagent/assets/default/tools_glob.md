@@ -1,0 +1,5 @@
+- High-performance filename pattern matcher, scales to any repository size
+- Accepts glob syntax: `"**/*.js"`, `"src/**/*.ts"`, etc.
+- Results are sorted by last-modified time (newest first)
+- Reach for this tool to locate files by name or extension
+- For exploratory searches spanning multiple rounds of pattern matching and content scanning, delegate to the Agent tool instead

@@ -1,0 +1,237 @@
+"""System prompt assembly for coding agents.
+
+All static section text lives in the recipe's base prompt and overlay
+files. This module handles assembly: loading, placeholder
+substitution, and dynamic environment info.
+
+Usage::
+
+    from sagent.prompt import build_system_dict
+
+    system = build_system_dict(model_id="claude-sonnet-4-6")
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from functools import cache
+from pathlib import Path
+
+import logging
+import os
+import platform
+import shutil
+import subprocess
+import sys
+
+from sagent import agents_md, memory
+from sagent.compactor import MICROCOMPACT_KEEP_RECENT
+from sagent.tools import get_tool_state
+from sagent.tools.core import (
+    read_asset,
+    recipe_dict,
+)
+
+
+logger = logging.getLogger(__name__)
+
+_GIT = shutil.which("git") or "git"
+
+
+@cache
+def _load_static() -> str:
+    sp = recipe_dict("system_prompt")
+    return read_asset(sp["base"]).replace(
+        "{keep_recent}", str(MICROCOMPACT_KEEP_RECENT)
+    )
+
+
+# Per-model marketing name + knowledge cutoff.
+# Opus 4.7 cutoff verified against Anthropic's docs (January 2026).
+_MODEL_INFO: dict[str, tuple[str, str]] = {
+    "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
+    "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
+    "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
+    "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
+    "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
+    "claude-haiku-4-5-20251001": ("Claude Haiku 4.5", "February 2025"),
+}
+
+
+@cache
+def _is_git_repo(cwd: str) -> bool:
+    """Check if cwd is inside a git repo (cached per directory)."""
+    try:
+        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
+            [_GIT, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+@cache
+def _is_git_worktree(cwd: str) -> bool:
+    """True if cwd is a git worktree (not the primary checkout)."""
+    try:
+        # In a worktree, `.git` is a file (gitdir: …); in the main
+        # repo, `.git` is a directory.
+        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
+            [_GIT, "rev-parse", "--git-common-dir", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    parts = result.stdout.strip().splitlines()
+    if len(parts) != 2:
+        return False
+    # common_dir != git_dir → this is a worktree.
+    return Path(parts[0]).resolve() != Path(parts[1]).resolve()
+
+
+_WORKTREE_LINE = (
+    "\nThis working directory is a git worktree (not the primary"
+    " checkout). Stay in this directory — do not `cd` to the"
+    " main repository."
+)
+# On Windows, tell the model to use Unix shell syntax
+# (assumes Git Bash / WSL).
+_WINDOWS_SHELL_SUFFIX = " (prefer Unix shell conventions — /dev/null, forward slashes)"
+
+
+@cache
+def _load_env_template() -> str:
+    """Load the environment template from the active recipe."""
+    sp = recipe_dict("system_prompt")
+    if "env" in sp:
+        return read_asset(sp["env"])
+    return ""
+
+
+def _shell_name(shell_path: str) -> str:
+    """Extract 'bash'/'zsh' from $SHELL, else return as-is."""
+    if "zsh" in shell_path:
+        return "zsh"
+    if "bash" in shell_path:
+        return "bash"
+    return shell_path
+
+
+def environment(model_id: str) -> str:
+    """Build the environment section with current runtime info.
+
+    Args:
+      model_id: Provider-specific model identifier.
+
+    Returns:
+      section: Formatted environment info string.
+
+    """
+    cwd = get_tool_state().bash_cwd
+    is_git = _is_git_repo(cwd)
+    marketing, cutoff = _MODEL_INFO.get(model_id, (model_id, "unknown"))
+    shell_name = _shell_name(os.environ.get("SHELL", "unknown"))
+    on_windows = platform.system() == "Windows"
+    shell_line = shell_name + (_WINDOWS_SHELL_SUFFIX if on_windows else "")
+    worktree_line = _WORKTREE_LINE if is_git and _is_git_worktree(cwd) else ""
+    return _load_env_template().format(
+        cwd=cwd,
+        is_git=str(is_git).lower(),
+        worktree_line=worktree_line,
+        platform=sys.platform,
+        shell_line=shell_line,
+        os_version=f"{platform.system()} {platform.release()}",
+        marketing=marketing,
+        model_id=model_id,
+        cutoff=cutoff,
+    )
+
+
+def build_system(
+    model_id: str,
+    custom: str = "",
+    *,
+    include_memory: bool = True,
+) -> str:
+    """Assemble the full system prompt (one-shot evaluation).
+
+    The environment section is evaluated once at call time. Use
+    ``build_system_dict()`` for per-request dynamic evaluation.
+
+    Args:
+      model_id: Provider-specific model identifier.
+      custom: Optional user instructions appended to the prompt.
+      include_memory: Whether to include persistent project memory.
+
+    Returns:
+      prompt: Assembled system prompt string.
+
+    """
+    d = build_system_dict(model_id, custom=custom, include_memory=include_memory)
+    parts: list[str] = []
+    for v in d.values():
+        if isinstance(v, str):
+            parts.append(v)
+        else:
+            parts.append(v())
+    return "\n\n".join(parts)
+
+
+def build_system_dict(
+    model_id: str,
+    custom: str = "",
+    *,
+    include_memory: bool = True,
+) -> dict[str, str | Callable[[], str]]:
+    """Assemble core scaffolding for the system prompt.
+
+    Returns only the feature-agnostic sections (static, environment,
+    AGENTS.md walk, memory, optional user instructions). The
+    environment section is a callable re-evaluated each model request,
+    so the working directory stays current after ``cd``.
+
+    Args:
+      model_id: Provider-specific model identifier.
+      custom: Optional user instructions appended to the prompt.
+      include_memory: Whether to include persistent project memory.
+
+    Returns:
+      sections: Ordered dict of section name to string or callable.
+
+    """
+    sections: dict[str, str | Callable[[], str]] = {
+        "static": _load_static(),
+        "environment": lambda: environment(model_id),
+        # AGENTS.md walk runs per-request so edits to project instructions
+        # take effect without restarting the CLI.
+        # Conditional ``.sagent/rules/*.md`` files (``paths:`` frontmatter)
+        # are NOT loaded here - they're injected into Read/Edit/Write
+        # tool results by the Agent so rules influence the same request's
+        # subsequent tool calls.
+        "agents_md": lambda: agents_md.build_section(
+            Path(get_tool_state().bash_cwd),
+            config=agents_md.AgentsMdConfig(
+                additional_dirs=[Path(d) for d in get_tool_state().additional_dirs],
+            )
+            if get_tool_state().additional_dirs
+            else None,
+        ),
+    }
+    if include_memory:
+        sections["memory"] = lambda: memory.build_system_section(
+            get_tool_state().bash_cwd
+        )
+    if custom:
+        sections["user_instructions"] = f"# User instructions\n{custom}"
+    return sections

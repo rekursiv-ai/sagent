@@ -1,0 +1,41 @@
+name: Package validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**"
+  push:
+    branches: [main]
+    paths:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Lint, type-check, test, and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Validate package
+        run: |
+          uv sync --all-groups
+          uv run ruff check --no-fix --no-cache .
+          uv run ruff format --check --no-cache .
+          uv run codespell .
+          uv run ty check
+          uv run basedpyright --threads=6 sagent
+          uv run pytest
+          uv run python -c "import sagent"
+          uv build
+          uv run python sagent/bin/check_wheel.py

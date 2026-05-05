@@ -1,0 +1,114 @@
+# See:
+#   https://pre-commit.com
+#   https://pre-commit.com/hooks.html
+# uv run pre-commit install
+# uv run pre-commit autoupdate
+# uv run pre-commit run --all-files
+
+# Philosophy: Only fail if there's things which cannot be auto-fixed.
+# Hooks fix files in place; if anything changes, pre-commit reports
+# "files were modified" and the commit is aborted. Run `git add -u`
+# then re-commit -- the second attempt always passes.
+
+fail_fast: false
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: trailing-whitespace
+        stages: [pre-commit]
+      - id: check-added-large-files
+        stages: [pre-commit]
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: check-yaml
+        stages: [pre-commit]
+      - id: check-toml
+        stages: [pre-commit]
+
+  # Validates uv.lock matches pyproject.toml (no network needed).
+  # Run `uv lock` manually when changing dependencies.
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.11.8
+    hooks:
+      - id: uv-lock
+        stages: [pre-commit]
+        files: pyproject.toml
+        args: [--locked]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff-check
+        stages: [pre-commit]
+        types_or: [python, pyi]
+        args: [--fix]
+      - id: ruff-format
+        stages: [pre-commit]
+        types_or: [python, pyi]
+
+  - repo: local
+    hooks:
+      - id: codespell
+        name: codespell
+        language: system
+        stages: [pre-commit]
+        types_or: [python, markdown]
+        entry: uv run --quiet --frozen codespell
+        args: [-w]
+
+  # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        language: system
+        stages: [pre-commit]
+        types_or: [python, pyi]
+        pass_filenames: false
+        entry: uv run --quiet --frozen ty check
+
+  # To enable:  uv run pre-commit install --hook-type pre-push
+  # To disable: uv run pre-commit uninstall --hook-type pre-push
+  - repo: local
+    hooks:
+      - id: basedpyright
+        name: basedpyright
+        language: system
+        types: [python]
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv run --quiet --frozen basedpyright
+        args: [--threads=6]
+
+      - id: pytest
+        name: pytest
+        language: system
+        types: [python]
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv run --quiet --frozen pytest
+        args: [-q, --tb=short, -n=6]
+
+      - id: build-wheel
+        name: build wheel
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv build
+
+      - id: check-wheel
+        name: check wheel
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv run --quiet --frozen python sagent/bin/check_wheel.py
