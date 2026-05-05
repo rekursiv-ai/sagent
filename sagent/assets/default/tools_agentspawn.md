@@ -1,0 +1,53 @@
+Spawn a child agent to work on a subtask and return its final output.
+
+Use this tool to:
+- Decompose a large task into independent subtasks. Multiple AgentSpawn
+  calls in a single response dispatch in parallel (map-reduce).
+- Delegate work that shouldn't pollute your main conversation
+  context — the child sees only its own prompt and tool results.
+- Run a reviewer / critic / second-opinion pass after a draft.
+
+Arguments:
+- `prompt` (required) — the task for the child agent, as a complete
+  self-contained instruction. The child does not see your messages
+  or files you've read.
+- `system` (optional) — override the child's system prompt. Defaults
+  to inheriting this agent's system prompt.
+- `provider` / `auth` / `model_id` / `account` (all optional) —
+  swap the child's model backend. Mirrors the CLI flags:
+  `provider` is a class name from `sagent.providers`
+  (e.g. `Anthropic`, `Google`, `OpenAI`, `Moonshot`);
+  `auth` is the suffix of a zero-argument `from_<auth>` classmethod on that
+  provider (for example, `env` for API-key environment variables);
+  `model_id` is the provider-specific model string (e.g.
+  `claude-sonnet-4-6`, `gemini-2.5-flash`); `account` selects among
+  named credential slots. Each defaults to inheriting
+  the parent's value, so passing none = same backend as parent.
+  Common use: `provider="Google", auth="env",
+  model_id="gemini-2.5-flash"` to delegate a review to Gemini
+  Flash while staying on Claude for the main loop.
+- `tools` (optional) — a list of tool names; the child gets only
+  these. Defaults to inheriting this agent's full toolset
+  (including this ``AgentSpawn`` tool, so children can spawn their own
+  subagents). Pass `[]` to give the child no tools (pure text
+  generation). Errors on unknown tool names.
+- `max_tool_call_rounds` (optional) — cap on child's tool-call rounds
+  (model responses that include one or more tool calls). A round with
+  many parallel tool calls still counts as one round.
+- `max_depth` (optional) — cap on the child's own sub-spawning. 0
+  makes the child a leaf; 1 lets the child spawn one generation;
+  omit for unbounded.
+
+Return value is the child's final assistant message text. If the
+child hits `max_tool_call_rounds`, raises an unhandled error, or its own
+sub-agent fails, that error bubbles up as the tool result.
+
+Concurrency: multiple AgentSpawn calls in one response run in parallel.
+Children edit files under shared per-path locks — a child can't
+clobber another child's in-flight edit on the same file. See the
+file-staleness system reminders: if a file changes under your feet
+(via a child's Edit, a linter, or the user), you'll be notified and
+should re-read before editing.
+
+Cost tracking: child usage aggregates into the root agent's
+CostLedger automatically. No accounting needed on your end.

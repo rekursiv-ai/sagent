@@ -1,0 +1,444 @@
+[project]
+name = "sagent"
+version = "0.1.0"
+description = "Python-first Coding Agent API and CLI."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+authors = [
+    {name = "rekursiv.ai", email = "hello@rekursiv.ai"},
+]
+keywords = ["agent", "LLM"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "anthropic>=0.72.0",
+    "cachetools",
+    "configgle>=1.1.15",
+    "httpx>=0.27",
+    "markdown-it-py",
+    "openai",
+    "pathspec",
+    "Pillow",
+    "prompt-toolkit",
+    "Pygments",
+    "PyYAML>=6.0",
+    "rich",
+    "slack-sdk>=3.33.0",
+    "sniffio",
+    "bashlex>=0.18",
+    "trafilatura",
+    "typing_extensions",
+    "aiohttp",
+    "jaxtyping",
+    "typeguard",
+    "webp>=0.4.0",
+    "dbus-next ; sys_platform == 'linux'",
+    "brotli",
+    "beautifulsoup4",
+    "zstandard",
+]
+
+[project.scripts]
+sagent = "sagent.bin.cli:main"
+sagent-slack = "sagent.bin.slack:main"
+
+[dependency-groups]
+# uv sync --all-groups
+
+debug = [
+    "ipykernel",
+    "ipython",
+]
+docs = [
+    "markdown",
+    "python-pptx>=1.0.2",
+    "sphinx",
+]
+lint = [
+    "pre-commit>=3.5",
+
+    # checks for spelling mistakes
+    "codespell>=2.2.4",
+
+    # ruff linter checks for issues and potential bugs
+    "ruff",
+
+    # checks for unused code
+    "vulture",
+
+    # required for codespell to parse pyproject.toml
+    "tomli",
+
+    # validation of pyproject.toml
+    "validate-pyproject[all]",
+
+    # automatic sorting of imports
+    "isort",
+]
+test = [
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov",
+    "pytest-xdist>=3.8.0",
+    "pytest>=7.0",
+]
+typing = [
+    "basedpyright>=1.10",
+    "basedtyping>=0.1.10",
+    "ty",
+]
+dev = [
+    {include-group = "docs"},
+    {include-group = "lint"},
+    {include-group = "test"},
+    {include-group = "typing"},
+]
+
+[project.urls]
+Homepage = "https://www.rekursiv.ai"
+Repository = "https://github.com/rekursiv-ai/sagent"
+Documentation = "https://github.com/rekursiv-ai/sagent/tree/main/docs"
+Source = "https://github.com/rekursiv-ai/sagent"
+Issues = "https://github.com/rekursiv-ai/sagent/issues"
+Changelog = "https://github.com/rekursiv-ai/sagent/releases"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sagent"]
+exclude = ["**/*_test.py", "**/conftest.py"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".github/**", ".codespell-ignore"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+python_files = "*_test.py"
+markers = [
+    "integration: tests that require networking or external CLIs (deselected by default)",
+    "performance: timing-sensitive tests (deselected by default)",
+]
+addopts = "-m 'not integration and not performance' --durations=20 --dist=worksteal"
+# "error" = treat all warnings as errors (same as -Werror).
+# Using filterwarnings instead of addopts so we can add exceptions.
+filterwarnings = [
+    "error",
+    "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
+    "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
+]
+norecursedirs = [
+    ".venv",
+    "__pycache__",
+    "*.egg-info",
+    "typings",
+    "third_party",
+]
+
+[tool.coverage.run]
+omit = [
+    "*_test.py",
+    "*/tests/*",
+    "*/.venv/*",
+    "*/typings/*",
+    "*/tools/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+fix = true
+show-fixes = true
+line-length = 88
+output-format = "concise"
+target-version = "py312"
+exclude = [
+    ".venv/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "typings/",
+    "**/typings/",
+    "**/third_party/",
+]
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # Module-level ignores.
+    "ANN",     # Flake8 annotations. (We use pyright for type checking.)
+    "C90",     # McCabe complexity. (One function slightly over threshold.)
+    "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.)
+               # https://github.com/astral-sh/ruff/issues/9216
+
+    # Relax docstring rules.
+    "D100",    # Undocumented public module.
+    "D101",    # Undocumented public class.
+    "D102",    # Undocumented public method.
+    "D103",    # Undocumented public function.
+    "D104",    # Undocumented public package.
+    "D105",    # Undocumented magic method.
+    "D106",    # Undocumented public nested class.
+    "D107",    # Undocumented public init.
+    "D203",    # Incorrect blank line before class. (Conflicts with D211.)
+    "D205",    # Missing blank line after summary.
+    "D213",    # Multi-line summary second line. (Conflicts with D212.)
+    "D400",    # Missing trailing period.
+    "D401",    # Non-imperative mood.
+    "D415",    # Missing terminal punctuation.
+    "RUF001",  # Ambiguous unicode character string. (Intentional math usage of `α, σ, γ, ×` etc.)
+    "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
+    "RUF003",  # Ambiguous unicode character comment. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
+
+    # Standard style relaxations.
+    "A002",    # Builtin argument shadowing.
+    "E501",    # Line too long. (Will be fixed by formatter.)
+    "EM101",   # Raw string in exception.
+    "EM102",   # F-string in exception.
+    "ERA001",  # Commented-out code.
+    "FBT001",  # Boolean type hint positional argument.
+    "FBT002",  # Boolean default value positional argument.
+    "FBT003",  # Boolean positional value in call.
+    "FIX002",  # Line contains TODO. (Too verbose descriptions of TODOs.)
+    "FLY002",  # Consider f-string instead of join. (Join is often clearer.)
+    "N806",    # Non-lowercase variable in function.
+    "PLR0911", # Too many return statements. (Early returns aid clarity.)
+    "PLR0912", # Too many branches.
+    "PLR0913", # Too many arguments.
+    "PLR0915", # Too many statements.
+    "PLR2044", # Empty comment. (Helps to break-up long lists.)
+    "PLW0642", # Self or cls assignment. (Reassignment of name in finalize.)
+    "RET504",  # Unnecessary assign.
+    "TC001",   # Typing-only first-party import. (Will be fixed by formatter.)
+    "TC003",   # Typing-only standard library import. (Will be fixed by formatter.)
+    "TC006",   # Runtime cast value.
+    "TD003",   # Missing TODO link.
+    "TRY003",  # Raise vanilla args.
+    "TRY300",  # Try consider else.
+
+    # Additional style relaxations.
+    # "DJ",    # Django.
+    # "EXE",   # Flake8 executable.
+    # "TID",   # Flake8 tidy imports.
+    "A001",    # Builtin variable shadowing.
+    "DTZ006",  # Call datetime fromtimestamp.
+    "EXE001",  # Shebang is present but file is not executable.
+    "G004",    # Logging f-string.
+    "PLR1704", # Redefined argument from local.
+    "PLR2004", # Magic value comparison.
+    "S101",    # Use of `assert` detected.
+    "SIM108",  # If-else block instead of if-exp.
+    # "B008",  # Function call in default argument.
+    "FIX001",  # Line contains FIXME.
+    # "ICN001",# Unconventional import alias.
+    # "N801",  # Invalid class name.
+    # "N802",  # Invalid function name.
+    # "N803",  # Invalid argument name.
+    # "N813",  # Camelcase imported as lowercase.
+    # "N815",  # Mixed case variable in class scope.
+    # "PGH004",# Blanket noqa.
+    # "PT027", # Pytest unittest raises assertion.
+    "TD001",   # Invalid TODO tag: `FIXME`
+    "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...` or `# TODO @<author_name>: ...`
+    "TD004",   # Missing colon in TODO
+    "TD005",   # Missing issue description after `TODO`
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = [
+    "F401",    # Unused import.
+]
+"sagent/lib/web/search.py" = [
+    "UP040",  # get_args() needs a runtime Literal alias, not TypeAliasType.
+]
+"{*_test.py,tests/*}" = [
+    "INP001",  # Implicit namespace package. (Tests don't need __init__.py.)
+    "PLR2004", # Magic value comparison.
+    "S101",    # Use of `assert` detected.
+    "S301",    # Pickle usage.
+    "SLF001",  # Private member access.
+]
+"docs/**" = [
+    "INP001",  # Standalone scripts.
+    "T201",    # Print found. (CLI tools use print for output.)
+]
+"typings/**" = [
+    "PYI015", # Assignment default in stub — field specifiers (struct.field, module_field, dataclasses.field) are semantically meaningful to @dataclass_transform.
+]
+"*.ipynb" = [
+    "ARG001",  # Unused function argument (callbacks).
+    "BLE001",  # Blind exception (sandboxed exec).
+    "E402",    # Module level import not at top of file.
+    "F811",    # Redefinition across cells.
+    "F821",    # Undefined name (e.g., `display` from IPython).
+    "INP001",  # Implicit namespace package.
+    "PLC0415", # Import not at top level.
+    "RUF100",  # Preserve noqa for jupytext-synced .py files.
+    "S102",    # Use of exec.
+    "S301",    # Pickle usage.
+    "T201",    # Print found.
+]
+
+[tool.ruff.lint.isort]
+case-sensitive = false
+combine-as-imports = true
+force-wrap-aliases = true
+split-on-trailing-comma = true
+default-section = "third-party"
+detect-same-package = true
+force-single-line = false
+force-sort-within-sections = false
+from-first = true
+lines-between-types = 1
+lines-after-imports = 2
+extra-standard-library = ["typing", "typing_extensions", "ty_extensions"]
+known-first-party = ["sagent"]
+no-lines-before = ["future"]
+order-by-type = true
+relative-imports-order = "closest-to-furthest"
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+
+[tool.basedpyright]
+typeCheckingMode = "recommended"
+extraPaths = []
+exclude = [
+    "**/.venv/",
+    "**/node_modules/",
+    "*.egg-info/",
+    "**/*.ipynb",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "typings/",
+    "**/third_party/",
+]
+ignore = [
+    "**/.venv/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "typings/",
+    "**/third_party/",
+]
+pythonPlatform = "Linux"
+pythonVersion = "3.12"
+reportAny = false                          # `Any` propagation is pervasive in PyTorch.
+reportExplicitAny = false                  # Explicit `Any` annotations are intentional.
+reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
+reportInvalidCast = false                  # All cast() calls are intentional.
+reportPrivateUsage = false                 # Redundant with ruff SLF001.
+reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
+reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
+reportUnusedImport = false                 # Redundant with ruff F401.
+# Extra suppressions.
+reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
+reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
+reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
+reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
+reportAttributeAccessIssue = false        # Public package omits source-tree-only stubs for dynamic third-party ASTs.
+reportAssignmentType = false              # Public package keeps cachetools inference advisory.
+reportMissingImports = false              # Public package supports optional provider/runtime extras.
+reportMissingTypeStubs = false            # Public package should not require optional third-party stubs.
+reportPrivateImportUsage = false          # Some third-party packages expose runtime APIs without stubs.
+reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
+reportUnknownArgumentType = false         # Third-party dynamic ASTs do not carry useful static types.
+reportUnknownMemberType = false           # Third-party dynamic ASTs do not carry useful static types.
+reportUnknownParameterType = false        # Optional runtime accelerators may not ship stubs.
+reportUnknownVariableType = false         # Third-party dynamic ASTs do not carry useful static types.
+reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
+reportConstantRedefinition = false         # Uppercase module-level dicts with internal-only overrides.
+
+
+[tool.ty.src]
+exclude = [
+    ".venv/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "typings/",
+    "**/third_party/",
+]
+
+[tool.ty.environment]
+python-version = "3.12"
+extra-paths = []
+
+[tool.ty.terminal]
+error-on-warning = false
+# output-format = "concise"   # full concise gitlab github junit
+
+[tool.ty.rules]
+all = "warn"
+unused-ignore-comment = "ignore"
+unresolved-attribute = "ignore"
+unresolved-import = "ignore"
+
+[[tool.ty.overrides]]
+include = ["typings/**"]
+[tool.ty.overrides.rules]
+all = "ignore"
+
+[[tool.ty.overrides]]
+include = ["*_test.py"]
+[tool.ty.overrides.rules]
+invalid-key = "ignore"
+
+[tool.codespell]
+# some_variable_with_typo = "connexion"  # codespell:ignore
+builtin = "clear,rare,code"
+ignore-words = ".codespell-ignore"
+# Pre-commit exclude handles most skips. This covers direct CLI invocations.
+# Don't add new folder paths here — add them to .pre-commit-config.yaml's
+# codespell exclude regex instead. This list is only for file patterns.
+skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/"
+
+[tool.jupytext]
+formats = "ipynb,py:percent"
+
+[tool.uv]
+package = true
+environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
+constraint-dependencies = [
+    # TODO: remove once NVIDIA publishes x86_64 wheel for v9.21+.
+    # v9.21.0.82 (uploaded 2026-04-14) only shipped an aarch64 wheel,
+    # breaking `uv sync` on x86_64 Linux.
+    "nvidia-cudnn-cu12<9.21",
+]
+
+[tool.uv.pip]
+compile-bytecode = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.workspace]
+members = []
