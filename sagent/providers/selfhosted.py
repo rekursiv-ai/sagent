@@ -134,6 +134,21 @@ def _parse_dtype(name: str | None) -> torch.dtype | None:
     return dtype
 
 
+def _parse_bool_env(name: str, value: str | None) -> bool:
+    """Parse a boolean environment flag."""
+    if value is None or value == "":
+        return False
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Unsupported {name}={value!r}; expected one of "
+        "1/0, true/false, yes/no, on/off."
+    )
+
+
 def _context_window(config: MutableJSON, default: int) -> int:
     """Extract the configured context window from an HF config dict."""
     max_pos = config.get("max_position_embeddings")
@@ -163,6 +178,7 @@ class SelfHosted:
     ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_MODEL"
     DEVICE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_DEVICE"
     DTYPE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_DTYPE"
+    COMPILE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_COMPILE"
     DEFAULT_MAX_REQUEST_TOKENS: ClassVar[int] = 32_768
     DEFAULT_MAX_RESPONSE_TOKENS: ClassVar[int] = 4_096
 
@@ -190,6 +206,7 @@ class SelfHosted:
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
+        compile_model: bool | None = None,
     ) -> SelfHosted:
         """Build a provider from a HuggingFace repo ID or local snapshot path.
 
@@ -197,6 +214,7 @@ class SelfHosted:
           path_or_repo: HuggingFace repo ID or local HF snapshot path.
           device: Target device for model tensors.
           dtype: Data type for model parameters.
+          compile_model: Whether to wrap the model with ``torch.compile``.
 
         Returns:
           provider: Configured self-hosted provider.
@@ -206,8 +224,18 @@ class SelfHosted:
             device = os.environ.get(cls.DEVICE_ENV_VAR) or _default_device()
         if dtype is None:
             dtype = _parse_dtype(os.environ.get(cls.DTYPE_ENV_VAR))
+        if compile_model is None:
+            compile_model = _parse_bool_env(
+                cls.COMPILE_ENV_VAR,
+                os.environ.get(cls.COMPILE_ENV_VAR),
+            )
         path = str(Path(path_or_repo).expanduser())
-        return cls.from_hf(path, device=device, dtype=dtype)
+        return cls.from_hf(
+            path,
+            device=device,
+            dtype=dtype,
+            compile_model=compile_model,
+        )
 
     @classmethod
     def from_env(cls) -> SelfHosted:
@@ -215,9 +243,9 @@ class SelfHosted:
 
         ``SAGENT_SELFHOSTED_MODEL`` may be a HuggingFace repo ID or local
         snapshot path. If unset, Qwen 3.6 is used. Optional
-        ``SAGENT_SELFHOSTED_DEVICE`` and ``SAGENT_SELFHOSTED_DTYPE`` values are
-        forwarded to ``from_hf``. Supported dtype values are ``float16``,
-        ``bfloat16``, and ``float32``.
+        ``SAGENT_SELFHOSTED_DEVICE``, ``SAGENT_SELFHOSTED_DTYPE``, and
+        ``SAGENT_SELFHOSTED_COMPILE`` values are forwarded to ``from_hf``.
+        Supported dtype values are ``float16``, ``bfloat16``, and ``float32``.
 
         Returns:
           provider: Configured self-hosted provider.
@@ -229,7 +257,16 @@ class SelfHosted:
         path = os.environ.get(cls.ENV_VAR) or cls.DEFAULT_MODEL
         device = os.environ.get(cls.DEVICE_ENV_VAR) or _default_device()
         dtype = _parse_dtype(os.environ.get(cls.DTYPE_ENV_VAR))
-        return cls.from_hf(path, device=device, dtype=dtype)
+        compile_model = _parse_bool_env(
+            cls.COMPILE_ENV_VAR,
+            os.environ.get(cls.COMPILE_ENV_VAR),
+        )
+        return cls.from_hf(
+            path,
+            device=device,
+            dtype=dtype,
+            compile_model=compile_model,
+        )
 
     @property
     def native_model(self) -> nn.Module:
@@ -264,6 +301,7 @@ class SelfHosted:
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
         trust_remote_code: bool = False,
+        compile_model: bool = False,
     ) -> SelfHosted:
         """Build a SelfHosted provider from a HuggingFace repo ID or path.
 
@@ -276,6 +314,7 @@ class SelfHosted:
           device: Target device for model tensors.
           dtype: Data type for model parameters.
           trust_remote_code: Whether to allow model repository Python code.
+          compile_model: Whether to wrap the model with ``torch.compile``.
 
         Returns:
           provider: Configured SelfHosted instance.
@@ -317,6 +356,19 @@ class SelfHosted:
         if device is not None:
             model = model.to(device)
         model.eval()
+        if compile_model:
+            compile_start = time.perf_counter()
+            logger.info(
+                "Compiling SelfHosted model model_id=%s device=%s",
+                model_id,
+                _module_device(model),
+            )
+            model = _compile_model(model)
+            logger.info(
+                "Compiled SelfHosted model model_id=%s elapsed_sec=%.2f",
+                model_id,
+                time.perf_counter() - compile_start,
+            )
         tokenizer = cast(
             _Tokenizer,
             transformers_lib.AutoTokenizer.from_pretrained(  # pyright: ignore[reportUnknownMemberType] -- no stubs  # ty: ignore[possibly-missing-attribute] -- lazy import; ty can't resolve
@@ -548,7 +600,9 @@ class SelfHostedModel:
             rendered.attention_mask is not None,
         )
         out = await asyncio.to_thread(_generate, model, input_ids, generate_kwargs)
+        elapsed_sec = time.perf_counter() - start
         new_tokens = out[0, input_ids.shape[-1] :]
+        output_tokens = int(new_tokens.shape[-1])
         text = self._provider.tokenizer.decode(
             new_tokens,
             skip_special_tokens=True,
@@ -559,16 +613,18 @@ class SelfHostedModel:
         )
         # HF ``generate`` doesn't return a finish_reason; infer from
         # whether we exhausted the budget.
-        hit_cap = int(new_tokens.shape[-1]) >= max_new
+        hit_cap = output_tokens >= max_new
         finish_reason = "length" if hit_cap else "stop"
         logger.debug(
             "SelfHosted generate end model_id=%s output_tokens=%d "
-            "finish_reason=%s tool_calls=%d elapsed_sec=%.2f",
+            "finish_reason=%s tool_calls=%d elapsed_sec=%.2f "
+            "output_tokens_per_sec=%.2f",
             self.model_id,
-            int(new_tokens.shape[-1]),
+            output_tokens,
             finish_reason,
             len(tool_msgs),
-            time.perf_counter() - start,
+            elapsed_sec,
+            output_tokens / elapsed_sec if elapsed_sec > 0 else 0.0,
         )
         msg_parts: list[Message] = []
         if cleaned_text.strip():
@@ -582,7 +638,7 @@ class SelfHostedModel:
             ),
             tokens=TokenCount(
                 input_tokens=int(input_ids.shape[-1]),
-                output_tokens=int(new_tokens.shape[-1]),
+                output_tokens=output_tokens,
             ),
             stop_reason=normalize_stop_reason(
                 finish_reason,
@@ -698,6 +754,11 @@ def _generate(
     """Run blocking HF generation under inference mode."""
     with torch.inference_mode():
         return cast(_GenerateModel, model).generate(input_ids, **generate_kwargs)
+
+
+def _compile_model(model: nn.Module) -> nn.Module:
+    """Wrap a model with torch.compile."""
+    return cast("nn.Module", cast(Callable[[object], object], torch.compile)(model))
 
 
 def _module_device(model: nn.Module) -> str:
@@ -892,7 +953,9 @@ def _extract_tool_calls(
 
 def _tool_allowed(tool_call: Message, allowed_tools: set[str] | None) -> bool:
     """Return whether a parsed tool call was advertised to the model."""
-    return allowed_tools is None or get_tool_name(tool_call) in allowed_tools
+    return allowed_tools is None or get_tool_name(tool_call).lower() in {
+        tool.lower() for tool in allowed_tools
+    }
 
 
 def _parse_qwen_tool_call(raw: str) -> Message | None:

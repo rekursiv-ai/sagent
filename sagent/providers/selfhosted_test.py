@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, override
 from unittest.mock import Mock
 
+import logging
+
 import pytest
 
 
@@ -112,6 +114,15 @@ class TestToolCallParsing:
 
         assert calls == []
         assert cleaned == text
+
+    def test_qwen_tool_allowlist_matches_cli_tool_names(self) -> None:
+        text = '<tool_call>{"name": "bash", "arguments": {"cmd": "pwd"}}</tool_call>'
+
+        calls, cleaned = _extract_tool_calls(text, allowed_tools={"Bash"})
+
+        assert len(calls) == 1
+        assert get_tool_name(calls[0]) == "bash"
+        assert cleaned == ""
 
     def test_deepseek_block(self):
         text = (
@@ -446,6 +457,59 @@ class TestSelfHostedProvider:
         assert provider.hosted_model_id == "Qwen/Qwen3.6-27B"
         assert provider.hosted_max_request_tokens == 8192
 
+    def test_from_hf_compiles_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        model = nn.Module()
+        compiled_model = nn.Module()
+        tokenizer = _FakeTokenizer()
+
+        class FakeConfig:
+            def to_dict(self) -> dict[str, object]:
+                return {"max_position_embeddings": 8192}
+
+        class FakeAutoConfig:
+            @classmethod
+            def from_pretrained(cls, model_id: str, **kwargs: object) -> object:
+                del model_id, kwargs
+                return FakeConfig()
+
+        class FakeAutoModelForCausalLM:
+            @classmethod
+            def from_pretrained(cls, model_id: str, **kwargs: object) -> nn.Module:
+                del model_id, kwargs
+                return model
+
+        class FakeAutoTokenizer:
+            @classmethod
+            def from_pretrained(cls, model_id: str, **kwargs: object) -> _FakeTokenizer:
+                del model_id, kwargs
+                return tokenizer
+
+        compile_mock = Mock(return_value=compiled_model)
+        monkeypatch.setattr(
+            "sagent.providers.selfhosted.transformers_lib",
+            type(
+                "FakeTransformers",
+                (),
+                {
+                    "AutoConfig": FakeAutoConfig,
+                    "AutoModelForCausalLM": FakeAutoModelForCausalLM,
+                    "AutoTokenizer": FakeAutoTokenizer,
+                },
+            ),
+        )
+        monkeypatch.setattr(
+            "sagent.providers.selfhosted._compile_model",
+            compile_mock,
+        )
+
+        provider = SelfHosted.from_hf("Qwen/Qwen3.6-27B", compile_model=True)
+
+        compile_mock.assert_called_once_with(model)
+        assert provider.native_model is compiled_model
+
     def test_from_key_loads_hf_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -465,7 +529,12 @@ class TestSelfHostedProvider:
         )
 
         assert SelfHosted.from_key(str(tmp_path)) is provider
-        load.assert_called_once_with(str(tmp_path), device=None, dtype=None)
+        load.assert_called_once_with(
+            str(tmp_path),
+            device=None,
+            dtype=None,
+            compile_model=False,
+        )
 
     def test_from_key_uses_default_device(
         self,
@@ -486,7 +555,12 @@ class TestSelfHostedProvider:
         )
 
         assert SelfHosted.from_key(str(tmp_path)) is provider
-        load.assert_called_once_with(str(tmp_path), device="mps", dtype=None)
+        load.assert_called_once_with(
+            str(tmp_path),
+            device="mps",
+            dtype=None,
+            compile_model=False,
+        )
 
     def test_from_key_reads_device_and_dtype_env(
         self,
@@ -505,7 +579,39 @@ class TestSelfHostedProvider:
         monkeypatch.setattr(SelfHosted, "from_hf", load)
 
         assert SelfHosted.from_key(str(tmp_path)) is provider
-        load.assert_called_once_with(str(tmp_path), device="mps", dtype=torch.float16)
+        load.assert_called_once_with(
+            str(tmp_path),
+            device="mps",
+            dtype=torch.float16,
+            compile_model=False,
+        )
+
+    def test_from_key_reads_compile_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        provider = SelfHosted(
+            model=nn.Module(),
+            tokenizer=_FakeTokenizer(),
+            model_id=str(tmp_path),
+            max_request_tokens=128,
+        )
+        load = Mock(return_value=provider)
+        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "true")
+        monkeypatch.setattr(SelfHosted, "from_hf", load)
+        monkeypatch.setattr(
+            "sagent.providers.selfhosted._default_device",
+            Mock(return_value=None),
+        )
+
+        assert SelfHosted.from_key(str(tmp_path)) is provider
+        load.assert_called_once_with(
+            str(tmp_path),
+            device=None,
+            dtype=None,
+            compile_model=True,
+        )
 
     def test_from_env_loads_configured_model(
         self,
@@ -529,6 +635,7 @@ class TestSelfHostedProvider:
             str(tmp_path),
             device="cpu",
             dtype=torch.bfloat16,
+            compile_model=False,
         )
 
     def test_from_env_defaults_to_qwen36(
@@ -552,7 +659,12 @@ class TestSelfHostedProvider:
         )
 
         assert SelfHosted.from_env() is provider
-        load.assert_called_once_with(SelfHosted.DEFAULT_MODEL, device=None, dtype=None)
+        load.assert_called_once_with(
+            SelfHosted.DEFAULT_MODEL,
+            device=None,
+            dtype=None,
+            compile_model=False,
+        )
 
     def test_from_env_uses_default_device(
         self,
@@ -579,7 +691,46 @@ class TestSelfHostedProvider:
             SelfHosted.DEFAULT_MODEL,
             device="mps",
             dtype=None,
+            compile_model=False,
         )
+
+    def test_from_env_reads_compile_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        provider = SelfHosted(
+            model=nn.Module(),
+            tokenizer=_FakeTokenizer(),
+            model_id=SelfHosted.DEFAULT_MODEL,
+            max_request_tokens=128,
+        )
+        load = Mock(return_value=provider)
+        monkeypatch.delenv("SAGENT_SELFHOSTED_MODEL", raising=False)
+        monkeypatch.delenv("SAGENT_SELFHOSTED_DEVICE", raising=False)
+        monkeypatch.delenv("SAGENT_SELFHOSTED_DTYPE", raising=False)
+        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "1")
+        monkeypatch.setattr(SelfHosted, "from_hf", load)
+        monkeypatch.setattr(
+            "sagent.providers.selfhosted._default_device",
+            Mock(return_value=None),
+        )
+
+        assert SelfHosted.from_env() is provider
+        load.assert_called_once_with(
+            SelfHosted.DEFAULT_MODEL,
+            device=None,
+            dtype=None,
+            compile_model=True,
+        )
+
+    def test_from_env_rejects_invalid_compile_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "sometimes")
+
+        with pytest.raises(ValueError, match="SAGENT_SELFHOSTED_COMPILE"):
+            SelfHosted.from_env()
 
     def test_properties_and_model_binding(self) -> None:
         tokenizer = _FakeTokenizer()
@@ -838,6 +989,29 @@ class TestSelfHostedModel:
         await model.buffer(ModelRequest(messages=[]))
 
         assert seen
+
+    @pytest.mark.anyio
+    async def test_buffer_logs_output_tokens_per_second(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        model = SelfHostedModel(provider=_CaptureProvider())
+        monkeypatch.setattr(
+            model,
+            "_render_prompt",
+            Mock(
+                return_value=_RenderedPrompt(
+                    input_ids=torch.tensor([[1, 2]]),
+                    attention_mask=None,
+                )
+            ),
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            await model.buffer(ModelRequest(messages=[]))
+
+        assert "output_tokens_per_sec=" in caplog.text
 
 
 class TestToolCallInvalidBranches:
