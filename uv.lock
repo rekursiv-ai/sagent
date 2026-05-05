@@ -1835,7 +1835,7 @@ typing = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", marker = "extra == 'selfhosted'" },
+    { name = "accelerate", marker = "extra == 'selfhosted'", specifier = ">=1.13.0" },
     { name = "aiohttp" },
     { name = "anthropic", specifier = ">=0.72.0" },
     { name = "bashlex", specifier = ">=0.18" },
