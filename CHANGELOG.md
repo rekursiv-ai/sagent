@@ -2,6 +2,18 @@
 
 All notable Sagent changes are documented here.
 
+## 0.1.3 - Unreleased
+
+- Fixed SelfHosted tool-call allowlist matching so CLI tool names such as
+  `Bash` dispatch model-emitted tool calls such as `bash`.
+- Added SelfHosted generation throughput diagnostics with
+  `output_tokens_per_sec` in DEBUG logs.
+- Added opt-in `torch.compile` support for SelfHosted models via
+  `SelfHosted.from_hf(..., compile_model=True)` and
+  `SAGENT_SELFHOSTED_COMPILE=1`.
+- Documented SelfHosted compile configuration and its first-request latency
+  tradeoff.
+
 ## 0.1.2 - 2026-05-05
 
 - Added public SelfHosted provider support for Hugging Face causal language
