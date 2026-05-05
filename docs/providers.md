@@ -12,6 +12,7 @@ Sagent separates providers from models. A provider owns authentication and creat
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |
 | `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` | provider-defined | MiniMax provider. |
+| `SelfHosted` | `SAGENT_SELFHOSTED_MODEL` | `Qwen/Qwen3.6-27B` | configured snapshot | Local HF transformers provider. |
 | `OpenAICompat` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
 The public package is designed around API-key providers.
@@ -65,6 +66,7 @@ Agent tools can infer a provider switch from model ID prefixes:
 | `kimi`, `moonshot` | `Moonshot` |
 | `qwen` | `DashScope` |
 | `minimax` | `MiniMax` |
+| `/`, `./`, `../`, `~/` | `SelfHosted` |
 
 This is used by model-switching tools so callers can usually pass just `model_id`.
 
@@ -111,6 +113,56 @@ model = LocalProvider.from_env().model("local-model")
 `OpenAICompat.from_env(base_url=...)` and `from_key(api_key, base_url=...)` can override the class `BASE_URL` at construction time.
 
 See `examples/openai_compatible_provider.py` for a runnable version.
+
+## Self-hosted HuggingFace models
+
+Use `SelfHosted` for HuggingFace causal LMs loaded through `transformers`:
+
+```bash
+pip install "sagent[selfhosted]"
+hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
+sagent --provider SelfHosted
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B \
+  --tools none --effort none --max-tool-call-rounds 1
+```
+
+Python API:
+
+```python
+from sagent.providers import SelfHosted, SelfHostedModel
+
+provider = SelfHosted.from_hf("Qwen/Qwen3.6-27B")
+model: SelfHostedModel = provider.model()
+```
+
+Pass a local snapshot path to `from_hf` or `--model` when you want to use an
+already-populated cache. Cloud Qwen IDs continue to infer `DashScope`; select
+`SelfHosted` explicitly for local model paths.
+
+Examples of frontier open-weight HuggingFace repos to evaluate:
+
+| Model | Repo ID |
+| --- | --- |
+| DeepSeek V4 Flash | `deepseek-ai/DeepSeek-V4-Flash` |
+| DeepSeek V4 Pro | `deepseek-ai/DeepSeek-V4-Pro` |
+| Qwen 3.6 35B-A3B | `Qwen/Qwen3.6-35B-A3B` |
+| Qwen 3.6 27B | `Qwen/Qwen3.6-27B` |
+| Kimi K2 Thinking | `moonshotai/Kimi-K2-Thinking` |
+| GLM 4.6 | `zai-org/GLM-4.6` |
+| Gemma 4 31B IT | `google/gemma-4-31B-it` |
+
+Check each model card for license, hardware, quantization, chat-template, and
+`trust_remote_code` requirements. Some newly released architectures require the
+latest `transformers` build or a serving runtime such as vLLM or SGLang before
+they work with `AutoModelForCausalLM`; multimodal or custom-code models may need
+additional runtime support.
+
+The `selfhosted` extra tracks the released HuggingFace runtime stack needed by
+these examples: `transformers`, `accelerate`, `torchvision`,
+`compressed-tensors`, `sentencepiece`, `protobuf`, `safetensors`, and `torch`.
+Kimi checkpoints are tagged as custom-code models, so they still require an
+explicit `trust_remote_code=True` load.
 
 ## Model contract
 

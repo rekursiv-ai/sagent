@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sagent.custom_types import JsonMessage, Message, MultipartMessage
+from sagent.custom_types import (
+    JsonMessage,
+    Message,
+    ModelSpec,
+    MultipartMessage,
+)
 from sagent.lib.json import MutableJSON, json_freeze
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.core import (
@@ -184,6 +189,31 @@ class TestModel:
             assert result.descriptor == "text/x-error"
             assert 'operation="limits"' in cast(str, result.content)
             agent.swap_model.assert_not_called()
+        finally:
+            current_agent_var.reset(token)
+
+    @pytest.mark.anyio
+    async def test_selfhosted_local_path_updates_auth(self) -> None:
+        agent = MagicMock()
+        agent.model_spec = ModelSpec(
+            provider="SelfHosted",
+            auth="/old/model",
+            model_id="/old/model",
+        )
+        agent.model.model_id = "/old/model"
+        token = current_agent_var.set(cast(Any, agent))
+        try:
+            with patch("sagent.tools.agent_self.build_provider") as mock_bp:
+                mock_bp.return_value.model.return_value = MagicMock(
+                    model_id="/new/model"
+                )
+                result = await AgentSelf().run(_msg("model", model_id="/new/model"))
+            assert result.descriptor == "text/plain"
+            mock_bp.assert_called_once_with("SelfHosted", "/new/model", account=None)
+            spec = agent.swap_model.call_args.kwargs["spec"]
+            assert spec.provider == "SelfHosted"
+            assert spec.auth == "/new/model"
+            assert spec.model_id == "/new/model"
         finally:
             current_agent_var.reset(token)
 

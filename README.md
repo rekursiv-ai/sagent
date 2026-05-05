@@ -1,7 +1,7 @@
 # sagent🪄
 
 <p align="center">
-  <img alt="sagent logo" src="assets/logo-custom.webp" width="180">
+  <img alt="sagent logo" src="https://raw.githubusercontent.com/rekursiv-ai/sagent/main/assets/logo-custom.webp" width="180">
 </p>
 
 <p align="center">
@@ -39,6 +39,8 @@
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/compaction.md">Compaction</a>
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/slack.md">Slack</a>
+  ·
+  <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md">Self-hosted</a>
   ·
   <a href="https://github.com/rekursiv-ai/sagent/tree/main/examples">Examples</a>
 </p>
@@ -165,6 +167,7 @@ export MINIMAX_API_KEY=...
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
 | `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
+| `SelfHosted` | `SAGENT_SELFHOSTED_MODEL` | `Qwen/Qwen3.6-27B` |
 
 See [Providers](docs/providers.md) for more detail.
 
@@ -304,16 +307,16 @@ of each project.
 
 | | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Python library | ✅ | 🟡 | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Multi-provider | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Context compaction | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ❌ | ✅ |
-| User-initiated backend swap | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Agent-initiated backend swap | ✅ | ❌ | 🟡 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Agent self-mutation | ✅ | ❌ | ❌ | ❌ | ❌ | 🟡 | ❌ | ❌ |
-| Context hot-swap | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | ❌ | ❌ | ❌ |
-| Recursive agent spawn | ✅ | ❌ | ✅ | 🟡 | ❌ | ✅ | ❌ | ❌ |
-| Multi-agent | ✅ | ❌ | ✅ | ✅ | ❌ | 🟡 | ❌ | ❌ |
-| GitHub stars | -- | 44.4k | 135.8k | 368.6k | 61.4k | -- | 80.1k | 103.2k |
+| Python library                 | ✅ | 🟡    | ✅     | ❌      | ❌    | ❌          | ❌        | ❌         |
+| Multi-provider                 | ✅ | ✅    | ✅     | ✅      | ✅    | ❌          | ❌        | ❌         |
+| Context compaction             | ✅ | 🟡    | 🟡     | ❌      | 🟡    | ✅          | ✅        | ✅         |
+| User-initiated backend swap    | ✅ | ✅    | ❌     | ✅      | ✅    | ❌          | ❌        | ❌         |
+| Agent-initiated backend swap   | ✅ | ❌    | 🟡     | ❌      | ❌    | ❌          | ❌        | ❌         |
+| Agent self-mutation            | ✅ | ❌    | ❌     | ❌      | ❌    | ❌          | ❌        | ❌         |
+| Context hot-swap               | ✅ | 🟡    | 🟡     | 🟡      | 🟡    | ❌          | ❌        | ❌         |
+| Recursive agent spawn          | ✅ | ❌    | ✅     | 🟡      | ❌    | 🟡          | 🟡        | ❌         |
+| Multi-agent (fully detached)   | ✅ | ❌    | ✅     | ✅      | ❌    | 🟡          | 🟡        | ❌         |
+| GitHub stars (May 2026)        | -- | 44.4k | 135.8k | 368.6k | 61.4k | --         | 80.1k     | 103.2k     |
 
 ✅ = yes, 🟡 = partial, ❌ = no. Corrections welcome --
 [open a PR](https://github.com/rekursiv-ai/sagent/pulls).

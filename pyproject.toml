@@ -1,6 +1,6 @@
 [project]
 name = "sagent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -49,6 +49,20 @@ dependencies = [
 [project.scripts]
 sagent = "sagent.bin.cli:main"
 sagent-slack = "sagent.bin.slack:main"
+
+[project.optional-dependencies]
+selfhosted = [
+    "accelerate",
+    "compressed-tensors",
+    "protobuf",
+    "sentencepiece",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
+    "safetensors",
+    "transformers>=5.8.0",
+]
 
 [dependency-groups]
 # uv sync --all-groups
