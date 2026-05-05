@@ -590,12 +590,25 @@ async def _consume_gemini_stream(
     *,
     on_text: Callable[[str], None] | None,
     pricing: Pricing,
+    chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
     """Parse SSE stream from :streamGenerateContent?alt=sse.
 
-    Each `data:` line is a full GenerateContentResponse JSON object
+    Each ``data:`` line is a full GenerateContentResponse JSON object
     with partial content; we accumulate text and tool calls across
     events.
+
+    Args:
+      r: The streaming httpx response.
+      on_text: Optional callback invoked with each text delta.
+      pricing: Pricing struct used to compute final cost.
+      chunk_unwrap: Optional transform applied to each parsed chunk
+        before consumption. Used by the Code Assist subscription
+        provider, whose chunks are wrapped as ``{"response": <Gemini-
+        chunk>, "traceId": ..., "consumedCredits": ...}``; passing
+        ``lambda c: c.get("response") or {}`` unwraps to the standard
+        Gemini shape this function expects.
+
     """
     text_chunks: list[str] = []
     tool_parts: list[Message] = []
@@ -617,6 +630,8 @@ async def _consume_gemini_stream(
                 event = cast(MutableJSON, json.loads(data_str))
             except json.JSONDecodeError:
                 continue
+            if chunk_unwrap is not None:
+                event = chunk_unwrap(event)
             event_usage = event.get("usageMetadata")
             if isinstance(event_usage, dict):
                 usage = cast(MutableJSON, event_usage)
