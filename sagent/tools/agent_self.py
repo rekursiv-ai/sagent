@@ -43,6 +43,7 @@ class AgentSelf:
                         "diagnostics",
                         "model",
                         "limits",
+                        "cache_ttl",
                     ],
                     "description": "Which mutation to perform.",
                 },
@@ -105,6 +106,18 @@ class AgentSelf:
                         " context buffer."
                     ),
                 },
+                "ttl": {
+                    "type": "string",
+                    "enum": ["5m", "1h"],
+                    "description": (
+                        "Prompt-cache TTL for outgoing requests. Required"
+                        " with operation='cache_ttl'. '5m' is the default"
+                        " (1.25x input rate to write); '1h' is the"
+                        " extended-cache option (2x input rate to write,"
+                        " same read price). Use '1h' when typical gaps"
+                        " between turns exceed 5 minutes."
+                    ),
+                },
                 "max_response_tokens": {
                     "type": "integer",
                     "minimum": 1,
@@ -156,6 +169,8 @@ class AgentSelf:
             if "max_response_tokens" in d:
                 parts.append(f"max_response_tokens={d.get('max_response_tokens')}")
             return f"AgentSelf limits {' '.join(parts)}".strip()
+        if op == "cache_ttl":
+            return f"AgentSelf cache_ttl={d.get('ttl', '')}"
         return f"AgentSelf {op}"
 
     def prompt(self) -> str:
@@ -196,6 +211,8 @@ class AgentSelf:
             result = _do_model(d)
         elif op == "limits":
             result = _apply_limits(d)
+        elif op == "cache_ttl":
+            result = _do_cache_ttl(d)
         else:
             return TextMessage(f"Unknown operation: {op!r}", "text/x-error")
         return result
@@ -389,6 +406,19 @@ def _apply_limits(d: JSON) -> Message:
     except (ValueError, TypeError) as exc:
         return TextMessage(f"Invalid AgentSelf limit override: {exc}", "text/x-error")
     return TextMessage("Limits updated: " + ", ".join(parts), "text/plain")
+
+
+def _do_cache_ttl(d: JSON) -> Message:
+    """Set the agent's prompt-cache TTL for outgoing requests."""
+    ttl = str(d.get("ttl", "")).strip()
+    agent = current_agent_var.get(None)
+    if agent is None:
+        return TextMessage("No active agent.", "text/x-error")
+    try:
+        agent.cache_ttl = ttl
+    except (AttributeError, ValueError) as exc:
+        return TextMessage(f"Failed to set cache_ttl: {exc}", "text/x-error")
+    return TextMessage(f"Cache TTL set to {ttl}.", "text/plain")
 
 
 def _apply_one_limit(

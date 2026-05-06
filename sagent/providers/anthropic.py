@@ -783,17 +783,27 @@ async def _stream_impl(
 # -- Translation helpers -----------------------------------------------
 
 
-_CACHE_MARK: dict[str, str] = {"type": "ephemeral"}
+def _cache_mark(ttl: str) -> dict[str, str]:
+    """Build the ``cache_control`` marker for the requested TTL.
+
+    ``"5m"`` omits the ``ttl`` field (Anthropic default); ``"1h"`` opts
+    into the extended-cache rate (2x input price to write, same read).
+    """
+    if ttl == "1h":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
 
 
 def _add_cache_breakpoint(
     messages: list[anthropic.types.MessageParam],
+    ttl: str = "5m",
 ) -> None:
     """Add cache_control to the last content block of the last message.
 
     Places exactly one marker per request so the API can cache the
     conversation prefix.
     """
+    mark = _cache_mark(ttl)
     last = messages[-1]
     raw_content: object = last.get("content")
     if isinstance(raw_content, str):
@@ -805,7 +815,7 @@ def _add_cache_breakpoint(
                     {
                         "type": "text",
                         "text": raw_content,
-                        "cache_control": _CACHE_MARK,
+                        "cache_control": mark,
                     },
                 ],
             },
@@ -821,7 +831,7 @@ def _add_cache_breakpoint(
             if btype not in ("thinking", "redacted_thinking"):
                 blocks[i] = {
                     **cast(dict[str, object], blocks[i]),
-                    "cache_control": _CACHE_MARK,
+                    "cache_control": mark,
                 }
                 break
         if blocks:
@@ -990,7 +1000,7 @@ def _build_messages(
     _flush_tool_results(messages, pending_tool_results)
 
     if messages:
-        _add_cache_breakpoint(messages)
+        _add_cache_breakpoint(messages, request.cache_ttl)
 
     return messages
 

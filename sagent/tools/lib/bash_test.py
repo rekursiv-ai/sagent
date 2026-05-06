@@ -19,6 +19,7 @@ from sagent.tools.lib.bash import (
     parse_bash,
     resolve_cwd_path,
     unwrap_cd_prefix,
+    unwrap_cd_subtree,
 )
 
 
@@ -141,6 +142,41 @@ class TestUnwrapCdPrefix:
 
     def test_subshell_bails(self) -> None:
         assert unwrap_cd_prefix(_parse("(cd src && grep foo)")) is None
+
+
+# -- unwrap_cd_subtree ------------------------------------------------
+
+
+class TestUnwrapCdSubtree:
+    def test_no_cd_returns_none(self) -> None:
+        assert unwrap_cd_subtree(_parse("ls -la")) is None
+
+    def test_cd_then_command(self) -> None:
+        sub = unwrap_cd_subtree(_parse("cd src && ls -la"))
+        assert sub is not None
+        assert len(sub) == 1
+        assert sub[0].kind == "command"
+
+    def test_cd_then_pipeline(self) -> None:
+        sub = unwrap_cd_subtree(_parse("cd src && ls | head -5"))
+        assert sub is not None
+        assert len(sub) == 1
+        assert sub[0].kind == "pipeline"
+        # Re-dispatching through match_pipeline works on the slice.
+        pair = match_pipeline(sub)
+        assert pair is not None
+        first, second = pair
+        assert first.exe == "ls"
+        assert second.exe == "head"
+
+    def test_non_cd_prefix_bails(self) -> None:
+        assert unwrap_cd_subtree(_parse("echo hi && ls")) is None
+
+    def test_or_operator_bails(self) -> None:
+        assert unwrap_cd_subtree(_parse("cd src || ls")) is None
+
+    def test_cd_no_arg_bails(self) -> None:
+        assert unwrap_cd_subtree(_parse("cd && ls")) is None
 
 
 # -- match_pipeline ----------------------------------------------------

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
+import time
+
 import pytest
 
 from sagent.custom_types import (
@@ -160,6 +163,71 @@ class TestList:
         assert "dangling" in _txt(r)
 
 
+class TestListSort:
+    @pytest.mark.anyio
+    async def test_sort_name_default(self, tmp_path: Path) -> None:
+        (tmp_path / "b").write_text("")
+        (tmp_path / "a").write_text("")
+        (tmp_path / "c").write_text("")
+        r = await list_tool.run(_msg(json_freeze({"path": str(tmp_path)})))
+        assert _txt(r).splitlines() == ["a", "b", "c"]
+
+    @pytest.mark.anyio
+    async def test_sort_name_desc(self, tmp_path: Path) -> None:
+        (tmp_path / "a").write_text("")
+        (tmp_path / "c").write_text("")
+        (tmp_path / "b").write_text("")
+        r = await list_tool.run(
+            _msg(json_freeze({"path": str(tmp_path), "sort": "name_desc"}))
+        )
+        assert _txt(r).splitlines() == ["c", "b", "a"]
+
+    @pytest.mark.anyio
+    async def test_sort_mtime_desc(self, tmp_path: Path) -> None:
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        c = tmp_path / "c"
+        a.write_text("")
+        b.write_text("")
+        c.write_text("")
+        now = time.time()
+        os.utime(a, (now - 300, now - 300))
+        os.utime(b, (now - 100, now - 100))
+        os.utime(c, (now, now))
+        r = await list_tool.run(
+            _msg(json_freeze({"path": str(tmp_path), "sort": "mtime_desc"}))
+        )
+        assert _txt(r).splitlines() == ["c", "b", "a"]
+
+    @pytest.mark.anyio
+    async def test_sort_size_desc(self, tmp_path: Path) -> None:
+        (tmp_path / "small").write_text("a")
+        (tmp_path / "big").write_text("a" * 100)
+        (tmp_path / "med").write_text("a" * 10)
+        r = await list_tool.run(
+            _msg(json_freeze({"path": str(tmp_path), "sort": "size_desc"}))
+        )
+        assert _txt(r).splitlines() == ["big", "med", "small"]
+
+    @pytest.mark.anyio
+    async def test_sort_invalid(self, tmp_path: Path) -> None:
+        r = await list_tool.run(
+            _msg(json_freeze({"path": str(tmp_path), "sort": "bogus"}))
+        )
+        assert r.descriptor == "text/x-error"
+        assert "unknown sort" in _txt(r)
+
+    @pytest.mark.anyio
+    async def test_sort_name_case_insensitive(self, tmp_path: Path) -> None:
+        # GNU ``ls`` mirror: 'apple' < 'Banana' < 'Cherry' (case-folded),
+        # not raw ASCII order which would put all uppercase before lowercase.
+        (tmp_path / "Banana").write_text("")
+        (tmp_path / "Cherry").write_text("")
+        (tmp_path / "apple").write_text("")
+        r = await list_tool.run(_msg(json_freeze({"path": str(tmp_path)})))
+        assert _txt(r).splitlines() == ["apple", "Banana", "Cherry"]
+
+
 _NUDGE = "ls via Bash is a bad UX. Use the List tool."
 _NUDGE_GLOB = "ls glob via Bash is a bad UX. Use the Glob tool."
 
@@ -172,10 +240,21 @@ class TestBashMatchLs:
         assert _match("ls src") == _NUDGE
 
     def test_long_flag(self) -> None:
-        assert _match("ls -l") == _NUDGE
+        assert (
+            _match("ls -l")
+            == "ls via Bash is a bad UX. Use the List tool with long=true."
+        )
 
     def test_all_long_flags(self) -> None:
-        assert _match("ls -la") == _NUDGE
+        assert _match("ls -la") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " long=true, show_hidden=true."
+        )
+
+    def test_capital_a(self) -> None:
+        assert _match("ls -A") == (
+            "ls via Bash is a bad UX. Use the List tool with show_hidden=true."
+        )
 
     def test_unknown_flag_bails(self) -> None:
         # ``-h`` (human-readable sizes) has no List equivalent.
@@ -188,11 +267,150 @@ class TestBashMatchLs:
         assert _match("ls src/*.py") == _NUDGE_GLOB
 
     def test_cd_prefix(self) -> None:
-        # Fixed-string hint - cd prefix doesn't affect the content.
         assert _match("cd src && ls tests") == _NUDGE
 
     def test_multi_positional_bails(self) -> None:
         assert _match("ls dir1 dir2") is None
+
+
+class TestBashMatchLsSort:
+    def test_t_flag(self) -> None:
+        assert _match("ls -t") == (
+            "ls via Bash is a bad UX. Use the List tool with sort='mtime_desc'."
+        )
+
+    def test_tr_flags(self) -> None:
+        assert _match("ls -tr") == (
+            "ls via Bash is a bad UX. Use the List tool with sort='mtime'."
+        )
+
+    def test_capital_s(self) -> None:
+        assert _match("ls -S") == (
+            "ls via Bash is a bad UX. Use the List tool with sort='size_desc'."
+        )
+
+    def test_capital_s_reverse(self) -> None:
+        assert _match("ls -Sr") == (
+            "ls via Bash is a bad UX. Use the List tool with sort='size'."
+        )
+
+    def test_r_alone(self) -> None:
+        assert _match("ls -r") == (
+            "ls via Bash is a bad UX. Use the List tool with sort='name_desc'."
+        )
+
+    def test_lat_combo(self) -> None:
+        assert _match("ls -lat") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', long=true, show_hidden=true."
+        )
+
+    def test_t_and_size_conflict_bails(self) -> None:
+        assert _match("ls -tS") is None
+
+
+class TestBashMatchLsHead:
+    def test_lat_head_5(self) -> None:
+        assert _match("ls -lat ~/Downloads | head -5") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', long=true, show_hidden=true, max_results=5."
+        )
+
+    def test_head_n_form(self) -> None:
+        assert _match("ls -t | head -n 3") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', max_results=3."
+        )
+
+    def test_head_clustered(self) -> None:
+        assert _match("ls -t | head -n3") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', max_results=3."
+        )
+
+    def test_bare_head_defaults_10(self) -> None:
+        assert _match("ls | head") == (
+            "ls via Bash is a bad UX. Use the List tool with max_results=10."
+        )
+
+    def test_head_byte_mode_bails(self) -> None:
+        assert _match("ls | head -c 100") is None
+
+    def test_head_with_file_arg_bails(self) -> None:
+        assert _match("ls | head extra.txt") is None
+
+    def test_pipe_to_other_bails(self) -> None:
+        assert _match("ls | wc -l") is None
+
+    def test_head_negative_count_bails(self) -> None:
+        # ``head -n -5`` = "all but last 5" -- semantics don't map to max_results.
+        assert _match("ls | head -n -5") is None
+
+    def test_head_plus_count_bails(self) -> None:
+        assert _match("ls | head -n +5") is None
+
+    def test_head_zero_count_bails(self) -> None:
+        assert _match("ls | head -n 0") is None
+
+
+class TestBashMatchLsTail:
+    def test_tail_flips_default_to_name_desc(self) -> None:
+        assert _match("ls | tail -5") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='name_desc', max_results=5."
+        )
+
+    def test_tail_flips_mtime_desc_to_mtime(self) -> None:
+        # ``ls -t | tail -5`` = oldest 5 entries.
+        assert _match("ls -t | tail -5") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime', max_results=5."
+        )
+
+    def test_tail_flips_size_desc_to_size(self) -> None:
+        assert _match("ls -S | tail -3") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='size', max_results=3."
+        )
+
+    def test_tail_n_form(self) -> None:
+        assert _match("ls -lat | tail -n 5") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime', long=true, show_hidden=true, max_results=5."
+        )
+
+    def test_bare_tail_defaults_10(self) -> None:
+        assert _match("ls | tail") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='name_desc', max_results=10."
+        )
+
+    def test_tail_plus_count_bails(self) -> None:
+        # ``tail -n +5`` = "from line 5 onward" -- not "last 5".
+        assert _match("ls | tail -n +5") is None
+
+    def test_tail_negative_count_bails(self) -> None:
+        assert _match("ls | tail -n -5") is None
+
+
+class TestBashMatchLsCdPipeline:
+    def test_cd_then_ls_pipe_head(self) -> None:
+        assert _match("cd ~/Downloads && ls -lat | head -5") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', long=true, show_hidden=true, max_results=5."
+        )
+
+    def test_cd_then_ls_pipe_tail(self) -> None:
+        assert _match("cd src && ls -t | tail -3") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime', max_results=3."
+        )
+
+    def test_cd_then_bare_ls(self) -> None:
+        assert _match("cd src && ls -lat") == (
+            "ls via Bash is a bad UX. Use the List tool with"
+            " sort='mtime_desc', long=true, show_hidden=true."
+        )
 
 
 if __name__ == "__main__":

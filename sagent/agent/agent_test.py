@@ -413,6 +413,53 @@ class TestAgentBasic:
         with pytest.raises(ValueError, match="Duplicate tool"):
             Agent(name="test", model=_MockModel(), tools=[r1, r2])
 
+    def test_cache_ttl_setter_rejects_unknown_values(self) -> None:
+        """Regression: the setter is the runtime authority for cache_ttl
+        validation. Removing ``AgentSelf._do_cache_ttl``'s redundant
+        pre-check leaves the setter as the single point of truth.
+        """
+        agent = Agent(name="test", model=_MockModel())
+        with pytest.raises(ValueError, match="cache_ttl must be"):
+            agent.cache_ttl = "2h"
+        with pytest.raises(ValueError, match="cache_ttl must be"):
+            agent.cache_ttl = ""
+
+    @pytest.mark.anyio
+    async def test_cache_ttl_propagates_into_model_request(self) -> None:
+        """Regression: ``Agent._cache_ttl`` must travel into outgoing
+        ``ModelRequest`` instances. A silent drop would leave the
+        provider stamping the default 5m marker regardless of the
+        agent's setting.
+        """
+        captured: dict[str, str] = {}
+
+        class _Capture(_MockModel):
+            @override
+            async def buffer(self, request: ModelRequest) -> _ModelResponse:
+                captured["cache_ttl"] = request.cache_ttl
+                return await super().buffer(request=request)
+
+        agent = Agent(name="test", model=_Capture())
+        agent.cache_ttl = "1h"
+        await agent.run(json_freeze({"prompt": "hi"}))
+        assert captured["cache_ttl"] == "1h"
+
+    def test_account_response_resets_live_chars(self) -> None:
+        """Regression: ``_account_response`` must zero ``_live_model_response_chars``.
+
+        The toolbar shows ``total_tokens.output + live_model_response_tokens``
+        during active runs. The live counter is reset only at run start;
+        after each ``record()`` lands, the just-finished call's chars are
+        already in ``cost_tracker.total``. If the counter still held those
+        chars, the toolbar would double-count completed calls between
+        rounds (visible during tool dispatch).
+        """
+        agent = Agent(name="test", model=_MockModel())
+        agent._live_model_response_chars = 1234
+        response = ModelResponse(text="hi", input_tokens=1, output_tokens=1)
+        agent._account_response(response)
+        assert agent._live_model_response_chars == 0
+
     @pytest.mark.anyio
     async def test_done_event_output_tokens_is_per_call(self) -> None:
         """Regression: DoneEvent.output_tokens must be tokens consumed

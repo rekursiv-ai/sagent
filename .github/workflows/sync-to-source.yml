@@ -53,34 +53,46 @@ jobs:
       )
 
     steps:
-      - name: Check settings
-        env:
-          IMPORT_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
-        run: |
-          if [ -z "$IMPORT_TOKEN" ]; then
-            echo "::error::Set COPYBARISTA_IMPORT_TOKEN with repo and workflow scopes."
-            exit 1
-          fi
-          if [ -z "$TARGET_REPO" ]; then
-            echo "::error::Set COPYBARISTA_SOURCE_REPO."
-            exit 1
-          fi
-          if [ -z "$TARGET_PROJECT_PATH" ]; then
-            echo "::error::Set COPYBARISTA_TARGET_PROJECT_PATH."
-            exit 1
-          fi
-          if [ -z "$COPYBARISTA_TOOL_PROJECT_PATH" ]; then
-            echo "::error::Set COPYBARISTA_TOOL_PROJECT_PATH."
-            exit 1
-          fi
-
       - name: Set sync paths
         run: |
           echo "IMPORT_REPORT=$RUNNER_TEMP/copybarista-import-report.json" >> "$GITHUB_ENV"
           echo "TRUSTED_IMPORT_SCRIPT=$RUNNER_TEMP/sync_import_change.py" >> "$GITHUB_ENV"
 
+      - id: settings
+        name: Check settings
+        env:
+          IMPORT_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+        run: |
+          missing=false
+          if [ -z "$IMPORT_TOKEN" ]; then
+            echo "::error::Set COPYBARISTA_IMPORT_TOKEN with repo and workflow scopes."
+            missing=true
+          fi
+          if [ -z "$TARGET_REPO" ]; then
+            echo "::error::Set COPYBARISTA_SOURCE_REPO."
+            missing=true
+          fi
+          if [ -z "$TARGET_PROJECT_PATH" ]; then
+            echo "::error::Set COPYBARISTA_TARGET_PROJECT_PATH."
+            missing=true
+          fi
+          if [ -z "$COPYBARISTA_TOOL_PROJECT_PATH" ]; then
+            echo "::error::Set COPYBARISTA_TOOL_PROJECT_PATH."
+            missing=true
+          fi
+          if [ "$missing" = "true" ]; then
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              exit 1
+            fi
+            echo "::notice::Public-to-source import is not configured; skipping."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - id: refs
         name: Resolve public refs
+        if: steps.settings.outputs.enabled == 'true'
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base_ref="${{ github.event.pull_request.base.sha }}"
@@ -109,14 +121,17 @@ jobs:
           echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
+        if: steps.settings.outputs.enabled == 'true'
         with:
           ref: ${{ steps.refs.outputs.base_ref }}
           path: public-base
       - uses: actions/checkout@v4
+        if: steps.settings.outputs.enabled == 'true'
         with:
           ref: ${{ steps.refs.outputs.head_ref }}
           path: public-head
       - uses: actions/checkout@v4
+        if: steps.settings.outputs.enabled == 'true'
         with:
           repository: ${{ env.TARGET_REPO }}
           token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
@@ -124,17 +139,21 @@ jobs:
           path: target
           persist-credentials: false
       - uses: actions/setup-python@v5
+        if: steps.settings.outputs.enabled == 'true'
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
+        if: steps.settings.outputs.enabled == 'true'
 
       - name: Capture trusted import helper
+        if: steps.settings.outputs.enabled == 'true'
         run: |
           install -m 600 \
             "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
             "$TRUSTED_IMPORT_SCRIPT"
 
       - name: Import public tree into target repository
+        if: steps.settings.outputs.enabled == 'true'
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
@@ -158,7 +177,7 @@ jobs:
             --open-pr false
 
       - name: Open or update target import PR
-        if: github.event_name != 'pull_request'
+        if: steps.settings.outputs.enabled == 'true' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
         run: |

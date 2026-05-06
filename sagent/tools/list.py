@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import time
@@ -15,15 +16,32 @@ from sagent.tools.core import (
     load_tool_description,
     run_sync,
 )
-from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.lib.bash import (
+    Node,
+    match_pipeline,
+    unwrap_cd_prefix,
+    unwrap_cd_subtree,
+)
+from sagent.tools.lib.path_sort import (
+    SORT_VALUES,
+    safe_mtime,
+    safe_size,
+    sort_paths,
+)
 
 
-_NUDGE = "ls via Bash is a bad UX. Use the List tool."
+_NUDGE_PREFIX = "ls via Bash is a bad UX. Use the List tool"
 _NUDGE_GLOB = "ls glob via Bash is a bad UX. Use the Glob tool."
+
+_DEFAULT_SORT = "name"
 
 
 class List:
-    """List directory contents."""
+    """List directory contents.
+
+    See :class:`Glob` for behavioral differences when both tools could
+    apply to "what's in DIR?".
+    """
 
     name: str = "List"
     tool_id: str = "application/x-tool-list"
@@ -44,7 +62,17 @@ class List:
                 "long": {
                     "type": "boolean",
                     "description": (
-                        "Include size and mtime per entry (like ``ls -l``). Default false."
+                        "Include size and mtime per entry (like ``ls -l``)."
+                        " Default false."
+                    ),
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": list(SORT_VALUES),
+                    "description": (
+                        "Result ordering. Default 'name' (alphabetical)."
+                        " 'mtime_desc' = newest first (``ls -t``);"
+                        " 'size_desc' = largest first (``ls -S``)."
                     ),
                 },
                 "max_results": {
@@ -94,6 +122,7 @@ class List:
         path = str(directive.get("path", ".") or ".")
         show_hidden = bool_val(directive.get("show_hidden"), False)
         long = bool_val(directive.get("long"), False)
+        sort = str(directive.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
         max_results = int_val(directive.get("max_results"), 500)
         return await run_sync(
             self._run,
@@ -101,6 +130,7 @@ class List:
             path=path,
             show_hidden=show_hidden,
             long=long,
+            sort=sort,
             max_results=max_results,
         )
 
@@ -110,8 +140,14 @@ class List:
         path: str = ".",
         show_hidden: bool = False,
         long: bool = False,
+        sort: str = _DEFAULT_SORT,
         max_results: int = 500,
     ) -> str | Message:
+        if sort not in SORT_VALUES:
+            return TextMessage(
+                f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
+                "text/x-error",
+            )
         if not Path(path).is_absolute():
             path = str(Path(get_tool_state().bash_cwd) / path)
         p = Path(path)
@@ -120,23 +156,25 @@ class List:
         if not p.is_dir():
             return TextMessage(f"Not a directory: {path}", "text/x-error")
         try:
-            entries = sorted(p.iterdir(), key=lambda e: e.name)
+            entries = list(p.iterdir())
         except OSError as err:
             return TextMessage(f"Error reading {path}: {err}", "text/x-error")
         if not show_hidden:
             entries = [e for e in entries if not e.name.startswith(".")]
+        sort_paths(entries, sort)
         total = len(entries)
         entries = entries[:max_results]
         lines: list[str] = []
         for e in entries:
             name = e.name + ("/" if e.is_dir() else "")
             if long:
-                try:
-                    st = e.stat()
-                    size = st.st_size
-                    mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
-                except OSError:
-                    size, mtime = 0, "?"
+                size = safe_size(e)
+                mtime_raw = safe_mtime(e)
+                mtime = (
+                    time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime_raw))
+                    if mtime_raw
+                    else "?"
+                )
                 lines.append(f"{size:>10}  {mtime}  {name}")
             else:
                 lines.append(name)
@@ -146,11 +184,20 @@ class List:
         return out
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint if the command is a bare ``ls [DIR]``.
+        """Emit a hint when the command is an ``ls`` invocation.
 
-        Accepts ``cd PATH && CMD`` compounds via ``unwrap_cd_prefix``.
-        Also handles ``ls -l``/``ls -la`` by suggesting ``long=True``
-        (and ``show_hidden=True`` for ``-a``).
+        Recognized shapes (``cd PATH &&`` prefix accepted on either
+        the bare command or the pipeline):
+          * ``ls [-laAtSr]+ [DIR]`` -- direct listing
+          * ``ls ... | head [-n N | -N]`` -- truncated listing
+          * ``ls ... | tail [-n N | -N]`` -- truncated listing,
+            sort direction flipped (``tail`` of mtime_desc = oldest)
+
+        Flag map: ``l`` -> ``long``, ``a``/``A`` -> ``show_hidden``,
+        ``t`` -> ``sort='mtime_desc'``, ``S`` -> ``sort='size_desc'``,
+        ``r`` reverses any active sort. The pipe count becomes
+        ``max_results``. A positional containing glob metacharacters
+        routes to Glob.
 
         Args:
           trees: Parsed shell AST nodes.
@@ -159,23 +206,88 @@ class List:
           hint: Suggested List invocation, or ``None`` if no match.
 
         """
-        unwrapped = unwrap_cd_prefix(trees)
-        if unwrapped is None:
+        effective: Sequence[Node] = unwrap_cd_subtree(trees) or trees
+        unwrapped = unwrap_cd_prefix(effective)
+        if unwrapped is not None:
+            _cwd, cmd = unwrapped
+            if cmd.exe != "ls" or cmd.env_prefix:
+                return None
+            return _ls_to_hint(cmd.args, max_results=None, flip_sort=False)
+        pair = match_pipeline(effective)
+        if pair is None:
             return None
-        cwd, cmd = unwrapped
-        if cmd.exe != "ls" or cmd.env_prefix:
+        first, second = pair
+        if first.exe != "ls":
             return None
-        return _match_ls(cwd, cmd.args)
+        if second.exe == "head":
+            flip = False
+        elif second.exe == "tail":
+            flip = True
+        else:
+            return None
+        n = _parse_line_count(second.args)
+        if n is None:
+            return None
+        return _ls_to_hint(first.args, max_results=n, flip_sort=flip)
 
 
-def _match_ls(cwd: str | None, args: tuple[str, ...]) -> str | None:
-    """Validate ``ls`` args and return a fixed hint string.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _LsParse:
+    long: bool
+    show_hidden: bool
+    sort: str | None
 
-    Flags supported: ``-l`` (long), ``-a`` (show hidden), ``-la``/``-al``.
-    Any other flag bails. More than one positional bails. A positional
-    containing glob metacharacters routes to Glob rather than List.
-    """
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
+
+def _ls_to_hint(
+    args: tuple[str, ...], *, max_results: int | None, flip_sort: bool
+) -> str | None:
+    """Translate parsed ``ls`` args into a List-tool nudge string."""
+    if _ls_has_glob_positional(args):
+        return _NUDGE_GLOB
+    parsed = _parse_ls(args)
+    if parsed is None:
+        return None
+    sort = _flip_sort(parsed.sort) if flip_sort else parsed.sort
+    pieces: list[str] = []
+    if sort is not None:
+        pieces.append(f"sort={sort!r}")
+    if parsed.long:
+        pieces.append("long=true")
+    if parsed.show_hidden:
+        pieces.append("show_hidden=true")
+    if max_results is not None:
+        pieces.append(f"max_results={max_results}")
+    if not pieces:
+        return f"{_NUDGE_PREFIX}."
+    return f"{_NUDGE_PREFIX} with {', '.join(pieces)}."
+
+
+def _flip_sort(sort: str | None) -> str:
+    """Reverse a sort-direction key. ``None`` means default name asc."""
+    if sort is None:
+        return "name_desc"
+    if sort.endswith("_desc"):
+        return sort.removesuffix("_desc")
+    return f"{sort}_desc"
+
+
+def _ls_has_glob_positional(args: tuple[str, ...]) -> bool:
+    """True iff any non-flag argument contains a glob metacharacter."""
+    for a in args:
+        if a == "--" or (a.startswith("-") and a != "-"):
+            continue
+        if any(c in a for c in "*?["):
+            return True
+    return False
+
+
+def _parse_ls(args: tuple[str, ...]) -> _LsParse | None:
+    """Parse ``ls`` flags. Returns None on unsupported flag or arg shape."""
+    long = False
+    show_hidden = False
+    sort_t = False
+    sort_s = False
+    reverse = False
     positional: list[str] = []
     for a in args:
         if a == "--":
@@ -184,14 +296,67 @@ def _match_ls(cwd: str | None, args: tuple[str, ...]) -> str | None:
             if a.startswith("--"):
                 return None
             for c in a[1:]:
-                if c not in {"l", "a"}:
+                if c == "l":
+                    long = True
+                elif c in {"a", "A"}:
+                    show_hidden = True
+                elif c == "t":
+                    sort_t = True
+                elif c == "S":
+                    sort_s = True
+                elif c == "r":
+                    reverse = True
+                else:
                     return None
             continue
         positional.append(a)
     if len(positional) > 1:
         return None
-    raw = positional[0] if positional else None
-    # ``ls DIR/*.py`` is a content-glob, not a directory listing.
-    if raw is not None and any(c in raw for c in "*?["):
-        return _NUDGE_GLOB
-    return _NUDGE
+    if sort_t and sort_s:
+        return None
+    sort: str | None
+    if sort_t:
+        sort = "mtime" if reverse else "mtime_desc"
+    elif sort_s:
+        sort = "size" if reverse else "size_desc"
+    elif reverse:
+        sort = "name_desc"
+    else:
+        sort = None
+    return _LsParse(long=long, show_hidden=show_hidden, sort=sort)
+
+
+def _parse_line_count(args: tuple[str, ...]) -> int | None:
+    """Extract line count from ``head``/``tail`` args.
+
+    Bails on byte mode (``-c``), follow (``-f``), extra positionals,
+    or counts with GNU sign modifiers (``head -n -N`` = "all but last
+    N", ``tail -n +N`` = "from line N") whose semantics don't map to
+    ``max_results``.
+    """
+    if not args:
+        return 10
+    count: int | None = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-n":
+            if i + 1 >= len(args) or not args[i + 1].isdigit():
+                return None
+            count = int(args[i + 1])
+            i += 2
+            continue
+        if a.startswith("-n"):
+            if not a[2:].isdigit():
+                return None
+            count = int(a[2:])
+            i += 1
+            continue
+        if len(a) > 1 and a[0] == "-" and a[1:].isdigit():
+            count = int(a[1:])
+            i += 1
+            continue
+        return None
+    if count is None or count < 1:
+        return None
+    return count

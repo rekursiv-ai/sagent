@@ -302,6 +302,12 @@ class ModelRequest:
     the field so the API applies its own default. The API is the source
     of truth for accepted values and per-model support."""
 
+    cache_ttl: str = "5m"
+    """Prompt-cache TTL for the request's cache breakpoint. ``"5m"`` is
+    Anthropic's default (1.25x input rate to write); ``"1h"`` is the
+    extended-cache option (2x input rate to write). Reads price the same
+    either way. Providers without prompt caching ignore this field."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelResponse:

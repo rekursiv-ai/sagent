@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from sagent.custom_types import Message
-from sagent.lib.json import JSON, int_val, json_freeze
+import time
+
+from sagent.custom_types import Message, TextMessage
+from sagent.lib.json import JSON, bool_val, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
@@ -14,13 +16,39 @@ from sagent.tools.core import (
     run_sync,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.lib.path_sort import (
+    SORT_VALUES,
+    safe_mtime,
+    safe_size,
+    sort_paths,
+)
 
 
 _NUDGE = "find via Bash is a bad UX. Use the Glob tool."
 
+_DEFAULT_SORT = "name"
+
 
 class Glob:
-    """Match file paths against glob patterns."""
+    """Match file paths against glob patterns.
+
+    Differences vs the List tool (when both could apply to "what's in
+    DIR?"):
+      * Glob returns full resolved paths; List returns basenames.
+      * Glob does not append ``/`` to directories; List does.
+      * Glob's pattern controls dotfile inclusion (``*`` excludes,
+        ``.*`` matches only). List has an explicit ``show_hidden``
+        toggle that returns visible + hidden in a single call -- Glob
+        requires two calls and a merge.
+      * Glob returns ``(no matches)`` for missing path, non-directory
+        path, and empty directory alike. List distinguishes the three
+        (``Not found:``, ``Not a directory:``, ``(empty directory)``).
+      * Glob silently returns no matches when given a non-directory
+        ``path``; List errors.
+
+    Use List for "show me this directory" inspection. Use Glob for
+    pattern matching across a tree (especially recursive ``**/*.py``).
+    """
 
     name: str = "Glob"
     tool_id: str = "application/x-tool-glob"
@@ -36,7 +64,24 @@ class Glob:
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in. Defaults to current working directory.",
+                    "description": (
+                        "Directory to search in. Defaults to current working directory."
+                    ),
+                },
+                "sort": {
+                    "type": "string",
+                    "enum": list(SORT_VALUES),
+                    "description": (
+                        "Result ordering. Default 'name' (alphabetical,"
+                        " mirrors ``ls``). Use 'mtime_desc' for newest first."
+                    ),
+                },
+                "long": {
+                    "type": "boolean",
+                    "description": (
+                        "Prefix each result with size and mtime columns"
+                        " (like ``ls -l``). Default false."
+                    ),
                 },
                 "max_results": {
                     "type": "integer",
@@ -89,16 +134,33 @@ class Glob:
         directive = get_directive(msg)
         pattern = str(directive.get("pattern", ""))
         path = str(directive.get("path", ".") or ".")
+        sort = str(directive.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
+        long = bool_val(directive.get("long"), False)
         max_results = int_val(directive.get("max_results"), 200)
         return await run_sync(
             self._run,
             parent_id=msg.id,
             pattern=pattern,
             path=path,
+            sort=sort,
+            long=long,
             max_results=max_results,
         )
 
-    def _run(self, *, pattern: str, path: str = ".", max_results: int = 200) -> str:
+    def _run(
+        self,
+        *,
+        pattern: str,
+        path: str = ".",
+        sort: str = _DEFAULT_SORT,
+        long: bool = False,
+        max_results: int = 200,
+    ) -> str | Message:
+        if sort not in SORT_VALUES:
+            return TextMessage(
+                f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
+                "text/x-error",
+            )
         # Python's Path.glob requires a relative pattern. If the
         # caller passes an absolute pattern (e.g. ``/abs/dir/*.py``),
         # split it at the first component containing a glob char.
@@ -120,10 +182,15 @@ class Glob:
             root = Path(path)
             matches = list(root.glob(pattern))
 
-        matches.sort(key=_safe_mtime, reverse=True)
+        sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
-        result = "\n".join(str(m.resolve()) for m in matches[:max_results])
+        truncated = matches[:max_results]
+        if long:
+            lines = [_long_line(m) for m in truncated]
+        else:
+            lines = [str(m.resolve()) for m in truncated]
+        result = "\n".join(lines)
         if len(matches) > max_results:
             result += f"\n... ({len(matches) - max_results} more)"
         return result
@@ -152,11 +219,13 @@ class Glob:
         return _match_find(cwd, cmd.args)
 
 
-def _safe_mtime(p: Path) -> float:
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return 0.0
+def _long_line(p: Path) -> str:
+    size = safe_size(p)
+    mtime_raw = safe_mtime(p)
+    mtime = (
+        time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime_raw)) if mtime_raw else "?"
+    )
+    return f"{size:>10}  {mtime}  {p.resolve()}"
 
 
 def _match_find(cwd: str | None, args: tuple[str, ...]) -> str | None:
