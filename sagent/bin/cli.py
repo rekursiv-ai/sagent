@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300  -- Polyglot: #!/bin/sh + triple-single-quotes are intentional.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen python3 "$0" "$@"
 Interactive LLM agent CLI.
 
 ``--provider`` is a class name from ``sagent.providers``; ``--auth`` is
