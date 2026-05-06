@@ -496,7 +496,7 @@ class _AnthropicModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether this model supports thinking mode."""
-        return True
+        return not self._model_id.startswith("claude-haiku")
 
     @property
     def supports_effort(self) -> bool:
@@ -595,16 +595,17 @@ class _AnthropicModel:
             "temperature": request.temperature,
             "system": self._provider.build_system(request.system, messages),
         }
-        if request.thinking == "adaptive":
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["temperature"] = 1.0
-        elif request.thinking == "enabled":
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": max_tok,
-            }
-            kwargs["max_tokens"] = max_tok * 2
-            kwargs["temperature"] = 1.0
+        if self.supports_thinking:
+            if request.thinking == "adaptive":
+                kwargs["thinking"] = {"type": "adaptive"}
+                kwargs["temperature"] = 1.0
+            elif request.thinking == "enabled":
+                kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": max_tok,
+                }
+                kwargs["max_tokens"] = max_tok * 2
+                kwargs["temperature"] = 1.0
         if request.tools:
             kwargs["tools"] = [
                 {

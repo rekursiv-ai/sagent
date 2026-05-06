@@ -46,6 +46,7 @@ from sagent.custom_types import (
 from sagent.lib.descriptors import is_image
 from sagent.lib.json import (
     MutableJSON,
+    MutableJSONValue,
     int_val,
     json_freeze,
     json_unfreeze,
@@ -104,6 +105,15 @@ class Google:
         ),
         "gemini-2.0-flash": ModelProfile(
             max_request_tokens=1_000_000,
+            max_response_tokens=65_536,
+            pricing=Pricing(
+                request=0.10,
+                response=0.40,
+                cache_read=0.025,
+            ),
+        ),
+        "gemini-2.5-flash-lite": ModelProfile(
+            max_request_tokens=1_048_576,
             max_response_tokens=65_536,
             pricing=Pricing(
                 request=0.10,
@@ -392,7 +402,7 @@ class _GeminiModel:
             msg = r.text.lower()
             if "too large" in msg or "too long" in msg or "context" in msg:
                 raise PromptTooLongError(r.text)
-        r.raise_for_status()
+            raise ValueError(f"Google API 400: {r.text}")
         resp = _parse_response(r.json(), self._profile.pricing)
         logger.debug(
             "API response: tokens=%d/%d, stop=%s",
@@ -438,10 +448,24 @@ class _GeminiModel:
                 msg = err_body.lower()
                 if "too large" in msg or "too long" in msg or "context" in msg:
                     raise PromptTooLongError(err_body)
+                raise ValueError(f"Google API 400: {err_body}")
             r.raise_for_status()
             return await _consume_gemini_stream(
                 r, on_text=on_text, pricing=self._profile.pricing
             )
+
+
+def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
+    """Recursively remove ``additionalProperties`` — Gemini rejects it."""
+    if isinstance(schema, dict):
+        return {
+            k: _strip_additional_properties(v)
+            for k, v in schema.items()
+            if k != "additionalProperties"
+        }
+    if isinstance(schema, list):
+        return [_strip_additional_properties(item) for item in schema]
+    return schema
 
 
 def _build_request(
@@ -565,7 +589,9 @@ def _build_request(
                     {
                         "name": t.name,
                         "description": t.description,
-                        "parameters": json_unfreeze(t.directive_schema),
+                        "parameters": _strip_additional_properties(
+                            json_unfreeze(t.directive_schema)
+                        ),
                     }
                     for t in request.tools
                 ],
