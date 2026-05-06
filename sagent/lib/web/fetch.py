@@ -36,6 +36,7 @@ from urllib.parse import urlencode, urlparse
 
 import gzip
 import http.client
+import io
 import json as json_mod
 import logging
 import random
@@ -382,7 +383,10 @@ def _decompress(body: bytes, encoding: str) -> bytes:
         if enc == "br":
             return brotli.decompress(body)
         if enc == "zstd":
-            return zstandard.ZstdDecompressor().decompress(body)
+            # stream_reader handles frames without an embedded size,
+            # which `.decompress()` rejects. Servers (e.g. Cloudflare)
+            # commonly emit such frames.
+            return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
     except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
         raise ValueError(f"Decompression failed ({enc}): {e}") from None
     raise ValueError(f"Unknown Content-Encoding: {enc!r}")

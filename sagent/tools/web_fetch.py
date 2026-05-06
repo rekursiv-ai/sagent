@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ from sagent.tools.core import (
     load_tool_description,
     truncate,
 )
+from sagent.tools.lib.bash import Node, unwrap_cd_prefix
 
 
 trafilatura = lazy_import("trafilatura")
@@ -31,6 +33,8 @@ _WEBFETCH_CACHE = cachetools.TTLCache[str, str](
     maxsize=128,
     ttl=15 * 60,
 )
+
+_NUDGE = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
 
 
 _REDDIT_RE = re.compile(r"^https?://(?:\w+\.)?reddit\.com/r/(\w+)/comments/(\w+)")
@@ -232,6 +236,30 @@ class WebFetch:
         }
     )
 
+    def bash_match(self, trees: Sequence[Node]) -> str | None:
+        """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
+
+        Accepts ``cd PATH && CMD`` compounds via ``unwrap_cd_prefix``.
+        Bails on output redirection (``-o``/``-O``/``--output``),
+        ``--data-binary @file`` style file uploads, and any non-http(s)
+        URL — those are cases WebFetch can't cleanly replace. Pipelines
+        and stdout redirects are already filtered by ``unwrap_cd_prefix``.
+
+        Args:
+          trees: Parsed shell AST nodes.
+
+        Returns:
+          nudge: Suggested WebFetch invocation, or ``None`` if no match.
+
+        """
+        unwrapped = unwrap_cd_prefix(trees)
+        if unwrapped is None:
+            return None
+        _cwd, cmd = unwrapped
+        if cmd.exe not in {"curl", "wget"} or cmd.env_prefix:
+            return None
+        return _match_http_fetch(cmd.exe, cmd.args)
+
     def summary(self, msg: Message) -> str:
         """Return a short display label for this invocation.
 
@@ -336,3 +364,40 @@ class WebFetch:
         if cache_key is not None:
             _WEBFETCH_CACHE[cache_key] = truncated
         return TextMessage(truncated, "text/plain")
+
+
+# curl/wget flags that take a value but mean "save to disk", "upload a
+# local file", or otherwise change the request shape in ways WebFetch
+# can't mirror. Encountering one bails the matcher.
+_HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
+    {
+        "-o",
+        "-O",
+        "--output",
+        "--output-document",
+        "--data-binary",
+        "--upload-file",
+        "-T",
+        "-F",
+        "--form",
+    }
+)
+
+
+def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
+    # Shape: ``<exe> [flags] URL`` with exactly one http(s):// URL and
+    # no flag from the bail set. Bare ``-`` and unknown long flags are
+    # tolerated; flags Wget/curl share that imply a file sink are not.
+    del exe  # Hint is fixed; the LLM rederives the URL from its own command.
+    url_count = 0
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _HTTP_FETCH_BAIL_FLAGS:
+            return None
+        if a.startswith(("http://", "https://")):
+            url_count += 1
+        i += 1
+    if url_count != 1:
+        return None
+    return _NUDGE
