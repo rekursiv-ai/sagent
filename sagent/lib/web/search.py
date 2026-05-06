@@ -215,4 +215,4 @@ def search(
     if backend == "searxng":
         return searxng(query, num_results, headers)
 
-    raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable in OSS build after google branch is stripped
+    raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime
