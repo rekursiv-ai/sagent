@@ -81,6 +81,41 @@ class TestGlobEdgeCases:
         assert "more" in _text(r).lower()
 
 
+class TestGlobSort:
+    @pytest.mark.anyio
+    async def test_sort_name(self, tmp_path: Path) -> None:
+        (tmp_path / "b.py").write_text("")
+        (tmp_path / "a.py").write_text("")
+        (tmp_path / "c.py").write_text("")
+        r = await glob_tool.run(
+            _msg(
+                json_freeze({"pattern": "*.py", "path": str(tmp_path), "sort": "name"})
+            )
+        )
+        names = [Path(line).name for line in _text(r).splitlines()]
+        assert names == ["a.py", "b.py", "c.py"]
+
+    @pytest.mark.anyio
+    async def test_sort_invalid(self, tmp_path: Path) -> None:
+        r = await glob_tool.run(
+            _msg(
+                json_freeze({"pattern": "*.py", "path": str(tmp_path), "sort": "bogus"})
+            )
+        )
+        assert r.descriptor == "text/x-error"
+        assert "unknown sort" in _text(r)
+
+    @pytest.mark.anyio
+    async def test_long_includes_size(self, tmp_path: Path) -> None:
+        (tmp_path / "x.py").write_text("abcde")
+        r = await glob_tool.run(
+            _msg(json_freeze({"pattern": "*.py", "path": str(tmp_path), "long": True}))
+        )
+        # Size column appears.
+        assert "5" in _text(r)
+        assert "x.py" in _text(r)
+
+
 class TestGlobOSError:
     @pytest.mark.anyio
     async def test_glob_oserror_stat(

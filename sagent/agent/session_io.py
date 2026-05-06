@@ -577,6 +577,7 @@ class SessionMeta:
     compact_count: int = 0
     summary_pointers: list[tuple[str, str]] = dataclasses.field(default_factory=list)
     bash_cwd: str = ""
+    total_active_elapsed_seconds: float = 0.0
     version: int = 2
 
     def serialize(self) -> MutableJSON:
@@ -619,6 +620,9 @@ class SessionMeta:
             compact_count=int_val(d.get("compact_count"), 0),
             summary_pointers=parse_summary_pointers(d.get("summary_pointers")),
             bash_cwd=str(d.get("bash_cwd") or ""),
+            total_active_elapsed_seconds=float_val(
+                d.get("total_active_elapsed_seconds"), 0
+            ),
             version=int_val(d.get("version"), 2),
         )
 

@@ -46,6 +46,7 @@ __all__ = [
     "parse_bash",
     "resolve_cwd_path",
     "unwrap_cd_prefix",
+    "unwrap_cd_subtree",
 ]
 
 
@@ -178,6 +179,43 @@ def unwrap_cd_prefix(
     ):
         return None
     return cd_cmd.args[0], inner
+
+
+def unwrap_cd_subtree(trees: Sequence[Node]) -> Sequence[Node] | None:
+    """Strip a leading ``cd PATH &&`` and return the remaining subtree.
+
+    For input ``cd X && SUBTREE`` (where ``SUBTREE`` is any single AST
+    node — command, pipeline, etc.), returns ``[SUBTREE]`` so callers
+    can re-dispatch through other matchers (``match_pipeline``,
+    ``unwrap_cd_prefix`` won't recurse into a pipeline). Returns
+    ``None`` if the prefix doesn't match the cd-clean shape.
+
+    Args:
+      trees: Top-level bashlex AST nodes.
+
+    Returns:
+      subtree: Remaining AST nodes after the ``cd`` prefix, or None.
+
+    """
+    if len(trees) != 1 or trees[0].kind != "list":
+        return None
+    parts = trees[0].parts
+    if len(parts) != 3:
+        return None
+    cd_node, op_node, rest = parts[0], parts[1], parts[2]
+    if cd_node.kind != "command":
+        return None
+    if op_node.kind != "operator" or op_node.op != "&&":
+        return None
+    cd_cmd = _parse_command(cd_node)
+    if (
+        cd_cmd.exe != "cd"
+        or len(cd_cmd.args) != 1
+        or cd_cmd.env_prefix
+        or cd_cmd.captures_stdout
+    ):
+        return None
+    return [rest]
 
 
 def match_pipeline(trees: Sequence[Node]) -> tuple[Command, Command] | None:

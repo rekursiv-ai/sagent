@@ -9,6 +9,10 @@ Use this tool for:
 - `operation="recompact"` — redo the previous compaction with new guidance.
 - `operation="model"` — switch the current agent to another model backend.
 - `operation="limits"` — change this agent's context-token limits.
+- `operation="cache_ttl"` — set the prompt-cache TTL for outgoing requests
+  (`"5m"` default or `"1h"` extended). Switch to `"1h"` when typical gaps
+  between turns exceed 5 minutes; pays 2x input rate on cache writes but
+  avoids prefix rebuilds. Affects only Anthropic providers.
 - `operation="clear"` — request a destructive conversation-history clear.
   Use only when the user explicitly asks for a clear or fresh start.
 

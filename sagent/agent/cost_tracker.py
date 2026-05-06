@@ -53,3 +53,34 @@ class CostTracker:
                 f"Budget exhausted: ${self.total_cost_usd:.2f}"
                 f" >= ${self.max_budget_usd:.2f}"
             )
+
+    def fold(
+        self,
+        *,
+        snapshot_cost_usd: float,
+        snapshot_tokens: TokenCount,
+        run_ledger: CostLedger,
+    ) -> None:
+        """Replace cumulative totals with ``snapshot + run_ledger``.
+
+        Called by the root ``Agent`` at run-end to fold a completed
+        run's full subtree (parent + descendants, captured in
+        ``run_ledger``) into the cumulative tracker. The snapshot is
+        the tracker's value at run start; replacing rather than adding
+        rolls back the parent-only delta accrued via ``record()``
+        during the run, so ``total*`` becomes session-cumulative
+        subtree across runs.
+        """
+        self.total_cost_usd = snapshot_cost_usd + run_ledger.total_cost_usd
+        self.total = snapshot_tokens + run_ledger.tokens
+
+    def restore(self, *, total_cost_usd: float, total: TokenCount) -> None:
+        """Overwrite cumulative totals from persisted session metadata.
+
+        Counterpart to ``fold``: ``fold`` composes the run-end ledger
+        with a snapshot, ``restore`` seeds the tracker from disk on
+        session resume. Both go through the tracker rather than poking
+        its fields from outside.
+        """
+        self.total_cost_usd = total_cost_usd
+        self.total = total

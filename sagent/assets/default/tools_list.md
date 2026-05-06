@@ -1,7 +1,9 @@
 - Lists the contents of a directory (like `ls`).
-- Returns one entry per line, sorted by name. Directories are suffixed with `/`.
-- Use this for directory inspection — do NOT use Bash `ls`.
+- Returns one entry per line. Directories are suffixed with `/`.
+- Use this for directory inspection -- do NOT use Bash `ls`.
 - For pattern matching across a tree (e.g. `**/*.py`), use Glob instead.
 - The ``path`` parameter must be absolute; relative paths are resolved against the current working directory.
 - ``show_hidden`` controls whether dotfiles are included (default false).
 - ``long`` adds size and mtime columns (like ``ls -l``).
+- ``sort`` controls ordering: ``name`` (default), ``name_desc``, ``mtime``, ``mtime_desc`` (newest first, like ``ls -t``), ``size``, ``size_desc`` (largest first, like ``ls -S``).
+- ``ls -lat ~/Downloads | head -5`` maps to ``List(path="~/Downloads", sort="mtime_desc", long=true, show_hidden=true, max_results=5)``.

@@ -255,6 +255,7 @@ class Agent:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
         self._max_attempts = max_attempts
         self._thinking = thinking
+        self._cache_ttl: str = "5m"
         if effort is not None and not model.supports_effort:
             raise ValueError(
                 f"Model {model.model_id!r} does not support effort"
@@ -295,6 +296,12 @@ class Agent:
         self._last_elapsed: float = 0.0
         self._last_model_tokens = TokenCount()
         self._last_run_cost_usd: float = 0.0
+        self._total_active_elapsed_seconds: float = 0.0
+        # Snapshots taken at root-run start; at run end, the subtree
+        # ledger is folded into ``_cost_tracker`` so it accumulates the
+        # full subtree across runs rather than parent-only spend.
+        self._tracker_snap_cost_usd: float = 0.0
+        self._tracker_snap_tokens: TokenCount = TokenCount()
         self._active_cost_ledger: CostLedger | None = None
         self.active_children: dict[str, object] = {}
         self.inflight: asyncio.Task[Message] | None = None
@@ -359,16 +366,21 @@ class Agent:
 
     @property
     def total_cost_usd(self) -> float:
-        """Cumulative USD cost for this session across all model requests."""
+        """Cumulative subtree USD cost for this session.
+
+        Includes parent and all descendant agents across every completed
+        root run. While a root run is active, returns the running total
+        so the toolbar updates as descendant calls complete.
+        """
+        if self._active and self._active_cost_ledger is not None:
+            return self._tracker_snap_cost_usd + self._active_cost_ledger.total_cost_usd
         return self._cost_tracker.total_cost_usd
 
     @property
     def cache_tokens(self) -> tuple[int, int]:
         """(cache_creation, cache_read) totals across this session."""
-        return (
-            self._cost_tracker.total.cache_creation_tokens,
-            self._cost_tracker.total.cache_read_tokens,
-        )
+        tokens = self.total_tokens
+        return (tokens.cache_creation_tokens, tokens.cache_read_tokens)
 
     @property
     def tools(self) -> list[Tool]:
@@ -432,6 +444,19 @@ class Agent:
     def effort(self) -> str | None:
         """Effort level for this agent (provider-specific; may be ``None``)."""
         return self._effort
+
+    @property
+    def cache_ttl(self) -> str:
+        """Prompt-cache TTL for outgoing requests (``"5m"`` or ``"1h"``)."""
+        return self._cache_ttl
+
+    @cache_ttl.setter
+    def cache_ttl(self, value: str) -> None:
+        if value not in ("5m", "1h"):
+            raise ValueError(
+                f"cache_ttl must be '5m' or '1h', got {value!r}",
+            )
+        self._cache_ttl = value
 
     @property
     def session_id(self) -> str:
@@ -508,6 +533,31 @@ class Agent:
         if self._active_cost_ledger is not None:
             return self._active_cost_ledger.total_cost_usd
         return self._last_run_cost_usd
+
+    @property
+    def total_active_elapsed_seconds(self) -> float:
+        """Cumulative wall-clock seconds spent in ``run`` across the session.
+
+        Live during an active run: sums the stored historical total with
+        ``(now - request_start_time)`` so the toolbar ticks in real time.
+        """
+        if self._active:
+            loop = asyncio.get_running_loop()
+            return self._total_active_elapsed_seconds + (
+                loop.time() - self._request_start_time
+            )
+        return self._total_active_elapsed_seconds
+
+    @property
+    def total_tokens(self) -> TokenCount:
+        """Cumulative subtree token counts across the session.
+
+        Mirrors ``total_cost_usd`` — includes descendants and updates
+        live during an active root run.
+        """
+        if self._active and self._active_cost_ledger is not None:
+            return self._tracker_snap_tokens + self._active_cost_ledger.tokens
+        return self._cost_tracker.total
 
     async def run_continuous(
         self,
@@ -615,6 +665,8 @@ class Agent:
             ledger = CostLedger()
             self._active_cost_ledger = ledger
             ledger_token = cost_ledger_var.set(ledger)
+            self._tracker_snap_cost_usd = self._cost_tracker.total_cost_usd
+            self._tracker_snap_tokens = self._cost_tracker.total
         else:
             ledger_token = None
         counter_token = agent_counter_var.set(itertools.count())
@@ -660,10 +712,16 @@ class Agent:
         self._active = False
         loop = asyncio.get_running_loop()
         self._last_elapsed = loop.time() - self._request_start_time
+        self._total_active_elapsed_seconds += self._last_elapsed
         # Children record their local call; only the root snapshots the shared subtree ledger.
         if self._active_cost_ledger is not None:
             self._last_model_tokens = self._active_cost_ledger.tokens
             self._last_run_cost_usd = self._active_cost_ledger.total_cost_usd
+            self._cost_tracker.fold(
+                snapshot_cost_usd=self._tracker_snap_cost_usd,
+                snapshot_tokens=self._tracker_snap_tokens,
+                run_ledger=self._active_cost_ledger,
+            )
             self._active_cost_ledger = None
         else:
             self._last_model_tokens = TokenCount(
@@ -816,6 +874,7 @@ class Agent:
             max_response_tokens=self.max_response_tokens,
             thinking=self.thinking,
             effort=self.effort,
+            cache_ttl=self._cache_ttl,
         )
 
         def _emit_text(chunk: str) -> None:
@@ -1052,6 +1111,10 @@ class Agent:
             model_id=self.model.model_id,
             ledger=cost_ledger_var.get(),
         )
+        # Reset the in-flight chars/4 estimator: those tokens are now
+        # in ``_cost_tracker.total``. Leaving the counter live would
+        # double-count completed calls in the toolbar between rounds.
+        self._live_model_response_chars = 0
         self._publish_stats()
 
     # -- Tool dispatch -------------------------------------------------
@@ -1475,6 +1538,7 @@ class Agent:
             compact_count=self._compact_state.compact_count,
             summary_pointers=self._compact_state.summary_pointers,
             bash_cwd=self.tool_state.bash_cwd,
+            total_active_elapsed_seconds=self._total_active_elapsed_seconds,
         )
         save_session(
             self._session_dir / "session.jsonl",
@@ -1511,18 +1575,21 @@ class Agent:
             m = SessionMeta.deserialize(meta)
             self._session_id = m.session_id or self.session_id
             self._status = m.status
-            self._cost_tracker.total = TokenCount(
-                input_tokens=m.tokens.input_tokens,
-                output_tokens=m.tokens.output_tokens,
-                cache_creation_tokens=m.tokens.cache_creation_tokens,
-                cache_read_tokens=m.tokens.cache_read_tokens,
+            self._cost_tracker.restore(
+                total_cost_usd=m.total_cost_usd,
+                total=TokenCount(
+                    input_tokens=m.tokens.input_tokens,
+                    output_tokens=m.tokens.output_tokens,
+                    cache_creation_tokens=m.tokens.cache_creation_tokens,
+                    cache_read_tokens=m.tokens.cache_read_tokens,
+                ),
             )
-            self._cost_tracker.total_cost_usd = m.total_cost_usd
             self._num_tool_call_rounds = m.num_tool_call_rounds
             self._compact_state.compact_count = m.compact_count
             self._compact_state.summary_pointers = list(m.summary_pointers)
             if m.bash_cwd:
                 self.tool_state.bash_cwd = m.bash_cwd
+            self._total_active_elapsed_seconds = m.total_active_elapsed_seconds
             if m.provider and m.model_id:
                 restored = restore_model(m)
                 if restored is not None:

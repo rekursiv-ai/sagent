@@ -298,6 +298,68 @@ class TestLimits:
             current_agent_var.reset(token)
 
 
+class TestCacheTtl:
+    @pytest.mark.anyio
+    async def test_sets_5m(self) -> None:
+        agent = MagicMock(cache_ttl="5m")
+        token = current_agent_var.set(cast(Any, agent))
+        try:
+            result = await AgentSelf().run(_msg("cache_ttl", ttl="5m"))
+            assert result.descriptor == "text/plain"
+            assert agent.cache_ttl == "5m"
+        finally:
+            current_agent_var.reset(token)
+
+    @pytest.mark.anyio
+    async def test_sets_1h(self) -> None:
+        agent = MagicMock(cache_ttl="5m")
+        token = current_agent_var.set(cast(Any, agent))
+        try:
+            result = await AgentSelf().run(_msg("cache_ttl", ttl="1h"))
+            assert result.descriptor == "text/plain"
+            assert agent.cache_ttl == "1h"
+        finally:
+            current_agent_var.reset(token)
+
+    @pytest.mark.anyio
+    async def test_rejects_invalid_ttl(self) -> None:
+        """Setter raises on bad values; handler surfaces the error.
+
+        Models the real ``Agent`` setter; without a validating setter,
+        a plain ``MagicMock`` would silently accept any string and the
+        tool would report success.
+        """
+
+        class _AgentStub:
+            def __init__(self) -> None:
+                self._cache_ttl = "5m"
+
+            @property
+            def cache_ttl(self) -> str:
+                return self._cache_ttl
+
+            @cache_ttl.setter
+            def cache_ttl(self, value: str) -> None:
+                if value not in ("5m", "1h"):
+                    raise ValueError(
+                        f"cache_ttl must be '5m' or '1h', got {value!r}",
+                    )
+                self._cache_ttl = value
+
+        agent = _AgentStub()
+        token = current_agent_var.set(cast(Any, agent))
+        try:
+            result = await AgentSelf().run(_msg("cache_ttl", ttl="2h"))
+            assert result.descriptor == "text/x-error"
+        finally:
+            current_agent_var.reset(token)
+
+    @pytest.mark.anyio
+    async def test_no_active_agent(self) -> None:
+        result = await AgentSelf().run(_msg("cache_ttl", ttl="1h"))
+        assert result.descriptor == "text/x-error"
+
+
 @pytest.mark.usefixtures("tool_state")
 class TestUnknownOperation:
     @pytest.mark.anyio

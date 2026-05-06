@@ -153,6 +153,7 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 - `recompact`: redo the previous compaction with new guidance.
 - `model`: switch provider/auth/model.
 - `limits`: adjust request/response token limits.
+- `cache_ttl`: set prompt-cache TTL (`"5m"` default, `"1h"` extended) per agent. Affects Anthropic providers.
 - `clear`: clear history when explicitly requested.
 
 `AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.

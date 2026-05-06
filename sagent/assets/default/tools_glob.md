@@ -1,5 +1,6 @@
 - High-performance filename pattern matcher, scales to any repository size
 - Accepts glob syntax: `"**/*.js"`, `"src/**/*.ts"`, etc.
-- Results are sorted by last-modified time (newest first)
+- Default ordering is ``name`` (alphabetical, case-insensitive -- mirrors ``ls``). Override with ``sort``: ``name``, ``name_desc``, ``mtime``, ``mtime_desc``, ``size``, ``size_desc``.
+- ``long=true`` prefixes each result with size and mtime columns (like ``ls -l``).
 - Reach for this tool to locate files by name or extension
 - For exploratory searches spanning multiple rounds of pattern matching and content scanning, delegate to the Agent tool instead

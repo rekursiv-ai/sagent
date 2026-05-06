@@ -96,8 +96,11 @@ Important public properties:
 | `budget` | Active `ContextBudget`. |
 | `max_request_tokens` | Request token limit; setter validates model max. |
 | `max_response_tokens` | Response token reserve; setter validates model max. |
-| `total_cost_usd` | Cumulative model cost for this session. |
-| `cache_tokens` | `(cache_creation_tokens, cache_read_tokens)`. |
+| `total_cost_usd` | Cumulative subtree model cost for this session (includes descendant agents; live during active runs). |
+| `total_tokens` | Cumulative subtree `TokenCount` for this session (live during active runs). |
+| `total_active_elapsed_seconds` | Cumulative wall-clock seconds spent in `run()` across the session (live-ticks while active). |
+| `cache_tokens` | `(cache_creation_tokens, cache_read_tokens)` from `total_tokens`. |
+| `cache_ttl` | Prompt-cache TTL for outgoing requests (`"5m"` default or `"1h"`); setter validates. |
 | `session_id` | Stable short session ID. |
 | `status` | Current status string. |
 | `active` | True while `run()` is executing. |

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import asyncio
 import contextlib
 import sys
-import time
 
 from rich.cells import chop_cells
 from rich.text import Text
@@ -17,7 +16,6 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from sagent.agent import Agent
-    from sagent.tools.agent_spawn import ChildStats
 
 
 def print_user_bar(
@@ -59,49 +57,44 @@ def render_toolbar(
     agent: Agent,
     spinner: str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
 ) -> str:
-    """Build the bottom toolbar string showing elapsed time and cost.
+    """Build the bottom toolbar string showing session-cumulative stats.
+
+    Single bracketed block: ``[elapsed input↑ output↓ cw↟ cr↡ $cost]``.
+    Active runs prefix a braille spinner; the elapsed value ticks live
+    while token / cost values snap in at each model-call boundary.
 
     Args:
-      agent: Agent whose status drives the toolbar content.
+      agent: Agent whose session totals drive the toolbar content.
       spinner: Braille spinner character sequence.
 
     Returns:
-      toolbar: Formatted toolbar text, or empty string when idle.
+      toolbar: Formatted toolbar text, or empty string before the first run.
 
     """
+    elapsed = agent.total_active_elapsed_seconds
+    if elapsed <= 0 and not agent.active:
+        return ""
+    tokens = agent.total_tokens
+    cost = float(agent.total_cost_usd)
+    # Add the in-flight chars/4 estimate to output count so the bracket
+    # ticks during long single generations rather than freezing until
+    # the next ``cost_tracker.record()`` lands.
+    output_tokens = tokens.output_tokens + (
+        agent.live_model_response_tokens if agent.active else 0
+    )
+    bracket = (
+        f"[{format_elapsed(elapsed)}"
+        f" {format_count(tokens.input_tokens)}↑"
+        f" {format_count(output_tokens)}↓"
+        f" {format_count(tokens.cache_creation_tokens)}↟"
+        f" {format_count(tokens.cache_read_tokens)}↡"
+        f" ${cost:.2f}]"
+    )
     if agent.active:
-        elapsed = asyncio.get_running_loop().time() - agent.request_start_time
-        frame = spinner[int(elapsed * 5) % len(spinner)]
-        parts = [f"{frame} {format_elapsed(elapsed)}"]
-        if agent.live_model_response_tokens:
-            parts.append(f"{agent.live_model_response_tokens}↓")
-        # While active, this is the live subtree ledger, not just the parent call.
-        cost = float(agent.last_run_cost_usd)
-        if cost > 0:
-            parts.append(f"${cost:.2f}")
-        now = time.monotonic()
-        active_children = cast("dict[str, ChildStats]", agent.active_children)
-        for st in active_children.values():
-            if st.done:
-                continue
-            child_parts: list[str] = [format_elapsed(now - st.start)]
-            if st.model_response_tokens:
-                child_parts.append(f"{st.model_response_tokens}↓")
-            if st.cost_usd > 0:
-                child_parts.append(f"${st.cost_usd:.2f}")
-            parts.append(f"{st.label}[{' · '.join(child_parts)}]")
-        return " · ".join(parts)
-    if agent.last_elapsed:
-        cost = float(agent.last_run_cost_usd)
-        cost_str = f" ${cost:.2f}" if cost > 0 else ""
-        tokens = agent.last_run_tokens
-        return (
-            f"[{format_elapsed(agent.last_elapsed)}"
-            f" {tokens.input_tokens}↑"
-            f" {tokens.output_tokens}↓"
-            f"{cost_str}]"
-        )
-    return ""
+        live_delta = asyncio.get_running_loop().time() - agent.request_start_time
+        frame = spinner[int(live_delta * 5) % len(spinner)]
+        return f"{frame} {bracket}"
+    return bracket
 
 
 def set_terminal_title(text: str, max_len: int = 80) -> None:
@@ -126,20 +119,39 @@ def set_terminal_title(text: str, max_len: int = 80) -> None:
 
 
 def format_elapsed(seconds: float) -> str:
-    """Format a duration as a human-readable string.
+    """Format a duration as a compact string with integer-second granularity.
 
     Args:
-      seconds: Elapsed time in seconds.
+      seconds: Elapsed time in seconds. Sub-second values floor to ``"0s"``.
 
     Returns:
-      formatted: E.g. ``"12s"``, ``"2 min 5 sec"``, ``"1 hr 3 min"``.
+      formatted: E.g. ``"12s"``, ``"1m 23s"``, ``"2h 17m"``.
 
     """
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        m, s = divmod(int(seconds), 60)
-        return f"{m} min {s} sec"
-    h, rem = divmod(int(seconds), 3600)
-    m = rem // 60
-    return f"{h} hr {m} min"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m, sec = divmod(s, 60)
+        return f"{m}m {sec}s"
+    h, rem = divmod(s, 3600)
+    return f"{h}h {rem // 60}m"
+
+
+def format_count(n: int) -> str:
+    """Abbreviate large token counts; sub-10K values render verbatim.
+
+    Args:
+      n: Token count.
+
+    Returns:
+      formatted: E.g. ``"412"``, ``"12K"``, ``"1.8M"``.
+
+    """
+    if n < 10_000:
+        return str(n)
+    # Threshold lifted to 999_500 so banker's-rounded ``f"{n/1000:.0f}K"``
+    # never produces ``"1000K"`` -- step straight to the M scale instead.
+    if n < 999_500:
+        return f"{n / 1000:.0f}K"
+    return f"{n / 1_000_000:.1f}M"

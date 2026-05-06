@@ -939,6 +939,83 @@ class TestEndToEndDispatch:
         assert ledger.tokens.output_tokens == 1 + 2 + 3
         # Both models visible in the per-model breakdown.
         assert ledger.calls_by_model == {"parent": 2, "child": 1}
+        # After run completion, root's session-cumulative tracker should
+        # reflect the full subtree, not just parent-only spend.
+        assert parent.total_tokens.input_tokens == 11 + 13 + 7
+        assert parent.total_tokens.output_tokens == 1 + 2 + 3
+        assert parent.total_cost_usd == pytest.approx(ledger.total_cost_usd)
+
+    @pytest.mark.anyio
+    async def test_cumulative_subtree_across_two_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: the fold-back math must compose across multiple
+        completed runs. Run 1's subtree + Run 2's subtree should equal
+        ``parent.total_tokens`` after both finish.
+        """
+
+        def _fake_bp(*_a: object, **_k: object) -> _FakeProvider:
+            return _FakeProvider(
+                lambda mid: _MockModel(
+                    [
+                        dataclasses.replace(
+                            _response("c"),
+                            tokens=TokenCount(input_tokens=7, output_tokens=3),
+                        )
+                    ],
+                    model_id=mid,
+                )
+            )
+
+        monkeypatch.setattr("sagent.tools.agent_spawn.build_provider", _fake_bp)
+        factory = AgentTool(model_id="child")
+        parent_model = _MockModel(
+            [
+                # Run 1: parent spawns child, then finishes.
+                _response(
+                    "",
+                    tool_calls=[
+                        tool_call_message(
+                            "a1",
+                            "AgentSpawn",
+                            json_freeze({"prompt": "go"}),
+                        ),
+                    ],
+                    stop_reason="model_tool_use",
+                    input_tokens=11,
+                    output_tokens=1,
+                ),
+                _response("done", input_tokens=13, output_tokens=2),
+                # Run 2: parent spawns child, then finishes.
+                _response(
+                    "",
+                    tool_calls=[
+                        tool_call_message(
+                            "a2",
+                            "AgentSpawn",
+                            json_freeze({"prompt": "again"}),
+                        ),
+                    ],
+                    stop_reason="model_tool_use",
+                    input_tokens=4,
+                    output_tokens=2,
+                ),
+                _response("done2", input_tokens=6, output_tokens=4),
+            ],
+            model_id="parent",
+        )
+        parent = _Agent(
+            model=parent_model,
+            model_spec=_default_spec(model_id="parent"),
+            system="p",
+            tools=[factory],
+        )
+        await parent.run(json_freeze({"prompt": "go"}))
+        await parent.run(json_freeze({"prompt": "again"}))
+        # Run 1 subtree: parent (11+13 / 1+2) + child (7/3).
+        # Run 2 subtree: parent (4+6 / 2+4) + child (7/3).
+        assert parent.total_tokens.input_tokens == (11 + 13 + 7) + (4 + 6 + 7)
+        assert parent.total_tokens.output_tokens == (1 + 2 + 3) + (2 + 4 + 3)
 
     @pytest.mark.anyio
     async def test_parallel_siblings_complete(

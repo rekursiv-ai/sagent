@@ -819,6 +819,55 @@ class TestAddCacheBreakpoint:
         assert "cache_control" in b0
         assert "cache_control" not in b1
 
+    def test_default_ttl_is_5m_omits_field(self) -> None:
+        messages: list[anthropic.types.MessageParam] = [
+            cast(
+                anthropic.types.MessageParam,
+                {"role": "user", "content": "hi"},
+            )
+        ]
+        _add_cache_breakpoint(messages)
+        content = messages[0]["content"]
+        assert isinstance(content, list)
+        block = cast(dict[str, Any], content[0])
+        cache = cast(dict[str, str], block["cache_control"])
+        assert cache == {"type": "ephemeral"}
+
+    def test_1h_ttl_sets_extended_marker(self) -> None:
+        messages: list[anthropic.types.MessageParam] = [
+            cast(
+                anthropic.types.MessageParam,
+                {"role": "user", "content": "hi"},
+            )
+        ]
+        _add_cache_breakpoint(messages, "1h")
+        content = messages[0]["content"]
+        assert isinstance(content, list)
+        block = cast(dict[str, Any], content[0])
+        cache = cast(dict[str, str], block["cache_control"])
+        assert cache == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_build_messages_propagates_request_cache_ttl(self) -> None:
+        """Regression: ``ModelRequest.cache_ttl`` must reach
+        ``_add_cache_breakpoint`` via ``_build_messages``. Removing the
+        ``cache_ttl=request.cache_ttl`` argument silently drops the
+        agent's setting.
+        """
+        request = ModelRequest(messages=[_user("hi")], cache_ttl="1h")
+        msgs = _build_messages(request)
+        content = msgs[0]["content"]
+        assert isinstance(content, list)
+        block = cast(dict[str, Any], content[0])
+        assert block["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+    def test_build_messages_default_cache_ttl_is_5m(self) -> None:
+        request = ModelRequest(messages=[_user("hi")])
+        msgs = _build_messages(request)
+        content = msgs[0]["content"]
+        assert isinstance(content, list)
+        block = cast(dict[str, Any], content[0])
+        assert block["cache_control"] == {"type": "ephemeral"}
+
 
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
