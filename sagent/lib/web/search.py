@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
+from urllib.parse import urlencode
 
+import json
 import logging
+import os
 import re
 
 from sagent.lib.lazy_import import lazy_import
@@ -31,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # Internal builds keep extra backends; public exports keep only DuckDuckGo.
-SearchBackends: TypeAlias = Literal["duckduckgo"]
+SearchBackends: TypeAlias = Literal["duckduckgo", "searxng"]
 DEFAULT_SEARCH_BACKEND: SearchBackends = "duckduckgo"
 
 
@@ -60,6 +63,54 @@ def _strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
 def _clean_text(text: str) -> str:
     """Collapse whitespace runs and drop spaces before punctuation."""
     return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
+
+
+# ---------------------------------------------------------------------------
+# SearXNG
+# ---------------------------------------------------------------------------
+
+_SEARXNG_URL_ENV = "SEARXNG_URL"
+
+
+def _searxng_url() -> str:
+    """Return the configured SearXNG base URL without a trailing slash."""
+    url = os.environ.get(_SEARXNG_URL_ENV, "").rstrip("/")
+    if not url:
+        raise RuntimeError(
+            f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
+        )
+    return url
+
+
+def searxng(
+    query: str,
+    num_results: int = 10,
+    headers: dict[str, str] | None = None,
+) -> list[SearchResult]:
+    """Query a SearXNG instance and return parsed JSON results.
+
+    Args:
+      query: Search query string.
+      num_results: Maximum results to return.
+      headers: Optional override headers forwarded to fetch.
+
+    Returns:
+      results: Parsed search results.
+
+    """
+    base_url = _searxng_url()
+    params = urlencode({"q": query, "format": "json", "pageno": "1"})
+    url = f"{base_url}/search?{params}"
+    body = fetch(url, headers=headers, timeout_sec=10)
+    items = json.loads(body).get("results", [])
+    return [
+        SearchResult(
+            url=item.get("url", ""),
+            title=_clean_text(item.get("title", "")),
+            snippet=_clean_text(item.get("content", "")),
+        )
+        for item in items[:num_results]
+    ]
 
 
 # ---------------------------------------------------------------------------

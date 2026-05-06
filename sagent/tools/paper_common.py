@@ -23,10 +23,10 @@ from typing import Literal, cast
 
 import asyncio
 import json
+import os
 import re
 
 from sagent.custom_types import Message, TextMessage
-from sagent.lib import apikey
 from sagent.lib.json import MutableJSON
 from sagent.lib.web.fetch import FetchError, fetch
 
@@ -479,7 +479,7 @@ S2_TIMEOUT = 60.0
 
 def _s2_headers() -> dict[str, str]:
     headers: dict[str, str] = {"Accept": "application/json"}
-    key = apikey.get("SEMANTIC_SCHOLAR_API_KEY")
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
     if key:
         headers["x-api-key"] = key
     return headers

@@ -17,9 +17,9 @@ from urllib.parse import urlencode
 import asyncio
 import json
 import logging
+import os
 
 from sagent.custom_types import Message, TextMessage, is_message
-from sagent.lib import apikey
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import get_directive
@@ -84,7 +84,7 @@ def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
     """Ask S2 for an ``openAccessPdf.url``. Returns URL or None."""
     wire = s2_wire_id(kind, canonical)
     headers: dict[str, str] = {"Accept": "application/json"}
-    key = apikey.get("SEMANTIC_SCHOLAR_API_KEY")
+    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
     if key:
         headers["x-api-key"] = key
     params = urlencode({"fields": "openAccessPdf"})

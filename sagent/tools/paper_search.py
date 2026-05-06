@@ -13,12 +13,12 @@ from typing import cast
 import asyncio
 import json
 import logging
+import os
 import re
 
 import cachetools
 
 from sagent.custom_types import Message, TextMessage, is_message
-from sagent.lib import apikey
 from sagent.lib.json import JSON, MutableJSON, bool_val, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
@@ -137,7 +137,7 @@ async def _search_s2(
 
 def _openalex_headers() -> dict[str, str]:
     """UA with mailto signals the polite pool for better rate limits."""
-    email = apikey.get("OPENALEX_EMAIL")
+    email = os.environ.get("OPENALEX_EMAIL", "")
     ua = f"sagent (mailto:{email})" if email else "sagent"
     return {"Accept": "application/json", "User-Agent": ua}
 

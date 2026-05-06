@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import math
+import os
 import uuid
 
 
@@ -42,7 +43,6 @@ from sagent.custom_types import (
     TextMessage,
     TokenCount,
 )
-from sagent.lib import apikey
 from sagent.lib.descriptors import is_image
 from sagent.lib.json import (
     MutableJSON,
@@ -176,7 +176,7 @@ class Google:
           RuntimeError: If ``GOOGLE_API_KEY`` is not set.
 
         """
-        key = apikey.get("GOOGLE_API_KEY")
+        key = os.environ.get("GOOGLE_API_KEY", "")
         if not key:
             raise RuntimeError("Google API key not configured.")
         return cls(api_key=key)
