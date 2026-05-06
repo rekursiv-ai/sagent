@@ -7,6 +7,8 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import argparse
+import os
+import subprocess
 
 import pytest
 
@@ -48,6 +50,27 @@ def _parse(argv: list[str]) -> argparse.Namespace:
 
 
 class TestParseCliArgs:
+    @pytest.mark.ci_smoke
+    def test_direct_script_bootstraps_dependencies(self, tmp_path: Path) -> None:
+        script = Path(__file__).with_name("cli.py")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "."
+        env["UV_FROZEN"] = "1"
+        env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / ".venv")
+
+        proc = subprocess.run(  # noqa: S603 - Exercises the trusted local wrapper.
+            [str(script), "--help"],
+            cwd=script.parents[1],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert "Interactive CLI agent." in proc.stdout
+
     def test_max_response_tokens(self) -> None:
         assert _parse(["--max-response-tokens", "12"]).max_response_tokens == 12
 
