@@ -305,18 +305,18 @@ Sagent does not currently include:
 This comparison focuses on the runtime shape rather than every feature
 of each project.
 
-| | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Python library                 | ✅ | 🟡    | ✅     | ❌      | ❌    | ❌          | ❌        | ❌         |
-| Multi-provider                 | ✅ | ✅    | ✅     | ✅      | ✅    | ❌          | ❌        | ❌         |
-| Context compaction             | ✅ | 🟡    | 🟡     | ❌      | 🟡    | ✅          | ✅        | ✅         |
-| User-initiated backend swap    | ✅ | ✅    | ❌     | ✅      | ✅    | ❌          | ❌        | ❌         |
-| Agent-initiated backend swap   | ✅ | ❌    | 🟡     | ❌      | ❌    | ❌          | ❌        | ❌         |
-| Agent self-mutation            | ✅ | ❌    | ❌     | ❌      | ❌    | ❌          | ❌        | ❌         |
-| Context hot-swap               | ✅ | 🟡    | 🟡     | 🟡      | 🟡    | ❌          | ❌        | ❌         |
-| Recursive agent spawn          | ✅ | ❌    | ✅     | 🟡      | ❌    | 🟡          | 🟡        | ❌         |
-| Multi-agent (fully detached)   | ✅ | ❌    | ✅     | ✅      | ❌    | 🟡          | 🟡        | ❌         |
-| GitHub stars (May 2026)        | -- | 44.4k | 135.8k | 368.6k | 61.4k | --         | 80.1k     | 103.2k     |
+| | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [Flue](https://github.com/withastro/flue) | [Pi](https://pi.dev/) | [Attractor](https://github.com/strongdm/attractor) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Python library                 | ✅ | 🟡    | ✅     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | ❌    |
+| Multi-provider                 | ✅ | ✅    | ✅     | ✅      | ✅    | ❌          | ❌        | ❌         | ✅    | ✅    | ✅    |
+| Context compaction             | ✅ | 🟡    | 🟡     | ❌      | 🟡    | ✅          | ✅        | ✅         | ❌    | ✅    | ✅    |
+| User-initiated backend swap    | ✅ | ✅    | ❌     | ✅      | ✅    | ❌          | ❌        | ❌         | ❌    | ✅    | ❌    |
+| Agent-initiated backend swap   | ✅ | ❌    | 🟡     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | 🟡    |
+| Agent self-mutation            | ✅ | ❌    | ❌     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | 🟡    | ❌    |
+| Context hot-swap               | ✅ | 🟡    | 🟡     | 🟡      | 🟡    | ❌          | ❌        | ❌         | 🟡    | ✅    | ✅    |
+| Recursive agent spawn          | ✅ | ❌    | ✅     | 🟡      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    |
+| Multi-agent (fully detached)   | ✅ | ❌    | ✅     | ✅      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    |
+| GitHub stars (May 2026)        | -- | 44.4k | 135.8k | 368.6k | 61.4k | --         | 80.1k     | 103.2k     | 2.5k  | 45.0k | 1.1k  |
 
 ✅ = yes, 🟡 = partial, ❌ = no. Corrections welcome --
 [open a PR](https://github.com/rekursiv-ai/sagent/pulls).
@@ -374,6 +374,47 @@ TypeScript CLI locked to Google models. Has context compaction via
 summarization. Single-agent, single-provider, no programmatic API, no
 custom tool protocol. Designed as a terminal interface for Gemini, not as a
 composable runtime.
+
+**[Flue](https://github.com/withastro/flue)** (Astro) --
+TypeScript "agent harness framework," explicitly headless and runtime-agnostic
+(Node.js, Cloudflare Workers, GitHub Actions). Agents are TypeScript modules
+with triggers (HTTP webhook, CLI). Sandbox is pluggable: a fast in-process
+`just-bash` virtual sandbox by default, or full Linux containers via
+Daytona/E2B connectors. `session.task()` spawns child agents in the same
+sandbox; the same primitive is exposed to the LLM, so agents can recursively
+delegate. Multi-provider via model strings (`anthropic/claude-sonnet-4-6`,
+`openrouter/...`). No interactive UI, no built-in compaction, no
+agent-initiated backend swap -- the developer chooses the model at `init()`
+or per call. Skills, AGENTS.md, and per-call MCP tool injection are
+first-class.
+
+**[Pi](https://pi.dev/)** ([badlogic/pi-mono](https://github.com/badlogic/pi-mono)) --
+TypeScript "minimal terminal coding harness." The design point is the
+opposite of Sagent's: ship aggressively few defaults and make every layer
+extensible (skills, prompt templates, themes, extensions, packages
+distributed via npm or git). `/model` and `Ctrl+L` swap the backend
+mid-session; `/tree` navigates session history as a branchable tree
+(genuine context hot-swap). `/reload` lets the agent rewrite its own files
+and pick up the change in place -- a soft form of self-mutation. Sub-agents,
+plan mode, permission gates, sandboxing, and MCP support are all explicitly
+*not* built in; install or build them via extensions. Print/JSON, RPC, and
+SDK modes make it embeddable. Star count reflects the whole `pi-mono`
+toolkit (CLI + LLM SDK + UI libraries + Slack bot), not the coding agent
+in isolation.
+
+**[Attractor](https://github.com/strongdm/attractor)** (StrongDM) --
+*Specification, not an implementation.* A pair of NLSpecs (`attractor-spec.md`,
+`coding-agent-loop-spec.md`, `unified-llm-spec.md`) you hand to a coding agent
+and ask it to build. Attractor proper is a DOT-graph pipeline runner: nodes
+are AI tasks, edges encode routing/conditions, the graph IS the workflow.
+The spec mandates structured fidelity modes (`full`/`truncate`/`compact`/
+`summary:{low,medium,high}`) for cross-stage context handoff, per-node model
+selection via a CSS-like stylesheet, parallel/fan-in handlers, human-gate
+nodes, and checkpoint/resume. The companion coding-agent-loop spec defines
+provider-aligned toolsets (apply_patch for OpenAI, edit_file for Anthropic,
+gemini-cli tools for Gemini) and subagent spawn primitives. Categories above
+reflect what an Attractor-conformant implementation must support; the actual
+runtime shape depends on whoever builds it.
 
 ## Architecture map
 

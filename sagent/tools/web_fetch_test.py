@@ -20,6 +20,7 @@ from sagent.custom_types import (
 )
 from sagent.lib.json import JSON, JSONValue, json_freeze
 from sagent.lib.web.fetch import FetchError
+from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import WebFetch
 
 import sagent.tools.web_fetch as wfm
@@ -417,6 +418,61 @@ class TestPostSupport:
             )
         assert isinstance(result, TextMessage)
         assert '"id":42' in result.content
+
+
+_NUDGE = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
+
+
+class TestBashMatch:
+    """Verify ``WebFetch.bash_match`` flags curl/wget HTTP fetches."""
+
+    @staticmethod
+    def _match(command: str) -> str | None:
+        trees = parse_bash(command)
+        assert trees is not None, command
+        return webfetch.bash_match(trees)
+
+    def test_curl_simple_get(self) -> None:
+        assert self._match("curl https://example.com/") == _NUDGE
+
+    def test_curl_with_flags(self) -> None:
+        assert self._match("curl -L --compressed https://example.com/") == _NUDGE
+
+    def test_wget_simple(self) -> None:
+        assert self._match("wget https://example.com/") == _NUDGE
+
+    def test_cd_prefix(self) -> None:
+        assert self._match("cd /tmp && curl https://example.com/") == _NUDGE
+
+    def test_curl_to_file_bails(self) -> None:
+        # ``-o file`` writes to disk; WebFetch can't replace this.
+        assert self._match("curl -o out.html https://example.com/") is None
+        assert self._match("curl --output out.html https://example.com/") is None
+        assert self._match("curl -O https://example.com/file.tar") is None
+
+    def test_pipeline_bails(self) -> None:
+        # Output piped into another command - WebFetch returns text, not a stream.
+        assert self._match("curl https://example.com/ | jq .") is None
+
+    def test_redirect_bails(self) -> None:
+        assert self._match("curl https://example.com/ > out.html") is None
+
+    def test_no_url_bails(self) -> None:
+        # ``curl --version`` or ``curl --help`` are not fetches.
+        assert self._match("curl --version") is None
+
+    def test_non_http_url_bails(self) -> None:
+        # ``curl ftp://...`` or ``curl localhost:8080`` (no scheme) - skip.
+        assert self._match("curl ftp://example.com/file") is None
+        assert self._match("curl localhost:8080") is None
+
+    def test_file_upload_bails(self) -> None:
+        assert self._match("curl --data-binary @body.json https://example.com/") is None
+        assert self._match("curl -F file=@x.png https://example.com/") is None
+
+    def test_unrelated_command(self) -> None:
+        assert self._match("ls -la") is None
+        assert self._match("echo hello") is None
 
 
 if __name__ == "__main__":
