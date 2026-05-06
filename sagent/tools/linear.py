@@ -23,9 +23,9 @@ from typing import cast
 
 import asyncio
 import json
+import os
 
 from sagent.custom_types import Message, TextMessage, is_message
-from sagent.lib import apikey
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
@@ -234,7 +234,7 @@ class Linear:
         """
         directive = get_directive(msg)
         operation = str(directive.get("operation", ""))
-        api_key = apikey.get("LINEAR_API_KEY")
+        api_key = os.environ.get("LINEAR_API_KEY", "")
         if not api_key:
             return TextMessage("Linear API key not configured.", "text/x-error")
         result = await self._dispatch(

@@ -83,7 +83,6 @@ from sagent.bin.cli import (
 )
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import Message, ModelSpec, is_message
-from sagent.lib import apikey
 from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
@@ -930,8 +929,8 @@ def parse_slack_args(
 
 
 def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
-    app = args.app_token or apikey.get("SLACK_APP_TOKEN")
-    bot = args.bot_token or apikey.get("SLACK_BOT_TOKEN")
+    app = args.app_token or os.environ.get("SLACK_APP_TOKEN", "")
+    bot = args.bot_token or os.environ.get("SLACK_BOT_TOKEN", "")
     missing: list[str] = []
     if not app:
         missing.append("app token (--app-token or $SLACK_APP_TOKEN)")

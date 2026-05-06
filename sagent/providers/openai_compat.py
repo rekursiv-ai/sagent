@@ -31,6 +31,7 @@ import base64
 import json
 import logging
 import math
+import os
 
 
 if TYPE_CHECKING:
@@ -52,7 +53,6 @@ from sagent.custom_types import (
     TextMessage,
     TokenCount,
 )
-from sagent.lib import apikey
 from sagent.lib.descriptors import is_image
 from sagent.lib.json import (
     MutableJSON,
@@ -133,7 +133,7 @@ class OpenAICompat:
         """
         if not cls.ENV_VAR:
             raise RuntimeError(f"{cls.__name__} has no ENV_VAR set.")
-        key = apikey.get(cls.ENV_VAR)
+        key = os.environ.get(cls.ENV_VAR, "")
         if not key:
             raise RuntimeError(f"{cls.__name__} API key not configured.")
         return cls(api_key=key, base_url=base_url)

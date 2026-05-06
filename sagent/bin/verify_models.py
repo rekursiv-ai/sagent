@@ -32,12 +32,12 @@ from dataclasses import dataclass
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 
 import httpx
 
-from sagent.lib import apikey
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.google import Google
 from sagent.providers.openai import OpenAI
@@ -267,7 +267,7 @@ async def main() -> int:
 
     if target in ("all", "google"):
         _out("Google (API query):")
-        key = apikey.get("GOOGLE_API_KEY")
+        key = os.environ.get("GOOGLE_API_KEY", "")
         if not key:
             _out("  [skip] GOOGLE_API_KEY not set")
         else:
@@ -281,7 +281,7 @@ async def main() -> int:
 
     if target in ("all", "anthropic"):
         _out("Anthropic (API query):")
-        key = apikey.get("ANTHROPIC_API_KEY")
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             _out("  [skip] ANTHROPIC_API_KEY not set")
         else:

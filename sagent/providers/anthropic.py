@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import asyncio
 import base64
 import logging
+import os
 import re
 import time
 
@@ -47,7 +48,7 @@ from sagent.custom_types import (
     TextMessage,
     TokenCount,
 )
-from sagent.lib import apikey, debug_log
+from sagent.lib import debug_log
 from sagent.lib.descriptors import has_error, is_image
 from sagent.lib.json import (
     JSONValue,
@@ -229,7 +230,7 @@ class Anthropic:
           RuntimeError: If the API key is not configured.
 
         """
-        key = apikey.get("ANTHROPIC_API_KEY")
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise RuntimeError("Anthropic API key not configured.")
         return cls(api_key=key)
