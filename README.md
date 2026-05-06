@@ -107,14 +107,14 @@ Sagent requires Python 3.12.
 
 ```bash
 export GOOGLE_API_KEY=...
-sagent --provider Google --model gemini-3.1-pro-preview
+sagent/bin/cli.py --provider Google --model gemini-3.1-pro-preview
 ```
 
 For non-interactive use, pipe a prompt on stdin:
 
 ```bash
 printf 'Say hi in one sentence.' | \
-  sagent --provider Google --model gemini-3.1-pro-preview \
+  sagent/bin/cli.py --provider Google --model gemini-3.1-pro-preview \
   --output-format json
 ```
 
@@ -148,7 +148,7 @@ asyncio.run(main())
 
 ## Provider setup
 
-Sagent ships API-key providers for Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints. Set the key for the provider you plan to use:
+Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints. Set the key for the provider you plan to use:
 
 ```bash
 export ANTHROPIC_API_KEY=...
