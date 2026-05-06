@@ -212,5 +212,7 @@ def search(
         backend = DEFAULT_SEARCH_BACKEND
     if backend == "duckduckgo":
         return duckduckgo(query, num_results, headers)
+    if backend == "searxng":
+        return searxng(query, num_results, headers)
 
     raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable in OSS build after google branch is stripped
