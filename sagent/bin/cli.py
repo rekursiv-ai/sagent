@@ -85,7 +85,6 @@ DEFAULT_TOOLS = [
     "PaperFetch",
     "PlayAudio",
     "Skill",
-    "Wiki",
 ]
 
 
@@ -277,7 +276,7 @@ def parse_agent_args(
     parser.add_argument(
         "--tools",
         nargs="+",
-        default=DEFAULT_TOOLS,
+        default=None,
         metavar="NAME",
         help=(
             "Tool class names to load from the tools submodule"
@@ -430,10 +429,12 @@ def _build_provider_model(
     """
     auth = str(args.auth)
     model_id = cast(str | None, args.model)
+    model_lookup = model_id
     if args.provider == "SelfHosted":
         auth = model_id or "env"
+        model_lookup = None
     provider = build_provider(str(args.provider), auth, account=args.account)
-    model = provider.model(model_id)
+    model = provider.model(model_lookup)
     return provider, model, auth
 
 
@@ -529,7 +530,8 @@ def main() -> None:
 
     session_dir = None if args.no_session else _resolve_session_dir(args)
 
-    agent_tools = resolve_tools(args.tools)
+    tool_names = args.tools or DEFAULT_TOOLS
+    agent_tools = resolve_tools(tool_names)
     if args.advisor:
         advisor_model = provider.model(args.advisor)
         agent_tools.append(

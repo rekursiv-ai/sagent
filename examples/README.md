@@ -80,9 +80,9 @@ For HuggingFace models loaded locally through `transformers`, use
 pip install "sagent[selfhosted]"
 hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
 sagent --provider SelfHosted
-sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
-sagent --provider SelfHosted --model Qwen/Qwen3-0.6B \
-  --tools none --effort none --max-tool-call-rounds 1
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
+  --effort none --max-tool-call-rounds 1
 ```
 
 ## More docs

@@ -147,10 +147,36 @@ class TestBuildProvider:
             "/opt/models/qwen3.6-27b",
             account=None,
         )
-        mock_provider.model.assert_called_once_with("/opt/models/qwen3.6-27b")
+        mock_provider.model.assert_called_once_with(None)
         assert provider is mock_provider
         assert model is mock_model
         assert auth == "/opt/models/qwen3.6-27b"
+
+    def test_selfhosted_model_options_stay_in_load_path(self) -> None:
+        args = argparse.Namespace(
+            provider="SelfHosted",
+            auth="env",
+            account=None,
+            model="Qwen/Qwen3.6-27B+bfloat16+cuda",
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with(
+            "SelfHosted",
+            "Qwen/Qwen3.6-27B+bfloat16+cuda",
+            account=None,
+        )
+        mock_provider.model.assert_called_once_with(None)
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "Qwen/Qwen3.6-27B+bfloat16+cuda"
 
     def test_selfhosted_defaults_to_env_auth(self) -> None:
         args = argparse.Namespace(
@@ -342,6 +368,11 @@ class TestResolveResume:
 
 
 class TestResolveTools:
+    def test_explicit_wiki_tool_still_resolves(self) -> None:
+        tools_list = resolve_tools(["Wiki"])
+
+        assert [t.name for t in tools_list] == ["Wiki"]
+
     def test_none_disables_tools(self) -> None:
         assert resolve_tools(["none"]) == []
 
