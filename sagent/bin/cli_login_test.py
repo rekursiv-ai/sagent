@@ -57,11 +57,11 @@ class TestLoginSubcommand:
         _, remaining = _parse_cli_args(parser, ["login"])
         assert remaining == ["login"]
 
-    def test_parses_login_manual(self) -> None:
+    def test_parses_login_headless(self) -> None:
         parser = argparse.ArgumentParser()
-        ns, remaining = _parse_cli_args(parser, ["login", "--manual"])
+        ns, remaining = _parse_cli_args(parser, ["login", "--headless"])
         assert remaining == ["login"]
-        assert ns.manual is True
+        assert ns.headless is True
 
     def test_login_invokes_save(self) -> None:
         fake_creds = {
@@ -93,7 +93,7 @@ class TestLoginSubcommand:
         assert mock.login.call_args.kwargs["manual"] is False
         mock.save.assert_called_once_with(fake_creds, account="work")
 
-    def test_login_forwards_manual(self) -> None:
+    def test_login_forwards_headless(self) -> None:
         fake_creds = {
             "access_token": "t",
             "refresh_token": "r",
@@ -111,7 +111,7 @@ class TestLoginSubcommand:
                     "login",
                     "--provider",
                     "OpenAISubscription",
-                    "--manual",
+                    "--headless",
                 ],
             ),
         ):

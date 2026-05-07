@@ -233,7 +233,7 @@ def parse_agent_args(
         ),
     )
     parser.add_argument(
-        "--manual",
+        "--headless",
         action="store_true",
         help=(
             "For login: print an auth URL and paste the returned code instead"
@@ -589,7 +589,7 @@ def _do_login(args: argparse.Namespace) -> None:
         sys.exit(1)
     account = args.account or "default"
     sys.stderr.write(f"[login] provider={args.provider} account={account!r}\n")
-    creds = login_fn(output=sys.stderr, account=args.account, manual=args.manual)
+    creds = login_fn(output=sys.stderr, account=args.account, manual=args.headless)
     save_fn(creds, account=args.account)
     sys.stderr.write(f"[login] saved credentials for account '{account}'.\n")
 
