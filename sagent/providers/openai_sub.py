@@ -854,6 +854,7 @@ def _parse_tool_arguments(
 ) -> MutableJSON:
     """Parse streamed function-call arguments with completed-item fallback."""
     saw_args = False
+    parsed_by_source: dict[str, MutableJSON] = {}
     for source, args_str in (("delta", delta_args), ("done", done_args)):
         if not args_str:
             continue
@@ -871,7 +872,18 @@ def _parse_tool_arguments(
             )
             continue
         if isinstance(parsed, dict):
-            return cast(MutableJSON, parsed)
+            parsed_obj = cast(MutableJSON, parsed)
+            parsed_by_source[source] = parsed_obj
+            if not parsed_obj:
+                logger.warning(
+                    "OpenAI Responses tool arguments were an empty JSON object: "
+                    "source=%s tool=%s call_id=%s chars=%d",
+                    source,
+                    tool_name,
+                    call_id,
+                    len(args_str),
+                )
+            continue
         logger.warning(
             "OpenAI Responses tool arguments were not a JSON object: "
             "source=%s tool=%s call_id=%s",
@@ -885,6 +897,48 @@ def _parse_tool_arguments(
             tool_name,
             call_id,
         )
+    delta = parsed_by_source.get("delta")
+    done = parsed_by_source.get("done")
+    if delta is not None and done is not None and delta != done:
+        logger.warning(
+            "OpenAI Responses tool arguments differed between delta and done: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
+            "delta_keys=%d done_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta),
+            len(done),
+        )
+    if done:
+        logger.debug(
+            "OpenAI Responses selected completed tool arguments: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
+            "delta_keys=%d done_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta) if delta is not None else -1,
+            len(done),
+        )
+        return done
+    if delta:
+        logger.debug(
+            "OpenAI Responses selected streamed delta tool arguments: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d delta_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta),
+        )
+        return delta
+    if done is not None:
+        return done
+    if delta is not None:
+        return delta
     return {}
 
 
