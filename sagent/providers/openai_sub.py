@@ -787,15 +787,14 @@ async def _consume_stream(
                 tc_id = str(item.call_id or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
                 tc_name = str(item.name or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
                 item_id = item.id or ""
-                args_str = "".join(tool_args.get(item_id, []))
-                args: MutableJSON = {}
-                if args_str:
-                    try:
-                        parsed = json.loads(args_str)
-                        if isinstance(parsed, dict):
-                            args = cast(MutableJSON, parsed)
-                    except json.JSONDecodeError:
-                        pass
+                delta_args = "".join(tool_args.get(item_id, []))
+                done_args = str(item.arguments or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                args = _parse_tool_arguments(
+                    delta_args,
+                    done_args,
+                    tool_name=tc_name,
+                    call_id=tc_id,
+                )
                 tool_calls.append(tool_call_message(tc_id, tc_name, json_freeze(args)))
         elif isinstance(event, oai_responses.ResponseCompletedEvent):
             resp = event.response
@@ -844,6 +843,49 @@ async def _consume_stream(
         output_cost=out_cost,
         total_cost=total_cost,
     )
+
+
+def _parse_tool_arguments(
+    delta_args: str,
+    done_args: str,
+    *,
+    tool_name: str,
+    call_id: str,
+) -> MutableJSON:
+    """Parse streamed function-call arguments with completed-item fallback."""
+    saw_args = False
+    for source, args_str in (("delta", delta_args), ("done", done_args)):
+        if not args_str:
+            continue
+        saw_args = True
+        try:
+            parsed = json.loads(args_str)
+        except json.JSONDecodeError:
+            logger.warning(
+                "OpenAI Responses tool arguments were invalid JSON: "
+                "source=%s tool=%s call_id=%s chars=%d",
+                source,
+                tool_name,
+                call_id,
+                len(args_str),
+            )
+            continue
+        if isinstance(parsed, dict):
+            return cast(MutableJSON, parsed)
+        logger.warning(
+            "OpenAI Responses tool arguments were not a JSON object: "
+            "source=%s tool=%s call_id=%s",
+            source,
+            tool_name,
+            call_id,
+        )
+    if not saw_args:
+        logger.warning(
+            "OpenAI Responses tool arguments were empty: tool=%s call_id=%s",
+            tool_name,
+            call_id,
+        )
+    return {}
 
 
 # -- JWT helpers -------------------------------------------------------

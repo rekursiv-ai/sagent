@@ -134,6 +134,18 @@ class TestWikiTool:
         assert "See [[two]]" in _text(resp)
 
     @pytest.mark.anyio
+    async def test_read_page_without_slug_has_recovery_hint(
+        self, wiki_cwd: Path
+    ) -> None:
+        del wiki_cwd
+        tool = wiki_mod.Wiki()
+        resp = await tool.run(_msg(json_freeze({"operation": "read_page"})))
+        assert resp.descriptor == "text/x-error"
+        assert "ToolInputError" in str(resp.content)
+        assert "operation='read_page' requires `slug`" in str(resp.content)
+        assert "Do not repeat the same empty or incomplete call" in str(resp.content)
+
+    @pytest.mark.anyio
     async def test_rejects_invalid_slug(self, wiki_cwd: Path) -> None:
         del wiki_cwd
         tool = wiki_mod.Wiki()

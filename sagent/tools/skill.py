@@ -28,7 +28,11 @@ from sagent.lib.message import (
     append_to_first_user_message,
     get_directive,
 )
-from sagent.tools.core import ToolState, get_tool_state
+from sagent.tools.core import (
+    ToolState,
+    get_tool_state,
+    load_tool_description,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -148,14 +152,7 @@ class Skill:
 
     name: str = "Skill"
     tool_id: str = "application/x-tool-skill"
-    description: str = (
-        "Invoke a user-authored skill by name. Returns the skill's full"
-        " SKILL.md body so you can follow its instructions on the next"
-        " model request. The list of available skills is in the system"
-        " prompt under '# Skills'."
-        " When a skill's trigger condition matches the user's request,"
-        " invoke it immediately — before any other action or response."
-    )
+    description: str = load_tool_description("Skill")
     supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {

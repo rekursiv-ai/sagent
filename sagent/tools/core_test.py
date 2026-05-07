@@ -11,13 +11,16 @@ import time
 
 import pytest
 
+from sagent import tools
 from sagent.custom_types import (
     JsonMessage,
     MessageBase,
     MultipartMessage,
 )
 from sagent.lib.json import JSON, json_freeze
+from sagent.tools import core
 from sagent.tools.core import (
+    _MISSING_TOOL_DESCRIPTION,
     TOOL_RESULT_MAX_CHARS,
     ToolState,
     _build_schema,
@@ -28,6 +31,7 @@ from sagent.tools.core import (
     load_tool_description,
     mark_read,
     opt_str,
+    read_asset,
     run_sync,
     tool,
     tool_state_context,
@@ -87,6 +91,7 @@ class TestBuildSchema:
                 "limit": {"type": "integer"},
             },
             "required": ["query"],
+            "additionalProperties": False,
         }
 
     def test_annotated_description(self) -> None:
@@ -142,6 +147,89 @@ def test_default_recipe_loads_tool_descriptions() -> None:
     assert load_tool_description("agentself")
 
 
+def test_all_builtin_tools_have_description_assets() -> None:
+    recipe = core.recipe_dict("tool_descriptions")
+    recipe_paths = {k.lower(): Path(v) for k, v in recipe.items()}
+    missing_recipe: list[str] = []
+    missing_file: list[str] = []
+
+    for name in tools.__all__:
+        obj = getattr(tools, name, None)
+        tool_id = getattr(obj, "tool_id", None)
+        if not isinstance(obj, type) or not isinstance(tool_id, str):
+            continue
+        if not tool_id.startswith("application/x-tool-"):
+            continue
+        recipe_path = recipe_paths.get(name.lower())
+        if recipe_path is None:
+            missing_recipe.append(name)
+            continue
+        if not (core._ASSETS_DIR / recipe_path).is_file():
+            missing_file.append(f"{name}: {recipe_path}")
+
+    assert missing_recipe == []
+    assert missing_file == []
+
+
+def test_missing_tool_description_asset_soft_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Missing tool description files return a generic prompt fragment."""
+    monkeypatch.setattr(
+        core,
+        "_recipe_cache",
+        {"tool_descriptions": {"MissingTool": "default/does_not_exist.md"}},
+    )
+
+    with caplog.at_level("ERROR", logger="sagent.tools.core"):
+        assert load_tool_description("MissingTool") == _MISSING_TOOL_DESCRIPTION
+
+    assert "MissingTool" in caplog.text
+    assert "default/does_not_exist.md" in caplog.text
+
+
+def test_missing_tool_description_include_soft_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Missing includes inside tool descriptions use the same soft-fail path."""
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "tool.md").write_text("before {{include: missing.md}} after")
+    monkeypatch.setattr(core, "_ASSETS_DIR", assets)
+    monkeypatch.setattr(
+        core,
+        "_recipe_cache",
+        {"tool_descriptions": {"MissingInclude": "tool.md"}},
+    )
+
+    with caplog.at_level("ERROR", logger="sagent.tools.core"):
+        assert load_tool_description("MissingInclude") == _MISSING_TOOL_DESCRIPTION
+
+    assert "MissingInclude" in caplog.text
+    assert "tool.md" in caplog.text
+
+
+def test_read_asset_remains_strict_for_missing_files(tmp_path: Path) -> None:
+    """Direct asset reads still raise for missing files."""
+    with pytest.raises(FileNotFoundError):
+        read_asset(tmp_path / "missing.md")
+
+
+def test_read_asset_remains_strict_for_missing_includes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Direct asset reads still raise for missing include targets."""
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "tool.md").write_text("{{include: missing.md}}")
+    monkeypatch.setattr(core, "_ASSETS_DIR", assets)
+
+    with pytest.raises(FileNotFoundError):
+        read_asset("tool.md")
+
+
 # -- run_sync ---------------------------------------------------------
 
 
@@ -186,6 +274,7 @@ class TestToolDecorator:
 
         assert my_fn.name == "my_fn"
         assert my_fn.directive_schema["required"] == ("x",)
+        assert my_fn.directive_schema["additionalProperties"] is False
 
     def test_with_args(self) -> None:
         @tool(name="Custom", description="desc")

@@ -152,17 +152,23 @@ def recipe_list(section: str, key: str) -> list[str]:
     return [str(x) for x in cast(list[object], items)]
 
 
+_MISSING_TOOL_DESCRIPTION = "Tool description unavailable; use the JSON schema exactly."
+
+
 def load_tool_description(name: str) -> str:
     """Load a tool description from the active recipe.
 
-    Paths are explicit in recipe.yaml -- no fallback search.
-    Substitutes ``{{NOW}}`` with the current ``Month YYYY``.
+    Tool descriptions are optional prompt fragments, so missing files soft-fail
+    to a generic agent-visible description. Other recipe assets stay strict at
+    their call sites. Paths are explicit in recipe.yaml -- no fallback search.
+    Substitutes ``{{NOW}}`` with the current
+    ``Month YYYY``.
 
     Args:
       name: Tool name (case-insensitive lookup).
 
     Returns:
-      description: Rendered tool description, or empty string on miss.
+      description: Rendered tool description, or a generic fallback on miss.
 
     """
     tool_descs = recipe_dict("tool_descriptions")
@@ -173,7 +179,16 @@ def load_tool_description(name: str) -> str:
             "Tool %r not in recipe %s", name, _recipe_path_override or _DEFAULT_RECIPE
         )
         return ""
-    text = read_asset(str(by_lower[key])).rstrip()
+    try:
+        text = read_asset(str(by_lower[key])).rstrip()
+    except FileNotFoundError:
+        logger.exception(
+            "Missing tool description asset for tool %r in recipe %s: %s",
+            name,
+            _recipe_path_override or _DEFAULT_RECIPE,
+            by_lower[key],
+        )
+        return _MISSING_TOOL_DESCRIPTION
     if _NOW_PLACEHOLDER in text:
         text = text.replace(_NOW_PLACEHOLDER, time.strftime("%B %Y"))
     return text
@@ -238,6 +253,7 @@ def _build_schema(
     schema: dict[str, object] = {
         "type": "object",
         "properties": properties,
+        "additionalProperties": False,
     }
     if required:
         schema["required"] = required

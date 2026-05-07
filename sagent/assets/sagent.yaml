@@ -31,3 +31,8 @@ tool_descriptions:
   PaperDetails: default/tools_paperdetails.md
   PaperAuthor: default/tools_paperauthor.md
   PaperFetch: default/tools_paperfetch.md
+  Linear: default/tools_linear.md
+  PlayAudio: default/tools_playaudio.md
+  Skill: default/tools_skill.md
+  Slack: default/tools_slack.md
+  Wiki: default/tools_wiki.md
