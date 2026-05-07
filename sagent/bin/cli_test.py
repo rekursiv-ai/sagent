@@ -71,6 +71,9 @@ class TestParseCliArgs:
         assert proc.returncode == 0, proc.stderr
         assert "Interactive CLI agent." in proc.stdout
 
+    def test_max_request_tokens(self) -> None:
+        assert _parse(["--max-request-tokens", "8192"]).max_request_tokens == 8192
+
     def test_max_response_tokens(self) -> None:
         assert _parse(["--max-response-tokens", "12"]).max_response_tokens == 12
 
@@ -404,6 +407,25 @@ class TestMain:
         ):
             mock_ant.from_env.return_value = mock_prov
             main()
+
+    def test_max_request_tokens_sets_agent_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_prov = _provider_patches(monkeypatch)
+        agent = MagicMock()
+        agent.tool_state = MagicMock()
+        agent.tool_state.additional_dirs = []
+
+        with (
+            patch("sagent.bin.cli.asyncio.run"),
+            patch("sagent.bin.cli.Agent", return_value=agent),
+            patch("sagent.providers.Anthropic") as mock_ant,
+            patch("sys.argv", ["cli.py", "--max-request-tokens", "8192"]),
+        ):
+            mock_ant.from_env.return_value = mock_prov
+            main()
+
+        assert agent.max_request_tokens == 8192
 
     def test_no_session_persistence_disables_memory(
         self, monkeypatch: pytest.MonkeyPatch
