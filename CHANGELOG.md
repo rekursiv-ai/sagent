@@ -2,7 +2,7 @@
 
 All notable Sagent changes are documented here.
 
-## 0.1.3 - Unreleased
+## 0.1.3 - 2026-05-07
 
 - Fixed SelfHosted tool-call allowlist matching so CLI tool names such as
   `Bash` dispatch model-emitted tool calls such as `bash`.
