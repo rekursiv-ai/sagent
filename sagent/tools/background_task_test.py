@@ -203,7 +203,7 @@ class TestBackgroundDispatch:
         if job is not None:
             await job.task
         drained = agent.inbox.drain()
-        assert any("bg-result" in item for item in drained)
+        assert any("bg-result" in str(item.content) for item in drained)
 
     @pytest.mark.anyio
     async def test_delay_implies_background(self) -> None:

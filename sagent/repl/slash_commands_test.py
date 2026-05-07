@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
-from sagent.custom_types import ModelSpec
+from sagent.custom_types import Message, ModelSpec
 from sagent.lib.asyncio_collections import Deque
 from sagent.repl.slash_commands import (
     handle_slash_clear,
@@ -22,7 +22,7 @@ import sagent.providers as providers_mod
 
 def _agent(**overrides: object) -> MagicMock:
     a = MagicMock()
-    a.inbox = Deque[str]()
+    a.inbox = Deque[Message]()
     a.model_spec = overrides.get(
         "model_spec",
         ModelSpec(provider="Anthropic", auth="env", model_id="old-model"),
@@ -225,14 +225,19 @@ class TestHandleSlashClear:
         a = _agent()
         c, buf = _console()
         assert handle_slash_clear(a, c, "") is True
-        assert a.inbox.drain() == ["/clear"]
+        drained = a.inbox.drain()
+        assert len(drained) == 1
+        assert drained[0].descriptor == "text/x-clear-request"
         assert "queued" in buf.getvalue()
 
     def test_clear_with_reason(self) -> None:
         a = _agent()
         c, buf = _console()
         assert handle_slash_clear(a, c, " fresh start") is True
-        assert a.inbox.drain() == ["/clear fresh start"]
+        drained = a.inbox.drain()
+        assert len(drained) == 1
+        assert drained[0].content == "fresh start"
+        assert drained[0].descriptor == "text/x-clear-request"
         assert "fresh start" in buf.getvalue()
 
 

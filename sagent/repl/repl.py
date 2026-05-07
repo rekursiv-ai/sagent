@@ -159,11 +159,12 @@ async def _pump(
         try:
             text = await session.prompt_async()
         except (EOFError, KeyboardInterrupt):
-            agent.inbox.put(QUIT_SENTINEL)
+            agent.inbox.put(TextMessage("", QUIT_SENTINEL))
             return
         if text.strip().lower() in ("quit", "exit"):
             if agent.inbox:
-                preview = (agent.inbox.peek_tail() or "").replace("\n", " ")[:80]
+                tail = agent.inbox.peek_tail()
+                preview = str(tail.content).replace("\n", " ")[:80] if tail else ""
                 console.print(
                     Text(
                         f"[discarding queued message: {preview}]",
@@ -171,19 +172,24 @@ async def _pump(
                     ),
                 )
                 agent.inbox.drain()
-            agent.inbox.put(QUIT_SENTINEL)
+            agent.inbox.put(TextMessage("", QUIT_SENTINEL))
             return
         stripped = text.strip()
         if handle_slash_command(agent, console, stripped):
             continue
-        parts: list[str] = agent.inbox.drain()
+        parts: list[str] = []
+        for m in agent.inbox.drain():
+            if m.descriptor == "text/x-clear-request":
+                agent.inbox.put_left(m)
+            else:
+                parts.append(str(m.content))
         if stripped:
             parts.append(stripped)
         if not parts:
             continue
         full = "\n\n".join(parts)
         events.put_nowait(TextMessage(full, "text/x-signal-user-input"))
-        agent.inbox.put(full)
+        agent.inbox.put(TextMessage(full, "text/x-user-message"))
 
 
 def _collect_batch(

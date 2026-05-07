@@ -82,7 +82,12 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import Message, ModelSpec, is_message
+from sagent.custom_types import (
+    Message,
+    ModelSpec,
+    TextMessage,
+    is_message,
+)
 from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
@@ -417,7 +422,9 @@ class SlackAdapter:
             owner = self._log_channel_owners[channel]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] log-channel {clean[:200]}")
-                agent_registry[owner].inbox.put(formatted)
+                agent_registry[owner].inbox.put(
+                    TextMessage(formatted, "text/x-user-message")
+                )
             return
 
         # 2. Explicit agent name at start of message.
@@ -427,7 +434,9 @@ class SlackAdapter:
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
             self._log_route(f"[{user}->{target}] mention {clean[:200]}")
-            agent_registry[target].inbox.put(formatted)
+            agent_registry[target].inbox.put(
+                TextMessage(formatted, "text/x-user-message")
+            )
             return
 
         # 3. Thread continuation.
@@ -436,7 +445,9 @@ class SlackAdapter:
             owner = self._thread_owners[thread_key]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] thread {clean[:200]}")
-                agent_registry[owner].inbox.put(formatted)
+                agent_registry[owner].inbox.put(
+                    TextMessage(formatted, "text/x-user-message")
+                )
                 return
 
         # Agent messages that don't match steps 1-3: drop.
@@ -454,7 +465,9 @@ class SlackAdapter:
         if len(agents) == 1:
             self._thread_owners[(channel, thread_ts)] = agents[0]
             self._log_route(f"[{user}->{agents[0]}] default {clean[:200]}")
-            agent_registry[agents[0]].inbox.put(formatted)
+            agent_registry[agents[0]].inbox.put(
+                TextMessage(formatted, "text/x-user-message")
+            )
             return
 
         # 6. Ambiguous or no agents.
@@ -519,7 +532,9 @@ class SlackAdapter:
             formatted = f"{source} {user} reacted with :{reaction}: to your message"
 
         self._log_route(f"[{user}->{agent_name}] reaction :{reaction}:")
-        agent_registry[agent_name].inbox.put(formatted)
+        agent_registry[agent_name].inbox.put(
+            TextMessage(formatted, "text/x-user-message")
+        )
 
     # -- Command handling --------------------------------------------------
 
@@ -638,7 +653,7 @@ class SlackAdapter:
     def stop_agent(self, label: str) -> None:
         agent = agent_registry.get(label)
         if agent:
-            agent.inbox.put(QUIT_SENTINEL)
+            agent.inbox.put(TextMessage("", QUIT_SENTINEL))
         self._active_agents.pop(label, None)
         _save_manifest(self._session_dir, self._active_agents)
 
@@ -1014,7 +1029,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Shutdown.
     for agent in list(agent_registry.values()):
-        agent.inbox.put(QUIT_SENTINEL)
+        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
     adapter_task.cancel()
     logger.info("Shutdown complete")
 

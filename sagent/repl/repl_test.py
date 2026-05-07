@@ -42,7 +42,7 @@ def _make_agent(
     call_idx = 0
     wrapper: Any = MagicMock()
     wrapper.tool_state = MagicMock()
-    wrapper.inbox = Deque[str]()
+    wrapper.inbox = Deque[Message]()
     wrapper.active = False
     wrapper.inflight = None
     wrapper.title = ""
@@ -53,7 +53,7 @@ def _make_agent(
         nonlocal call_idx
         while True:
             prompt = await wrapper.inbox.get()
-            if prompt == QUIT_SENTINEL:
+            if prompt.descriptor == QUIT_SENTINEL:
                 return
             if call_idx < len(event_batches):
                 for ev in event_batches[call_idx]:
@@ -94,7 +94,7 @@ def _prompt_sequence(*inputs: str | type[BaseException]) -> Any:
 
 def _simple_agent() -> Any:
     a: Any = MagicMock()
-    a.inbox = Deque[str]()
+    a.inbox = Deque[Message]()
     a.active = False
     a.inflight = None
     a.title = ""
@@ -105,7 +105,7 @@ def _simple_agent() -> Any:
     async def _run_forever() -> AsyncGenerator[Message | None, None]:
         while True:
             prompt = await a.inbox.get()
-            if prompt == QUIT_SENTINEL:
+            if prompt.descriptor == QUIT_SENTINEL:
                 return
             yield None
 
@@ -458,12 +458,12 @@ class TestSlashModel:
             auth="env",
             model_id="m",
         )
-        received: list[str] = []
+        received: list[Message] = []
 
         async def _spy() -> AsyncGenerator[Message | None, None]:
             while True:
                 prompt = await agent.inbox.get()
-                if prompt == QUIT_SENTINEL:
+                if prompt.descriptor == QUIT_SENTINEL:
                     return
                 received.append(prompt)
                 yield None
@@ -482,27 +482,31 @@ class TestSlashModel:
 class TestSlashClear:
     def test_slash_clear_queues_front_for_drain(self) -> None:
         agent = _simple_agent()
-        agent.inbox.put("later")
+        agent.inbox.put(TextMessage("later", "text/x-user-message"))
         err_io = StringIO()
         console = Console(file=err_io, width=80, force_terminal=False)
 
         assert handle_slash_clear(agent, console, " fresh start ") is True
 
-        assert agent.inbox.drain() == ["/clear fresh start", "later"]
+        drained = agent.inbox.drain()
+        assert len(drained) == 2
+        assert drained[0].content == "fresh start"
+        assert drained[0].descriptor == "text/x-clear-request"
+        assert drained[1].content == "later"
         assert "[/clear]" in err_io.getvalue()
         assert "fresh start" in err_io.getvalue()
 
     @pytest.mark.anyio
     async def test_slash_clear_goes_through_inbox(self) -> None:
         agent = _simple_agent()
-        received: list[str] = []
+        received: list[Message] = []
         received_event = asyncio.Event()
         sent_clear = False
 
         async def _spy() -> AsyncGenerator[Message | None, None]:
             while True:
                 prompt = await agent.inbox.get()
-                if prompt == QUIT_SENTINEL:
+                if prompt.descriptor == QUIT_SENTINEL:
                     return
                 received.append(prompt)
                 received_event.set()
@@ -522,7 +526,9 @@ class TestSlashClear:
         with p1 as mock_cls, p2:
             mock_cls.return_value.prompt_async = _prompt
             await run_repl(agent, name="test")
-        assert received == ["/clear fresh start"]
+        assert len(received) == 1
+        assert received[0].content == "fresh start"
+        assert received[0].descriptor == "text/x-clear-request"
 
 
 class TestUserBarRendering:

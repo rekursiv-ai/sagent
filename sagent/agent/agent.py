@@ -158,7 +158,7 @@ _MAX_COMPACT_FAILURES = 3
 _MAX_UNSAVED_EVENTS = 1000
 
 # Sentinel placed in ``Agent.inbox`` by the REPL pump to signal session end.
-QUIT_SENTINEL = "\x00__quit__\x00"
+QUIT_SENTINEL = "text/x-quit"
 
 # Error codes returned in ToolResponse.content for programmatic matching.
 ERROR_NO_PROMPT = "error:no_prompt"
@@ -283,7 +283,7 @@ class Agent:
         # drains it at ONE point -- the top of each iteration --
         # and injects items as user messages before the next LLM
         # call. No other code should drain the inbox.
-        self.inbox: Deque[str] = Deque()
+        self.inbox: Deque[Message] = Deque()
         self._background_tasks: dict[str, BackgroundTaskEntry] = {}
         self._has_background_support = (
             "application/x-tool-backgroundtask" in self._tools
@@ -575,10 +575,18 @@ class Agent:
         """
         while True:
             items = await self.inbox.get_all()
-            if QUIT_SENTINEL in items:
+            if any(m.descriptor == QUIT_SENTINEL for m in items):
                 self._save_session()
                 return
-            prompt = "\n\n".join(items)
+            prompts: list[str] = []
+            for m in items:
+                if m.descriptor == "text/x-clear-request":
+                    self._clear_context(str(m.content))
+                else:
+                    prompts.append(str(m.content))
+            if not prompts:
+                continue
+            prompt = "\n\n".join(prompts)
             handle = self.run(json_freeze({"prompt": prompt}))
             try:
                 async for event in handle:
@@ -717,7 +725,7 @@ class Agent:
         self._max_tokens_recoveries = 0
         self._messages = repair_dangling_tool_calls(self.messages)
         await self._maybe_drain_clear_request()
-        self.inbox.put(prompt)
+        self.inbox.put(TextMessage(prompt, "text/x-user-message"))
 
         request_num = 0
         while True:
@@ -1026,16 +1034,27 @@ class Agent:
             result = await self._invoke_tool_safe(req)
             result_text = text_from_msg(result)
             self.inbox.put(
-                f"[Background tool completed: {tool_name} ({qid})]\n\n{result_text}"
+                TextMessage(
+                    f"[Background tool completed: {tool_name} ({qid})]\n\n{result_text}",
+                    "text/x-user-message",
+                )
             )
             return result
         except asyncio.CancelledError:
-            self.inbox.put(f"[Background tool cancelled: {tool_name} ({qid})]")
+            self.inbox.put(
+                TextMessage(
+                    f"[Background tool cancelled: {tool_name} ({qid})]",
+                    "text/x-user-message",
+                )
+            )
             raise
         except Exception as e:
             self.inbox.put(
-                f"[Background tool failed: {tool_name} ({qid})]\n\n"
-                f"{type(e).__name__}: {e}"
+                TextMessage(
+                    f"[Background tool failed: {tool_name} ({qid})]\n\n"
+                    f"{type(e).__name__}: {e}",
+                    "text/x-user-message",
+                )
             )
             raise
         finally:
@@ -1058,11 +1077,10 @@ class Agent:
             return
         kept: list[str] = []
         for item in drained:
-            stripped = item.strip()
-            if stripped == "/clear" or stripped.startswith("/clear "):
-                self._clear_context(stripped[6:].strip())
+            if item.descriptor == "text/x-clear-request":
+                self._clear_context(str(item.content))
             else:
-                kept.append(item)
+                kept.append(str(item.content))
         if not kept:
             return
         text = "\n\n".join(kept)
