@@ -794,37 +794,34 @@ class Agent:
                     "text/plain",
                 )
 
-    def _emit(self, event: Message) -> None:
-        """Put an event on the streaming queue (no-op outside ``run``)."""
-        if self._events is not None:
-            self._events.put_nowait(event)
+    def _drain_inbox(self, request_num: int) -> None:
+        """Drain inbox into conversation history.
 
-    def _finish_run(self) -> None:
-        """Post-run cleanup called by ``RunHandle`` after the task completes."""
-        self.inflight = None
-        self._active = False
-        loop = asyncio.get_running_loop()
-        self._last_elapsed = loop.time() - self._request_start_time
-        self._total_active_elapsed_seconds += self._last_elapsed
-        # Children record their local call; only the root snapshots the shared subtree ledger.
-        if self._active_cost_ledger is not None:
-            self._last_model_tokens = self._active_cost_ledger.tokens
-            self._last_run_cost_usd = self._active_cost_ledger.total_cost_usd
-            self._cost_tracker.fold(
-                snapshot_cost_usd=self._tracker_snap_cost_usd,
-                snapshot_tokens=self._tracker_snap_tokens,
-                run_ledger=self._active_cost_ledger,
-            )
-            self._active_cost_ledger = None
-        else:
-            self._last_model_tokens = TokenCount(
-                input_tokens=self._cost_tracker.last_request.input_tokens,
-                output_tokens=self._cost_tracker.call_output_tokens,
-            )
-            self._last_run_cost_usd = self._cost_tracker.total_cost_usd
-        self._events = None
+        This is the only place that converts inbox text into conversation
+        history or context-changing slash-command effects. Producers
+        (REPL, keybindings, background tasks, agent sends) may prioritize
+        delivery with ``put_left`` but must not mutate history directly.
 
-    # -- Request helpers ----------------------------------------------
+        On request 0 the drain is the initial prompt (user bar already
+        rendered by the REPL), so skip the ``text/x-user-injected`` event.
+        On later iterations the event triggers a mid-request user bar.
+        """
+        drained = self.inbox.drain()
+        if not drained:
+            return
+        kept: list[str] = []
+        for item in drained:
+            if item.descriptor == "text/x-clear-request":
+                self._clear_context(str(item.content))
+            else:
+                kept.append(str(item.content))
+        if not kept:
+            return
+        text = "\n\n".join(kept)
+        self.messages.append(TextMessage(text, "text/x-user-message"))
+        self._log_event("user_message", request=request_num, content_len=len(text))
+        if request_num > 0:
+            self._emit(TextMessage(text, "text/x-user-injected"))
 
     async def _prepare_request(self) -> str:
         """Pre-model-call: maintain, compact, build system prompt."""
@@ -889,6 +886,29 @@ class Agent:
         self.messages.append(response.content)
         return response
 
+    def _log_response(
+        self,
+        response: ModelResponse,
+        request_num: int,
+    ) -> list[Message]:
+        """Emit thinking event, log response, return tool calls."""
+        thinking = _response_thinking(response.content)
+        if thinking:
+            self._emit(TextMessage(thinking, "text/x-thinking"))
+        tool_calls = response_tool_calls(response.content)
+        self._log_event(
+            "model_response",
+            request=request_num,
+            stop_reason=response.stop_reason,
+            text_len=len(response_text(response.content)),
+            tool_count=len(tool_calls),
+            input_tokens=response.tokens.input_tokens,
+            output_tokens=response.tokens.output_tokens,
+            thinking=bool(thinking),
+            streaming=self._events is not None,
+        )
+        return tool_calls
+
     async def _send_with_context_recovery(
         self,
         request: ModelRequest,
@@ -932,28 +952,37 @@ class Agent:
         )
         raise RuntimeError(msg) from last_error
 
-    def _log_response(
-        self,
-        response: ModelResponse,
-        request_num: int,
-    ) -> list[Message]:
-        """Emit thinking event, log response, return tool calls."""
-        thinking = _response_thinking(response.content)
-        if thinking:
-            self._emit(TextMessage(thinking, "text/x-thinking"))
-        tool_calls = response_tool_calls(response.content)
-        self._log_event(
-            "model_response",
-            request=request_num,
-            stop_reason=response.stop_reason,
-            text_len=len(response_text(response.content)),
-            tool_count=len(tool_calls),
-            input_tokens=response.tokens.input_tokens,
-            output_tokens=response.tokens.output_tokens,
-            thinking=bool(thinking),
-            streaming=self._events is not None,
-        )
-        return tool_calls
+    def _emit(self, event: Message) -> None:
+        """Put an event on the streaming queue (no-op outside ``run``)."""
+        if self._events is not None:
+            self._events.put_nowait(event)
+
+    def _finish_run(self) -> None:
+        """Post-run cleanup called by ``RunHandle`` after the task completes."""
+        self.inflight = None
+        self._active = False
+        loop = asyncio.get_running_loop()
+        self._last_elapsed = loop.time() - self._request_start_time
+        self._total_active_elapsed_seconds += self._last_elapsed
+        # Children record their local call; only the root snapshots the shared subtree ledger.
+        if self._active_cost_ledger is not None:
+            self._last_model_tokens = self._active_cost_ledger.tokens
+            self._last_run_cost_usd = self._active_cost_ledger.total_cost_usd
+            self._cost_tracker.fold(
+                snapshot_cost_usd=self._tracker_snap_cost_usd,
+                snapshot_tokens=self._tracker_snap_tokens,
+                run_ledger=self._active_cost_ledger,
+            )
+            self._active_cost_ledger = None
+        else:
+            self._last_model_tokens = TokenCount(
+                input_tokens=self._cost_tracker.last_request.input_tokens,
+                output_tokens=self._cost_tracker.call_output_tokens,
+            )
+            self._last_run_cost_usd = self._cost_tracker.total_cost_usd
+        self._events = None
+
+    # -- Request helpers ----------------------------------------------
 
     async def _run_tools(self, tool_calls: list[Message]) -> None:
         """Dispatch tools, enforce budget, append results.
@@ -1062,35 +1091,6 @@ class Agent:
             raise
         finally:
             self.background_tasks.pop(qid, None)
-
-    def _drain_inbox(self, request_num: int) -> None:
-        """Drain inbox into conversation history.
-
-        This is the only place that converts inbox text into conversation
-        history or context-changing slash-command effects. Producers
-        (REPL, keybindings, background tasks, agent sends) may prioritize
-        delivery with ``put_left`` but must not mutate history directly.
-
-        On request 0 the drain is the initial prompt (user bar already
-        rendered by the REPL), so skip the ``text/x-user-injected`` event.
-        On later iterations the event triggers a mid-request user bar.
-        """
-        drained = self.inbox.drain()
-        if not drained:
-            return
-        kept: list[str] = []
-        for item in drained:
-            if item.descriptor == "text/x-clear-request":
-                self._clear_context(str(item.content))
-            else:
-                kept.append(str(item.content))
-        if not kept:
-            return
-        text = "\n\n".join(kept)
-        self.messages.append(TextMessage(text, "text/x-user-message"))
-        self._log_event("user_message", request=request_num, content_len=len(text))
-        if request_num > 0:
-            self._emit(TextMessage(text, "text/x-user-injected"))
 
     def _account_response(self, response: ModelResponse) -> None:
         """Update token/cost counters after a model response."""
