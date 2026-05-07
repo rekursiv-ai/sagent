@@ -119,7 +119,8 @@ See `examples/openai_compatible_provider.py` for a runnable version.
 Use `SelfHosted` for HuggingFace causal LMs loaded through `transformers`:
 
 ```bash
-pip install "sagent[selfhosted]"
+uv sync --extra selfhosted
+# Or: pip install "sagent[selfhosted]"
 hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
 sagent --provider SelfHosted
 sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
