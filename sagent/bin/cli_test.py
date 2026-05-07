@@ -204,6 +204,29 @@ class TestBuildProvider:
         assert model is mock_model
         assert auth == "env"
 
+    def test_llamacpp_model_is_endpoint_model_not_load_path(self) -> None:
+        args = argparse.Namespace(
+            provider="LlamaCpp",
+            auth="/models/qwen.gguf",
+            account=None,
+            model="qwen3.6-27b-12gb",
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_model.model_id = "qwen3.6-27b-12gb"
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with("LlamaCpp", "/models/qwen.gguf", account=None)
+        mock_provider.model.assert_called_once_with("qwen3.6-27b-12gb")
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "/models/qwen.gguf"
+
 
 class TestResolveSessionDir:
     """``_resolve_session_dir`` precedence: --session > --continue > --resume > fresh."""

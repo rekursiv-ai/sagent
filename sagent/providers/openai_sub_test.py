@@ -620,6 +620,49 @@ class TestConsumeStream:
         )
 
     @pytest.mark.anyio
+    async def test_tool_call_extraction_prefers_done_item_over_empty_delta(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger=os_.logger.name)
+        events = [
+            _mock_function_args_delta("fc_1", "{}"),
+            _mock_output_item_done(
+                item_id="fc_1",
+                call_id="call_abc",
+                name="papersearch",
+                arguments='{"query": "attention is all you need"}',
+            ),
+            _mock_completed_event(
+                response_id="resp-3",
+                status="completed",
+                input_tokens=20,
+                output_tokens=10,
+            ),
+        ]
+        stream = _AsyncIterator(events)
+        resp = await _consume_stream(
+            stream,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- test double for AsyncResponseStream
+            pricing=_DEFAULT_PRICING,
+            on_text=None,
+        )
+
+        tcs = _resp_tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze(
+            {"query": "attention is all you need"}
+        )
+        assert (
+            "OpenAI Responses tool arguments were an empty JSON object" in caplog.text
+        )
+        assert (
+            "OpenAI Responses tool arguments differed between delta and done"
+            in caplog.text
+        )
+        assert "source=delta" in caplog.text
+        assert "tool=papersearch" in caplog.text
+        assert "call_id=call_abc" in caplog.text
+
+    @pytest.mark.anyio
     async def test_tool_call_extraction_logs_empty_arguments(
         self,
         caplog: pytest.LogCaptureFixture,
