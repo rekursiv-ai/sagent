@@ -163,16 +163,16 @@ class Read:
         directive = get_directive(msg)
         file_path = str(directive.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
-        offset = directive.get("offset")
-        limit = directive.get("limit")
-        last_lines = directive.get("last_lines")
-        if isinstance(last_lines, int) and last_lines > 0:
+        offset = int_val(directive.get("offset"), 0)
+        limit = int_val(directive.get("limit"), 0)
+        last_lines = int_val(directive.get("last_lines"), 0)
+        if last_lines > 0:
             suffix = f":last-{last_lines}"
-        elif isinstance(offset, int) and isinstance(limit, int):
+        elif offset > 0 and limit > 0:
             suffix = f":{offset}-{offset + limit}"
-        elif isinstance(offset, int):
+        elif offset > 0:
             suffix = f":{offset}+"
-        elif isinstance(limit, int):
+        elif limit > 0:
             suffix = f":1-{limit}"
         else:
             suffix = ""
