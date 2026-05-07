@@ -701,36 +701,6 @@ class Agent:
             if ledger_token is not None:
                 cost_ledger_var.reset(ledger_token)
 
-    def _emit(self, event: Message) -> None:
-        """Put an event on the streaming queue (no-op outside ``run``)."""
-        if self._events is not None:
-            self._events.put_nowait(event)
-
-    def _finish_run(self) -> None:
-        """Post-run cleanup called by ``RunHandle`` after the task completes."""
-        self.inflight = None
-        self._active = False
-        loop = asyncio.get_running_loop()
-        self._last_elapsed = loop.time() - self._request_start_time
-        self._total_active_elapsed_seconds += self._last_elapsed
-        # Children record their local call; only the root snapshots the shared subtree ledger.
-        if self._active_cost_ledger is not None:
-            self._last_model_tokens = self._active_cost_ledger.tokens
-            self._last_run_cost_usd = self._active_cost_ledger.total_cost_usd
-            self._cost_tracker.fold(
-                snapshot_cost_usd=self._tracker_snap_cost_usd,
-                snapshot_tokens=self._tracker_snap_tokens,
-                run_ledger=self._active_cost_ledger,
-            )
-            self._active_cost_ledger = None
-        else:
-            self._last_model_tokens = TokenCount(
-                input_tokens=self._cost_tracker.last_request.input_tokens,
-                output_tokens=self._cost_tracker.call_output_tokens,
-            )
-            self._last_run_cost_usd = self._cost_tracker.total_cost_usd
-        self._events = None
-
     async def _send_impl(
         self,
         directive: JSON,
@@ -819,6 +789,36 @@ class Agent:
             )
         finally:
             self._save_session()
+
+    def _emit(self, event: Message) -> None:
+        """Put an event on the streaming queue (no-op outside ``run``)."""
+        if self._events is not None:
+            self._events.put_nowait(event)
+
+    def _finish_run(self) -> None:
+        """Post-run cleanup called by ``RunHandle`` after the task completes."""
+        self.inflight = None
+        self._active = False
+        loop = asyncio.get_running_loop()
+        self._last_elapsed = loop.time() - self._request_start_time
+        self._total_active_elapsed_seconds += self._last_elapsed
+        # Children record their local call; only the root snapshots the shared subtree ledger.
+        if self._active_cost_ledger is not None:
+            self._last_model_tokens = self._active_cost_ledger.tokens
+            self._last_run_cost_usd = self._active_cost_ledger.total_cost_usd
+            self._cost_tracker.fold(
+                snapshot_cost_usd=self._tracker_snap_cost_usd,
+                snapshot_tokens=self._tracker_snap_tokens,
+                run_ledger=self._active_cost_ledger,
+            )
+            self._active_cost_ledger = None
+        else:
+            self._last_model_tokens = TokenCount(
+                input_tokens=self._cost_tracker.last_request.input_tokens,
+                output_tokens=self._cost_tracker.call_output_tokens,
+            )
+            self._last_run_cost_usd = self._cost_tracker.total_cost_usd
+        self._events = None
 
     # -- Request helpers ----------------------------------------------
 
