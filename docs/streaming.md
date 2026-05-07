@@ -75,7 +75,7 @@ EOF
 
 ## Continuous agents
 
-`Agent.run_continuous(events=queue)` is for long-lived surfaces such as REPLs and chat adapters. It drains `agent.inbox`, joins queued strings into a prompt, calls `run()`, and waits for more inbox items. It exits only on Sagent's quit sentinel.
+`Agent.run_forever(events=queue)` is for long-lived surfaces such as REPLs and chat adapters. It drains `agent.inbox`, joins queued strings into a prompt, calls `run()`, and waits for more inbox items. It exits only on Sagent's quit sentinel.
 
 `AgentSend`, background task completion, and host UIs all communicate through the same inbox path.
 

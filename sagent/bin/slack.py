@@ -627,7 +627,7 @@ class SlackAdapter:
             e: asyncio.Queue[Message | None] = events,
         ) -> None:
             try:
-                async for event in c.run_continuous():
+                async for event in c.run_forever():
                     e.put_nowait(event)
             finally:
                 agent_registry.pop(c.name, None)

@@ -50,7 +50,7 @@ async def run_repl(
 
     Architecture:
     - ``_pump`` feeds ``PromptSession`` input into ``agent.inbox``.
-    - ``agent.run_continuous`` owns the request loop, reading from
+    - ``agent.run_forever`` owns the request loop, reading from
       ``agent.inbox`` between model requests.
     - The render loop in this coroutine streams events from both tasks
       above the live prompt via ``patch_stdout``.
@@ -99,7 +99,7 @@ async def run_repl(
             a: Agent,
             q: asyncio.Queue[Message | None],
         ) -> None:
-            async for event in a.run_continuous():
+            async for event in a.run_forever():
                 q.put_nowait(event)
 
         pump = asyncio.create_task(_pump(agent, session, console, events))

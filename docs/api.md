@@ -79,7 +79,7 @@ events: asyncio.Queue[Message | None] = asyncio.Queue()
 result = await agent.run(json_freeze({"prompt": "Do the task"}), events=events)
 ```
 
-`run_continuous(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL and Slack service use this shape for long-lived agents.
+`run_forever(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL and Slack service use this shape for long-lived agents.
 
 The inbox is the coordination point for REPL input, background tool completion, and peer-agent messages. Prefer putting text into the inbox over mutating history directly.
 
