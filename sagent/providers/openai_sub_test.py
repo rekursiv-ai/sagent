@@ -5,6 +5,7 @@ from typing import Any, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import base64
+import io
 import json
 import time
 
@@ -657,6 +658,55 @@ class TestLoadSave:
             OpenAISubscription.load(path=Path("/nonexistent/auth.json"))
 
 
+class TestLogin:
+    def test_manual_uses_pasted_redirect_url(self) -> None:
+        access_token = _make_jwt(
+            claims={
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "acct-manual",
+                    "chatgpt_plan_type": "plus",
+                }
+            },
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "access_token": access_token,
+            "refresh_token": "new-rt",
+            "expires_in": 3600,
+        }
+        mock_http = MagicMock()
+        mock_http.post.return_value = mock_resp
+        mock_http.__enter__ = MagicMock(return_value=mock_http)
+        mock_http.__exit__ = MagicMock(return_value=False)
+        redirect_url = (
+            "http://127.0.0.1:1455/auth/callback?code=manual-code&state=state"
+        )
+
+        with (
+            patch(
+                "sagent.providers.openai_sub.httpx.Client",
+                return_value=mock_http,
+            ),
+            patch(
+                "sagent.providers.openai_sub.secrets.token_urlsafe",
+                return_value="state",
+            ),
+            patch(
+                "sagent.providers.openai_sub.AuthCodeListener",
+            ) as mock_listener,
+            patch("builtins.input", return_value=redirect_url),
+            patch.object(OpenAISubscription, "save") as mock_save,
+        ):
+            OpenAISubscription.login(output=io.StringIO(), manual=True)
+
+        mock_listener.assert_not_called()
+        mock_save.assert_called_once()
+        body = mock_http.post.call_args.kwargs["data"]
+        assert body["code"] == "manual-code"
+        assert body["redirect_uri"] == "http://127.0.0.1:1455/auth/callback"
+
+
 class TestOpenAIAccountRouting:
     def test_save_default_writes_legacy_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -719,9 +769,10 @@ class TestOpenAIAccountRouting:
         assert os_.OpenAISubscription.load(account="work")["account_id"] == "acct-work"
 
 
-def _make_jwt(*, exp: float = 9e9) -> str:
+def _make_jwt(*, exp: float = 9e9, claims: dict[str, object] | None = None) -> str:
     header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=")
-    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=")
+    payload_data = {"exp": exp, **(claims or {})}
+    payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=")
     return f"{header.decode()}.{payload.decode()}.sig"
 
 
