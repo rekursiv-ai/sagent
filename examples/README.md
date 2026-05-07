@@ -8,7 +8,8 @@ Install Sagent. `offline_custom_tool.py` needs no provider key. The other
 examples use the provider shown in their source:
 
 ```bash
-pip install sagent
+uv sync
+# Or: pip install sagent
 export GOOGLE_API_KEY=...
 ```
 
@@ -77,7 +78,8 @@ For HuggingFace models loaded locally through `transformers`, use
 `SelfHosted` instead:
 
 ```bash
-pip install "sagent[selfhosted]"
+uv sync --extra selfhosted
+# Or: pip install "sagent[selfhosted]"
 hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
 sagent --provider SelfHosted
 sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda

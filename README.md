@@ -97,6 +97,14 @@ Three pieces make Sagent distinctive:
 
 ## Install
 
+From a checkout:
+
+```bash
+uv sync
+```
+
+From PyPI:
+
 ```bash
 pip install sagent
 ```
@@ -177,10 +185,21 @@ See [Providers](docs/providers.md) for the provider matrix, inference rules, and
 
 ## Self-hosted models
 
-Install the local runtime extra and pass a HuggingFace repo ID or local snapshot path:
+Install the local runtime extra from a checkout:
+
+```bash
+uv sync --extra selfhosted
+```
+
+Or install it from PyPI:
 
 ```bash
 pip install "sagent[selfhosted]"
+```
+
+Then pass a HuggingFace repo ID or local snapshot path:
+
+```bash
 sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
 sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+bfloat16
 ```

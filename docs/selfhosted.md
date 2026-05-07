@@ -3,7 +3,13 @@
 Sagent can run HuggingFace causal LMs through the `SelfHosted` provider. The
 default public model is `Qwen/Qwen3.6-27B`, loaded through `transformers`.
 
-Install the optional local runtime dependencies:
+Install the optional local runtime dependencies from a checkout:
+
+```bash
+uv sync --extra selfhosted
+```
+
+Or install them from PyPI:
 
 ```bash
 pip install "sagent[selfhosted]"
@@ -43,14 +49,13 @@ Run Qwen 3.6 27B from the CLI:
 
 ```bash
 sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
-sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+bfloat16
 ```
 
 Test Qwen 3 0.6B on macbook:
 
 ```bash
-# To reduce memory: shorten response tokens, use shorter bare prompt, and load no tools
-sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 128  --max-tool-call-rounds 1 --tools none
+# To reduce memory: shorten response tokens, use shorter bare prompt, load no tools, use less effort
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 64  --max-tool-call-rounds 1 --tools none --effort none
 ```
 
 Note that on the first turn, the model might need extra warmup time (e.g., run compile).
