@@ -27,7 +27,11 @@ import subprocess
 from sagent.custom_types import Message, TextMessage
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import get_directive
-from sagent.tools.core import get_tool_state, run_sync
+from sagent.tools.core import (
+    get_tool_state,
+    load_tool_description,
+    run_sync,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -40,13 +44,7 @@ class PlayAudio:
 
     name: str = "PlayAudio"
     tool_id: str = "application/x-tool-playaudio"
-    description: str = (
-        "Play a WAV file on the user's speakers. Intended for short"
-        " notifications (end-of-task bell, attention-needed ping) -"
-        " not for long audio. Path may be absolute or relative to the"
-        " current working directory. Only .wav is supported; silently"
-        " no-ops on hosts with no audio subsystem (headless SSH, CI)."
-    )
+    description: str = load_tool_description("PlayAudio")
     supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {

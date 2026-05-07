@@ -26,8 +26,10 @@ from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
+    load_tool_description,
     run_sync,
 )
+from sagent.tools.input_errors import tool_input_error_text
 
 
 logger = logging.getLogger(__name__)
@@ -173,18 +175,7 @@ class Wiki:
 
     name: str = "Wiki"
     tool_id: str = "application/x-tool-wiki"
-    description: str = (
-        "Locate and query an llm-wiki (docs/llm-wiki/SPEC.md). "
-        "Operate only on an initialized llm-wiki with SCHEMA.md. "
-        "Do not use for ordinary repo docs, code search, planning, or discovery. "
-        "If locate fails once, do not retry unless the user creates or points to a "
-        "wiki. Operations:\n"
-        "  - 'locate' -> absolute path of the wiki root (by SCHEMA.md walk)\n"
-        "  - 'list' -> all page slugs under <root>/pages/\n"
-        "  - 'read_page' (slug required) -> read one page's markdown\n"
-        "  - 'read_index' -> contents of <root>/index.md\n"
-        "  - 'lint' -> deterministic broken-link + frontmatter check"
-    )
+    description: str = load_tool_description("Wiki")
     supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
@@ -283,7 +274,14 @@ class Wiki:
 
 def _read_page_op(root: Path, slug: str) -> str | Message:
     if not slug:
-        return TextMessage("'read_page' requires 'slug'.", "text/x-error")
+        return TextMessage(
+            tool_input_error_text(
+                "Wiki",
+                "operation='read_page' requires `slug`.",
+                required=("slug",),
+            ),
+            "text/x-error",
+        )
     if not valid_slug(slug):
         return TextMessage(f"Invalid page slug: {slug!r}", "text/x-error")
     content = read_page(root, slug)

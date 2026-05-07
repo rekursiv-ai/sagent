@@ -64,11 +64,13 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.dispatch import (
+    add_tool_input_batch_hint,
     conditional_rules_for_request,
     invoke_tool,
     is_request_read_only,
     tc_directive,
     tc_tool_id,
+    tool_call_label,
 )
 from sagent.agent.retry import (
     RateLimitError,
@@ -966,7 +968,7 @@ class Agent:
             if self._events is not None:
                 tid = tc_tool_id(req)
                 tool = self._tools.get(tid)
-                desc = tool.summary(req) if tool is not None else tid
+                desc = tool_call_label(tool, req)
                 self._live_model_response_chars += len(desc)
                 self._emit(TextMessage(desc, "text/x-tool-label"))
             directive = tc_directive(req)
@@ -991,6 +993,7 @@ class Agent:
             tool_names,
             self._replacement_state,
         )
+        tool_results = add_tool_input_batch_hint(tool_results)
         for raw_tr in tool_results:
             resolved = _wrap_errors_for_llm(raw_tr)
             self.messages.append(resolved)

@@ -226,6 +226,34 @@ class _MockTool:
         return TextMessage(str(text), "text/plain")
 
 
+class _StrictTool:
+    def __init__(self) -> None:
+        self.name = "strict"
+        self.tool_id = "application/x-tool-strict"
+        self.description = "requires a value arg"
+        self.supports_microcompaction = False
+        self.directive_schema: JSON = json_freeze(
+            {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            }
+        )
+
+    def summary(self, msg: Message) -> str:
+        del msg
+        return "Strict normal summary"
+
+    def prompt(self) -> str:
+        return ""
+
+    async def run(self, msg: Message) -> Message:
+        directive = get_directive(msg)
+        value = str(directive.get("value", ""))
+        return TextMessage(value, "text/plain")
+
+
 class _SleepTool:
     """Tool that sleeps and records start/end timestamps."""
 
@@ -329,32 +357,6 @@ class TestToolDispatch:
         model omits ``command`` for Bash) used to escape the dispatcher
         and terminate the session mid-request.
         """
-
-        class _StrictTool:
-            name = "strict"
-            tool_id = "application/x-tool-strict"
-            description = "requires a value arg"
-            supports_microcompaction = False
-            directive_schema: JSON = json_freeze(
-                {
-                    "type": "object",
-                    "properties": {"value": {"type": "string"}},
-                    "required": ["value"],
-                }
-            )
-
-            def summary(self, msg: Message) -> str:
-                del msg
-                return self.name
-
-            def prompt(self) -> str:
-                return ""
-
-            async def run(self, msg: Message) -> Message:
-                directive = get_directive(msg)
-                value = str(directive.get("value", ""))
-                return TextMessage(value, "text/plain")
-
         model = _MockModel(
             responses=[
                 ModelResponse(
@@ -404,6 +406,114 @@ class TestToolDispatch:
         )
         assert "InputValidationError" in result_text
         assert "`value` is missing" in result_text
+        assert "This tool call was not executed" in result_text
+        assert "Do not repeat the same empty or incomplete call" in result_text
+
+    @pytest.mark.anyio
+    async def test_malformed_tool_label_shows_missing_keys(self) -> None:
+        model = _MockModel(
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        tool_call_message("t1", "strict", json_freeze({})),
+                    ],
+                    stop_reason="model_tool_use",
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+                ModelResponse(text="Recovered.", input_tokens=20, output_tokens=10),
+            ],
+        )
+        agent = Agent(
+            name="test",
+            description="Test agent.",
+            model=model,
+            tools=[_StrictTool()],
+        )
+
+        events = [event async for event in agent.run(json_freeze({"prompt": "call"}))]
+
+        labels = [
+            str(e.content)
+            for e in events
+            if isinstance(e, TextMessage) and e.descriptor == "text/x-tool-label"
+        ]
+        assert "Invalid strict call: missing `value`" in labels
+        assert "Strict normal summary" not in labels
+
+    @pytest.mark.anyio
+    async def test_multiple_malformed_tool_calls_get_batch_hint(self) -> None:
+        model = _MockModel(
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        tool_call_message("t1", "strict", json_freeze({})),
+                        tool_call_message("t2", "strict", json_freeze({})),
+                    ],
+                    stop_reason="model_tool_use",
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+                ModelResponse(text="Recovered.", input_tokens=20, output_tokens=10),
+            ],
+        )
+        agent = Agent(
+            name="test",
+            description="Test agent.",
+            model=model,
+            tools=[_StrictTool()],
+        )
+
+        await agent.run(json_freeze({"prompt": "call strict twice"}))
+
+        second_request = model.requests[1]
+        result_text = "\n".join(
+            _tool_result_text(m)
+            for m in second_request.messages
+            if m.descriptor == "multipart/x-tool-result"
+        )
+        assert (
+            "Multiple tool calls in the previous response were malformed" in result_text
+        )
+        assert "continue with only valid calls" in result_text
+
+    @pytest.mark.anyio
+    async def test_unexpected_tool_input_key_becomes_validation_error(self) -> None:
+        model = _MockModel(
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        tool_call_message(
+                            "t1",
+                            "strict",
+                            json_freeze({"value": "ok", "extra": "bad"}),
+                        ),
+                    ],
+                    stop_reason="model_tool_use",
+                    input_tokens=10,
+                    output_tokens=5,
+                ),
+                ModelResponse(text="Recovered.", input_tokens=20, output_tokens=10),
+            ],
+        )
+        agent = Agent(
+            name="test",
+            description="Test agent.",
+            model=model,
+            tools=[_StrictTool()],
+        )
+
+        await agent.run(json_freeze({"prompt": "call strict with extra"}))
+
+        second_request = model.requests[1]
+        result_text = "\n".join(
+            _tool_result_text(m)
+            for m in second_request.messages
+            if m.descriptor == "multipart/x-tool-result"
+        )
+        assert "InputValidationError" in result_text
+        assert "Unexpected parameter `extra`" in result_text
+        assert "strict accepts: `value`" in result_text
 
     @pytest.mark.anyio
     async def test_max_tool_call_rounds(self) -> None:

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import base64
 import io
 import json
+import logging
 import time
 
 from openai.types.responses import (
@@ -560,6 +561,97 @@ class TestConsumeStream:
         assert resp.stop_reason == "model_tool_use"
 
     @pytest.mark.anyio
+    async def test_tool_call_extraction_uses_done_item_arguments(self) -> None:
+        events = [
+            _mock_output_item_done(
+                item_id="fc_1",
+                call_id="call_abc",
+                name="papersearch",
+                arguments='{"query": "attention is all you need"}',
+            ),
+            _mock_completed_event(
+                response_id="resp-3",
+                status="completed",
+                input_tokens=20,
+                output_tokens=10,
+            ),
+        ]
+        stream = _AsyncIterator(events)
+        resp = await _consume_stream(
+            stream,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- test double for AsyncResponseStream
+            pricing=_DEFAULT_PRICING,
+            on_text=None,
+        )
+
+        tcs = _resp_tool_calls(resp)
+        assert len(tcs) == 1
+        assert get_tool_name(tcs[0]) == "papersearch"
+        assert get_directive(tcs[0]) == json_freeze(
+            {"query": "attention is all you need"}
+        )
+
+    @pytest.mark.anyio
+    async def test_tool_call_extraction_falls_back_from_invalid_delta(self) -> None:
+        events = [
+            _mock_function_args_delta("fc_1", '{"query":'),
+            _mock_output_item_done(
+                item_id="fc_1",
+                call_id="call_abc",
+                name="papersearch",
+                arguments='{"query": "attention is all you need"}',
+            ),
+            _mock_completed_event(
+                response_id="resp-3",
+                status="completed",
+                input_tokens=20,
+                output_tokens=10,
+            ),
+        ]
+        stream = _AsyncIterator(events)
+        resp = await _consume_stream(
+            stream,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- test double for AsyncResponseStream
+            pricing=_DEFAULT_PRICING,
+            on_text=None,
+        )
+
+        tcs = _resp_tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze(
+            {"query": "attention is all you need"}
+        )
+
+    @pytest.mark.anyio
+    async def test_tool_call_extraction_logs_empty_arguments(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger=os_.logger.name)
+        events = [
+            _mock_output_item_done(
+                item_id="fc_1",
+                call_id="call_abc",
+                name="papersearch",
+            ),
+            _mock_completed_event(
+                response_id="resp-3",
+                status="completed",
+                input_tokens=20,
+                output_tokens=10,
+            ),
+        ]
+        stream = _AsyncIterator(events)
+        resp = await _consume_stream(
+            stream,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- test double for AsyncResponseStream
+            pricing=_DEFAULT_PRICING,
+            on_text=None,
+        )
+
+        tcs = _resp_tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze({})
+        assert "OpenAI Responses tool arguments were empty" in caplog.text
+        assert "tool=papersearch" in caplog.text
+        assert "call_id=call_abc" in caplog.text
+
+    @pytest.mark.anyio
     async def test_cost_calculation(self) -> None:
 
         events = [
@@ -803,12 +895,13 @@ def _mock_output_item_done(
     item_id: str,
     call_id: str,
     name: str,
+    arguments: str = "",
 ) -> Any:
     item = ResponseFunctionToolCall.model_construct(
         type="function_call",
         call_id=call_id,
         name=name,
-        arguments="",
+        arguments=arguments,
         id=item_id,
     )
     return ResponseOutputItemDoneEvent.model_construct(
