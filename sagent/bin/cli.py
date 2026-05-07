@@ -233,6 +233,14 @@ def parse_agent_args(
         ),
     )
     parser.add_argument(
+        "--manual",
+        action="store_true",
+        help=(
+            "For login: print an auth URL and paste the returned code instead"
+            " of waiting for a browser callback."
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="Model ID (default per provider). Append +1m / +200k to set window.",
@@ -564,32 +572,6 @@ def main() -> None:
 from sagent import providers  # noqa: E402
 
 
-def _add_login_subparser(parser: argparse.ArgumentParser) -> None:  # pyright: ignore[reportUnusedFunction] - used by tests; guarded for export
-    """Register the ``login`` subcommand on ``parser``."""
-    subparsers = parser.add_subparsers(dest="command", required=False)
-    login_p = subparsers.add_parser(
-        "login",
-        help=(
-            "Run the provider's OAuth login and save credentials to"
-            " the named account slot. Exits after saving."
-        ),
-    )
-    login_p.add_argument(
-        "--account",
-        default=None,
-        metavar="NAME",
-        help=(
-            "Credential account to save into. Omit for 'default' (the"
-            " legacy single-account file)."
-        ),
-    )
-    login_p.add_argument(
-        "--provider",
-        default="OpenAISubscription",
-        help="Provider class name (must implement ``login``).",
-    )
-
-
 def _do_login(args: argparse.Namespace) -> None:
     """Run the OAuth flow for ``args.provider`` and save under ``args.account``.
 
@@ -610,7 +592,7 @@ def _do_login(args: argparse.Namespace) -> None:
         sys.exit(1)
     account = args.account or "default"
     sys.stderr.write(f"[login] provider={args.provider} account={account!r}\n")
-    creds = login_fn(output=sys.stderr)
+    creds = login_fn(output=sys.stderr, account=args.account, manual=args.manual)
     save_fn(creds, account=args.account)
     sys.stderr.write(f"[login] saved credentials for account '{account}'.\n")
 
