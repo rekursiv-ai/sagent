@@ -314,6 +314,14 @@ def parse_agent_args(
         ),
     )
     parser.add_argument(
+        "--max-request-tokens",
+        dest="max_request_tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum request tokens for one model call. Default: model limit.",
+    )
+    parser.add_argument(
         "--max-response-tokens",
         dest="max_response_tokens",
         type=int,
@@ -556,6 +564,8 @@ def main() -> None:
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
     )
+    if args.max_request_tokens is not None:
+        agent.max_request_tokens = args.max_request_tokens
     if args.max_response_tokens is not None:
         agent.max_response_tokens = args.max_response_tokens
     agent.tool_state.additional_dirs = list(args.add_dir)

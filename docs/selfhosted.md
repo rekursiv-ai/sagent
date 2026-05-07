@@ -49,8 +49,11 @@ sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+bfloat16
 Test Qwen 3 0.6B on macbook:
 
 ```bash
-sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 128  --max-tool-call-rounds 1
+# To reduce memory: shorten response tokens, use shorter bare prompt, and load no tools
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 128  --max-tool-call-rounds 1 --tools none
 ```
+
+Note that on the first turn, the model might need extra warmup time (e.g., run compile).
 
 SelfHosted model specs are the HuggingFace repo ID or local path followed by
 `+` options in any order:
