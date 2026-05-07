@@ -32,8 +32,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal, overload, override
-from urllib.parse import urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
+import base64
 import gzip
 import http.client
 import io
@@ -270,6 +271,7 @@ def fetch(
     """
     if data is not None and json is not None:
         raise ValueError("'data' and 'json' are mutually exclusive.")
+    url, basic_auth = _split_userinfo(url)
     if params:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{urlencode(params)}"
@@ -287,6 +289,8 @@ def fetch(
         content_type=body_content_type,
         extra=headers,
     )
+    if basic_auth is not None:
+        merged.setdefault("Authorization", basic_auth)
     if cookies:
         merged["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
@@ -390,6 +394,32 @@ def _decompress(body: bytes, encoding: str) -> bytes:
     except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
         raise ValueError(f"Decompression failed ({enc}): {e}") from None
     raise ValueError(f"Unknown Content-Encoding: {enc!r}")
+
+
+def _split_userinfo(url: str) -> tuple[str, str | None]:
+    """Strip ``user:pass@`` from *url*; return cleaned URL plus Basic auth.
+
+    ``urllib.request`` does not extract userinfo: handing it
+    ``https://u:p@host/`` causes ``http.client`` to ``getaddrinfo()`` the
+    full ``u:p@host`` string as a hostname (``Errno -2``). Pre-strip the
+    userinfo and emit an ``Authorization: Basic`` header instead.
+
+    Args:
+      url: Fully-qualified URL, possibly with ``user:pass@`` userinfo.
+
+    Returns:
+      cleaned_url: URL with userinfo removed (unchanged if absent).
+      auth_header: ``Basic <b64>`` value, or ``None`` if no userinfo.
+
+    """
+    parsed = urlparse(url)
+    if not (parsed.username or parsed.password):
+        return url, None
+    user = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    creds = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    new_netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
+    return parsed._replace(netloc=new_netloc).geturl(), f"Basic {creds}"
 
 
 def _join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
