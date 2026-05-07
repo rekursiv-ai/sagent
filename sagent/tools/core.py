@@ -934,7 +934,7 @@ agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 class AgentLike(Protocol):
-    inbox: Deque[str]
+    inbox: Deque[Message]
 
 
 # Process-wide registry of live agents, keyed by label. Agents

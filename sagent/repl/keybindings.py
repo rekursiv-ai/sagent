@@ -9,6 +9,8 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
+from sagent.custom_types import TextMessage
+
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyPressEvent
@@ -57,15 +59,12 @@ def _kb_submit(agent: Agent | None, event: KeyPressEvent) -> None:
             buf.validate_and_handle()
             return
         if text == "/clear" or text.startswith("/clear "):
-            # Context-affecting slash commands must still flow through the
-            # Agent inbox. Agent._drain_inbox is the single place that mutates
-            # conversation history, so active input only prioritizes delivery.
-            agent.inbox.put_left(text)
+            agent.inbox.put_left(TextMessage(text[6:].strip(), "text/x-clear-request"))
             buf.append_to_history()
             buf.reset()
             return
         if text:
-            agent.inbox.put(text)
+            agent.inbox.put(TextMessage(text, "text/x-user-message"))
             buf.append_to_history()
             buf.reset()
         return
@@ -82,7 +81,11 @@ def _kb_up(agent: Agent | None, event: KeyPressEvent) -> None:
     if agent is not None and agent.inbox and not buf.text.strip():
         tail = agent.inbox.pop_tail()
         if tail is not None:
-            buf.text = tail
+            if tail.descriptor == "text/x-clear-request":
+                reason = str(tail.content)
+                buf.text = f"/clear {reason}" if reason else "/clear"
+            else:
+                buf.text = str(tail.content)
             buf.cursor_position = len(buf.text)
             return
     buf.history_backward(count=1)

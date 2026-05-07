@@ -36,7 +36,7 @@ def _msg(directive: JSON) -> Message:
 class _FakeAgent:
     def __init__(self, name: str = "fake") -> None:
         self.name = name
-        self.inbox: Deque[str] = Deque()
+        self.inbox: Deque[Message] = Deque()
 
 
 def _register(name: str) -> _FakeAgent:
@@ -112,8 +112,8 @@ class TestRun:
             assert "Delivered" in str(result.content)
             drained = target.inbox.drain()
             assert len(drained) == 1
-            assert "[from agent]:" in drained[0]
-            assert "stop editing foo.py" in drained[0]
+            assert "[from agent]:" in str(drained[0].content)
+            assert "stop editing foo.py" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -150,7 +150,7 @@ class TestRun:
         try:
             await t.run(_msg(json_freeze({"to": "Agent1", "content": "hey"})))
             drained = target.inbox.drain()
-            assert "[from Agent_0]:" in drained[0]
+            assert "[from Agent_0]:" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -176,8 +176,8 @@ class TestRun:
         _deliver(target, "agent", "wake up", 60)
         drained = target.inbox.drain()
         assert len(drained) == 1
-        assert "[from agent, 60s ago]:" in drained[0]
-        assert "wake up" in drained[0]
+        assert "[from agent, 60s ago]:" in str(drained[0].content)
+        assert "wake up" in str(drained[0].content)
 
     def test_deliver_callback_dead_agent(self) -> None:
         _deliver(object(), "agent", "hello", 10)
@@ -194,7 +194,7 @@ class TestRun:
             assert result.descriptor == "text/plain"
             drained = me.inbox.drain()
             assert len(drained) == 1
-            assert "[from agent]:" in drained[0]
+            assert "[from agent]:" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()

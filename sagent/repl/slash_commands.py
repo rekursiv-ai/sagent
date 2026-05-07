@@ -9,6 +9,7 @@ import shlex
 
 from rich.text import Text
 
+from sagent.custom_types import TextMessage
 from sagent.providers import build_provider, infer_provider
 
 
@@ -156,8 +157,7 @@ def handle_slash_login(agent: Agent, console: Console) -> None:
 def handle_slash_clear(agent: Agent, console: Console, args_str: str) -> bool:
     """Queue ``/clear`` for the Agent inbox drain."""
     reason = args_str.strip()
-    command = "/clear" if not reason else f"/clear {reason}"
-    agent.inbox.put_left(command)
+    agent.inbox.put_left(TextMessage(reason, "text/x-clear-request"))
     note = f" ({reason})" if reason else ""
     console.print(
         Text(

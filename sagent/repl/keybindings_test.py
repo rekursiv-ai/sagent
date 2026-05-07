@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+from sagent.custom_types import Message, TextMessage
 from sagent.lib.asyncio_collections import Deque
 from sagent.repl.keybindings import build_key_bindings
 
@@ -43,7 +44,7 @@ def _fake_event(buf: Any = None, app: Any = None) -> Any:
 def _idle_agent() -> Any:
     a = MagicMock()
     a.active = False
-    a.inbox = Deque[str]()
+    a.inbox = Deque[Message]()
     a.inflight = None
     return a
 
@@ -51,7 +52,7 @@ def _idle_agent() -> Any:
 def _active_agent() -> Any:
     a = MagicMock()
     a.active = True
-    a.inbox = Deque[str]()
+    a.inbox = Deque[Message]()
     a.tool_state = MagicMock()
     task = MagicMock()
     task.done.return_value = False
@@ -73,17 +74,20 @@ class TestKeyBindings:
         kb = build_key_bindings(agent)
         buf = _fake_buf("first msg")
         _kb_handler(kb, ("enter",))(_fake_event(buf))
-        assert agent.inbox.peek_tail() == "first msg"
+        tail = agent.inbox.peek_tail()
+        assert tail is not None
+        assert tail.content == "first msg"
         buf.reset.assert_called_once()
         buf.validate_and_handle.assert_not_called()
 
     def test_enter_appends_to_existing_queue(self) -> None:
         agent = _active_agent()
-        agent.inbox.put("prior")
+        agent.inbox.put(TextMessage("prior", "text/x-user-message"))
         kb = build_key_bindings(agent)
         buf = _fake_buf("more")
         _kb_handler(kb, ("enter",))(_fake_event(buf))
-        assert agent.inbox.drain() == ["prior", "more"]
+        drained = agent.inbox.drain()
+        assert [m.content for m in drained] == ["prior", "more"]
 
     def test_enter_empty_buffer_during_request_noop(self) -> None:
         agent = _active_agent()
@@ -99,7 +103,10 @@ class TestKeyBindings:
         kb = build_key_bindings(agent)
         buf = _fake_buf("/clear fresh start")
         _kb_handler(kb, ("enter",))(_fake_event(buf))
-        assert agent.inbox.drain() == ["/clear fresh start"]
+        drained = agent.inbox.drain()
+        assert len(drained) == 1
+        assert drained[0].content == "fresh start"
+        assert drained[0].descriptor == "text/x-clear-request"
         agent.tool_state.clear_requested.assert_not_called()
         buf.append_to_history.assert_called_once()
         buf.reset.assert_called_once()
@@ -127,7 +134,7 @@ class TestKeyBindings:
 
     def test_up_lifts_queue_when_empty(self) -> None:
         agent = _idle_agent()
-        agent.inbox.put("queued text")
+        agent.inbox.put(TextMessage("queued text", "text/x-user-message"))
         kb = build_key_bindings(agent)
         buf = _fake_buf("")
         _kb_handler(kb, ("up",))(_fake_event(buf))

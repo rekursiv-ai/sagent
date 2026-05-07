@@ -43,6 +43,8 @@ TextDescriptor = Literal[
     "text/x-signal-user-input",
     "text/x-signal-status-changed",
     "text/x-diff",
+    "text/x-clear-request",
+    "text/x-quit",
 ]
 
 ImageDescriptor = Literal[

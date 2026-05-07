@@ -872,7 +872,7 @@ class TestMidTurnInjection:
             model=model,
             tools=[_MockTool()],
         )
-        agent.inbox.put("by the way, also do Y")
+        agent.inbox.put(TextMessage("by the way, also do Y", "text/x-user-message"))
         await agent.run(json_freeze({"prompt": "do X"}))
 
         # Both the pre-queued item and the prompt flow through
@@ -934,7 +934,7 @@ class TestMidTurnInjection:
 
         async def _seeding_run(msg: Message) -> Message:
             result = await original_run(msg)
-            agent.inbox.put("hey also do Y")
+            agent.inbox.put(TextMessage("hey also do Y", "text/x-user-message"))
             return result
 
         tool.run = _seeding_run  # ty: ignore[invalid-assignment] -- test mock
@@ -970,7 +970,7 @@ class TestMidTurnInjection:
             ],
         )
         agent = Agent(name="test", description="x", model=model, tools=[_MockTool()])
-        agent.inbox.put("first nudge")
+        agent.inbox.put(TextMessage("first nudge", "text/x-user-message"))
         await agent.run(json_freeze({"prompt": "start"}))
 
         # Pre-queued item merged with prompt on first drain.
@@ -988,7 +988,7 @@ class TestMidTurnInjection:
             ],
         )
         agent = Agent(name="test", description="x", model=model, tools=[_MockTool()])
-        agent.inbox.put("something")
+        agent.inbox.put(TextMessage("something", "text/x-user-message"))
         await agent.run(json_freeze({"prompt": "hi"}))
         assert agent.inbox.empty()
 
@@ -2841,7 +2841,7 @@ class TestClearToolDrain:
             UserMessage(content="old context"),
             AssistantMessage(content="old response"),
         ]
-        agent.inbox.put_left("/clear slash clear")
+        agent.inbox.put_left(TextMessage("slash clear", "text/x-clear-request"))
 
         await agent.run(json_freeze({"prompt": "new question"}))
 
@@ -2875,7 +2875,7 @@ class TestClearToolDrain:
 
         async def _seeding_run(msg: Message) -> Message:
             result = await original_run(msg)
-            agent.inbox.put_left("/clear slash clear")
+            agent.inbox.put_left(TextMessage("slash clear", "text/x-clear-request"))
             return result
 
         tool.run = _seeding_run  # ty: ignore[invalid-assignment] -- test mock

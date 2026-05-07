@@ -489,7 +489,7 @@ class AgentSpawn:
                 if self.on_persistent_stop is not None:
                     self.on_persistent_stop(label)
 
-        child.inbox.put(prompt)
+        child.inbox.put(TextMessage(prompt, "text/x-user-message"))
         task = asyncio.create_task(_run())
         _persistent_tasks[label] = task
         agent_label_var.reset(agent_label_var_token)

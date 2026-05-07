@@ -23,8 +23,11 @@ def dynamic_prompt(agent: Agent) -> FormattedText:
     """
     parts: list[tuple[str, str]] = []
     tail = agent.inbox.peek_tail()
-    if tail:
-        parts.append(("class:queued", _collapse_prompt_preview(tail)))
+    if tail is not None:
+        preview_text = str(tail.content)
+        if tail.descriptor == "text/x-clear-request":
+            preview_text = f"/clear {preview_text}" if preview_text else "/clear"
+        parts.append(("class:queued", _collapse_prompt_preview(preview_text)))
         parts.append(("", "\n"))
     parts.append(("class:prompt", "> "))
     return FormattedText(parts)
