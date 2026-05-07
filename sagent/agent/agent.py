@@ -680,6 +680,7 @@ class Agent:
             self._emit(TextMessage("[interrupted]", "text/x-interrupted"))
             raise
         finally:
+            self._save_session()
             assert self._events is not None
             self._events.put_nowait(
                 JsonMessage(
@@ -716,79 +717,72 @@ class Agent:
         self._max_tokens_recoveries = 0
         self._messages = repair_dangling_tool_calls(self.messages)
         await self._maybe_drain_clear_request()
-        # Seed the inbox so the loop handles it uniformly.
         self.inbox.put(prompt)
 
-        request_iter = (
-            range(self._max_tool_call_rounds)
-            if self._max_tool_call_rounds is not None
-            else itertools.count()
-        )
-        try:
-            for request_num in request_iter:
-                self._drain_inbox(request_num)
-                if not self.messages:
-                    return TextMessage("", "text/plain")
-                system = await self._prepare_request()
-                response = await self._model_call(system)
-                tool_calls = self._log_response(response, request_num)
+        request_num = 0
+        while True:
+            if (
+                self._max_tool_call_rounds is not None
+                and request_num >= self._max_tool_call_rounds
+            ):
+                return TextMessage(
+                    f"Tool-call-round limit reached"
+                    f" ({self._max_tool_call_rounds} rounds)."
+                    f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]",
+                    "text/x-error",
+                )
+            self._drain_inbox(request_num)
+            if not self.messages:
+                return TextMessage("", "text/plain")
+            system = await self._prepare_request()
+            response = await self._model_call(system)
+            tool_calls = self._log_response(response, request_num)
+            request_num += 1
 
-                # -- Stop-reason guards --
-                if response.stop_reason == "model_refusal":
+            # -- Stop-reason guards --
+            if response.stop_reason == "model_refusal":
+                raise RuntimeError(
+                    "Model refused to respond (content filter or usage policy)."
+                )
+            if (
+                response.stop_reason not in BENIGN_STOP_REASONS
+                and response.stop_reason not in _RECOVERABLE_TRUNCATION
+            ):
+                raise ModelTerminationError(response)
+
+            # -- Truncation recovery --
+            if response.stop_reason in _RECOVERABLE_TRUNCATION and not tool_calls:
+                self._max_tokens_recoveries += 1
+                if self._max_tokens_recoveries > _MAX_TOKENS_RECOVERY_LIMIT:
                     raise RuntimeError(
-                        "Model refused to respond (content filter or usage policy)."
+                        response_text(response.content)
+                        + "\n\n[truncated: recovery attempts exhausted]"
                     )
-                if (
-                    response.stop_reason not in BENIGN_STOP_REASONS
-                    and response.stop_reason not in _RECOVERABLE_TRUNCATION
-                ):
-                    raise ModelTerminationError(response)
+                self.messages.append(
+                    TextMessage(
+                        _MAX_TOKENS_RECOVERY_NUDGE,
+                        "text/x-user-message",
+                    ),
+                )
+                continue
+            if response.stop_reason not in _RECOVERABLE_TRUNCATION:
+                self._max_tokens_recoveries = 0
 
-                # -- Truncation recovery --
-                if response.stop_reason in _RECOVERABLE_TRUNCATION and not tool_calls:
-                    self._max_tokens_recoveries += 1
-                    if self._max_tokens_recoveries > _MAX_TOKENS_RECOVERY_LIMIT:
-                        raise RuntimeError(
-                            response_text(response.content)
-                            + "\n\n[truncated: recovery attempts exhausted]"
-                        )
-                    self.messages.append(
-                        TextMessage(_MAX_TOKENS_RECOVERY_NUDGE, "text/x-user-message"),
-                    )
-                    continue
-                if response.stop_reason not in _RECOVERABLE_TRUNCATION:
-                    self._max_tokens_recoveries = 0
-
-                if tool_calls:
-                    self._num_tool_call_rounds += 1
-                    self._publish_stats()
-
-                # -- No tool calls: end or continue --
-                if not tool_calls:
-                    if self.inbox:
-                        # Model responded with no tool calls, but the inbox
-                        # has pending items (background jobs, agent sends,
-                        # delayed messages). Continue the loop -- drain the
-                        # inbox and make another model request instead of
-                        # returning and forcing a new run().
-                        continue
-                    return TextMessage(response_text(response.content), "text/plain")
-
-                # -- Tool dispatch --
+            # -- Tool dispatch --
+            if tool_calls:
+                self._num_tool_call_rounds += 1
+                self._publish_stats()
                 await self._run_tools(tool_calls)
                 if not self.messages:
                     return TextMessage("", "text/plain")
+                continue
 
-            return TextMessage(
-                (
-                    f"Tool-call-round limit reached"
-                    f" ({self._max_tool_call_rounds} rounds)."
-                    f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]"
-                ),
-                "text/x-error",
-            )
-        finally:
-            self._save_session()
+            # -- Done unless inbox has pending work --
+            if not self.inbox:
+                return TextMessage(
+                    response_text(response.content),
+                    "text/plain",
+                )
 
     def _emit(self, event: Message) -> None:
         """Put an event on the streaming queue (no-op outside ``run``)."""
