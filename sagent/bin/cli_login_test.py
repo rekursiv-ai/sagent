@@ -57,6 +57,12 @@ class TestLoginSubcommand:
         _, remaining = _parse_cli_args(parser, ["login"])
         assert remaining == ["login"]
 
+    def test_parses_login_manual(self) -> None:
+        parser = argparse.ArgumentParser()
+        ns, remaining = _parse_cli_args(parser, ["login", "--manual"])
+        assert remaining == ["login"]
+        assert ns.manual is True
+
     def test_login_invokes_save(self) -> None:
         fake_creds = {
             "access_token": "t",
@@ -83,7 +89,35 @@ class TestLoginSubcommand:
             mock.login.return_value = fake_creds
             main()
         mock.login.assert_called_once()
+        assert mock.login.call_args.kwargs["account"] == "work"
+        assert mock.login.call_args.kwargs["manual"] is False
         mock.save.assert_called_once_with(fake_creds, account="work")
+
+    def test_login_forwards_manual(self) -> None:
+        fake_creds = {
+            "access_token": "t",
+            "refresh_token": "r",
+            "account_id": "acct",
+            "expires_at": 0.0,
+        }
+        with (
+            patch(
+                "sagent.providers.OpenAISubscription",
+            ) as mock,
+            patch(
+                "sys.argv",
+                [
+                    "cli.py",
+                    "login",
+                    "--provider",
+                    "OpenAISubscription",
+                    "--manual",
+                ],
+            ),
+        ):
+            mock.login.return_value = fake_creds
+            main()
+        assert mock.login.call_args.kwargs["manual"] is True
 
     def test_login_rejects_provider_without_login(self) -> None:
         # ``OpenAI`` is the API-key class without a ``login`` classmethod;

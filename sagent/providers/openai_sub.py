@@ -116,6 +116,7 @@ from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credentials_path,
+    parse_manual_auth_code,
     pkce_pair,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -140,6 +141,7 @@ _SCOPES = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
 _REFRESH_BUFFER_SEC = 300.0
+_CALLBACK_PORT = 1455
 
 _EFFORT_PREFIXES = ("o", "gpt-5")
 
@@ -245,6 +247,7 @@ class OpenAISubscription(OpenAI):
         *,
         listener_timeout_sec: float = 300.0,
         account: str | None = None,
+        manual: bool = False,
     ) -> OpenAISubscription.Credentials:
         """Perform interactive OAuth login via browser PKCE flow.
 
@@ -253,6 +256,8 @@ class OpenAISubscription(OpenAI):
           listener_timeout_sec: Seconds to wait for the browser callback.
           account: Named credential slot. ``None`` writes to the legacy
             ``~/.codex/auth.json`` path.
+          manual: Print a URL and prompt for a pasted code without waiting for
+            a browser callback.
 
         Returns:
           creds: Fresh OAuth credentials.
@@ -265,16 +270,19 @@ class OpenAISubscription(OpenAI):
         verifier, challenge = pkce_pair()
         state = secrets.token_urlsafe(32)
 
-        listener = AuthCodeListener(
-            state,
-            port=1455,
-            callback_path="/auth/callback",
-        )
-        try:
-            listener.start()
-            redirect_uri = listener.redirect_uri
-        except OSError as e:
-            raise RuntimeError(f"Failed to start callback listener: {e}") from e
+        listener: AuthCodeListener | None = None
+        redirect_uri = f"http://127.0.0.1:{_CALLBACK_PORT}/auth/callback"
+        if not manual:
+            listener = AuthCodeListener(
+                state,
+                port=_CALLBACK_PORT,
+                callback_path="/auth/callback",
+            )
+            try:
+                listener.start()
+                redirect_uri = listener.redirect_uri
+            except OSError as e:
+                raise RuntimeError(f"Failed to start callback listener: {e}") from e
 
         url = (
             f"{_AUTHORIZE_URL}"
@@ -298,10 +306,16 @@ class OpenAISubscription(OpenAI):
         )
         out.flush()
 
-        try:
-            auth_code = listener.wait(listener_timeout_sec)
-        finally:
-            listener.stop()
+        if listener is None:
+            auth_code = parse_manual_auth_code(
+                input("Paste the authorization code or redirected URL here: "),
+                state,
+            )
+        else:
+            try:
+                auth_code = listener.wait(listener_timeout_sec)
+            finally:
+                listener.stop()
 
         with httpx.Client() as http:
             r = http.post(

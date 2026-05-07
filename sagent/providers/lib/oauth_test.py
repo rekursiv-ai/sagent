@@ -15,6 +15,7 @@ import pytest
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credentials_path,
+    parse_manual_auth_code,
     pkce_pair,
     resolve_account,
 )
@@ -117,6 +118,26 @@ class TestAuthCodeListener:
             assert listener.wait(timeout_sec=2.0) == "OK"
         finally:
             listener.stop()
+
+
+class TestParseManualAuthCode:
+    def test_raw_code(self) -> None:
+        assert parse_manual_auth_code(" AUTH_CODE ", "state") == "AUTH_CODE"
+
+    def test_code_state_fragment(self) -> None:
+        assert parse_manual_auth_code("AUTH_CODE#state", "state") == "AUTH_CODE"
+
+    def test_full_redirect_url(self) -> None:
+        url = "http://127.0.0.1:1455/auth/callback?code=AUTH_CODE&state=state"
+        assert parse_manual_auth_code(url, "state") == "AUTH_CODE"
+
+    def test_state_mismatch_rejected(self) -> None:
+        with pytest.raises(ValueError, match="State mismatch"):
+            parse_manual_auth_code("AUTH_CODE#wrong", "state")
+
+    def test_missing_code_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Authorization code not found"):
+            parse_manual_auth_code("https://example.test/callback?state=state", "state")
 
 
 def _get(url: str) -> bytes:

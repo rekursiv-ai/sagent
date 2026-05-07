@@ -75,6 +75,40 @@ def credentials_path(default_path: Path, account: str | None) -> Path:
     return default_path.with_stem(f"{default_path.stem}-{name}")
 
 
+def parse_manual_auth_code(value: str, expected_state: str) -> str:
+    """Extract an OAuth code from pasted manual-login input.
+
+    Args:
+      value: Raw terminal paste. Accepts a code, ``code#state``, or a full
+        redirect URL containing ``code`` and ``state`` query parameters.
+      expected_state: State originally sent in the authorization URL.
+
+    Returns:
+      code: Authorization code to exchange.
+
+    Raises:
+      ValueError: If no code is present or a pasted state does not match.
+
+    """
+    text = value.strip()
+    parsed = urllib.parse.urlparse(text)
+    code = ""
+    state = ""
+    if parsed.scheme and parsed.netloc:
+        params = urllib.parse.parse_qs(parsed.query)
+        code = (params.get("code") or [""])[0]
+        state = (params.get("state") or [""])[0]
+    else:
+        code, sep, state = text.partition("#")
+        if not sep:
+            state = ""
+    if not code:
+        raise ValueError("Authorization code not found")
+    if state and state != expected_state:
+        raise ValueError("State mismatch in pasted authorization code")
+    return code
+
+
 class AuthCodeServer(http_server.HTTPServer):
     """HTTPServer carrying a reference to the owning listener.
 
