@@ -559,7 +559,7 @@ class Agent:
             return self._tracker_snap_tokens + self._active_cost_ledger.tokens
         return self._cost_tracker.total
 
-    async def run_continuous(
+    async def run_forever(
         self,
     ) -> AsyncGenerator[Message | None, None]:
         """Run continuously: read prompts from inbox, process prompts, repeat.
@@ -576,7 +576,8 @@ class Agent:
         while True:
             items = await self.inbox.get_all()
             if QUIT_SENTINEL in items:
-                break
+                self._save_session()
+                return
             prompt = "\n\n".join(items)
             handle = self.run(json_freeze({"prompt": prompt}))
             try:
@@ -586,13 +587,14 @@ class Agent:
             except asyncio.CancelledError:
                 pass
             except (RateLimitError, RetriesExhaustedError) as e:
-                logger.warning("run_continuous: %s", e)
+                logger.warning("run_forever: %s", e)
                 yield TextMessage(str(e), "text/x-error")
             except Exception as e:  # noqa: BLE001 -- REPL safety net for unexpected errors
-                logger.debug("run_continuous: run raised", exc_info=True)
+                logger.debug("run_forever: run raised", exc_info=True)
                 yield TextMessage(f"⚠ {type(e).__name__}: {e}", "text/x-error")
             yield None
-        self._save_session()
+
+    # -- Tool interface ----------------------------------------
 
     def summary(self, msg: Message) -> str:
         """Return a help description for this agent.
@@ -615,8 +617,6 @@ class Agent:
 
         """
         return ""
-
-    # -- Tool interface ----------------------------------------
 
     def run(self, directive: JSON) -> RunHandle:
         """Run the agent on a prompt.
@@ -851,26 +851,11 @@ class Agent:
 
     async def _model_call(self, system: str) -> ModelResponse:
         """Build request, send with retry, account tokens."""
-        raw_tools: list[Tool] = list(self._tools.values())
-        known_tools: list[Tool] | None = None
-        if raw_tools:
-            known_tools = (
-                cast(
-                    list[Tool],
-                    [
-                        t
-                        if t.tool_id == "application/x-tool-backgroundtask"
-                        else BackgroundAwareTool(t)
-                        for t in raw_tools
-                    ],
-                )
-                if self._has_background_support
-                else raw_tools
-            )
-        request = ModelRequest(
-            messages=list(self.messages),
+        request = _build_model_request(
+            messages=self.messages,
             system=system,
-            tools=known_tools,
+            tools=list(self._tools.values()),
+            has_background_support=self._has_background_support,
             max_response_tokens=self.max_response_tokens,
             thinking=self.thinking,
             effort=self.effort,
@@ -887,23 +872,11 @@ class Agent:
             response = await self._send_with_context_recovery(request, on_text)
         except asyncio.CancelledError:
             chars_this_call = self._live_model_response_chars - chars_before
-            estimated_input = _estimate_total_tokens(
-                system, request.messages, self.model
-            )
-            estimated_output = (
-                max(1, chars_this_call // 4) if chars_this_call > 0 else 0
-            )
-            p = self.model.pricing
-            estimated_cost = (
-                estimated_input * p.request + estimated_output * p.response
-            ) / 1_000_000
-            partial = ModelResponse(
-                content=TextMessage("", "text/plain"),
-                tokens=TokenCount(
-                    input_tokens=estimated_input,
-                    output_tokens=estimated_output,
-                ),
-                total_cost=estimated_cost,
+            partial = _estimate_cancelled_response(
+                system,
+                request.messages,
+                self.model,
+                chars_this_call,
             )
             with contextlib.suppress(RuntimeError):
                 self._account_response(partial)
@@ -1094,8 +1067,8 @@ class Agent:
             stripped = item.strip()
             if stripped == "/clear" or stripped.startswith("/clear "):
                 self._clear_context(stripped[6:].strip())
-                continue
-            kept.append(item)
+            else:
+                kept.append(item)
         if not kept:
             return
         text = "\n\n".join(kept)
@@ -1127,10 +1100,9 @@ class Agent:
             logger.debug("Tool %s raised", get_tool_name(req), exc_info=True)
             error_text = f"{type(e).__name__}: {e}"
             self._emit(TextMessage(error_text, "text/x-error"))
-            qid = get_queue_id(req)
             return MultipartMessage(
                 (
-                    TextMessage(qid, "text/x-queue-id"),
+                    TextMessage(get_queue_id(req), "text/x-queue-id"),
                     TextMessage(error_text, "text/x-error"),
                 ),
                 "multipart/x-tool-result",
@@ -1214,12 +1186,7 @@ class Agent:
         await self._do_compact()
 
     def _publish_stats(self) -> None:
-        """Refresh ``tool_state.stats`` so the Diagnostics tool sees current data.
-
-        Called once per model request after the model response is logged. Cheap -
-        just dict assignment. The Diagnostics tool dict-copies it so
-        mutations post-read can't corrupt a prior snapshot.
-        """
+        """Refresh ``tool_state.stats`` so the Diagnostics tool sees current data."""
         c = self._cost_tracker
         self.tool_state.stats = {
             "num_tool_call_rounds": self._num_tool_call_rounds,
@@ -1794,3 +1761,64 @@ def _postprocess_results(
             }
         )
     return results, log_entries
+
+
+def _build_model_request(
+    *,
+    messages: list[Message],
+    system: str,
+    tools: list[Tool],
+    has_background_support: bool,
+    max_response_tokens: int,
+    thinking: str | None,
+    effort: str | None,
+    cache_ttl: str,
+) -> ModelRequest:
+    """Assemble a ``ModelRequest`` from agent state."""
+    known_tools: list[Tool] | None = None
+    if tools:
+        known_tools = (
+            cast(
+                list[Tool],
+                [
+                    t
+                    if t.tool_id == "application/x-tool-backgroundtask"
+                    else BackgroundAwareTool(t)
+                    for t in tools
+                ],
+            )
+            if has_background_support
+            else tools
+        )
+    return ModelRequest(
+        messages=list(messages),
+        system=system,
+        tools=known_tools,
+        max_response_tokens=max_response_tokens,
+        thinking=thinking,
+        effort=effort,
+        cache_ttl=cache_ttl,
+    )
+
+
+def _estimate_cancelled_response(
+    system: str,
+    messages: list[Message],
+    model: Model,
+    chars_streamed: int,
+) -> ModelResponse:
+    """Build an estimated ``ModelResponse`` for a cancelled request."""
+    estimated_input = _estimate_total_tokens(system, messages, model)
+    estimated_output = max(1, chars_streamed // 4) if chars_streamed > 0 else 0
+    p = model.pricing
+    estimated_cost = (
+        estimated_input * p.request + estimated_output * p.response
+    ) / 1_000_000
+    return ModelResponse(
+        content=TextMessage("", "text/plain"),
+        tokens=TokenCount(
+            input_tokens=estimated_input,
+            output_tokens=estimated_output,
+        ),
+        total_cost=estimated_cost,
+    )

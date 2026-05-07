@@ -49,7 +49,7 @@ def _make_agent(
     wrapper.messages = []
     wrapper.total_cost_usd = 0.0
 
-    async def _run_continuous() -> AsyncGenerator[Message | None, None]:
+    async def _run_forever() -> AsyncGenerator[Message | None, None]:
         nonlocal call_idx
         while True:
             prompt = await wrapper.inbox.get()
@@ -67,7 +67,7 @@ def _make_agent(
             if raise_exc is not None:
                 raise raise_exc
 
-    wrapper.run_continuous = _run_continuous
+    wrapper.run_forever = _run_forever
     return wrapper
 
 
@@ -102,14 +102,14 @@ def _simple_agent() -> Any:
     a.tool_state = MagicMock()
     a.total_cost_usd = 0.0
 
-    async def _run_continuous() -> AsyncGenerator[Message | None, None]:
+    async def _run_forever() -> AsyncGenerator[Message | None, None]:
         while True:
             prompt = await a.inbox.get()
             if prompt == QUIT_SENTINEL:
                 return
             yield None
 
-    a.run_continuous = _run_continuous
+    a.run_forever = _run_forever
     return a
 
 
@@ -468,7 +468,7 @@ class TestSlashModel:
                 received.append(prompt)
                 yield None
 
-        agent.run_continuous = _spy
+        agent.run_forever = _spy
         p1, p2 = _repl_ctx()
         with p1 as mock_cls, p2:
             mock_cls.return_value.prompt_async = _prompt_sequence(
@@ -517,7 +517,7 @@ class TestSlashClear:
             await received_event.wait()
             return "quit"
 
-        agent.run_continuous = _spy
+        agent.run_forever = _spy
         p1, p2 = _repl_ctx()
         with p1 as mock_cls, p2:
             mock_cls.return_value.prompt_async = _prompt

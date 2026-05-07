@@ -183,7 +183,7 @@ class AgentSpawn:
                     "type": "boolean",
                     "description": (
                         "Run the child as a persistent agent via"
-                        " run_continuous(). Returns immediately with"
+                        " run_forever(). Returns immediately with"
                         " the child's label. Send messages via"
                         " AgentSend; manage via BackgroundTask."
                     ),
@@ -454,7 +454,7 @@ class AgentSpawn:
         prompt: str,
         msg: Message,
     ) -> Message:
-        """Start a persistent child agent via ``run_continuous()``.
+        """Start a persistent child agent via ``run_forever()``.
 
         Registers the child in ``agent_registry`` and seeds its inbox
         with the initial prompt. Returns immediately with the label.
@@ -475,7 +475,7 @@ class AgentSpawn:
 
         async def _run() -> None:
             try:
-                async for event in child.run_continuous():
+                async for event in child.run_forever():
                     if on_msg is not None and event is not None:
                         try:
                             on_msg(event)
