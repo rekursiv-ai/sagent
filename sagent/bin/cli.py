@@ -50,7 +50,7 @@ import logging
 import os
 import sys
 
-from sagent import sessions, tools
+from sagent import providers, sessions, tools
 from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import Model, ModelSpec, Provider, Tool
@@ -567,9 +567,6 @@ def main() -> None:
                 output_format=args.output_format,
             )
         )
-
-
-from sagent import providers  # noqa: E402
 
 
 def _do_login(args: argparse.Namespace) -> None:
