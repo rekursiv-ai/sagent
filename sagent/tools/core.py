@@ -48,6 +48,7 @@ from sagent.tools.lib.bash import BashParseCache
 if TYPE_CHECKING:
     from sagent.agent import Agent
     from sagent.custom_types import ModelResponse
+    from sagent.tools.background_task import BackgroundTaskEntry
 
 
 logger = logging.getLogger(__name__)
@@ -951,6 +952,14 @@ agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 class AgentLike(Protocol):
     inbox: Deque[Message]
+    # Foreground spawned tasks (model calls, tool batches, subagent runs).
+    # Cancelled by ``/break`` and ``/abort``.
+    tasks: dict[int, asyncio.Task[None]]
+    # Long-running tasks: visible (user-scheduled bg tools) and hidden
+    # (REPL pump, daemons). ``BackgroundTaskEntry.hidden`` distinguishes.
+    # Survives ``/break`` and bare ``/abort``; ``/abort all`` cancels
+    # the visible ones.
+    background_tasks: dict[str, BackgroundTaskEntry]
 
 
 # Process-wide registry of live agents, keyed by label. Agents

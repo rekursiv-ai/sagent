@@ -39,12 +39,13 @@ from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import get_directive, tool_call_message
 from sagent.repl import (
     ConsolePrinter,
-    PromptInputHandler,
     PromptToolkitInputSource,
     RecordingPrinter,
     StubInputSource,
     repl_handler_set,
+    spawn_repl_pump,
 )
+from sagent.repl.slash import parse_slash
 from sagent.repl.toolbar import render_toolbar
 from sagent.testing import MockModelCaps
 
@@ -360,9 +361,8 @@ async def test_prompt_input_routes_user_text() -> None:
     source = StubInputSource(["hello", "world", None])
     model = _StreamingFakeModel([_model_response("ack")])
     agent = Agent(model=model, handlers=[])
-    agent.register(PromptInputHandler(source))
     agent.register(_Spy())
-    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    _ = spawn_repl_pump(agent, source)
     await asyncio.wait_for(agent.run_loop(), timeout=2.0)
     assert [m.content for m in captured] == ["hello", "world"]
 
@@ -398,9 +398,8 @@ async def test_prompt_input_routes_slash_commands() -> None:
     )
     model = _StreamingFakeModel([_model_response("ack")])
     agent = Agent(model=model, handlers=[])
-    agent.register(PromptInputHandler(source))
     agent.register(_Trace())
-    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    _ = spawn_repl_pump(agent, source)
     await asyncio.wait_for(agent.run_loop(), timeout=2.0)
     # /clear and /abort go put_left -- preempt anything queued. The
     # remaining slash + text inputs preserve typed order.
@@ -411,14 +410,79 @@ async def test_prompt_input_routes_slash_commands() -> None:
     assert ("text/x-user-message", "after") in seen
 
 
+def test_help_and_tasks_parse_to_inbox_actions() -> None:
+    """``/help`` and ``/tasks`` map to their respective request descriptors.
+
+    Both are exact-line matches; conversational mention falls through.
+    """
+    h = parse_slash("/help")
+    assert h is not None
+    assert h.descriptor == "text/x-help-request"
+
+    t = parse_slash("/tasks")
+    assert t is not None
+    assert t.descriptor == "text/x-tasks-request"
+
+    # ``/help <args>`` is not a command (parser is exact-match for these).
+    fall = parse_slash("/help me")
+    assert fall is not None
+    assert fall.descriptor == "text/x-error"
+
+
+def test_break_and_abort_parse_with_scope() -> None:
+    """``/break`` and ``/abort`` accept ``""``, ``<label>``, or ``"all"``.
+
+    The arg passes straight through as message content; the handler
+    interprets it.
+    """
+    bare = parse_slash("/abort")
+    assert bare is not None
+    assert bare.descriptor == "text/x-abort"
+    assert bare.content == ""
+
+    labelled = parse_slash("/abort coder-1")
+    assert labelled is not None
+    assert labelled.descriptor == "text/x-abort"
+    assert labelled.content == "coder-1"
+
+    all_ = parse_slash("/abort all")
+    assert all_ is not None
+    assert all_.descriptor == "text/x-abort"
+    assert all_.content == "all"
+
+    br = parse_slash("/break all")
+    assert br is not None
+    assert br.descriptor == "text/x-break"
+    assert br.content == "all"
+
+
+def test_clear_only_fires_on_exact_line() -> None:
+    """``/clear`` only matches an exact-line; conversational mention is not a command.
+
+    Regression: prior versions accepted ``/clear ARG`` too. Typing
+    ``"/clear should also wipe foo"`` then triggered the destructive
+    handler, mid-sentence, on a line that was talking *about* the
+    command. ``/clear`` takes no argument; any extra text means we
+    fall through to the unknown-command branch.
+    """
+    exact = parse_slash("/clear")
+    assert exact is not None
+    assert exact.descriptor == "text/x-clear-request"
+
+    conversational = parse_slash("/clear should clear context not logs")
+    assert conversational is not None
+    # Falls through to the catch-all unknown-command branch -- safer
+    # than firing a destructive command on a sentence.
+    assert conversational.descriptor == "text/x-error"
+
+
 @pytest.mark.asyncio
 async def test_quit_word_terminates_input_loop() -> None:
     """``/quit`` (slash-prefixed) maps to ``text/x-quit``."""
     source = StubInputSource(["hi", "/quit"])
     model = _StreamingFakeModel([_model_response("ack")])
     agent = Agent(model=model, handlers=[])
-    agent.register(PromptInputHandler(source))
-    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    _ = spawn_repl_pump(agent, source)
     await asyncio.wait_for(agent.run_loop(), timeout=2.0)
 
 
@@ -463,9 +527,8 @@ async def test_prompt_input_routes_slash_model() -> None:
     source = StubInputSource(["/model gpt-4", "/quit"])
     model = _StreamingFakeModel([_model_response("ack")])
     agent = Agent(model=model, handlers=[])
-    agent.register(PromptInputHandler(source))
     agent.register(_Trace())
-    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    _ = spawn_repl_pump(agent, source)
     await asyncio.wait_for(agent.run_loop(), timeout=2.0)
     assert seen == [("text/x-model-switch-request", "gpt-4")]
 
@@ -495,10 +558,9 @@ async def test_unknown_slash_does_not_reach_llm() -> None:
     source = StubInputSource(["/foo arg", "/quit"])
     model = _StreamingFakeModel([_model_response("ack")])
     agent = Agent(model=model, handlers=[])
-    agent.register(PromptInputHandler(source))
     agent.register(_SpyUser())
     agent.register(_SpyError())
-    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    _ = spawn_repl_pump(agent, source)
     await asyncio.wait_for(agent.run_loop(), timeout=2.0)
     assert user_messages == []
     assert len(errors) == 1

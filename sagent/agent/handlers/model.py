@@ -228,6 +228,9 @@ class ModelCallHandler(SpawnedHandler):
                 len(repaired) - len(agent.history),
             )
             agent.history[:] = repaired
+            # Repair inserted synthesized results mid-history; persist
+            # via clear barrier so the on-disk live view matches memory.
+            agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
         return ModelRequest(
             messages=list(agent.history),
             system=agent.system_prompt(),

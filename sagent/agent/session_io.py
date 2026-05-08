@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import re
+import time
 
 from sagent.agent.dispatch import tc_directive, tc_tool_id
 from sagent.custom_types import (
@@ -385,33 +386,52 @@ def rebuild_tool_state_from_messages(
 # -- Session persistence (called from Agent) -------------------------------
 
 
-def save_session(
+def append_session(
     path: Path,
-    meta: Mapping[str, object],
-    messages: list[Message],
-    event_log: list[dict[str, object]],
+    *,
+    meta: Mapping[str, object] | None = None,
+    messages_delta: list[Message] | None = None,
+    events: list[dict[str, object]] | None = None,
+    clear: bool = False,
 ) -> None:
-    """Atomically write a session.jsonl file.
+    """Append delta records to ``session.jsonl``.
+
+    The session file is append-only. Multiple ``kind: meta`` lines may
+    accumulate -- the loader takes the latest. Set ``clear=True`` to
+    write a ``kind: clear`` barrier first; the loader treats this as a
+    reset, dropping all prior messages from the live history view (file
+    bytes preserved for forensics). Use ``clear=True`` whenever history
+    was wholesale-replaced (``/clear``, compaction, uncompact, or repair
+    inserting messages mid-history).
 
     Args:
-      path: Destination file path.
-      meta: Session metadata dict (written as the first line).
-      messages: Conversation messages to persist.
-      event_log: Structured event entries to append.
+      path: Destination file path; created if missing.
+      meta: Optional session metadata dict (latest meta line wins on load).
+      messages_delta: Conversation messages to append (typically the
+          tail past ``Agent._persisted_idx``).
+      events: Structured event entries to append.
+      clear: True to emit a ``kind: clear`` barrier line before any
+          other records in this batch.
 
     """
-    with atomic_write(path) as f:
-        _ = f.write(json.dumps({"kind": "meta", **meta}) + "\n")
-        for msg in messages:
-            _ = f.write(json.dumps({"kind": "message", **msg.serialize()}) + "\n")
-        for entry in event_log:
-            _ = f.write(
-                json.dumps(
-                    {"kind": "event", **entry},
-                    default=str,
-                )
-                + "\n"
-            )
+    parts: list[str] = []
+    if clear:
+        parts.append(json.dumps({"kind": "clear", "_timestamp": time.time_ns()}))
+    if meta is not None:
+        parts.append(json.dumps({"kind": "meta", **meta}))
+    parts.extend(
+        json.dumps({"kind": "message", **msg.serialize()})
+        for msg in messages_delta or ()
+    )
+    parts.extend(
+        json.dumps({"kind": "event", **entry}, default=str) for entry in events or ()
+    )
+    if not parts:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for p in parts:
+            _ = f.write(p + "\n")
 
 
 def load_session(
@@ -454,6 +474,10 @@ def load_session(
                         meta = record
                     elif kind == "message":
                         messages.append(load_message(record))
+                    elif kind == "clear":
+                        # Barrier: drop all prior messages from the live
+                        # view. Bytes remain in the file for forensics.
+                        messages = []
                 except (json.JSONDecodeError, KeyError, TypeError):
                     logger.warning(
                         "Skipping corrupt session line %s in %s.",

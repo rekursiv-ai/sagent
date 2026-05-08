@@ -246,6 +246,9 @@ async def run_compaction(
     )
     agent.compaction_state.compact_count += 1
     agent.cost_tracker.last_request = TokenCount()
+    # History was wholesale-replaced; persist via clear barrier so the
+    # on-disk live view matches memory (prior bytes preserved).
+    agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
     return True
 
 

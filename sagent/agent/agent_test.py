@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import cast, override
 
 import asyncio
+import contextlib
+import time
 
 import pytest
 
@@ -16,6 +18,7 @@ from sagent.agent.handlers import (
     SpawnedHandler,
     core_handlers,
 )
+from sagent.agent.session_io import load_session
 from sagent.custom_types import (
     Message,
     ModelRequest,
@@ -31,6 +34,7 @@ from sagent.lib.message import (
     tool_call_message,
 )
 from sagent.testing import MockModelCaps
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import (
     ReadCacheEntry,
     current_agent_var,
@@ -184,6 +188,98 @@ async def test_streaming_chunks_post_to_inbox() -> None:
     agent = Agent(model=model, handlers=[*core_handlers(), _ChunkSpy()])
     _ = await agent.run(json_freeze({"prompt": "go"}))
     assert [str(m.content) for m in received] == ["hello ", "world"]
+
+
+@pytest.mark.asyncio
+async def test_run_done_envelope_includes_cost_usd() -> None:
+    """``Agent.run`` emits a ``cost_usd`` field in the done envelope.
+
+    The field carries the delta in subtree cost between handle creation
+    and completion, so subagent forwarders can show real per-child cost
+    instead of always-zero. For a root run with no inherited ledger the
+    delta comes from ``cost_tracker.total_cost_usd`` post-fold; for a
+    nested child it would come from the inherited ``cost_ledger_var``.
+    """
+    response = ModelResponse(
+        content=MultipartMessage(
+            (TextMessage("done", "text/plain"),),
+            "multipart/x-model-message",
+        ),
+        tokens=TokenCount(input_tokens=100, output_tokens=50),
+        total_cost=0.0042,
+        stop_reason="model_finished",
+    )
+    model = _FakeModel([response])
+    agent = Agent(model=model)
+    handle = agent.run(json_freeze({"prompt": "p"}))
+    seen_done = False
+    cost_seen = -1.0
+    async for event in handle:
+        if event.descriptor == "application/x-done":
+            seen_done = True
+            content = cast(dict[str, object], event.content)
+            cost_seen = float(cast(float, content.get("cost_usd", -1.0)))
+    _ = await handle
+    assert seen_done
+    # Cost is the per-call total_cost; only one call so delta == 0.0042.
+    assert cost_seen == pytest.approx(0.0042, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_streaming_thinking_renders_before_response_text() -> None:
+    """Thinking flushes before the first text chunk.
+
+    Anthropic's stream emits ``thinking_delta`` events before
+    ``text_delta``. ``ModelCallHandler`` accumulates thinking via the
+    ``on_thinking`` callback and emits a single ``text/x-thinking``
+    message into the inbox right before the first ``text/plain``
+    chunk so the renderer prints "∴ Thinking …" *above* the response
+    text rather than after it.
+    """
+    received: list[Message] = []
+
+    class _OrderSpy(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-thinking", "text/plain")
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            received.append(msg)
+
+    class _ThinkingThenTextFake(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            self.requests.append(request)
+            # Mirror Anthropic's wire order: all thinking_delta events
+            # arrive before any text_delta event.
+            if on_thinking is not None:
+                on_thinking("first ")
+                on_thinking("plan; ")
+            if on_text is not None:
+                on_text("answer ")
+                on_text("text")
+            resp = self._responses[0]
+            self._idx += 1
+            return resp
+
+    model = _ThinkingThenTextFake([_model_response("answer text")])
+    agent = Agent(model=model, handlers=[*core_handlers(), _OrderSpy()])
+    _ = await agent.run(json_freeze({"prompt": "go"}))
+    descriptors = [m.descriptor for m in received]
+    assert descriptors[0] == "text/x-thinking", descriptors
+    # Exactly one thinking message; the rest are text chunks.
+    assert descriptors.count("text/x-thinking") == 1, descriptors
+    # Thinking content was concatenated from all on_thinking calls.
+    thinking = next(m for m in received if m.descriptor == "text/x-thinking")
+    assert str(thinking.content) == "first plan; "
+    # Text chunks preserve order.
+    chunks = [str(m.content) for m in received if m.descriptor == "text/plain"]
+    assert chunks == ["answer ", "text"]
 
 
 @pytest.mark.asyncio
@@ -658,6 +754,223 @@ async def test_abort_handler_cancels_inflight_tasks() -> None:
     assert agent.tool_state.abort_event.is_set()
 
 
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_abort_does_not_cancel_hidden_background_tasks() -> None:
+    """``/abort`` must spare hidden background tasks.
+
+    The REPL input pump and similar long-running infrastructure spawn
+    into ``agent.background_tasks`` with ``hidden=True`` rather than
+    into ``agent.tasks``. That puts them outside ``AbortHandler``'s
+    reach -- if it could cancel them, ``/abort`` would deadlock the
+    terminal (no reader on stdin, raw mode never restored).
+
+    This test stages a hidden bg task plus a foreground spawned
+    handler; ``/abort`` must hit the foreground only.
+    """
+    interrupts: list[str] = []
+    started = asyncio.Event()
+
+    async def _pump_loop(agent: Agent) -> None:
+        del agent
+        started.set()
+        try:
+            _ = await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            interrupts.append("pump cancelled")
+            raise
+
+    class _Worker(SpawnedHandler):
+        descriptors: tuple[str, ...] = ("text/x-user-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent, msg
+            try:
+                _ = await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                interrupts.append("worker cancelled")
+                raise
+
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    agent.register(_Worker())
+    pump_task = asyncio.create_task(_pump_loop(agent))
+    agent.background_tasks["__pump__"] = BackgroundTaskEntry(
+        task=pump_task,
+        tool_name="test-pump",
+        queue_id="__pump__",
+        started=time.time(),
+        hidden=True,
+    )
+    agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    # Wait until the foreground worker is registered.
+    for _ in range(50):
+        if agent.tasks:
+            break
+        await asyncio.sleep(0)
+    agent.inbox.put_left(TextMessage("", "text/x-abort"))
+    # Worker should receive the cancel; pump must not.
+    for _ in range(50):
+        if "worker cancelled" in interrupts:
+            break
+        await asyncio.sleep(0)
+    agent.inbox.put_left(TextMessage("", "text/x-quit"))
+    await loop_task
+    # Pump survived /abort. Cleanup happens at test scope.
+    pump_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await pump_task
+    assert "worker cancelled" in interrupts
+    assert (
+        "pump cancelled" not in interrupts[: interrupts.index("worker cancelled") + 1]
+    )
+
+
+@pytest.mark.asyncio
+async def test_abort_drains_queued_messages_preserving_quit() -> None:
+    """``text/x-abort`` cancels in-flight AND clears queued work.
+
+    The ``text/x-quit`` sentinel survives so the dispatch loop still
+    terminates cleanly; everything else (queued user prompts, queued
+    slash actions, queued model-call triggers) is dropped.
+    """
+    started = asyncio.Event()
+
+    class _SlowSpawn(SpawnedHandler):
+        descriptors: tuple[str, ...] = ("text/x-user-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent, msg
+            started.set()
+            _ = await asyncio.Event().wait()
+
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    agent.register(_SlowSpawn())
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    # Queue work that should get dropped, plus a quit that must survive.
+    agent.inbox.put(TextMessage("queued1", "text/x-user-message"))
+    agent.inbox.put(TextMessage("queued2", "text/x-user-message"))
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    agent.inbox.put_left(TextMessage("", "text/x-abort"))
+    await loop_task
+    # Inbox should be empty (the quit got processed by the dispatch loop).
+    assert len(agent.inbox) == 0
+    # History should show only the first user message; the queued ones
+    # never reached HistoryHandler.
+    user_messages = [m for m in agent.history if m.descriptor == "text/x-user-message"]
+    assert [str(m.content) for m in user_messages] == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_break_cancels_step_preserves_queue() -> None:
+    """``/break`` (text/x-break) cancels the current step but leaves
+    queued messages alone -- the typed-ahead-correction case.
+    """
+    started = asyncio.Event()
+
+    class _SlowSpawn(SpawnedHandler):
+        descriptors: tuple[str, ...] = ("text/x-user-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent, msg
+            started.set()
+            _ = await asyncio.Event().wait()
+
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    agent.register(_SlowSpawn())
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    agent.inbox.put(TextMessage("queued", "text/x-user-message"))
+    agent.inbox.put_left(TextMessage("", "text/x-break"))
+    # Wait for the spawn to be cancelled.
+    for _ in range(50):
+        if not agent.tasks:
+            break
+        await asyncio.sleep(0)
+    # Queued message must survive (the whole point of /break).
+    assert any(
+        m.descriptor == "text/x-user-message" and str(m.content) == "queued"
+        for m in agent.inbox
+    )
+    agent.inbox.put_left(TextMessage("", "text/x-quit"))
+    await loop_task
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_abort_all_cancels_visible_background_tasks() -> None:
+    """``/abort all`` (or forwarded ``content="bg"``) cancels visible bg tasks
+    while leaving hidden infrastructure tasks alone.
+    """
+    visible_cancelled = asyncio.Event()
+    hidden_cancelled = asyncio.Event()
+
+    async def _visible_loop() -> Message:
+        try:
+            _ = await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            visible_cancelled.set()
+            raise
+        return TextMessage("never", "text/plain")
+
+    async def _hidden_loop() -> None:
+        try:
+            _ = await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            hidden_cancelled.set()
+            raise
+
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    visible_task = asyncio.create_task(_visible_loop())
+    hidden_task = asyncio.create_task(_hidden_loop())
+    agent.background_tasks["visible"] = BackgroundTaskEntry(
+        task=visible_task,
+        tool_name="bash",
+        queue_id="visible",
+        started=time.time(),
+    )
+    agent.background_tasks["hidden"] = BackgroundTaskEntry(
+        task=hidden_task,
+        tool_name="repl-pump",
+        queue_id="hidden",
+        started=time.time(),
+        hidden=True,
+    )
+    # Yield once so both tasks actually start running and reach their
+    # ``Event().wait()`` -- otherwise ``cancel()`` lands before the
+    # coroutines are scheduled and the ``except CancelledError``
+    # handler we assert on never runs.
+    await asyncio.sleep(0)
+    agent.inbox.put_left(TextMessage("bg", "text/x-abort"))
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    # Drain the visible task so its CancelledError handler runs and
+    # the event we assert on actually fires. The dispatch loop only
+    # called ``.cancel()``; the coroutine still needs a tick.
+    with contextlib.suppress(asyncio.CancelledError):
+        await visible_task
+    # Visible bg got cancelled; hidden survived.
+    assert visible_cancelled.is_set()
+    assert not hidden_cancelled.is_set()
+    assert "visible" not in agent.background_tasks
+    assert "hidden" in agent.background_tasks
+    # Cleanup.
+    hidden_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await hidden_task
+
+
 @pytest.mark.asyncio
 async def test_stats_handler_publishes_after_response() -> None:
     model = _FakeModel([_model_response("ok")])
@@ -696,6 +1009,50 @@ async def test_session_save_noop_without_session_dir() -> None:
         agent.run(json_freeze({"prompt": "p"})),
         timeout=2.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_clear_appends_barrier_preserves_log(tmp_path: Path) -> None:
+    """``/clear`` must not truncate ``session.jsonl``.
+
+    Regression for the accidental-/clear incident: typing ``/clear``
+    should append a ``kind: clear`` barrier line. Bytes preceding the
+    barrier remain on disk so the user can recover by deleting the
+    barrier line and restarting. The live history view (what gets
+    sent to the provider on the next request) starts after the most
+    recent barrier.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    model = _FakeModel([_model_response("first"), _model_response("second")])
+    agent = Agent(model=model, session_dir=session_dir)
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "before clear"})),
+        timeout=2.0,
+    )
+    session_file = session_dir / "session.jsonl"
+    bytes_before = session_file.read_text(encoding="utf-8")
+    assert "before clear" in bytes_before
+
+    agent.inbox.put(TextMessage("", "text/x-clear-request"))
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "after clear"})),
+        timeout=2.0,
+    )
+
+    bytes_after = session_file.read_text(encoding="utf-8")
+    # Forensic content preserved.
+    assert "before clear" in bytes_after
+    assert '"kind": "clear"' in bytes_after
+    assert "after clear" in bytes_after
+
+    # Live view (loader-applied barrier) drops everything pre-clear.
+    loaded = load_session(session_dir, {})
+    assert loaded is not None
+    _, messages = loaded
+    text_contents = [str(m.content) for m in messages]
+    assert not any("before clear" in t for t in text_contents)
+    assert any("after clear" in t for t in text_contents)
 
 
 @pytest.mark.real_sleep

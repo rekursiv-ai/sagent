@@ -54,7 +54,7 @@ import signal
 import sys
 
 from sagent import providers, sessions, tools
-from sagent.agent import QUIT_SENTINEL, Agent
+from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
     Model,
@@ -63,6 +63,7 @@ from sagent.custom_types import (
     TextMessage,
     Tool,
 )
+from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import json_freeze
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
@@ -518,11 +519,18 @@ async def _run_headless(
     input_format: str,
     output_format: str,
 ) -> None:
-    """Non-interactive execution for piped/scripted usage."""
+    """Non-interactive execution for piped/scripted usage.
+
+    Reads stdin via ``asyncio.to_thread`` so the asyncio event loop
+    keeps iterating while the read is blocked. Without this, an idle
+    stdin starves the SIGINT / SIGTERM handler installed by
+    :func:`_with_signals` and Ctrl+C can't unstick the process.
+    """
+    raw = await asyncio.to_thread(sys.stdin.read)
     if input_format == "stream-json":
         prompts: list[str] = []
-        for raw in sys.stdin:
-            line = raw.strip()
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
             if not line:
                 continue
             obj = json.loads(line)
@@ -531,7 +539,7 @@ async def _run_headless(
                 prompts.append(p)
         prompt = "\n\n".join(prompts)
     else:
-        prompt = sys.stdin.read().strip()
+        prompt = raw.strip()
     if not prompt:
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)

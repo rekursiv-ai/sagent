@@ -75,7 +75,6 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx
 
 from sagent.agent import Agent
-from sagent.agent.agent import QUIT_SENTINEL
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     parse_agent_args,
@@ -88,6 +87,7 @@ from sagent.custom_types import (
     TextMessage,
     is_message,
 )
+from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry

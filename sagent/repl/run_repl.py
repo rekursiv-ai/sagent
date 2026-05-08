@@ -1,10 +1,10 @@
 """``run_repl``: orchestrate an interactive REPL on top of ``agent``.
 
 Builds a prompt-toolkit session with ``FileHistory`` + ``AutoSuggest``
-+ bottom toolbar + multi-line input + custom keybindings, wires it to
-:class:`PromptInputHandler` plus :func:`repl_handler_set`, posts the
-bootstrap message, and calls ``agent.run_loop()``. Returns when the user
-types ``quit`` or sends EOF.
++ bottom toolbar + multi-line input + custom keybindings, spawns the
+REPL input pump as a hidden background task, registers
+:func:`repl_handler_set`, and calls ``agent.run_loop()``. Returns when
+the user types ``/quit`` or sends EOF.
 
 Important: the ``rich.Console`` is constructed INSIDE the
 ``patch_stdout`` context. ``patch_stdout`` swaps ``sys.stdout`` /
@@ -19,6 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import asyncio
+import contextlib
 import functools
 
 from prompt_toolkit import PromptSession
@@ -28,9 +30,8 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
-from sagent.custom_types import TextMessage
 from sagent.repl.console import ConsolePrinter
-from sagent.repl.input import PromptInputHandler
+from sagent.repl.input import REPL_PUMP_KEY, spawn_repl_pump
 from sagent.repl.keybindings import build_key_bindings
 from sagent.repl.prompt import (
     PromptToolkitInputSource,
@@ -55,11 +56,13 @@ async def run_repl(
 ) -> None:
     """Drive ``agent`` interactively until the user types ``/quit``.
 
-    Registers REPL handlers (input + render) on the supplied agent,
-    then runs the dispatch loop. The rich console is constructed
-    inside ``patch_stdout`` so its stderr reference picks up the
-    proxy that routes writes above the prompt. Resumed sessions are
-    replayed into scrollback before the prompt opens.
+    Registers render handlers, spawns the input pump as a hidden
+    background task, then runs the dispatch loop. The rich console is
+    constructed inside ``patch_stdout`` so its stderr reference picks
+    up the proxy that routes writes above the prompt. Resumed sessions
+    are replayed into scrollback before the prompt opens. On exit, the
+    pump task is cancelled and awaited so the terminal restores
+    cleanly even if the dispatch loop returned early.
 
     Args:
       agent: The agent to drive.
@@ -91,16 +94,24 @@ async def run_repl(
         printer = ConsolePrinter(console)
         for handler in repl_handler_set(printer):
             agent.register(handler)
-        agent.register(
-            PromptInputHandler(
-                PromptToolkitInputSource(session, agent=agent, console=console),
-                printer=printer,
-            ),
+        pump_task = spawn_repl_pump(
+            agent,
+            PromptToolkitInputSource(session, agent=agent, console=console),
+            printer=printer,
         )
         replay_messages(agent, console)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:
             printer.set_terminal_title(agent.name)
-        agent.inbox.put(TextMessage("", "text/x-bootstrap"))
-        await agent.run_loop()
+        try:
+            await agent.run_loop()
+        finally:
+            # Pump may still be blocked on stdin; cancel and let the
+            # OS reclaim the terminal. ``with contextlib.suppress``
+            # so a stray exception during shutdown doesn't mask the
+            # real reason the loop exited.
+            pump_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pump_task
+            _ = agent.background_tasks.pop(REPL_PUMP_KEY, None)
