@@ -29,42 +29,49 @@ An Agent combines four parts:
   fills. Optional; without one the agent runs until it hits the
   window limit.
 
-Inbox zero
-----------
-The agent loop pursues inbox zero: process everything, then go idle.
+Inbox spine
+-----------
+The agent IS its inbox: a per-agent deque of tagged Messages plus a
+handler registry. Every signal -- user input, model response, tool
+batch, abort, quit, status update -- is a ``Message`` routed through
+one dispatch loop to descriptor-keyed handlers.
 
 ::
 
     while True:
-        drain inbox -> inject as user messages
-        call LLM
-        if tool calls: dispatch, loop back to drain
-        if inbox empty and LLM done: go idle
+        msg = await inbox.get()
+        if msg.descriptor == "text/x-quit":
+            return
+        for h in handlers[msg.descriptor]:
+            await h.handle(agent, msg)
+        for h in wildcards:
+            await h.handle(agent, msg)
 
-The inbox is the ONLY entry point for user-message content. User
-prompts, background results, agent-to-agent messages -- all go
-through ``inbox.put()`` / ``inbox.put_left()``. There is ONE
-drain point (``_drain_inbox``) at the top of each loop iteration.
-No other code reads from the inbox or appends user messages to the
-message history.
+Empty deque + no in-flight spawned tasks = idle. There is no
+separate ``events`` queue, no flag-passing channel between tools and
+the loop -- the deque is the spine.
 
-Context-affecting slash commands are inbox messages too. For example,
-``/clear`` must be enqueued with ``put_left`` and interpreted by
-``_drain_inbox``; REPL/keybinding code must not clear messages or
-mutate context directly. REPL-local commands that do not touch model
-context, such as ``/model`` display/swap and ``/login``, may be handled
-by the surface before they enter the inbox.
-
-Priority is insertion order: user messages go to the front
+Priority is insertion order: urgent messages go to the front
 (``put_left``), everything else appends at the back.
 
-Two queues connect the Agent to its surface (REPL, Slackbot,
-parent agent):
+Handlers
+--------
+A :class:`Handler` declares ``descriptors: tuple[str, ...]`` and
+``spawn: bool``. The dispatch loop pops a message and runs every
+handler subscribed to its descriptor (then any wildcards
+``descriptors=()``). Inline handlers run on the loop. Spawned
+handlers run as ``asyncio.Task``s and post their results back as
+follow-up messages.
 
-- ``inbox`` (Deque[str]) -- inbound.
-- ``events`` (Queue[Message | None]) -- outbound. Every observable
-  side effect flows here as a typed Message. ``None`` = request
-  boundary.
+State ownership: each piece of mutable agent state has exactly one
+owning handler. ``HistoryHandler`` is the sole writer of
+``agent.history``; ``ActivityHandler`` owns ``agent.activity``;
+``ClearHandler`` owns the wipe transition. Other handlers post
+request messages.
+
+The standard handler set is :func:`agent.handlers.core_handlers`.
+Surface bundles like :func:`repl.repl_handler_set` add render
+handlers; tests register stubs for inspection.
 
 Message
 -------
@@ -115,8 +122,18 @@ result. That is the entire execution interface.
   ``None`` = no change (avoids cache invalidation).
 - ``help(msg) -> str`` -- human-readable invocation summary.
 
-An Agent is itself a Tool (``run`` takes a prompt, returns the
-final response), so agents compose recursively.
+Agent is **Tool-shaped but not Tool-conforming**: it has the
+metadata fields (``name``, ``description``, ``directive_schema``,
+``summary``, ``prompt``) but its ``run`` returns a streaming +
+awaitable :class:`RunHandle` rather than a flat ``Message``, and
+takes a JSON directive rather than a tool-call ``Message``. The
+real ``Tool`` that wraps an Agent for recursive composition is
+:class:`tools.AgentSpawn`: it constructs a child Agent from the
+parent's directive, drives it via ``child.run(...)``, forwards
+events to the parent's inbox, and returns the final ``Message``.
+
+In other words: agents compose recursively *via* ``AgentSpawn``,
+not by sticking an ``Agent`` instance into a ``tools=[...]`` list.
 
 Model contract
 --------------

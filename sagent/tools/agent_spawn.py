@@ -462,7 +462,7 @@ class AgentSpawn:
         child._persistent = True  # noqa: SLF001 -- cross-layer flag
         child.name = label
         if self._session_root_dir is not None:
-            child._session_dir = self._session_root_dir / label  # noqa: SLF001 -- cross-layer private attr
+            child.session_dir = self._session_root_dir / label
         agent_registry[label] = child
         agent_label_var_token = agent_label_var.set(label)
         parent_agent = current_agent_var.get()
@@ -702,9 +702,11 @@ class ChildStats:
 class _ChildForwarder:
     """Callable that wraps child events with a label and forwards them.
 
-    Holds a reference to the parent agent and reads ``._events`` lazily
-    at call time. Between parent ``run()`` calls ``._events`` is None
-    and events are silently dropped.
+    Posts ``multipart/x-child-event`` envelopes to the parent's
+    ``inbox``; the parent's :class:`RenderChildEvent` handler renders
+    them as labeled lines. Stripped down from v1 (which wrote into a
+    transient ``_events`` queue): the inbox spine handles delivery
+    semantics now.
     """
 
     __slots__ = ("_forward_set", "_label", "_parent_agent", "_stats")
@@ -723,10 +725,8 @@ class _ChildForwarder:
         self._label = label
 
     def _put(self, event: Message) -> None:
-        """Write to the parent's live queue, or no-op if between requests."""
-        q = self._parent_agent._events  # noqa: SLF001 -- cross-layer queue access
-        if q is not None:
-            q.put_nowait(event)
+        """Post the envelope onto the parent's inbox."""
+        self._parent_agent.inbox.put(event)
 
     def __call__(self, event: Message) -> None:
         if isinstance(event, JsonMessage) and event.descriptor == "application/x-done":

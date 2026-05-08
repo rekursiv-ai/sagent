@@ -566,10 +566,11 @@ class TestParallelDispatch:
             ],
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
-        t0 = time.monotonic()
         await agent.run(json_freeze({"prompt": "go"}))
-        elapsed = time.monotonic() - t0
-        assert elapsed < 0.15, f"expected concurrent dispatch, took {elapsed:.3f}s"
+        # Structural check: every tool started before any tool finished
+        # -- proves the gather actually ran them concurrently. No
+        # wall-clock bound: under parallel-test load (xdist -n 4) the
+        # dispatch overhead alone can spike past any tight threshold.
         assert len(tool.starts) == 3
         assert max(tool.starts) < min(tool.ends)
 
@@ -599,10 +600,8 @@ class TestParallelDispatch:
             ],
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
-        t0 = time.monotonic()
         await agent.run(json_freeze({"prompt": "go"}))
-        elapsed = time.monotonic() - t0
-        assert elapsed < 0.15, f"expected concurrent Bash dispatch, took {elapsed:.3f}s"
+        # Structural concurrency check (see sibling test for rationale).
         assert max(tool.starts) < min(tool.ends)
 
     @pytest.mark.anyio

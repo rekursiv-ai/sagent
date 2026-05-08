@@ -45,6 +45,22 @@ TextDescriptor = Literal[
     "text/x-diff",
     "text/x-clear-request",
     "text/x-quit",
+    # Inbox spine descriptors -- inbound signals.
+    "text/x-abort",
+    "text/x-compact-request",
+    "text/x-uncompact-request",
+    "text/x-model-switch-request",
+    "text/x-status-update",
+    # Inbox spine descriptors -- internal flow.
+    "text/x-model-call",
+    "text/x-stream-end",
+    "text/x-thinking-chunk",
+    "text/x-stream-tool-label",
+    "text/x-wait-idle",
+    "text/x-idle",
+    "text/x-compact-done",
+    "text/x-session-save-request",
+    "text/x-bootstrap",
 ]
 
 ImageDescriptor = Literal[
@@ -70,6 +86,11 @@ MultipartDescriptor = Literal[
     "multipart/x-tool-result",
     "multipart/x-child-event",
     "multipart/mixed",
+    # Inbox spine multipart envelopes -- carry inner Messages.
+    "multipart/x-tool-batch",
+    "multipart/x-tool-batch-result",
+    "multipart/x-background-completed",
+    "multipart/x-subagent-result",
 ]
 
 JsonDescriptor = Literal[

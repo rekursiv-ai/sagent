@@ -1,598 +1,556 @@
-"""Tests for repl.repl."""
+"""Tests for the v2 REPL handler bundle.
+
+Tests assert *occurrence counts* and *exact rendered output*, not
+"string in output". The earlier loose "in output" tests let three
+regressions through:
+
+- Response text rendered twice (streaming + final multipart).
+- Streaming chunks rendered with extra newlines per chunk.
+- User-bar prefix duplicated by prompt-toolkit echo.
+
+Tests below pin each behavior with explicit counts.
+"""
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from io import StringIO
-from typing import Any
-from unittest.mock import MagicMock, patch
+from collections.abc import Callable
+from typing import override
+from unittest.mock import AsyncMock, MagicMock
 
 import asyncio
+import io
 
 from rich.console import Console
 
 import pytest
 
-from sagent.agent import QUIT_SENTINEL
+from sagent.agent.agent import Agent
+from sagent.agent.handlers import InlineHandler, core_handlers
 from sagent.custom_types import (
-    JsonMessage,
     Message,
+    ModelRequest,
+    ModelResponse,
     ModelSpec,
     MultipartMessage,
     TextMessage,
+    TokenCount,
 )
-from sagent.lib.asyncio_collections import Deque
-from sagent.lib.json import json_freeze
-from sagent.repl.custom_types import RenderState
-from sagent.repl.handlers import render_batch
-from sagent.repl.repl import (
-    _flush_render_frame,
-    run_repl,
+from sagent.lib.json import JSON, json_freeze
+from sagent.lib.message import get_directive, tool_call_message
+from sagent.repl import (
+    ConsolePrinter,
+    PromptInputHandler,
+    PromptToolkitInputSource,
+    RecordingPrinter,
+    StubInputSource,
+    repl_handler_set,
 )
-from sagent.repl.slash_commands import (
-    handle_slash_clear,
-    handle_slash_model,
-)
+from sagent.repl.toolbar import render_toolbar
+from sagent.testing import MockModelCaps
 
 
-def _make_agent(
-    event_batches: list[list[Any]],
-    raise_exc: BaseException | None = None,
-) -> Any:
-    call_idx = 0
-    wrapper: Any = MagicMock()
-    wrapper.tool_state = MagicMock()
-    wrapper.inbox = Deque[Message]()
-    wrapper.active = False
-    wrapper.inflight = None
-    wrapper.title = ""
-    wrapper.messages = []
-    wrapper.total_cost_usd = 0.0
+class _StreamingFakeModel(MockModelCaps):
+    """Model that streams chunks via ``on_text`` then returns canned responses."""
 
-    async def _run_forever() -> AsyncGenerator[Message | None, None]:
-        nonlocal call_idx
-        while True:
-            prompt = await wrapper.inbox.get()
-            if prompt.descriptor == QUIT_SENTINEL:
-                return
-            if call_idx < len(event_batches):
-                for ev in event_batches[call_idx]:
-                    yield ev
-                yield JsonMessage(
-                    json_freeze({"input_tokens": 10, "output_tokens": 5}),
-                    "application/x-done",
-                )
-                yield None
-            call_idx += 1
-            if raise_exc is not None:
-                raise raise_exc
+    max_image_dim: int = 2000
 
-    wrapper.run_forever = _run_forever
-    return wrapper
+    def __init__(
+        self,
+        responses: list[ModelResponse],
+        *,
+        chunks: tuple[str, ...] = (),
+    ) -> None:
+        self._responses = responses
+        self._chunks = chunks
+        self._idx = 0
+        self.requests: list[ModelRequest] = []
 
+    @property
+    def max_request_tokens(self) -> int:
+        return 100_000
 
-def _prompt_sequence(*inputs: str | type[BaseException]) -> Any:
-    """prompt_async mock: yields inputs in order, then blocks forever."""
-    items: tuple[str | type[BaseException], ...] = inputs
-    idx = 0
-    hang = asyncio.Event()
+    @property
+    def model_id(self) -> str:
+        return "stream-fake"
 
-    async def _prompt(_prompt_text: str = "") -> str:
-        nonlocal idx
-        await asyncio.sleep(0)
-        if idx < len(items):
-            val = items[idx]
-            idx += 1
-            if isinstance(val, type):
-                raise val()
-            return val
-        await hang.wait()
-        return ""
+    def _next(self) -> ModelResponse:
+        idx = min(self._idx, len(self._responses) - 1)
+        self._idx += 1
+        return self._responses[idx]
 
-    return _prompt
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        return self._next()
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        self.requests.append(request)
+        if on_text is not None:
+            for chunk in self._chunks:
+                on_text(chunk)
+        return self._next()
 
 
-def _simple_agent() -> Any:
-    a: Any = MagicMock()
-    a.inbox = Deque[Message]()
-    a.active = False
-    a.inflight = None
-    a.title = ""
-    a.messages = []
-    a.tool_state = MagicMock()
-    a.total_cost_usd = 0.0
-
-    async def _run_forever() -> AsyncGenerator[Message | None, None]:
-        while True:
-            prompt = await a.inbox.get()
-            if prompt.descriptor == QUIT_SENTINEL:
-                return
-            yield None
-
-    a.run_forever = _run_forever
-    return a
-
-
-def _repl_ctx() -> Any:
-    return (
-        patch("sagent.repl.repl.PromptSession"),
-        patch("sagent.repl.repl.Console"),
+def _model_response(
+    text: str = "",
+    *,
+    tool_calls: list[Message] | None = None,
+) -> ModelResponse:
+    parts: list[Message] = []
+    if text:
+        parts.append(TextMessage(text, "text/plain"))
+    parts.extend(tool_calls or [])
+    return ModelResponse(
+        content=MultipartMessage(tuple(parts), "multipart/x-model-message"),
+        tokens=TokenCount(input_tokens=10, output_tokens=5),
+        stop_reason="model_finished" if not tool_calls else "model_tool_use",
     )
 
 
-def _render(events: list[Message]) -> tuple[RenderState, str, str]:
-    """Run render_batch and return (render_frame, stdout_text, stderr_text)."""
-    out_io = StringIO()
-    err_io = StringIO()
-    out = Console(file=out_io, width=80, force_terminal=False)
-    console = Console(file=err_io, width=80, force_terminal=False)
-    render_frame = RenderState(console=console, out=out)
-    render_batch(events, render_frame)
-    return render_frame, out_io.getvalue(), err_io.getvalue()
+class _EchoTool:
+    name = "echo"
+    tool_id = "application/x-tool-echo"
+    description = "Echoes input."
+    supports_microcompaction = False
+    directive_schema: JSON = json_freeze(
+        {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    )
+
+    def summary(self, msg: Message) -> str:
+        del msg
+        return self.name
+
+    def prompt(self) -> str:
+        return ""
+
+    async def run(self, msg: Message) -> Message:
+        directive = get_directive(msg)
+        return TextMessage(str(directive.get("text", "")), "text/plain")
 
 
-class TestRendering:
-    """Exercise render_batch event handling."""
+# -- User-bar render ---------------------------------------------------
 
-    def test_text_event_accumulated(self) -> None:
-        render_frame, _, _ = _render([TextMessage("Hello\n\n", "text/plain")])
-        assert "Hello" in render_frame.buf
 
-    def test_thinking_event_rendered(self) -> None:
-        _, out, _ = _render([TextMessage("Let me think...", "text/x-thinking")])
-        assert "Thinking" in out
+@pytest.mark.asyncio
+async def test_user_bar_renders_exactly_once_per_user_message() -> None:
+    """One ``text/x-user-message`` -> exactly one user-bar payload."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "hi"})),
+        timeout=2.0,
+    )
+    assert printer.user_bars == ["hi"]
 
-    def test_tool_call_rendered(self) -> None:
-        # Tool-call display events carry a string label (from tool.summary()).
-        tc = TextMessage("bash", "text/x-tool-label")
-        _, _, err = _render([tc])
-        assert "bash" in err
 
-    def test_error_tool_result_rendered(self) -> None:
-        tr = MultipartMessage(
-            (TextMessage("command failed", "text/x-error"),),
-            "multipart/x-tool-result",
-        )
-        _, _, err = _render([tr])
-        assert "✗" in err
+# -- Streaming render --------------------------------------------------
 
-    def test_bash_lint_hint_surfaces_on_error(self) -> None:
-        tr = MultipartMessage(
-            (
-                TextMessage("grep: no such file\n", "text/x-error"),
-                TextMessage(
-                    "grep via Bash is a bad UX. Use the Grep tool.",
-                    "text/x-hint-tool-use-nudge",
-                ),
+
+@pytest.mark.asyncio
+async def test_streaming_renders_paragraphs_as_markdown() -> None:
+    """Stable paragraph boundaries commit as ``write_markdown`` blocks."""
+    printer = RecordingPrinter()
+    # Two paragraphs trigger a stable-boundary commit during streaming;
+    # the second paragraph flushes on stream-end.
+    model = _StreamingFakeModel(
+        [_model_response("first para\n\nsecond para")],
+        chunks=("first para\n", "\nsecond ", "para"),
+    )
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    # Both paragraphs end up rendered as markdown.
+    rendered = printer.rendered_text
+    assert "first para" in rendered
+    assert "second para" in rendered
+
+
+@pytest.mark.asyncio
+async def test_buffer_only_response_renders_via_markdown() -> None:
+    """Buffer-only model (no ``on_text``) still renders the response."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel([_model_response("hello buffer")])
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert printer.rendered_text.strip() == "hello buffer"
+
+
+@pytest.mark.asyncio
+async def test_response_renders_only_via_streaming_path() -> None:
+    """The multipart/x-model-message itself does NOT trigger a render."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel(
+        [_model_response("hello world")],
+        chunks=("hello ", "world"),
+    )
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "say hi"})),
+        timeout=2.0,
+    )
+    # Only one render of the response text, not "hello world" twice.
+    rendered_count = printer.rendered_text.count("hello world")
+    assert rendered_count == 1
+
+
+# -- Tool result / tool label render -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_result_renders_errors_and_diffs_only() -> None:
+    """``RenderToolResult`` emits errors / diffs; plain text isn't user-facing."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel(
+        [
+            _model_response(
+                tool_calls=[
+                    tool_call_message("t1", "echo", json_freeze({"text": "ok"})),
+                ],
             ),
-            "multipart/x-tool-result",
+            _model_response("done"),
+        ],
+    )
+    agent = Agent(
+        model=model,
+        tools=[_EchoTool()],
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "use the tool"})),
+        timeout=2.0,
+    )
+    # Plain "ok" is in history (model sees it) but not user-rendered.
+    assert printer.tool_errors == []
+    assert printer.diffs == []
+
+
+# -- Activity tracker / toolbar ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_accumulates_elapsed_after_call() -> None:
+    """``ActivityHandler`` flips ``active`` and accumulates elapsed_seconds."""
+    model = _StreamingFakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    assert not agent.activity.active
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert not agent.activity.active
+    assert agent.activity.elapsed_seconds >= 0.0
+
+
+@pytest.mark.asyncio
+async def test_activity_tracker_counts_streaming_chars() -> None:
+    """Stream chunks accumulate ``live_response_chars`` while in flight."""
+    captured: list[int] = []
+
+    class _SpyChunks(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/plain",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del msg
+            captured.append(agent.activity.live_response_chars)
+
+    model = _StreamingFakeModel(
+        [_model_response("ab")],
+        chunks=("a", "b"),
+    )
+    agent = Agent(model=model)
+    agent.register(_SpyChunks())
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert captured == [1, 2]
+    assert agent.activity.live_response_chars == 0
+
+
+def test_render_toolbar_idle_returns_empty() -> None:
+    """Pristine agent with no run history -> empty toolbar."""
+
+    class _NopModel(MockModelCaps):
+        max_image_dim: int = 2000
+
+        @property
+        def max_request_tokens(self) -> int:
+            return 100_000
+
+        @property
+        def model_id(self) -> str:
+            return "nop"
+
+        async def buffer(self, request: ModelRequest) -> ModelResponse:
+            del request
+            raise RuntimeError("not used")
+
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del request, on_text
+            raise RuntimeError("not used")
+
+    agent = Agent(model=_NopModel(), handlers=[])
+    assert render_toolbar(agent) == ""
+
+
+@pytest.mark.asyncio
+async def test_render_toolbar_after_run_shows_bracket() -> None:
+    """After at least one model call, toolbar carries token + cost summary."""
+    model = _StreamingFakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    bar = render_toolbar(agent)
+    assert bar.startswith("[")
+    assert bar.endswith("]")
+    assert "$" in bar
+
+
+# -- Input handler routing ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_prompt_input_routes_user_text() -> None:
+    """Text lines become ``text/x-user-message`` posted to the inbox."""
+    captured: list[Message] = []
+
+    class _Spy(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-user-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            captured.append(msg)
+
+    source = StubInputSource(["hello", "world", None])
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, handlers=[])
+    agent.register(PromptInputHandler(source))
+    agent.register(_Spy())
+    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    assert [m.content for m in captured] == ["hello", "world"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_input_routes_slash_commands() -> None:
+    """``/clear``, ``/compact``, ``/uncompact``, ``/abort`` map cleanly."""
+    seen: list[tuple[str, str]] = []
+
+    class _Trace(InlineHandler):
+        descriptors: tuple[str, ...] = (
+            "text/x-clear-request",
+            "text/x-abort",
+            "text/x-compact-request",
+            "text/x-uncompact-request",
+            "text/x-user-message",
         )
-        _, _, err = _render([tr])
-        assert "✗" in err
-        assert "hint:" in err
 
-    def test_bash_lint_hint_surfaces(self) -> None:
-        tr = MultipartMessage(
-            (
-                TextMessage("stdout contents\n", "text/plain"),
-                TextMessage(
-                    "grep via Bash is a bad UX. Use the Grep tool.",
-                    "text/x-hint-tool-use-nudge",
-                ),
-            ),
-            "multipart/x-tool-result",
-        )
-        _, _, err = _render([tr])
-        assert "hint:" in err
-        assert "grep via Bash is a bad UX" in err
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            seen.append((msg.descriptor, str(msg.content)))
 
-    def test_no_phantom_hint_from_literal_in_content(self) -> None:
-        """Regression: literal ``[bash-lint]`` in content must not trigger hint."""
-        tr = MultipartMessage(
-            (
-                TextMessage(
-                    (
-                        "so its ``[bash-lint]`` feature can suggest"
-                        " dedicated replacements\n"
-                        "<system-reminder>\n[bash-lint] phony\n"
-                        "</system-reminder>\n"
-                    ),
-                    "text/plain",
-                ),
-            ),
-            "multipart/x-tool-result",
-        )
-        _, _, err = _render([tr])
-        assert "hint:" not in err
-        assert "phony" not in err
-
-    def test_text_tool_text_preserves_paragraph_break(self) -> None:
-        """Text before a tool call must not concatenate with text after it."""
-        events: list[Message] = [
-            TextMessage("Did you mean a different file?", "text/plain"),
-            TextMessage("Read", "text/x-tool-label"),
-            TextMessage("Read repl.py.", "text/plain"),
-        ]
-        _, out, err = _render(events)
-        rendered = out + err
-        assert "?Read" not in rendered
-        assert "Did you mean a different file?" in rendered
+    source = StubInputSource(
+        [
+            "/clear",
+            "/compact focus on bugs",
+            "/uncompact",
+            "after",
+            "/abort",
+            "/quit",
+        ],
+    )
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, handlers=[])
+    agent.register(PromptInputHandler(source))
+    agent.register(_Trace())
+    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    # /clear and /abort go put_left -- preempt anything queued. The
+    # remaining slash + text inputs preserve typed order.
+    assert ("text/x-abort", "") in seen
+    assert ("text/x-clear-request", "") in seen
+    assert ("text/x-compact-request", "focus on bugs") in seen
+    assert ("text/x-uncompact-request", "") in seen
+    assert ("text/x-user-message", "after") in seen
 
 
-class TestChildEventRendering:
-    """Exercise _handle_child_event via render_batch."""
-
-    def test_child_tool_label_renders_with_prefix(self) -> None:
-        event = MultipartMessage(
-            (
-                TextMessage("Agent_0", "text/plain"),
-                TextMessage("Bash ls", "text/x-tool-label"),
-            ),
-            "multipart/x-child-event",
-        )
-        _, _, err = _render([event])
-        assert "[Agent_0]" in err
-        assert "Bash ls" in err
-
-    def test_child_error_renders_red_with_prefix(self) -> None:
-        event = MultipartMessage(
-            (
-                TextMessage("Agent_0", "text/plain"),
-                MultipartMessage(
-                    (TextMessage("something broke", "text/x-error"),),
-                    "multipart/x-tool-result",
-                ),
-            ),
-            "multipart/x-child-event",
-        )
-        _, _, err = _render([event])
-        assert "[Agent_0]" in err
-        assert "something broke" in err
-
-    def test_child_done_renders_summary(self) -> None:
-        event = MultipartMessage(
-            (
-                TextMessage("Agent_0", "text/plain"),
-                JsonMessage(
-                    json_freeze(
-                        {"elapsed": 5.0, "model_response_tokens": 100, "cost_usd": 0.05}
-                    ),
-                    "application/x-child-done",
-                ),
-            ),
-            "multipart/x-child-event",
-        )
-        _, _, err = _render([event])
-        assert "[Agent_0]" in err
-        assert "done" in err
-        assert "5s" in err
-
-    def test_child_text_deltas_buffer_until_line_boundary(self) -> None:
-        events: list[Message] = [
-            MultipartMessage(
-                (
-                    TextMessage("Agent_0", "text/plain"),
-                    TextMessage("Depth ", "text/plain"),
-                ),
-                "multipart/x-child-event",
-            ),
-            MultipartMessage(
-                (
-                    TextMessage("Agent_0", "text/plain"),
-                    TextMessage("is set\n", "text/plain"),
-                ),
-                "multipart/x-child-event",
-            ),
-        ]
-        _, _, err = _render(events)
-        assert "[Agent_0] Depth is set" in err
-        assert "[Agent_0] Depth\n" not in err
-        assert "[Agent_0] is set" not in err
-
-    def test_parent_text_flushes_before_nested_child_event(self) -> None:
-        nested = MultipartMessage(
-            (
-                TextMessage("Agent_0_0", "text/plain"),
-                TextMessage("Bash ls", "text/x-tool-label"),
-            ),
-            "multipart/x-child-event",
-        )
-        events: list[Message] = [
-            MultipartMessage(
-                (
-                    TextMessage("Agent_0", "text/plain"),
-                    TextMessage("before nested", "text/plain"),
-                ),
-                "multipart/x-child-event",
-            ),
-            MultipartMessage(
-                (
-                    TextMessage("Agent_0", "text/plain"),
-                    nested,
-                ),
-                "multipart/x-child-event",
-            ),
-        ]
-        _, _, err = _render(events)
-        assert err.index("[Agent_0] before nested") < err.index("[Agent_0_0] Bash ls")
+@pytest.mark.asyncio
+async def test_quit_word_terminates_input_loop() -> None:
+    """``/quit`` (slash-prefixed) maps to ``text/x-quit``."""
+    source = StubInputSource(["hi", "/quit"])
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, handlers=[])
+    agent.register(PromptInputHandler(source))
+    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
 
 
-class TestRunRepl:
-    @pytest.mark.anyio
-    async def test_quit_command(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("quit")
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_exit_command(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("exit")
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_empty_input_skipped(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("", "  ", "quit")
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_eof_exits(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence(EOFError)
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_keyboard_interrupt_exits(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence(KeyboardInterrupt)
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_message_sent_to_agent(self) -> None:
-        agent = _make_agent([[TextMessage("ok\n\n", "text/plain")]])
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("hello", "quit")
-            await run_repl(agent, name="test")
-
-    @pytest.mark.anyio
-    async def test_agent_exception_handled(self) -> None:
-        agent = _make_agent([[]], raise_exc=RuntimeError("boom"))
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("x", "quit")
-            await run_repl(agent, name="test")
+@pytest.mark.asyncio
+async def test_slash_model_no_args_reports_current_spec() -> None:
+    """``ModelSwitchHandler`` with no args writes current spec to printer."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel([_model_response("ack")])
+    spec = ModelSpec(
+        provider="Anthropic",
+        auth="env",
+        model_id="stream-fake",
+        account=None,
+    )
+    agent = Agent(
+        model=model,
+        model_spec=spec,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    agent.inbox.put(TextMessage("", "text/x-model-switch-request"))
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    status_lines = [line for line in printer.lines if line.startswith("[/model]")]
+    assert len(status_lines) == 1
+    assert "provider=Anthropic" in status_lines[0]
+    assert "stream-fake" in status_lines[0]
 
 
-class TestRunReplQueueDiscard:
-    @pytest.mark.anyio
-    async def test_discards_queued_on_quit(self) -> None:
-        agent = _simple_agent()
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            session_mock = mock_cls.return_value
-            session_mock.prompt_async = _prompt_sequence("quit")
-            await run_repl(agent, name="test")
+@pytest.mark.asyncio
+async def test_prompt_input_routes_slash_model() -> None:
+    """``/model ARGS`` posts ``text/x-model-switch-request`` with args content."""
+    seen: list[tuple[str, str]] = []
+
+    class _Trace(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-model-switch-request",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            seen.append((msg.descriptor, str(msg.content)))
+
+    source = StubInputSource(["/model gpt-4", "/quit"])
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, handlers=[])
+    agent.register(PromptInputHandler(source))
+    agent.register(_Trace())
+    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    assert seen == [("text/x-model-switch-request", "gpt-4")]
 
 
-class TestSlashModel:
-    @pytest.mark.anyio
-    async def test_slash_model_swaps_provider(self) -> None:
-        agent = _simple_agent()
-        agent.model_spec = ModelSpec(
-            provider="Anthropic",
-            auth="env",
-            model_id="old-model",
-        )
-        agent.model = MagicMock(model_id="old-model")
-        p1, p2 = _repl_ctx()
-        with (
-            p1 as mock_cls,
-            p2,
-            patch("sagent.repl.slash_commands.build_provider") as mock_bp,
-        ):
-            mock_model = MagicMock(model_id="new-model")
-            mock_bp.return_value.model.return_value = mock_model
-            mock_cls.return_value.prompt_async = _prompt_sequence(
-                "/model --provider Google --auth env new-model",
-                "quit",
-            )
-            await run_repl(agent, name="test")
-        agent.swap_model.assert_called_once()
-        call_args = agent.swap_model.call_args
-        assert call_args.args[0] is mock_model
-        assert call_args.kwargs["spec"].provider == "Google"
-        assert call_args.kwargs["spec"].model_id == "new-model"
+@pytest.mark.asyncio
+async def test_unknown_slash_does_not_reach_llm() -> None:
+    """``/foo`` produces an error message, never a ``text/x-user-message``."""
+    user_messages: list[Message] = []
+    errors: list[Message] = []
 
-    @pytest.mark.anyio
-    def test_slash_model_no_args_prints_current_settings(self) -> None:
-        agent = _simple_agent()
-        agent.model_spec = ModelSpec(
-            provider="Anthropic",
-            auth="env",
-            model_id="old-model",
-            account="work",
-        )
-        err_io = StringIO()
-        console = Console(file=err_io, width=80, force_terminal=False)
+    class _SpyUser(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-user-message",)
 
-        assert handle_slash_model(agent, console, "") is True
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            user_messages.append(msg)
 
-        text = err_io.getvalue()
-        assert "provider=Anthropic" in text
-        assert "auth=env" in text
-        assert "model=old-model" in text
-        assert "account=work" in text
-        agent.swap_model.assert_not_called()
+    class _SpyError(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-error",)
 
-    @pytest.mark.anyio
-    async def test_slash_model_no_args_not_forwarded(self) -> None:
-        agent = _simple_agent()
-        agent.model_spec = ModelSpec(
-            provider="Anthropic",
-            auth="env",
-            model_id="old-model",
-        )
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence("/model", "quit")
-            await run_repl(agent, name="test")
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            errors.append(msg)
 
-    @pytest.mark.anyio
-    async def test_slash_model_not_forwarded_to_agent(self) -> None:
-        """A /model command must not enter the agent inbox."""
-        agent = _simple_agent()
-        agent.model_spec = ModelSpec(
-            provider="Anthropic",
-            auth="env",
-            model_id="m",
-        )
-        received: list[Message] = []
-
-        async def _spy() -> AsyncGenerator[Message | None, None]:
-            while True:
-                prompt = await agent.inbox.get()
-                if prompt.descriptor == QUIT_SENTINEL:
-                    return
-                received.append(prompt)
-                yield None
-
-        agent.run_forever = _spy
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt_sequence(
-                "/model",
-                "quit",
-            )
-            await run_repl(agent, name="test")
-        assert not received
+    source = StubInputSource(["/foo arg", "/quit"])
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, handlers=[])
+    agent.register(PromptInputHandler(source))
+    agent.register(_SpyUser())
+    agent.register(_SpyError())
+    agent.inbox.put(TextMessage("", "text/x-bootstrap"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    assert user_messages == []
+    assert len(errors) == 1
+    assert "unknown command: /foo" in str(errors[0].content)
 
 
-class TestSlashClear:
-    def test_slash_clear_queues_front_for_drain(self) -> None:
-        agent = _simple_agent()
-        agent.inbox.put(TextMessage("later", "text/x-user-message"))
-        err_io = StringIO()
-        console = Console(file=err_io, width=80, force_terminal=False)
-
-        assert handle_slash_clear(agent, console, " fresh start ") is True
-
-        drained = agent.inbox.drain()
-        assert len(drained) == 2
-        assert drained[0].content == "fresh start"
-        assert drained[0].descriptor == "text/x-clear-request"
-        assert drained[1].content == "later"
-        assert "[/clear]" in err_io.getvalue()
-        assert "fresh start" in err_io.getvalue()
-
-    @pytest.mark.anyio
-    async def test_slash_clear_goes_through_inbox(self) -> None:
-        agent = _simple_agent()
-        received: list[Message] = []
-        received_event = asyncio.Event()
-        sent_clear = False
-
-        async def _spy() -> AsyncGenerator[Message | None, None]:
-            while True:
-                prompt = await agent.inbox.get()
-                if prompt.descriptor == QUIT_SENTINEL:
-                    return
-                received.append(prompt)
-                received_event.set()
-                yield None
-
-        async def _prompt(_prompt_text: str = "") -> str:
-            nonlocal sent_clear
-            del _prompt_text
-            if not sent_clear:
-                sent_clear = True
-                return "/clear fresh start"
-            await received_event.wait()
-            return "quit"
-
-        agent.run_forever = _spy
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2:
-            mock_cls.return_value.prompt_async = _prompt
-            await run_repl(agent, name="test")
-        assert len(received) == 1
-        assert received[0].content == "fresh start"
-        assert received[0].descriptor == "text/x-clear-request"
+# -- ConsolePrinter integration ----------------------------------------
 
 
-class TestUserBarRendering:
-    """Verify user-input signal events produce a visible user bar."""
+@pytest.mark.asyncio
+async def test_console_printer_renders_user_bar_and_markdown() -> None:
+    """Real rich.Console output contains the user message + markdown response."""
+    buf = io.StringIO()
+    printer = ConsolePrinter(Console(file=buf, force_terminal=False, width=80))
+    model = _StreamingFakeModel([_model_response("hello world")])
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), *repl_handler_set(printer)],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "hi"})),
+        timeout=2.0,
+    )
+    output = buf.getvalue()
+    assert "> hi" in output
+    assert "hello world" in output
 
-    def test_signal_event_renders_user_bar(self) -> None:
-        """Basic: a text/x-signal-user-input event must render a user bar."""
-        _, out, _ = _render([TextMessage("status?", "text/x-signal-user-input")])
-        assert "status?" in out
 
-    def test_injected_event_renders_user_bar(self) -> None:
-        """Mid-request: a text/x-user-injected event must also render."""
-        _, out, _ = _render([TextMessage("hey", "text/x-user-injected")])
-        assert "hey" in out
+@pytest.mark.asyncio
+async def test_console_printer_writes_chunk_without_newline() -> None:
+    """``write_chunk`` does NOT add a newline (chunks coalesce)."""
+    buf = io.StringIO()
+    printer = ConsolePrinter(Console(file=buf, force_terminal=False, width=80))
+    printer.write_chunk("hello ")
+    printer.write_chunk("world")
+    output = buf.getvalue()
+    assert output == "hello world"
 
-    def test_signal_followed_by_agent_events(self) -> None:
-        """Signal event batched with agent response events."""
-        _, out, _ = _render(
-            [
-                TextMessage("status?", "text/x-signal-user-input"),
-                TextMessage("AgentSelf status=Reviewing", "text/x-tool-label"),
-                MultipartMessage(
-                    (TextMessage("ok", "text/plain"),),
-                    "multipart/x-tool-result",
-                ),
-                TextMessage("Here is the status.\n\n", "text/plain"),
-            ]
-        )
-        assert "status?" in out
 
-    def test_signal_followed_by_done(self) -> None:
-        """Signal + done in same batch -- user bar must survive flush."""
-        events: list[Message] = [
-            TextMessage("status?", "text/x-signal-user-input"),
-        ]
-        out_io = StringIO()
-        err_io = StringIO()
-        out = Console(file=out_io, width=80, force_terminal=False)
-        console = Console(file=err_io, width=80, force_terminal=False)
-        render_frame = RenderState(console=console, out=out)
-        render_batch(events, render_frame)
-        _flush_render_frame(render_frame)
-        assert "status?" in out_io.getvalue()
+@pytest.mark.asyncio
+async def test_prompt_toolkit_input_source_wraps_session() -> None:
+    """``PromptToolkitInputSource`` returns lines and ``None`` on EOF / quit."""
+    session = MagicMock()
+    session.prompt_async = AsyncMock(side_effect=["hello", "/quit"])
+    source = PromptToolkitInputSource(session)
+    assert await source.next_line() == "hello"
+    assert await source.next_line() is None  # "/quit" -> None
 
-    @pytest.mark.anyio
-    async def test_full_flow_user_bar_appears(self) -> None:
-        """End-to-end: pump puts signal, agent responds, user bar rendered."""
-        agent = _make_agent([[TextMessage("Done.\n\n", "text/plain")]])
-        p1, p2 = _repl_ctx()
-        with p1 as mock_cls, p2 as mock_console_cls:
-            out_io = StringIO()
-            mock_out = Console(file=out_io, width=80, force_terminal=False)
-            err_io = StringIO()
-            mock_console = Console(file=err_io, width=80, force_terminal=False)
-            mock_console_cls.side_effect = [
-                mock_console,  # console = Console(stderr=True)
-                mock_out,  # out = Console(force_terminal=True)
-            ]
-            mock_cls.return_value.prompt_async = _prompt_sequence("status?", "quit")
-            await run_repl(agent, name="test")
-        rendered = out_io.getvalue()
-        assert "status?" in rendered, (
-            f"User bar missing from output. Got:\n{rendered!r}"
-        )
+    session_eof = MagicMock()
+    session_eof.prompt_async = AsyncMock(side_effect=EOFError())
+    source_eof = PromptToolkitInputSource(session_eof)
+    assert await source_eof.next_line() is None
+
+
+# -- Test entry --------------------------------------------------------
 
 
 if __name__ == "__main__":
