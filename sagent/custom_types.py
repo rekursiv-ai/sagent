@@ -672,7 +672,7 @@ class ContextBudget:
             max_request_tokens=inp,
             max_response_tokens=out,
             chars_per_token=cpt,
-            buffer_tokens=max(inp // 15, out, 8_000),
+            buffer_tokens=max(inp // 15, 8_000),
             reattach_count=5,
             reattach_max_chars=cpt * max(inp // 40, 2_000),
             reattach_budget=cpt * max(inp // 4, 10_000),

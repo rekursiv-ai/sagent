@@ -286,6 +286,13 @@ class TestHappyPath:
         response = await _run_under_parent(parent, tool, prompt="hi")
         assert "child-output" in str(response.content)
 
+    @pytest.mark.anyio
+    async def test_summary_result_reports_child_output_line_count(self) -> None:
+        parent = _parent(model=_MockModel([_response("one\ntwo")]))
+        tool = AgentTool()
+        response = await _run_under_parent(parent, tool, prompt="hi")
+        assert tool.summary_result(response) == "2L"
+
 
 class TestInheritance:
     @pytest.mark.anyio
