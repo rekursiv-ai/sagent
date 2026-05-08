@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import asyncio
+
 import pytest
 
 from sagent.agent import Agent
@@ -20,6 +22,7 @@ from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON, json_freeze
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_send import AgentSend, _deliver
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import (
     agent_label_var,
     agent_registry,
@@ -37,6 +40,8 @@ class _FakeAgent:
     def __init__(self, name: str = "fake") -> None:
         self.name = name
         self.inbox: Deque[Message] = Deque()
+        self.tasks: dict[int, asyncio.Task[None]] = {}
+        self.background_tasks: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(name: str) -> _FakeAgent:

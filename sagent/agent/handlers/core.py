@@ -33,6 +33,8 @@ from sagent.agent.handlers.tools import (
     ToolBatchResultHandler,
 )
 from sagent.custom_types import TextMessage, TokenCount
+from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.tools.core import agent_registry
 
 
 if TYPE_CHECKING:
@@ -101,8 +103,13 @@ class ClearHandler(InlineHandler):
     Resets ``cost_tracker.last_request`` and ``ToolState`` file-tracking
     caches so the Edit/Write "must read first" invariant starts fresh.
     Cumulative cost totals survive (cost is a session metric, not a
-    context metric). Saves the cleared session so a crash before the
-    next model request leaves disk state matching memory.
+    context metric).
+
+    Persists a ``kind: clear`` barrier marker to ``session.jsonl`` --
+    append-only, never truncating. Bytes preceding the barrier remain
+    on disk for forensics; the loader's live view starts after the
+    most recent barrier. Recovery from an accidental ``/clear`` is to
+    open the file, delete the offending barrier line, and restart.
     """
 
     descriptors: tuple[str, ...] = ("text/x-clear-request",)
@@ -114,30 +121,133 @@ class ClearHandler(InlineHandler):
         agent.cost_tracker.last_request = TokenCount()
         agent.activity.num_tool_call_rounds = 0
         agent.tool_state.reset_file_tracking()
-        agent._save_session()  # noqa: SLF001 -- handler is agent's intimate helper
+        agent._save_session(clear=True)  # noqa: SLF001 -- handler is agent's intimate helper
 
 
 # -- AbortHandler ------------------------------------------------------
 
 
-class AbortHandler(InlineHandler):
-    """Cancel in-flight spawned tasks; signal sync tools via ``abort_event``.
+def _cancel_local_tasks(agent: Agent) -> None:
+    """Cancel every spawned task currently in ``agent.tasks``.
 
-    Cancels every task in the agent's in-flight registry; sync tool
-    threads polling ``tool_state.abort_event`` see the set flag and
-    unwind. Surviving queued messages are processed normally -- abort
-    is for in-flight work, not the entire session.
+    Hidden background tasks (REPL pump, daemons) live in
+    ``agent.background_tasks`` and are untouched here -- bash-style
+    foreground/background separation.
+    """
+    agent.tool_state.abort_event.set()
+    for task in list(agent.tasks.values()):
+        if not task.done():
+            _ = task.cancel()
+
+
+def _drain_inbox_preserving_quit(agent: Agent) -> None:
+    """Drop pending inbox messages but keep ``text/x-quit`` sentinels.
+
+    Without preservation, the dispatch loop would never see the quit
+    that was queued behind the abort.
+    """
+    kept = [m for m in agent.inbox.drain() if m.descriptor == QUIT_SENTINEL]
+    for m in kept:
+        _ = agent.inbox.put(m)
+
+
+def _cancel_visible_background(agent: Agent) -> None:
+    """Cancel every visible (non-hidden) background task on this agent."""
+    for qid, job in list(agent.background_tasks.items()):
+        if job.hidden:
+            continue
+        _ = job.task.cancel()
+        agent.background_tasks.pop(qid, None)
+
+
+class BreakHandler(InlineHandler):
+    """Cancel the in-flight step (``/break``; Ctrl+Z analog).
+
+    The queue and background tasks survive: ``/break`` is the
+    "interrupt this step, keep planned follow-ups" verb. ``content``
+    selects the scope:
+
+    - ``""``: this agent only.
+    - ``"<label>"``: forward to that agent (cross-agent reach via inbox).
+    - ``"all"``: act locally and forward ``""`` to every other
+      registered agent so each cancels its own step. The fan-out is
+      one-hop -- forwarded messages arrive with ``content=""`` and
+      do not re-broadcast.
+    """
+
+    descriptors: tuple[str, ...] = ("text/x-break",)
+
+    @override
+    async def handle(self, agent: Agent, msg: Message) -> None:
+        target = str(msg.content).strip()
+        if target in ("", agent.name):
+            _cancel_local_tasks(agent)
+            return
+        if target == "all":
+            _cancel_local_tasks(agent)
+            for other in list(agent_registry.values()):
+                if other is agent:
+                    continue
+                _ = other.inbox.put_left(TextMessage("", "text/x-break"))
+            return
+        other = agent_registry.get(target)
+        if other is None:
+            agent.inbox.put(
+                TextMessage(f"[/break] unknown agent: {target}", "text/x-error"),
+            )
+            return
+        _ = other.inbox.put_left(TextMessage("", "text/x-break"))
+
+
+class AbortHandler(InlineHandler):
+    """Cancel step + drain queue (``/abort``; Ctrl+C analog).
+
+    More aggressive than ``/break``: also drops typed-ahead commands
+    and model-call triggers from the inbox. The ``text/x-quit``
+    sentinel is preserved so a queued quit still terminates the
+    loop.
+
+    ``content`` selects the scope:
+
+    - ``""``: this agent only; foreground + queue.
+    - ``"bg"``: foreground + queue + visible background tasks
+      (this is what the ``"all"`` fan-out forwards to recipients).
+    - ``"<label>"``: forward to that agent.
+    - ``"all"``: act locally with bg-kill, then forward ``"bg"`` to
+      every other registered agent. Forwarded messages do not
+      re-broadcast.
     """
 
     descriptors: tuple[str, ...] = ("text/x-abort",)
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
-        del msg
-        agent.tool_state.abort_event.set()
-        for task in list(agent.tasks.values()):
-            if not task.done():
-                _ = task.cancel()
+        target = str(msg.content).strip()
+        if target in ("", agent.name):
+            _cancel_local_tasks(agent)
+            _drain_inbox_preserving_quit(agent)
+            return
+        if target == "bg":
+            _cancel_local_tasks(agent)
+            _drain_inbox_preserving_quit(agent)
+            _cancel_visible_background(agent)
+            return
+        if target == "all":
+            _cancel_local_tasks(agent)
+            _drain_inbox_preserving_quit(agent)
+            _cancel_visible_background(agent)
+            for other in list(agent_registry.values()):
+                if other is agent:
+                    continue
+                _ = other.inbox.put_left(TextMessage("bg", "text/x-abort"))
+            return
+        other = agent_registry.get(target)
+        if other is None:
+            agent.inbox.put(
+                TextMessage(f"[/abort] unknown agent: {target}", "text/x-error"),
+            )
+            return
+        _ = other.inbox.put_left(TextMessage("", "text/x-abort"))
 
 
 # -- StatsHandler ------------------------------------------------------
@@ -223,6 +333,7 @@ def core_handlers() -> list[Handler]:
         CompactHandler(),
         UncompactHandler(),
         ClearHandler(),
+        BreakHandler(),
         AbortHandler(),
         StatsHandler(),
         SessionSaveHandler(),

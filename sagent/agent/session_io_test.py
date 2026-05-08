@@ -207,6 +207,103 @@ class TestLoadSession:
         assert meta["session_id"] == "s1"
         assert messages == [msg]
 
+    def test_clear_marker_drops_prior_messages(self, tmp_path: Path) -> None:
+        """``kind: clear`` resets the live messages list during load."""
+        session_file = tmp_path / "session.jsonl"
+        before = TextMessage("before clear", "text/x-user-message")
+        after = TextMessage("after clear", "text/x-user-message")
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"kind": "meta", "session_id": "s1"}),
+                    json.dumps({"kind": "message", **before.serialize()}),
+                    json.dumps({"kind": "clear", "_timestamp": 1}),
+                    json.dumps({"kind": "message", **after.serialize()}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [after]
+
+    def test_latest_meta_wins(self, tmp_path: Path) -> None:
+        """Multiple ``kind: meta`` lines: loader takes the latest."""
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"kind": "meta", "session_id": "old"}),
+                    json.dumps({"kind": "meta", "session_id": "new"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+
+        assert loaded is not None
+        meta, _ = loaded
+        assert meta["session_id"] == "new"
+
+
+class TestAppendSession:
+    def test_append_creates_and_extends(self, tmp_path: Path) -> None:
+        """Two append calls produce one file with both messages."""
+        session_file = tmp_path / "session.jsonl"
+        m1 = TextMessage("first", "text/x-user-message")
+        m2 = TextMessage("second", "text/x-user-message")
+
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[m1],
+        )
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[m2],
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [m1, m2]
+
+    def test_append_with_clear_barrier(self, tmp_path: Path) -> None:
+        """``clear=True`` writes a barrier; loader drops everything before."""
+        session_file = tmp_path / "session.jsonl"
+        before = TextMessage("doomed", "text/x-user-message")
+        after = TextMessage("survives", "text/x-user-message")
+
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[before],
+        )
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[after],
+            clear=True,
+        )
+
+        # File still contains both messages -- not truncated.
+        raw = session_file.read_text(encoding="utf-8")
+        assert "doomed" in raw
+        assert "survives" in raw
+        assert '"kind": "clear"' in raw
+
+        loaded = session_io.load_session(tmp_path, {})
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [after]
+
 
 # -- Serialization edge cases -----------------------------------------
 

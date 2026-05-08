@@ -2,15 +2,16 @@
 
 The REPL is a *handler bundle* registered on the same agent that
 runs the dispatch loop. Render handlers consume descriptors the
-model + tool dispatch produce; an input handler spawns prompt-toolkit
-and posts user messages back into the inbox.
+model + tool dispatch produce; the input pump runs as a hidden
+background task on ``agent.background_tasks`` and posts user
+messages back into the inbox.
 
 CLI orchestrators build the agent like this::
 
     agent = Agent(model=..., tools=[...], compactor=...)
     asyncio.run(run_repl(agent))
 
-The pieces live in :mod:`repl.main` (orchestrator), :mod:`repl.console`,
+The pieces live in :mod:`repl.run_repl` (orchestrator), :mod:`repl.console`,
 :mod:`repl.input`, :mod:`repl.keybindings`, :mod:`repl.prompt`,
 :mod:`repl.render`, :mod:`repl.replay`, :mod:`repl.toolbar`,
 :mod:`repl.format`, :mod:`repl.render_diff`, :mod:`repl.tight_markdown`.
@@ -19,10 +20,9 @@ The pieces live in :mod:`repl.main` (orchestrator), :mod:`repl.console`,
 from sagent.repl.console import ConsolePrinter
 from sagent.repl.input import (
     InputSource,
-    PromptInputHandler,
     StubInputSource,
+    spawn_repl_pump,
 )
-from sagent.repl.main import run_repl
 from sagent.repl.prompt import PromptToolkitInputSource
 from sagent.repl.render import (
     Printer,
@@ -37,13 +37,13 @@ from sagent.repl.render import (
     repl_handler_set,
 )
 from sagent.repl.replay import replay_messages
+from sagent.repl.run_repl import run_repl
 
 
 __all__ = [
     "ConsolePrinter",
     "InputSource",
     "Printer",
-    "PromptInputHandler",
     "PromptToolkitInputSource",
     "RecordingPrinter",
     "RenderChildEvent",
@@ -57,4 +57,5 @@ __all__ = [
     "repl_handler_set",
     "replay_messages",
     "run_repl",
+    "spawn_repl_pump",
 ]

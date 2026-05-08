@@ -3,8 +3,8 @@
 Single source of truth for ``/clear``, ``/compact``, ``/uncompact``,
 ``/model``, ``/provider``, ``/abort``, ``/login``, ``/quit``. Both
 ``keybindings._kb_submit`` (active path: a model call or tool batch is
-running) and ``PromptInputHandler.handle`` (idle path: prompt has
-returned) call :func:`parse_slash` and then dispatch the resulting
+running) and the REPL input pump (idle path: prompt has returned)
+call :func:`parse_slash` and then dispatch the resulting
 :class:`SlashAction` against ``agent.inbox``.
 
 Keeping a single table avoids the v1 wart where the two paths drifted
@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import dataclasses
 
 from sagent.custom_types import TextMessage
-from sagent.lib.descriptors import TextDescriptor
+from sagent.lib.descriptors import QUIT_SENTINEL, TextDescriptor
 
 
 if TYPE_CHECKING:
@@ -63,15 +63,19 @@ def parse_slash(line: str) -> SlashAction | None:
     if not stripped:
         return None
     if stripped.lower() in QUIT_WORDS:
-        return SlashAction(descriptor="text/x-quit", quit=True)
-    arg = _arg_after("/clear", stripped)
-    if arg is not None:
-        note = f" ({arg})" if arg else ""
+        return SlashAction(descriptor=QUIT_SENTINEL, quit=True)
+    if stripped == "/help":
+        return SlashAction(descriptor="text/x-help-request")
+    if stripped == "/tasks":
+        return SlashAction(descriptor="text/x-tasks-request")
+    # ``/clear`` is destructive and accepts no argument: any extra
+    # text means the user is talking *about* the command, not invoking
+    # it. (See bugs/post-mortem on the accidental-/clear incident.)
+    if stripped == "/clear":
         return SlashAction(
             descriptor="text/x-clear-request",
-            content=arg,
             urgent=True,
-            echo=f"[/clear] history cleared{note}",
+            echo="[/clear] history cleared",
         )
     arg = _arg_after("/compact", stripped)
     if arg is not None:
@@ -103,11 +107,31 @@ def parse_slash(line: str) -> SlashAction | None:
             descriptor="text/x-model-switch-request",
             content=f"--provider {arg}" if arg else "",
         )
-    if stripped.startswith("/abort"):
+    # /break and /abort take an optional argument:
+    #   no arg   - this agent only
+    #   <label>  - that agent (cross-agent reach via inbox)
+    #   all      - every registered agent
+    # /break cancels the in-flight step (Ctrl+Z analog -- queue
+    # survives so typed-ahead commands still run).
+    # /abort cancels in-flight + drains the queue. With "all" it
+    # additionally cancels visible background tasks (Ctrl+C analog).
+    arg = _arg_after("/break", stripped)
+    if arg is not None:
+        scope = f" {arg}" if arg else ""
+        return SlashAction(
+            descriptor="text/x-break",
+            content=arg,
+            urgent=True,
+            echo=f"[/break{scope}] cancelling current step",
+        )
+    arg = _arg_after("/abort", stripped)
+    if arg is not None:
+        scope = f" {arg}" if arg else ""
         return SlashAction(
             descriptor="text/x-abort",
+            content=arg,
             urgent=True,
-            echo="[/abort] cancelling in-flight tasks",
+            echo=f"[/abort{scope}] cancelling step + queue",
         )
     if stripped == "/login":
         return SlashAction(descriptor="text/x-login-request")
@@ -117,8 +141,8 @@ def parse_slash(line: str) -> SlashAction | None:
             descriptor="text/x-error",
             content=(
                 f"unknown command: {cmd}. Supported: "
-                "/clear /compact /uncompact /model /provider /login"
-                " /abort /quit"
+                "/help /clear /compact /uncompact /model /provider"
+                " /login /tasks /break /abort /quit"
             ),
         )
     return SlashAction(descriptor="text/x-user-message", content=line)
@@ -141,9 +165,12 @@ def supported_descriptors() -> Iterable[str]:
     """
     return {
         "text/x-clear-request",
+        "text/x-help-request",
+        "text/x-tasks-request",
         "text/x-compact-request",
         "text/x-uncompact-request",
         "text/x-model-switch-request",
+        "text/x-break",
         "text/x-abort",
         "text/x-login-request",
         "text/x-error",

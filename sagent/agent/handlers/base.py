@@ -21,6 +21,15 @@ class Handler(Protocol):
     A handler with ``descriptors = ()`` is a wildcard that fires on
     every message after specific handlers complete.
 
+    All spawned handlers are abortable -- ``/abort`` cancels every task
+    in ``agent.tasks``. Session-lifecycle infrastructure that must
+    survive abort (the REPL input pump, daemons) does NOT live as a
+    Handler; instead it spawns directly into ``agent.background_tasks``
+    with ``hidden=True``. That separation eliminates the prior
+    "abortable flag" wart and aligns the registry with bash semantics:
+    foreground steps die on abort, background tasks survive until the
+    agent itself shuts down.
+
     Attributes:
       descriptors: Tuple of descriptor strings this handler subscribes to.
       spawn: True to run as a task, False to run inline on the dispatch loop.
@@ -65,8 +74,11 @@ class SpawnedHandler:
     """Base class for spawned handlers (run as ``asyncio.Task``).
 
     Use for long ops that should not block the dispatch loop: model
-    calls, tool dispatch, subagent runs, background-task workers.
-    The task posts its result(s) back to the inbox when done.
+    calls, tool dispatch, subagent runs. The task posts its result(s)
+    back to the inbox when done. ``/abort`` cancels every spawned
+    handler unconditionally; long-running infra (input pump, daemons)
+    must NOT extend this class -- spawn into ``agent.background_tasks``
+    with ``hidden=True`` instead.
 
     Attributes:
       descriptors: Tuple of descriptor strings this handler subscribes to.

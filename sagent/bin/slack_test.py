@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import asyncio
+
 import pytest
 
 from sagent.bin.slack import (
@@ -30,6 +32,7 @@ from sagent.custom_types import (
 )
 from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import agent_registry
 
 
@@ -40,6 +43,8 @@ class _FakeAgent:
     def __init__(self, name: str) -> None:
         self.name = name
         self.inbox: Deque[Message] = Deque()
+        self.tasks: dict[int, asyncio.Task[None]] = {}
+        self.background_tasks: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(*names: str) -> dict[str, _FakeAgent]:

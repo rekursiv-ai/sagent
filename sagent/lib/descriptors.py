@@ -44,8 +44,11 @@ TextDescriptor = Literal[
     "text/x-signal-status-changed",
     "text/x-diff",
     "text/x-clear-request",
+    "text/x-help-request",
+    "text/x-tasks-request",
     "text/x-quit",
     # Inbox spine descriptors -- inbound signals.
+    "text/x-break",
     "text/x-abort",
     "text/x-compact-request",
     "text/x-uncompact-request",
@@ -61,7 +64,6 @@ TextDescriptor = Literal[
     "text/x-idle",
     "text/x-compact-done",
     "text/x-session-save-request",
-    "text/x-bootstrap",
 ]
 
 ImageDescriptor = Literal[
@@ -134,6 +136,15 @@ Descriptor = (
     | JsonDescriptor
     | ToolDescriptor
 )
+
+
+# -- Named sentinels --------------------------------------------------------
+# Descriptors that flow through dispatch as control signals (not data)
+# get a named constant here. Code comparing ``msg.descriptor`` to one
+# of these reads as the intent ("is this a quit?") rather than the
+# literal string. New sentinels go here, not at the use site.
+
+QUIT_SENTINEL: Literal["text/x-quit"] = "text/x-quit"
 
 
 # -- Runtime frozensets (derived from Literals) ----------------------------

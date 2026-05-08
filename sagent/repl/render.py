@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Protocol, cast, override
 from sagent.agent.handlers.base import Handler, InlineHandler
 from sagent.agent.handlers.model_switch import ModelSwitchHandler
 from sagent.lib.message import get_queue_id
-from sagent.repl.input import LoginHandler
+from sagent.repl.input import HelpHandler, LoginHandler, TasksHandler
 from sagent.repl.render_diff import find_stable_boundary
 
 
@@ -345,4 +345,6 @@ def repl_handler_set(printer: Printer) -> list[Handler]:
         RenderStatusTitle(printer),
         ModelSwitchHandler(printer=printer),
         LoginHandler(printer=printer),
+        HelpHandler(printer=printer),
+        TasksHandler(printer=printer),
     ]

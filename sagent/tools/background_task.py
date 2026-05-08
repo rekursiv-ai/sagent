@@ -10,7 +10,7 @@ tasks.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import asyncio
 import dataclasses
@@ -28,13 +28,32 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class BackgroundTaskEntry:
-    """A background tool invocation tracked by the Agent."""
+    """A long-running task tracked by the Agent.
 
-    task: asyncio.Task[Message]
+    Two flavors share this dataclass:
+
+    - **Visible** (``hidden=False``, the default). User-scheduled tool
+      invocations spawned via ``background: true``. Listed by the
+      ``BackgroundTask`` tool, cancellable by the model, foregroundable.
+    - **Hidden** (``hidden=True``). Session-lifecycle infrastructure --
+      the REPL input pump, future watchdogs, daemons. Filtered out of
+      the model-facing tool listing; only shut down when the agent
+      itself exits. Lives here rather than in a separate registry so
+      ``Agent`` keeps a single source of truth for "what's running".
+
+    ``task`` is typed ``Task[Any]`` to accommodate both -- visible
+    bg tools resolve to a ``Message`` for inbox delivery, hidden infra
+    tasks resolve to ``None``. The model never sees the hidden ones,
+    so the result-type asymmetry never reaches a foreground/cancel
+    code path for them.
+    """
+
+    task: asyncio.Task[Any]
     tool_name: str
     queue_id: str
     started: float
     delay_sec: float = 0.0
+    hidden: bool = False
 
 
 _BG_FIELDS: JSON = json_freeze(
@@ -163,7 +182,9 @@ class BackgroundTask:
         return TextMessage(f"Unknown operation: {op!r}", "text/x-error")
 
     def _list(self, agent: Agent) -> Message:
-        jobs = agent.background_tasks
+        # Hidden infra tasks (REPL pump, daemons) are filtered out --
+        # they're internal and not user/model-actionable.
+        jobs = {q: j for q, j in agent.background_tasks.items() if not j.hidden}
         if not jobs:
             return TextMessage("No background tasks.", "text/plain")
         lines: list[str] = []
@@ -195,7 +216,7 @@ class BackgroundTask:
             return TextMessage("cancel requires an id", "text/x-error")
         jobs = agent.background_tasks
         job = jobs.get(job_id)
-        if job is None:
+        if job is None or job.hidden:
             return TextMessage(f"No such job: {job_id}", "text/x-error")
         job.task.cancel()
         jobs.pop(job_id, None)
@@ -209,7 +230,7 @@ class BackgroundTask:
             return TextMessage("foreground requires an id", "text/x-error")
         jobs = agent.background_tasks
         job = jobs.get(job_id)
-        if job is None:
+        if job is None or job.hidden:
             return TextMessage(f"No such job: {job_id}", "text/x-error")
         try:
             result = await job.task

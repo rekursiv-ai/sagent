@@ -9,7 +9,7 @@ swapped for v2's deque + handler model:
 
 Slash-command parsing for the active path goes through
 :func:`repl.slash.parse_slash` so this path and the idle
-``PromptInputHandler`` always agree on which commands are recognized.
+the REPL input pump always agree on which commands are recognized.
 
 Bindings:
 

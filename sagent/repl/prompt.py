@@ -2,7 +2,7 @@
 
 Wraps a :class:`prompt_toolkit.PromptSession` and yields lines via
 ``next_line()``. Returns ``None`` when the user types ``exit`` or
-``quit`` (lowercase) so :class:`PromptInputHandler` shuts the loop
+``quit`` (lowercase) so the REPL input pump shuts the loop
 down cleanly. Other exit signals (Ctrl-D / EOFError, Ctrl-C while
 idle / KeyboardInterrupt) also map to ``None``.
 

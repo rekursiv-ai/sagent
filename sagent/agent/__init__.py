@@ -16,7 +16,6 @@ trails the in-memory state by more than one model call.
 
 from sagent.agent.agent import (
     ERROR_MAX_TOOL_CALL_ROUNDS,
-    QUIT_SENTINEL,
     Agent,
     RunHandle,
     SystemPrompt,
@@ -29,7 +28,6 @@ from sagent.tools.background_task import BackgroundTaskEntry
 __all__ = [
     "ERROR_MAX_TOOL_CALL_ROUNDS",
     "MICROCOMPACT_KEEP_RECENT",
-    "QUIT_SENTINEL",
     "Agent",
     "BackgroundTaskEntry",
     "ContextBudget",

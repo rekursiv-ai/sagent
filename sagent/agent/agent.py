@@ -32,11 +32,11 @@ from sagent.agent.retry import (
 )
 from sagent.agent.session_io import (
     SessionMeta,
+    append_session,
     load_session,
     rebuild_tool_state_from_messages,
     repair_dangling_tool_calls,
     restore_model,
-    save_session,
 )
 from sagent.custom_types import (
     Compactor,
@@ -52,6 +52,7 @@ from sagent.custom_types import (
     reset_id_counter,
 )
 from sagent.lib.asyncio_collections import Deque
+from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import response_text
 from sagent.tools.background_task import BackgroundTaskEntry
@@ -83,10 +84,6 @@ _MAX_UNSAVED_EVENTS = 1000
 # uncancellable work (sync tools in ``asyncio.to_thread``) cannot be
 # stopped from the event loop, so the runner falls through after this.
 _DRAIN_TIMEOUT = 2.0
-
-# Sentinel placed in ``Agent.inbox`` by REPL pumps / Slack adapters /
-# any external driver to signal session end. Mirrors v1 export.
-QUIT_SENTINEL = "text/x-quit"
 
 # Error code returned in the final assistant message when the agent's
 # tool-call-round cap was reached. Callers (AgentSpawn, orchestrator)
@@ -216,6 +213,12 @@ class Agent:
         self._session_id = str(uuid.uuid4())[:8]
         self._status: str = ""
         self._event_log: list[dict[str, object]] = []
+        # Cursor: index up to which ``self.history`` has been persisted
+        # to ``session.jsonl``. Saves append ``self.history[idx:]``;
+        # wholesale-replacement paths (``/clear``, compact, repair on
+        # load) call ``_save_session(clear=True)`` to write a barrier
+        # marker and re-persist the current history fresh.
+        self._persisted_idx: int = 0
         # Spawn-tree cost tracking (parity with v1).
         self._tracker_snap_cost_usd: float = 0.0
         self._tracker_snap_tokens: TokenCount = TokenCount()
@@ -601,7 +604,7 @@ class Agent:
                 try:
                     await self._wait_for_idle()
                 finally:
-                    self.inbox.put(TextMessage("", "text/x-quit"))
+                    self.inbox.put(TextMessage("", QUIT_SENTINEL))
                     await loop_task
                 return _last_assistant_message(self.history)
             finally:
@@ -680,7 +683,7 @@ class Agent:
         """The bare dispatch loop, no context setup."""
         while True:
             msg = await self.inbox.get()
-            if msg.descriptor == "text/x-quit":
+            if msg.descriptor == QUIT_SENTINEL:
                 await self._drain_tasks()
                 return
             for h in self._handlers.get(msg.descriptor, ()):
@@ -805,16 +808,31 @@ class Agent:
             total_active_elapsed_seconds=self.activity.elapsed_seconds,
         )
 
-    def _save_session(self) -> None:
-        """Persist meta + history + event_log to ``session_dir/session.jsonl``."""
+    def _save_session(self, *, clear: bool = False) -> None:
+        """Append meta + new messages + events to ``session_dir/session.jsonl``.
+
+        Normal saves append ``self.history[self._persisted_idx:]`` --
+        the messages added since the last save. Wholesale-replacement
+        paths (``/clear``, compaction, uncompact, repair-on-load that
+        inserted messages) pass ``clear=True``: a ``kind: clear``
+        barrier line is appended first, then the entire current
+        ``self.history`` is re-persisted. The loader treats the barrier
+        as a reset, so the live history view starts after the most
+        recent barrier; everything before remains in the file for
+        forensics and accidental-clear recovery.
+        """
         if self.session_dir is None:
             return
-        save_session(
-            self.session_dir / "session.jsonl",
+        path = self.session_dir / "session.jsonl"
+        delta = list(self.history) if clear else self.history[self._persisted_idx :]
+        append_session(
+            path,
             meta=self._build_session_meta().serialize(),
-            messages=self.history,
-            event_log=self._event_log,
+            messages_delta=delta,
+            events=self._event_log,
+            clear=clear,
         )
+        self._persisted_idx = len(self.history)
         self._event_log.clear()
 
     def _load_session(self) -> None:
@@ -840,7 +858,15 @@ class Agent:
         meta, messages = result
         if messages:
             reset_id_counter(max(m.id for m in messages) + 1)
-        self.history = repair_dangling_tool_calls(messages)
+        repaired = repair_dangling_tool_calls(messages)
+        # Repair may insert synthesized ``[interrupted]`` results
+        # mid-history. Those inserts aren't on disk yet; flag for a
+        # ``clear``-barrier repersist below once the agent state is
+        # otherwise consistent.
+        repair_inserted = len(repaired) != len(messages)
+        self.history = repaired
+        # Disk view matches what we just loaded; cursor follows.
+        self._persisted_idx = len(messages)
         rebuild_tool_state_from_messages(self.history, self.tool_state)
         if meta:
             m = SessionMeta.deserialize(meta)
@@ -871,6 +897,10 @@ class Agent:
             self.session_id,
             len(self.history),
         )
+        if repair_inserted:
+            # Repair added messages that aren't on disk; persist via a
+            # clear barrier so the file's live view matches memory.
+            self._save_session(clear=True)
 
 
 class _DriveForwarder:
