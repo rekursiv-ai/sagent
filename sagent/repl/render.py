@@ -55,6 +55,7 @@ class Printer(Protocol):
     def write_user_bar(self, text: str) -> None: ...
     def write_tool_label(self, text: str) -> None: ...
     def write_tool_error(self, text: str) -> None: ...
+    def write_tool_summary(self, text: str) -> None: ...
     def write_hint(self, text: str) -> None: ...
     def write_thinking(self, text: str) -> None: ...
     def write_diff(self, diff: str, file_path: str = "") -> None: ...
@@ -76,6 +77,7 @@ class RecordingPrinter:
       user_bars: ``write_user_bar`` payloads.
       tool_labels: ``write_tool_label`` payloads.
       tool_errors: ``write_tool_error`` payloads.
+      tool_summaries: ``write_tool_summary`` payloads.
       hints: ``write_hint`` payloads.
       thinkings: ``write_thinking`` payloads.
       diffs: ``write_diff`` payloads.
@@ -93,6 +95,7 @@ class RecordingPrinter:
         self.user_bars: list[str] = []
         self.tool_labels: list[str] = []
         self.tool_errors: list[str] = []
+        self.tool_summaries: list[str] = []
         self.hints: list[str] = []
         self.thinkings: list[str] = []
         self.diffs: list[tuple[str, str]] = []
@@ -117,6 +120,9 @@ class RecordingPrinter:
 
     def write_tool_error(self, text: str) -> None:
         self.tool_errors.append(text)
+
+    def write_tool_summary(self, text: str) -> None:
+        self.tool_summaries.append(text)
 
     def write_hint(self, text: str) -> None:
         self.hints.append(text)
@@ -215,20 +221,27 @@ def render_tool_result(printer: Printer, msg: Message) -> None:
     """Render the user-facing parts of a ``multipart/x-tool-result``.
 
     Errors via ``write_tool_error``; diffs via ``write_diff``;
+    one-line success summaries via ``write_tool_summary``;
     bash-lint nudges (``text/x-hint-tool-use-nudge``) via the dim
     yellow ``hint:`` line. Plain text parts are skipped -- they
     belong to history, not user feedback (the model already saw
     them).
 
-    Shared helper so child-event rendering can reuse the parent's
-    tool-result formatting (RenderToolResult for the parent's own
-    tools; the child-block renderer for child agents' tools).
+    Tools opt into the dim ``  ⎿ <summary>`` receipt line by
+    emitting a ``text/x-tool-summary`` part in their result
+    multipart (success path only -- on error, the ``text/x-error``
+    line tells the story; doubling up adds noise).
+
+    Shared helper so child-event rendering and replay reuse the
+    same formatting the parent's live ``RenderToolResult`` does.
     """
     for part in cast("tuple[Message, ...]", msg.content):
         if part.descriptor == "text/x-error":
             printer.write_tool_error(str(part.content))
         elif part.descriptor == "text/x-diff" and part.content:
             printer.write_diff(str(part.content), get_queue_id(msg))
+        elif part.descriptor == "text/x-tool-summary" and part.content:
+            printer.write_tool_summary(str(part.content))
         elif part.descriptor == "text/x-hint-tool-use-nudge" and part.content:
             printer.write_hint(str(part.content))
 

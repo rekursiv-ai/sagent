@@ -13,6 +13,7 @@ from typing import Protocol, cast, runtime_checkable
 import contextlib
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -31,6 +32,12 @@ from sagent.tools.lib.bash import Node, cached_parse_bash
 
 
 logger = logging.getLogger(__name__)
+
+
+# Matches ``[exit code: N]`` appended by ``Bash._run`` on non-zero exits.
+# Anchored to ``\n`` or start-of-string because ``_run`` strips the leading
+# newline when stdout was empty (e.g. ``false`` → ``"[exit code: 1]"``).
+_BASH_EXIT_RE = re.compile(r"(?:^|\n)\[exit code: (\d+)\]\s*$")
 
 
 @runtime_checkable
@@ -165,6 +172,26 @@ class Bash:
         if len(cmd) > 60:
             cmd = cmd[:57] + "..."
         return f"Bash {cmd}" if cmd else "Bash"
+
+    def summary_result(self, result: Message) -> str | None:
+        r"""One-line receipt: line count + nonzero exit code.
+
+        ``Bash._run`` appends ``\n[exit code: N]`` for non-zero exits;
+        recognise that suffix and surface it in the receipt. For
+        clean runs, just report the line count of stdout.
+        """
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content)
+        if not text:
+            return "no output"
+        # Detect appended exit-code marker.
+        exit_match = _BASH_EXIT_RE.search(text)
+        body = text[: exit_match.start()] if exit_match else text
+        lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
+        if exit_match:
+            return f"{lines}L · exit {exit_match.group(1)}"
+        return f"{lines}L"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.

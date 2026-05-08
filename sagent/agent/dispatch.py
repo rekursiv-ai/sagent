@@ -251,11 +251,32 @@ async def _run_tool(
         if is_multipart(inner.descriptor)
         else (inner,)
     )
+    # Tools opt into the dim ``  ⎿ <summary>`` receipt line by
+    # defining ``summary_result(result_msg) -> str | None``. Skip on
+    # error -- the ``text/x-error`` line already tells the story; a
+    # parallel summary would just be noise.
+    summary_fn = getattr(tool, "summary_result", None)
+    if summary_fn is not None and not _has_error(parts):
+        try:
+            summary_text = summary_fn(inner)
+        except Exception:  # noqa: BLE001 -- summary is best-effort UX, never fail dispatch
+            logger.debug("summary_result raised for %s", tool.name, exc_info=True)
+            summary_text = None
+        if summary_text:
+            parts = (
+                *parts,
+                TextMessage(str(summary_text), "text/x-tool-summary"),
+            )
     return MultipartMessage(
         (TextMessage(qid, "text/x-queue-id"), *parts),
         "multipart/x-tool-result",
         parent_id=req.id,
     )
+
+
+def _has_error(parts: tuple[Message, ...]) -> bool:
+    """True if any part has an error descriptor."""
+    return any(p.descriptor == "text/x-error" for p in parts)
 
 
 async def _drain_stream(

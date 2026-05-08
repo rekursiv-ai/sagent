@@ -99,7 +99,7 @@ async def run_repl(
             PromptToolkitInputSource(session, agent=agent, console=console),
             printer=printer,
         )
-        replay_messages(agent, console)
+        replay_messages(agent, printer)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:

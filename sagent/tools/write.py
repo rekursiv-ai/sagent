@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 from sagent.custom_types import Message, TextMessage
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
@@ -15,6 +17,10 @@ from sagent.tools.core import (
     resolve_tool_path,
     run_sync,
 )
+
+
+# Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.
+_WRITE_OK_RE = re.compile(r"^Wrote (\d+) bytes to ")
 
 
 class Write:
@@ -49,6 +55,17 @@ class Write:
         file_path = str(directive.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
         return f"Write {fname}"
+
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt: confirmation count from the success message."""
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content).strip()
+        # ``_run`` returns "Wrote N bytes to PATH"; surface the byte count.
+        match = _WRITE_OK_RE.match(text)
+        if match:
+            return f"wrote {match.group(1)} bytes"
+        return text or None
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.

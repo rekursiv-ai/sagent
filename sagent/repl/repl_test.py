@@ -46,6 +46,7 @@ from sagent.repl import (
     spawn_repl_pump,
 )
 from sagent.repl.render import RenderChildEvent
+from sagent.repl.replay import replay_messages
 from sagent.repl.slash import parse_slash
 from sagent.repl.toolbar import render_toolbar
 from sagent.testing import MockModelCaps
@@ -544,6 +545,51 @@ async def test_prompt_input_routes_slash_commands() -> None:
     assert ("text/x-compact-request", "focus on bugs") in seen
     assert ("text/x-uncompact-request", "") in seen
     assert ("text/x-user-message", "after") in seen
+
+
+def test_replay_uses_tool_summary_for_labels() -> None:
+    """Replay calls ``tool.summary(req)`` -- not the bare lowercase name.
+
+    Regression: the prior path emitted ``get_tool_name(p)`` (e.g.
+    ``"echo"``), losing every directive arg. Replay should match
+    live rendering exactly: ``echo`` with its own ``summary()`` /
+    ``tool_call_label`` formatting.
+    """
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, tools=[_EchoTool()])
+    # Stage history with an echo call.
+    agent.history.append(TextMessage("hi", "text/x-user-message"))
+    agent.history.append(
+        MultipartMessage(
+            (tool_call_message("q1", "echo", json_freeze({"text": "hello"})),),
+            "multipart/x-model-message",
+        ),
+    )
+    replay_messages(agent, printer)
+    # Tool label fired, formatted via _EchoTool.summary (not the lowercase id).
+    assert printer.tool_labels, printer.tool_labels
+    assert printer.tool_labels[0] == "echo"
+
+
+def test_replay_renders_tool_summary_part() -> None:
+    """Replay renders ``text/x-tool-summary`` parts via ``write_tool_summary``."""
+    printer = RecordingPrinter()
+    model = _StreamingFakeModel([_model_response("ack")])
+    agent = Agent(model=model, tools=[_EchoTool()])
+    agent.history.append(TextMessage("hi", "text/x-user-message"))
+    agent.history.append(
+        MultipartMessage(
+            (
+                TextMessage("q1", "text/x-queue-id"),
+                TextMessage("hello", "text/plain"),
+                TextMessage("5 chars", "text/x-tool-summary"),
+            ),
+            "multipart/x-tool-result",
+        ),
+    )
+    replay_messages(agent, printer)
+    assert printer.tool_summaries == ["5 chars"]
 
 
 def test_help_and_tasks_parse_to_inbox_actions() -> None:

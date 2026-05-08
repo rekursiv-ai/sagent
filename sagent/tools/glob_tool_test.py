@@ -60,6 +60,24 @@ class TestGlob:
         )
         assert "no matches" in _text(response).lower()
 
+    @pytest.mark.anyio
+    async def test_summary_result_reports_match_count(self, tmp_path: Path) -> None:
+        """Glob.summary_result returns ``"{N} matches"`` for hit results."""
+        (tmp_path / "a.py").write_text("")
+        (tmp_path / "b.py").write_text("")
+        response = await glob_tool.run(
+            _msg(json_freeze({"pattern": "*.py", "path": str(tmp_path)}))
+        )
+        assert glob_tool.summary_result(response) == "2 matches"
+
+    @pytest.mark.anyio
+    async def test_summary_result_reports_no_matches(self, tmp_path: Path) -> None:
+        """Glob.summary_result returns ``"no matches"`` when nothing hit."""
+        response = await glob_tool.run(
+            _msg(json_freeze({"pattern": "*.xyz", "path": str(tmp_path)}))
+        )
+        assert glob_tool.summary_result(response) == "no matches"
+
 
 class TestGlobName:
     def test_tool_name_is_glob(self) -> None:

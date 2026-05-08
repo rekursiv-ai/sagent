@@ -178,6 +178,26 @@ class Read:
             suffix = ""
         return f"Read {fname}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt summarizing the read.
+
+        ``{N} lines`` for plain-text reads, ``image``/``pdf`` for
+        binary formats, ``(unchanged)`` when the file matches the
+        last-read snapshot, ``None`` for errors.
+        """
+        if result.descriptor == "text/x-error":
+            return None
+        if result.descriptor != "text/plain":
+            # Multipart (image, PDF) or notebook -- the inner descriptor
+            # carries the format. Fall back to a generic marker.
+            return "binary"
+        text = str(result.content)
+        if text.startswith("[File unchanged"):
+            return "unchanged"
+        # Line-numbered output: count newlines in the rendered body.
+        lines = text.count("\n")
+        return f"{lines} lines"
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 

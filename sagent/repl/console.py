@@ -82,6 +82,15 @@ class ConsolePrinter:
         """Render red, indented tool-error line."""
         self.console.print(Text(f"    ✗ {text.strip()}", style="dim red"))
 
+    def write_tool_summary(self, text: str) -> None:
+        """Render the dim ``  ⎿ <summary>`` receipt line for a tool result.
+
+        Mirrors the diff-header glyph (``⎿``) so tools without a
+        diff (Read, Bash, Glob, Grep, ...) get the same visual
+        cue that the call landed and what came back.
+        """
+        self.console.print(Text(f"    ⎿  {text.strip()}", style="dim"))
+
     def write_hint(self, text: str) -> None:
         """Render a dim yellow ``hint:`` line (bash-lint nudge surface)."""
         self.console.print(Text(f"    hint: {text}", style="dim yellow"))
