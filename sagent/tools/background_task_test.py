@@ -198,12 +198,16 @@ class TestBackgroundDispatch:
             tools=[_SlowTool(), BackgroundTask()],
         )
         await agent.run(json_freeze({"prompt": "go"}))
-        # Wait for the background task to finish.
-        job = agent._background_tasks.get("t1")
+        # Wait for the background task to finish (may already have).
+        job = agent.background_tasks.get("t1")
         if job is not None:
             await job.task
-        drained = agent.inbox.drain()
-        assert any("bg-result" in str(item.content) for item in drained)
+        # The bg post becomes a text/x-user-message either still in
+        # the inbox (if posted after run exit) or already in history
+        # (if processed by the dispatch loop). Either is correct for
+        # the v2 spine.
+        sources = [*agent.inbox.drain(), *agent.messages]
+        assert any("bg-result" in str(item.content) for item in sources)
 
     @pytest.mark.anyio
     async def test_delay_implies_background(self) -> None:
@@ -300,7 +304,7 @@ class TestBackgroundTaskTool:
             return TextMessage("", "text/plain")
 
         task = asyncio.create_task(_long_wait())
-        agent._background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background_tasks["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="slow",
             queue_id="j1",
@@ -321,7 +325,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "Cancelled" in str(result.content)
-            assert "j1" not in agent._background_tasks
+            assert "j1" not in agent.background_tasks
             assert task.cancelling()
         finally:
             current_agent_var.reset(token)
@@ -336,7 +340,7 @@ class TestBackgroundTaskTool:
             return TextMessage("the-result", "text/plain")
 
         task = asyncio.create_task(_delayed_result())
-        agent._background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background_tasks["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="echo",
             queue_id="j1",
@@ -357,7 +361,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "the-result" in str(result.content)
-            assert "j1" not in agent._background_tasks
+            assert "j1" not in agent.background_tasks
         finally:
             current_agent_var.reset(token)
 

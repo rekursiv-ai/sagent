@@ -30,6 +30,7 @@ from sagent.custom_types import (
     TokenCount,
     Tool,
 )
+from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import tool_call_message
 from sagent.testing import MockModelCaps
@@ -49,8 +50,17 @@ from sagent.tools.write import Write
 
 
 class _ParentEvents:
+    """Stub parent agent for ChildForwarder tests.
+
+    Mirrors v2's ``Agent.inbox`` (the new spine) plus
+    ``active_children`` (used by ``_ChildForwarder`` for live token
+    accounting). The forwarder posts ``multipart/x-child-event`` here
+    instead of v1's ``_events`` queue.
+    """
+
     def __init__(self) -> None:
-        self._events = None
+
+        self.inbox: Deque[Message] = Deque()
         self.active_children: dict[str, ChildStats] = {}
 
 
@@ -717,7 +727,7 @@ class TestCompactorInheritance:
     def test_compactor_inherits_from_parent(self) -> None:
         parent_comp = cast(Compactor, _StubCompactor())
         parent = _parent()
-        parent._compactor = parent_comp
+        parent.compactor = parent_comp
         tool = AgentTool()  # no factory compactor
         # _inherit reads parent.compactor (property) when factory is None.
         assert tool._inherit("compactor", parent) is parent_comp
@@ -726,7 +736,7 @@ class TestCompactorInheritance:
         parent_comp = cast(Compactor, _StubCompactor())
         factory_comp = cast(Compactor, _StubCompactor())
         parent = _parent()
-        parent._compactor = parent_comp
+        parent.compactor = parent_comp
         tool = AgentTool(compactor=factory_comp)
         assert tool._inherit("compactor", parent) is factory_comp
 

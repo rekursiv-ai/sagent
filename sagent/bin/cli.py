@@ -53,7 +53,12 @@ import sys
 from sagent import providers, sessions, tools
 from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import Model, ModelSpec, Provider, Tool
+from sagent.custom_types import (
+    Model,
+    ModelSpec,
+    Provider,
+    Tool,
+)
 from sagent.lib.json import json_freeze
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
@@ -570,7 +575,7 @@ def main() -> None:
         agent.max_response_tokens = args.max_response_tokens
     agent.tool_state.additional_dirs = list(args.add_dir)
     if args.output_format == "text" and args.input_format == "text":
-        asyncio.run(run_repl(agent, name=args.name, history=args.history))
+        asyncio.run(run_repl(agent, history=args.history))
     else:
         asyncio.run(
             _run_headless(
