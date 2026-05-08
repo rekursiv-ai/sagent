@@ -19,6 +19,7 @@ from sagent.agent.handlers import (
     core_handlers,
 )
 from sagent.agent.session_io import load_session
+from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
     Message,
     ModelRequest,
@@ -128,6 +129,27 @@ async def test_run_returns_model_response() -> None:
     # Tool contract: flat ``text/plain`` (the assistant's text).
     assert result.descriptor == "text/plain"
     assert result.content == "hi back"
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_precompact_tiny_first_prompt() -> None:
+    class _LargeResponseBudgetModel(_FakeModel):
+        max_response_tokens = 128_000
+
+        @property
+        @override
+        def max_request_tokens(self) -> int:
+            return 200_000
+
+    model = _LargeResponseBudgetModel([_model_response("hi back")])
+    agent = Agent(model=model, compactor=SummaryCompactor())
+    result = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "say hi"})),
+        timeout=2.0,
+    )
+    assert result.content == "hi back"
+    assert len(model.requests) == 1
+    assert agent.compaction_state.compact_count == 0
 
 
 @pytest.mark.asyncio

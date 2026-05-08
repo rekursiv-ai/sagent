@@ -36,7 +36,7 @@ from sagent.custom_types import (
     Tool,
     is_message,
 )
-from sagent.lib.descriptors import has_error
+from sagent.lib.descriptors import flat_text, has_error
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.lib.message import get_directive
@@ -288,6 +288,13 @@ class AgentSpawn:
             )
         s = "s" if remaining != 1 else ""
         return f"Spawn budget: depth {depth}/{cap} -- {remaining} generation{s} of sub-spawning available."
+
+    def summary_result(self, result: Message) -> str | None:
+        """Return a one-line receipt for the child result."""
+        text = flat_text(result).strip()
+        if not text:
+            return "completed with no output"
+        return f"{len(text.splitlines())}L"
 
     async def run(self, msg: Message) -> Message:
         """Spawn and run a child agent per the directive.
