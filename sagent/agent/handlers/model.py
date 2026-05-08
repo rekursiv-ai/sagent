@@ -20,7 +20,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, cast, override
 
 import asyncio
-import contextlib
 import dataclasses
 import logging
 
@@ -33,6 +32,7 @@ from sagent.agent.handlers.compact import (
     run_compaction,
 )
 from sagent.agent.retry import send_with_retry
+from sagent.agent.session_io import repair_dangling_tool_calls
 from sagent.custom_exceptions import ModelTerminationError
 from sagent.custom_types import (
     ModelRequest,
@@ -114,11 +114,31 @@ class ModelCallHandler(SpawnedHandler):
             _post_round_limit_response(agent)
             return
         streamed_chars: int = 0
+        thinking_buffer: list[str] = []
+        thinking_flushed = False
+
+        def _flush_thinking() -> None:
+            """Emit accumulated thinking once, before the first text chunk."""
+            nonlocal thinking_flushed
+            if thinking_flushed:
+                return
+            thinking_flushed = True
+            text = "".join(thinking_buffer)
+            if text:
+                _ = agent.inbox.put(TextMessage(text, "text/x-thinking"))
 
         def _emit_chunk(chunk: str) -> None:
             nonlocal streamed_chars
+            # Anthropic emits thinking_delta events before text_delta
+            # events; flush the accumulated thinking block now so the
+            # renderer prints "∴ Thinking ..." above the response text
+            # rather than after it.
+            _flush_thinking()
             streamed_chars += len(chunk)
-            agent.inbox.put(TextMessage(chunk, "text/plain"))
+            _ = agent.inbox.put(TextMessage(chunk, "text/plain"))
+
+        def _emit_thinking(chunk: str) -> None:
+            thinking_buffer.append(chunk)
 
         async with agent.model_lock:
             request = self._build_request(agent)
@@ -127,33 +147,39 @@ class ModelCallHandler(SpawnedHandler):
                     agent,
                     request,
                     _emit_chunk,
+                    _emit_thinking,
                 )
             except asyncio.CancelledError:
                 # Account the partial response so the toolbar / cost
                 # tracker reflect the cancelled call (parity with v1's
                 # ``_estimate_cancelled_response``).
                 _account_cancelled(agent, request, streamed_chars)
-                agent.inbox.put(TextMessage("", "text/x-stream-end"))
-                agent.inbox.put(TextMessage("[interrupted]", "text/x-interrupted"))
+                _ = agent.inbox.put(TextMessage("", "text/x-stream-end"))
+                _ = agent.inbox.put(TextMessage("[interrupted]", "text/x-interrupted"))
                 raise
             agent.cost_tracker.record(
                 response,
                 model_id=agent.model.model_id,
                 ledger=cost_ledger_var.get(),
             )
+            # Flush any thinking we accumulated even if no text chunks
+            # arrived (e.g. tool-only response).
+            _flush_thinking()
             if streamed_chars == 0:
                 # Buffer-only provider; synthesize chunks so the
                 # renderer never has to know whether streaming happened.
                 for part in _text_parts(response.content):
-                    agent.inbox.put(
+                    _ = agent.inbox.put(
                         TextMessage(part, "text/plain"),
                     )
-            agent.inbox.put(TextMessage("", "text/x-stream-end"))
-            # Surface thinking content (if any) so RenderThinking
-            # displays it. Subscribers see one ``text/x-thinking`` per
-            # response, never duplicated by Render*.
-            for thinking in _thinking_blocks(response.content):
-                agent.inbox.put(TextMessage(thinking, "text/x-thinking"))
+            _ = agent.inbox.put(TextMessage("", "text/x-stream-end"))
+            # Fallback for providers that don't surface thinking_delta
+            # via the streaming callback: extract from the final
+            # response. Skipped when we already streamed thinking
+            # so subscribers see exactly one block per response.
+            if not thinking_buffer:
+                for thinking in _thinking_blocks(response.content):
+                    _ = agent.inbox.put(TextMessage(thinking, "text/x-thinking"))
             # Stash the stop reason on the activity tracker so
             # ``ModelResponseHandler`` can guard on it. Doing this
             # out-of-band keeps history identical to v1 (which
@@ -161,7 +187,7 @@ class ModelCallHandler(SpawnedHandler):
             # provider requests rebuild from history and never see a
             # synthetic stop-reason part.
             agent.activity.last_stop_reason = response.stop_reason
-            agent.inbox.put(response.content)
+            _ = agent.inbox.put(response.content)
             # Truncation recovery: if the response was cut off
             # mid-stream and carried no tool calls, nudge the model to
             # resume. Bounded to ``MAX_TRUNCATION_RECOVERY`` attempts;
@@ -178,6 +204,14 @@ class ModelCallHandler(SpawnedHandler):
         next call. ``BackgroundAwareTool`` wrapping for tools is
         applied when the agent has the BackgroundTask tool registered
         (mirrors v1's ``has_background_support`` path).
+
+        Defensively runs ``repair_dangling_tool_calls`` over history:
+        if any ``tool_use`` block is missing its ``tool_result``
+        (resume-from-crash, races, or older session files predating
+        the abort fix), this rebuilds with synthetic ``[interrupted]``
+        results so the provider doesn't 400 with ``tool_use ids were
+        found without tool_result blocks``. The repair is idempotent;
+        a clean history is returned unchanged.
         """
         tools_list: list[Tool] = list(agent._tools.values())  # noqa: SLF001 -- handler intimate
         if tools_list and "application/x-tool-backgroundtask" in agent._tools:  # noqa: SLF001 -- handler intimate
@@ -187,6 +221,13 @@ class ModelCallHandler(SpawnedHandler):
                 else cast("Tool", BackgroundAwareTool(t))
                 for t in tools_list
             ]
+        repaired = repair_dangling_tool_calls(agent.history)
+        if len(repaired) != len(agent.history):
+            logger.info(
+                "Repaired %d dangling tool_use block(s) in history.",
+                len(repaired) - len(agent.history),
+            )
+            agent.history[:] = repaired
         return ModelRequest(
             messages=list(agent.history),
             system=agent.system_prompt(),
@@ -202,6 +243,7 @@ class ModelCallHandler(SpawnedHandler):
         agent: Agent,
         request: ModelRequest,
         on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
     ) -> ModelResponse:
         """Send; on context-overflow run compaction in-band and retry.
 
@@ -218,6 +260,7 @@ class ModelCallHandler(SpawnedHandler):
                     agent.model,
                     request,
                     on_text=on_text,
+                    on_thinking=on_thinking,
                     max_attempts=agent.max_attempts,
                     persistent_retry=agent.persistent_retry,
                     log_event=agent.log_event,
@@ -336,12 +379,14 @@ def _account_cancelled(
         ),
         total_cost=estimated_cost,
     )
-    with contextlib.suppress(RuntimeError):
+    try:
         agent.cost_tracker.record(
             partial,
             model_id=agent.model.model_id,
             ledger=cost_ledger_var.get(),
         )
+    except Exception:  # noqa: BLE001 -- best-effort accounting on cancel
+        logger.debug("Cancelled-call cost accounting failed", exc_info=True)
 
 
 def _is_thinking_unsupported(exc: BaseException) -> bool:

@@ -431,6 +431,7 @@ class OpenAICompatModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream a chat-completions SSE response.
 
@@ -442,11 +443,14 @@ class OpenAICompatModel:
         Args:
           request: Model request to send.
           on_text: Callback invoked with each text chunk as it arrives.
+          on_thinking: Reserved; OpenAI-compatible chat APIs don't
+              expose a separate thinking stream.
 
         Returns:
           response: Assembled model response after the stream closes.
 
         """
+        del on_thinking  # OpenAI-compat APIs don't expose a thinking stream
         body = self._build_body(request, stream=True)
         client = await self._get_client()
         async with client.stream(

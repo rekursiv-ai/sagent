@@ -1,23 +1,13 @@
-"""``PromptInputHandler`` and ``InputSource`` abstraction.
+"""``PromptInputHandler`` + ``LoginHandler`` + ``InputSource`` abstraction.
 
 The input handler is a long-running spawned handler. It loops on an
 ``InputSource`` (real prompt-toolkit in production; ``StubInputSource``
-in tests), classifies each line, and posts the appropriate descriptor
-to ``agent.inbox``::
-
-    line == "/quit"               ->  text/x-quit            (FIFO)
-    line == "/clear"              ->  text/x-clear-request   (FIFO)
-    line == "/compact" or
-    line.startswith("/compact ")  ->  text/x-compact-request (FIFO)
-    line == "/uncompact" or
-    line.startswith("/uncompact ")->  text/x-uncompact-request
-    line.startswith("/abort")     ->  text/x-abort           (put_left)
-    line == ""                    ->  ignore
-    other                         ->  text/x-user-message    (FIFO)
+in tests), classifies each line via :func:`repl.slash.parse_slash`, and
+dispatches the resulting :class:`SlashAction` to ``agent.inbox``.
 
 Slash commands flow through the FIFO with typed text so user intent
-order is preserved. Only ``/abort`` jumps the queue -- it exists to
-interrupt in-flight model/tool work, not to displace queued input.
+order is preserved. Only urgent actions (``/clear``, ``/abort``) jump
+the queue -- they exist to preempt in-flight model/tool work.
 """
 
 from __future__ import annotations
@@ -25,8 +15,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, override
 
 from sagent import providers as _providers
-from sagent.agent.handlers.base import SpawnedHandler
+from sagent.agent.handlers.base import (
+    InlineHandler,
+    SpawnedHandler,
+)
 from sagent.custom_types import TextMessage
+from sagent.repl.slash import (
+    QUIT_WORDS,
+    SlashAction,
+    dispatch,
+    parse_slash,
+)
 
 
 if TYPE_CHECKING:
@@ -35,7 +34,13 @@ if TYPE_CHECKING:
     from sagent.repl.render import Printer
 
 
-_QUIT_WORDS = ("/quit",)
+__all__ = [
+    "QUIT_WORDS",
+    "InputSource",
+    "LoginHandler",
+    "PromptInputHandler",
+    "StubInputSource",
+]
 
 
 class InputSource(Protocol):
@@ -93,100 +98,60 @@ class PromptInputHandler(SpawnedHandler):
         while True:
             line = await self._source.next_line()
             if line is None:
-                agent.inbox.put(TextMessage("", "text/x-quit"))
+                _ = agent.inbox.put(TextMessage("", "text/x-quit"))
                 return
-            stripped = line.strip()
-            if not stripped:
+            action = parse_slash(line)
+            if action is None:
                 continue
-            if stripped in _QUIT_WORDS:
-                agent.inbox.put(TextMessage("", "text/x-quit"))
+            if action.descriptor == "text/x-user-message":
+                # Pass the original (untrimmed) line through.
+                _ = agent.inbox.put(TextMessage(line, "text/x-user-message"))
+                continue
+            self._apply(agent, action)
+            if action.quit:
                 return
-            if stripped == "/clear" or stripped.startswith("/clear "):
-                # /clear is urgent (matches v1): wipe before any
-                # queued messages so the user's intent is honored even
-                # while a model call is in flight.
-                reason = stripped.removeprefix("/clear").strip()
-                agent.inbox.put_left(
-                    TextMessage(reason, "text/x-clear-request"),
-                )
-                note = f" ({reason})" if reason else ""
-                self._echo(f"[/clear] history cleared{note}")
-                continue
-            if stripped == "/compact" or stripped.startswith("/compact "):
-                instructions = stripped.removeprefix("/compact").strip()
-                agent.inbox.put(
-                    TextMessage(instructions, "text/x-compact-request"),
-                )
-                note = f" ({instructions})" if instructions else ""
-                self._echo(f"[/compact] queued{note}")
-                continue
-            if stripped == "/uncompact" or stripped.startswith("/uncompact "):
-                instructions = stripped.removeprefix("/uncompact").strip()
-                agent.inbox.put(
-                    TextMessage(instructions, "text/x-uncompact-request"),
-                )
-                note = f" ({instructions})" if instructions else ""
-                self._echo(f"[/uncompact] queued{note}")
-                continue
-            if stripped == "/model" or stripped.startswith("/model "):
-                args_str = stripped.removeprefix("/model").strip()
-                agent.inbox.put(
-                    TextMessage(args_str, "text/x-model-switch-request"),
-                )
-                # ModelSwitchHandler echoes its own status.
-                continue
-            if stripped == "/provider" or stripped.startswith("/provider "):
-                # Sugar for ``/model --provider PROV [model_id]``.
-                rest = stripped.removeprefix("/provider").strip()
-                args_str = f"--provider {rest}" if rest else ""
-                agent.inbox.put(
-                    TextMessage(args_str, "text/x-model-switch-request"),
-                )
-                continue
-            if stripped.startswith("/abort"):
-                agent.inbox.put_left(TextMessage("", "text/x-abort"))
-                self._echo("[/abort] cancelling in-flight tasks")
-                continue
-            if stripped == "/login":
-                self._do_login(agent)
-                continue
-            if stripped.startswith("/"):
-                # Unknown slash command. Surface to the user; do NOT
-                # send to the LLM.
-                cmd = stripped.split(maxsplit=1)[0]
-                agent.inbox.put(
-                    TextMessage(
-                        f"unknown command: {cmd}. Supported: "
-                        "/clear /compact /uncompact /model /provider "
-                        "/abort /quit",
-                        "text/x-error",
-                    ),
-                )
-                continue
-            agent.inbox.put(TextMessage(line, "text/x-user-message"))
 
-    def _echo(self, line: str) -> None:
-        """Write a confirmation line to the printer if one was supplied."""
-        if self._printer is not None:
-            self._printer.write_line(line)
+    def _apply(self, agent: Agent, action: SlashAction) -> None:
+        """Dispatch ``action`` and emit any echo line."""
+        dispatch(agent, action)
+        if action.echo is not None and self._printer is not None:
+            self._printer.write_line(action.echo)
 
-    def _do_login(self, agent: Agent) -> None:
-        """Re-authenticate the current provider via its ``login`` classmethod."""
+
+class LoginHandler(InlineHandler):
+    """Handle ``text/x-login-request`` by invoking the provider's ``login``.
+
+    Slash-command parsing emits ``text/x-login-request`` so both REPL
+    paths (active keybinding, idle prompt) take the same code path; the
+    actual re-auth lives here.
+    """
+
+    descriptors: tuple[str, ...] = ("text/x-login-request",)
+
+    def __init__(self, printer: Printer | None = None) -> None:
+        self._printer = printer
+
+    @override
+    async def handle(self, agent: Agent, msg: Message) -> None:
+        del msg
         spec = agent.model_spec
         if spec is None:
-            self._echo("[/login] agent has no model spec")
+            self._write("[/login] agent has no model spec")
             return
-        prov_name = spec.provider
-        prov_cls = getattr(_providers, prov_name, None)
+        prov_cls = getattr(_providers, spec.provider, None)
         if prov_cls is None:
-            self._echo(f"[/login] unknown provider {prov_name!r}")
+            self._write(f"[/login] unknown provider {spec.provider!r}")
             return
         login_fn = getattr(prov_cls, "login", None)
         if login_fn is None:
-            self._echo(f"[/login] {prov_name} has no login method")
+            self._write(f"[/login] {spec.provider} has no login method")
             return
         try:
             login_fn()
-            self._echo(f"[/login] {prov_name} re-authenticated")
+            self._write(f"[/login] {spec.provider} re-authenticated")
         except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-            self._echo(f"[/login] {exc}")
+            self._write(f"[/login] {exc}")
+
+    def _write(self, line: str) -> None:
+        if self._printer is not None:
+            self._printer.write_line(line)

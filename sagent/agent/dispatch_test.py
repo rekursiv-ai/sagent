@@ -189,8 +189,9 @@ class _MockModel(_MockCaps):
         self,
         request: ModelRequest,
         on_text: Any = None,
+        on_thinking: Any = None,
     ) -> _ModelResponse:
-        del on_text
+        del on_text, on_thinking
         return await self.buffer(request=request)
 
 

@@ -87,8 +87,10 @@ class ScriptedModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Return the buffered response and optionally emit final text."""
+        del on_thinking
         response = await self.buffer(request)
         if (
             on_text is not None

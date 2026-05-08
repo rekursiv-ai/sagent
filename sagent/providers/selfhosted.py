@@ -651,17 +651,21 @@ class SelfHostedModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Buffer the response then emit text in one shot.
 
         Args:
           request: Model request with messages and tool declarations.
           on_text: Callback invoked with each text part of the response.
+          on_thinking: Reserved; self-hosted decode is buffered, no
+              streaming thinking surface.
 
         Returns:
           response: Model response with text and/or tool-call messages.
 
         """
+        del on_thinking  # buffered decode; no per-chunk thinking
         resp = await self.buffer(request)
         if on_text is not None:
             for part in cast(tuple[Message, ...], resp.content.content):

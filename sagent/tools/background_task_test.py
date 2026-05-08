@@ -79,8 +79,9 @@ class _MockModel(_MockCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> _ModelResponse:
-        del on_text
+        del on_text, on_thinking
         return await self.buffer(request=request)
 
 

@@ -37,7 +37,7 @@ from sagent.custom_types import TextMessage, TokenCount
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
-    from sagent.custom_types import Compactor, Message
+    from sagent.custom_types import Message
 
 
 # -- HistoryHandler ----------------------------------------------------
@@ -192,10 +192,7 @@ class SessionSaveHandler(InlineHandler):
 # -- Standard handler-set factory -------------------------------------
 
 
-def core_handlers(
-    *,
-    compactor: Compactor | None = None,
-) -> list[Handler]:
+def core_handlers() -> list[Handler]:
     """Build the standard core handler set.
 
     Order matters:
@@ -207,16 +204,13 @@ def core_handlers(
       - ``BudgetWatcher`` before ``ModelCallHandler``: pre-flight
         compaction has to land before the spawned model call task.
 
-    Args:
-      compactor: Optional compactor; enables ``BudgetWatcher`` and
-          ``CompactHandler`` to do real work. With no compactor, those
-          handlers are no-ops.
+    Compaction handlers read ``agent.compactor`` directly and no-op
+    when it's ``None``; the agent owns that wiring.
 
     Returns:
       handlers: List of handler instances ready to register on Agent.
 
     """
-    del compactor  # only needed to advertise compaction is an option
     return [
         HistoryHandler(),
         ActivityHandler(),
