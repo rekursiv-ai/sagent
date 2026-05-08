@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Protocol, cast, override
 
 from sagent.agent.handlers.base import Handler, InlineHandler
 from sagent.agent.handlers.model_switch import ModelSwitchHandler
+from sagent.custom_types import TextMessage
 from sagent.lib.message import get_queue_id
 from sagent.repl.input import HelpHandler, LoginHandler, TasksHandler
 from sagent.repl.render_diff import find_stable_boundary
@@ -58,9 +59,7 @@ class Printer(Protocol):
     def write_thinking(self, text: str) -> None: ...
     def write_diff(self, diff: str, file_path: str = "") -> None: ...
     def write_interrupted(self) -> None: ...
-    def write_child_event(
-        self, label: str, descriptor: str, content: object
-    ) -> None: ...
+    def write_child_block(self, label: str, items: list[Message]) -> None: ...
     def set_terminal_title(self, text: str) -> None: ...
 
 
@@ -81,7 +80,8 @@ class RecordingPrinter:
       thinkings: ``write_thinking`` payloads.
       diffs: ``write_diff`` payloads.
       interruptions: count of ``write_interrupted`` calls.
-      child_events: tuples of ``(label, descriptor, content)``.
+      child_blocks: tuples of ``(label, items)`` where each item is
+          a ``Message`` from the child agent's event stream.
       titles: ``set_terminal_title`` payloads.
 
     """
@@ -97,7 +97,7 @@ class RecordingPrinter:
         self.thinkings: list[str] = []
         self.diffs: list[tuple[str, str]] = []
         self.interruptions: int = 0
-        self.child_events: list[tuple[str, str, object]] = []
+        self.child_blocks: list[tuple[str, list[Message]]] = []
         self.titles: list[str] = []
 
     def write_line(self, text: str) -> None:
@@ -130,8 +130,8 @@ class RecordingPrinter:
     def write_interrupted(self) -> None:
         self.interruptions += 1
 
-    def write_child_event(self, label: str, descriptor: str, content: object) -> None:
-        self.child_events.append((label, descriptor, content))
+    def write_child_block(self, label: str, items: list[Message]) -> None:
+        self.child_blocks.append((label, list(items)))
 
     def set_terminal_title(self, text: str) -> None:
         self.titles.append(text)
@@ -211,15 +211,30 @@ class RenderToolLabel(InlineHandler):
         self._printer.write_tool_label(str(msg.content))
 
 
-class RenderToolResult(InlineHandler):
-    """Render relevant parts of a ``multipart/x-tool-result``.
+def render_tool_result(printer: Printer, msg: Message) -> None:
+    """Render the user-facing parts of a ``multipart/x-tool-result``.
 
     Errors via ``write_tool_error``; diffs via ``write_diff``;
     bash-lint nudges (``text/x-hint-tool-use-nudge``) via the dim
-    yellow ``hint:`` line that v1 surfaces. Plain text parts are
-    skipped here -- they belong to history, not user feedback (the
-    model already saw them).
+    yellow ``hint:`` line. Plain text parts are skipped -- they
+    belong to history, not user feedback (the model already saw
+    them).
+
+    Shared helper so child-event rendering can reuse the parent's
+    tool-result formatting (RenderToolResult for the parent's own
+    tools; the child-block renderer for child agents' tools).
     """
+    for part in cast("tuple[Message, ...]", msg.content):
+        if part.descriptor == "text/x-error":
+            printer.write_tool_error(str(part.content))
+        elif part.descriptor == "text/x-diff" and part.content:
+            printer.write_diff(str(part.content), get_queue_id(msg))
+        elif part.descriptor == "text/x-hint-tool-use-nudge" and part.content:
+            printer.write_hint(str(part.content))
+
+
+class RenderToolResult(InlineHandler):
+    """Render relevant parts of a parent agent's ``multipart/x-tool-result``."""
 
     descriptors: tuple[str, ...] = ("multipart/x-tool-result",)
 
@@ -229,13 +244,7 @@ class RenderToolResult(InlineHandler):
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
         del agent
-        for part in cast("tuple[Message, ...]", msg.content):
-            if part.descriptor == "text/x-error":
-                self._printer.write_tool_error(str(part.content))
-            elif part.descriptor == "text/x-diff" and part.content:
-                self._printer.write_diff(str(part.content), get_queue_id(msg))
-            elif part.descriptor == "text/x-hint-tool-use-nudge" and part.content:
-                self._printer.write_hint(str(part.content))
+        render_tool_result(self._printer, msg)
 
 
 class RenderError(InlineHandler):
@@ -267,18 +276,40 @@ class RenderInterrupted(InlineHandler):
 
 
 class RenderChildEvent(InlineHandler):
-    """Render labeled child-agent events from ``multipart/x-child-event``.
+    """Buffer child-agent events; flush as labeled gutter blocks.
 
-    The envelope carries ``(label_msg, inner_msg, ...)`` where the first
-    part is a ``text/plain`` label and the rest are zero-or-more inner
-    events (tool labels, plain text, errors). Only display-relevant
-    inner descriptors are rendered.
+    Streaming text from a child arrives as many small ``text/plain``
+    chunks (mid-token byte-boundary fragments). Rendering each chunk
+    as its own line produces jagged output. Instead, accumulate
+    text per child label and flush at:
+
+    1. Stable Markdown boundary (paragraph break, code-block end)
+       -- same heuristic ``RenderStream`` uses for the parent's text.
+    2. Atomic event from the same child (tool label, tool result,
+       thinking, error, hint, child-done) -- those render in the
+       same labeled block.
+    3. Different child label arriving (X-interleave) -- prior label
+       flushes immediately so both children remain visible in
+       real-time.
+
+    Flushed output goes through ``Printer.write_child_block(label,
+    items)`` where items is the list of ``(descriptor, content)``
+    pairs accumulated in this block. The printer handles the gutter
+    rendering ("Agent_N  :  ..." on first line, indented thereafter).
     """
 
     descriptors: tuple[str, ...] = ("multipart/x-child-event",)
 
     def __init__(self, printer: Printer) -> None:
         self._printer = printer
+        # Per-label accumulated streaming text (not yet at a boundary).
+        self._text_buf: dict[str, str] = {}
+        # Per-label rendered items pending flush. Each item is a
+        # Message the printer knows how to render -- mixing text/plain
+        # (Markdown chunks), tool labels, tool results, errors, and
+        # the child-done summary into one block matches the user's
+        # mental model of "what this child said in this turn."
+        self._items: dict[str, list[Message]] = {}
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
@@ -288,7 +319,65 @@ class RenderChildEvent(InlineHandler):
             return
         label = str(parts[0].content)
         for inner in parts[1:]:
-            self._printer.write_child_event(label, inner.descriptor, inner.content)
+            self._consume(label, inner)
+
+    def _consume(self, label: str, inner: Message) -> None:
+        # X-interleave: when a different label emits, flush the
+        # other one's pending state so both children remain visible
+        # in real-time. Tighter blocks per-flush, but no head-of-line
+        # blocking on a slow streamer.
+        for other in list(self._text_buf.keys() | self._items.keys()):
+            if other != label:
+                self._flush(other)
+        if inner.descriptor == "text/plain":
+            self._text_buf[label] = self._text_buf.get(label, "") + str(inner.content)
+            buf = self._text_buf[label]
+            boundary = find_stable_boundary(buf)
+            if boundary <= 0:
+                return
+            stable = buf[:boundary].rstrip("\n")
+            # Keep the unstable tail in ``text_buf``; only the stable
+            # prefix gets emitted now. ``_emit_pending`` is used here
+            # (NOT ``_flush``) because ``_flush`` would also move
+            # ``text_buf`` into items -- splitting a mid-paragraph
+            # word across two blocks.
+            self._text_buf[label] = buf[boundary:]
+            if stable:
+                self._items.setdefault(label, []).append(
+                    TextMessage(stable, "text/plain"),
+                )
+                self._emit_pending(label)
+            return
+        # Atomic event. Flush any pending streaming text first (so
+        # it appears above the atomic event in the same block),
+        # then emit the block.
+        self._move_text_to_items(label)
+        self._items.setdefault(label, []).append(inner)
+        self._emit_pending(label)
+
+    def _move_text_to_items(self, label: str) -> None:
+        """Move accumulated streaming text into the items list."""
+        text = self._text_buf.pop(label, "").rstrip("\n")
+        if text:
+            self._items.setdefault(label, []).append(
+                TextMessage(text, "text/plain"),
+            )
+
+    def _emit_pending(self, label: str) -> None:
+        """Emit pending items for ``label``; leave ``text_buf`` untouched."""
+        items = self._items.pop(label, [])
+        if items:
+            self._printer.write_child_block(label, items)
+
+    def _flush(self, label: str) -> None:
+        """Force-flush everything for ``label``: text_buf + items.
+
+        Used when the buffered tail must surface even if no stable
+        boundary has been reached -- atomic event arriving, label
+        change (X-interleave), end of stream.
+        """
+        self._move_text_to_items(label)
+        self._emit_pending(label)
 
 
 class RenderThinking(InlineHandler):

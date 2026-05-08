@@ -45,6 +45,7 @@ from sagent.repl import (
     repl_handler_set,
     spawn_repl_pump,
 )
+from sagent.repl.render import RenderChildEvent
 from sagent.repl.slash import parse_slash
 from sagent.repl.toolbar import render_toolbar
 from sagent.testing import MockModelCaps
@@ -340,6 +341,141 @@ async def test_render_toolbar_after_run_shows_bracket() -> None:
     assert bar.startswith("[")
     assert bar.endswith("]")
     assert "$" in bar
+
+
+# -- Child-event gutter rendering --------------------------------------
+
+
+def _child_envelope(label: str, *inners: Message) -> Message:
+    """Build a ``multipart/x-child-event`` envelope as the spawn forwarder does."""
+    return MultipartMessage(
+        (TextMessage(label, "text/x-agent-label"), *inners),
+        "multipart/x-child-event",
+    )
+
+
+@pytest.mark.asyncio
+async def test_child_event_buffers_streaming_chunks_into_one_block() -> None:
+    """Many small ``text/plain`` chunks from one child collapse to one block.
+
+    The provider streams in arbitrary byte fragments. Without
+    buffering we'd render each chunk as a separate labeled line
+    with mid-token splits ("## Type" then " Hints"). The new
+    ``RenderChildEvent`` accumulates per label and flushes at a
+    stable Markdown boundary, so the user sees a single coherent
+    block.
+    """
+    printer = RecordingPrinter()
+    handler = RenderChildEvent(printer)
+    agent = Agent(model=_StreamingFakeModel([_model_response("ack")]))
+    chunks = ["## Type", " Hints\n\nNext", " paragraph.\n\n"]
+    for chunk in chunks:
+        await handler.handle(
+            agent,
+            _child_envelope("Agent_0", TextMessage(chunk, "text/plain")),
+        )
+    # Stable boundary at "\n\n" flushes; everything before it lands
+    # in one block as one ``text/plain`` Message (the assembled
+    # Markdown), not many.
+    assert len(printer.child_blocks) >= 1
+    label, items = printer.child_blocks[0]
+    assert label == "Agent_0"
+    text_items = [it for it in items if it.descriptor == "text/plain"]
+    assert text_items, items
+    # The first paragraph is a single coherent message, not chunks.
+    assert "## Type Hints" in str(text_items[0].content)
+
+
+@pytest.mark.asyncio
+async def test_child_event_x_interleave_flushes_on_label_change() -> None:
+    """When a different child emits, the prior label flushes immediately.
+
+    X-interleave: real-time visibility for both children, even if
+    the in-progress label hadn't reached a stable Markdown boundary.
+    """
+    printer = RecordingPrinter()
+    handler = RenderChildEvent(printer)
+    agent = Agent(model=_StreamingFakeModel([_model_response("ack")]))
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_0", TextMessage("partial", "text/plain")),
+    )
+    # Pre-interleave: nothing flushed (no boundary yet).
+    assert printer.child_blocks == []
+    # Different child arrives -> flush Agent_0's pending text first.
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_1", TextMessage("other", "text/plain")),
+    )
+    assert len(printer.child_blocks) == 1
+    assert printer.child_blocks[0][0] == "Agent_0"
+
+
+@pytest.mark.asyncio
+async def test_child_event_unstable_tail_does_not_split_across_blocks() -> None:
+    """Boundary-triggered flush keeps the unstable tail in the buffer.
+
+    Regression: an earlier version flushed the entire ``text_buf``
+    (stable prefix + unstable tail) on every boundary trigger,
+    producing one block ending mid-word and the next block starting
+    with the rest of that word ("for port" / "ability."). The fix
+    is that boundary flushes emit only the stable prefix; the
+    unstable tail stays in the buffer until the NEXT boundary, an
+    atomic event, or end-of-stream.
+    """
+    printer = RecordingPrinter()
+    handler = RenderChildEvent(printer)
+    agent = Agent(model=_StreamingFakeModel([_model_response("ack")]))
+    # Stream a paragraph followed by mid-word fragments. The first
+    # paragraph reaches a stable boundary at the blank line; the
+    # bullet that follows is still incomplete (mid-word "port").
+    chunks = [
+        "first paragraph.\n\n- list item with text for port",
+        "ability.\n\n## Heading\n",
+        "after",
+    ]
+    for chunk in chunks:
+        await handler.handle(
+            agent,
+            _child_envelope("Agent_0", TextMessage(chunk, "text/plain")),
+        )
+    # Concatenate every text/plain content across all blocks.
+    rendered = ""
+    for _, items in printer.child_blocks:
+        for item in items:
+            if item.descriptor == "text/plain":
+                rendered += str(item.content)
+    # ``portability`` MUST appear intact in some block, never split.
+    assert "portability" in rendered, [
+        (lbl, [(it.descriptor, str(it.content)) for it in its])
+        for lbl, its in printer.child_blocks
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_event_atomic_event_flushes_pending_text() -> None:
+    """A tool label / result / error from the child flushes pending text first.
+
+    The atomic event renders in the same labeled block as the
+    streaming text that preceded it, which matches the user's
+    mental model of "this child's output during this turn."
+    """
+    printer = RecordingPrinter()
+    handler = RenderChildEvent(printer)
+    agent = Agent(model=_StreamingFakeModel([_model_response("ack")]))
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_0", TextMessage("I will edit", "text/plain")),
+    )
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_0", TextMessage("Edit", "text/x-tool-label")),
+    )
+    # Both items appear in one block, in order.
+    assert len(printer.child_blocks) == 1
+    label, items = printer.child_blocks[0]
+    assert label == "Agent_0"
+    assert [it.descriptor for it in items] == ["text/plain", "text/x-tool-label"]
 
 
 # -- Input handler routing ---------------------------------------------
