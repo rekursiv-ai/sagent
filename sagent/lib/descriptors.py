@@ -43,6 +43,7 @@ TextDescriptor = Literal[
     "text/x-signal-user-input",
     "text/x-signal-status-changed",
     "text/x-diff",
+    "text/x-tool-summary",
     "text/x-clear-request",
     "text/x-help-request",
     "text/x-tasks-request",

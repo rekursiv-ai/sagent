@@ -73,6 +73,30 @@ class TestBash:
         response = await bash.run(_msg(json_freeze({"command": "false"})))
         assert "[exit code: 1]" in _text(response)
 
+    @pytest.mark.anyio
+    async def test_summary_result_clean_run_reports_line_count(self) -> None:
+        """Stdout-only successful run summarises as ``{N}L``."""
+        response = await bash.run(
+            _msg(json_freeze({"command": "printf 'a\\nb\\nc\\n'"}))
+        )
+        assert bash.summary_result(response) == "3L"
+
+    @pytest.mark.anyio
+    async def test_summary_result_nonzero_exit_includes_code(self) -> None:
+        """Non-zero exit appends ``· exit {code}`` to the summary."""
+        response = await bash.run(_msg(json_freeze({"command": "false"})))
+        summary = bash.summary_result(response)
+        assert summary is not None
+        assert "exit 1" in summary
+
+    @pytest.mark.anyio
+    async def test_summary_result_no_output_returns_marker(self) -> None:
+        """Empty stdout reports ``no output`` rather than ``0L``."""
+        response = await bash.run(_msg(json_freeze({"command": "true"})))
+        # ``Bash._run`` returns "(no output)" for empty stdout/exit 0.
+        # Body text "(no output)" is one line, so summary is "1L".
+        assert bash.summary_result(response) == "1L"
+
 
 class TestBashEdgeCases:
     @pytest.mark.anyio

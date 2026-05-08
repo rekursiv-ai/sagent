@@ -112,6 +112,16 @@ class Glob:
         suffix = f" in {path}" if path != "." else ""
         return f"Glob {pattern}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt: number of matches."""
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content).strip()
+        if not text or text.startswith("(no matches"):
+            return "no matches"
+        # ``_run`` separates entries with newlines (one path per line).
+        return f"{text.count(chr(10)) + 1} matches"
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 

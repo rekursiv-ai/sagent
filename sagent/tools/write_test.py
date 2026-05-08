@@ -52,6 +52,15 @@ class TestWrite:
         assert "5 bytes" in _text(response)
 
     @pytest.mark.anyio
+    async def test_summary_result_reports_byte_count(self, tmp_path: Path) -> None:
+        """Write.summary_result extracts the byte count from the OK message."""
+        f = tmp_path / "out.txt"
+        response = await write.run(
+            _msg(json_freeze({"file_path": str(f), "content": "hello"}))
+        )
+        assert write.summary_result(response) == "wrote 5 bytes"
+
+    @pytest.mark.anyio
     async def test_write_creates_dirs(self, tmp_path: Path) -> None:
         f = tmp_path / "sub" / "dir" / "out.txt"
         await write.run(_msg(json_freeze({"file_path": str(f), "content": "nested"})))

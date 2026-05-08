@@ -203,6 +203,17 @@ class Grep:
         suffix = f" in {path}" if path != "." else ""
         return f"Grep {pattern!r}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt: hit count."""
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content).strip()
+        if not text or text.startswith("(no matches"):
+            return "no matches"
+        # Output is one match per line; line count == match count for
+        # files_with_matches and content modes both.
+        return f"{text.count(chr(10)) + 1} hits"
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 
