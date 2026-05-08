@@ -59,7 +59,9 @@ class _OfflineEcho(MockModelCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
+        del on_thinking
         if on_text is not None:
             for word in self._last_user(request).split():
                 on_text(word + " ")

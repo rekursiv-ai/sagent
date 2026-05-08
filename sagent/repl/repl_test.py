@@ -86,7 +86,9 @@ class _StreamingFakeModel(MockModelCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
+        del on_thinking
         self.requests.append(request)
         if on_text is not None:
             for chunk in self._chunks:
@@ -315,8 +317,9 @@ def test_render_toolbar_idle_returns_empty() -> None:
             self,
             request: ModelRequest,
             on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
         ) -> ModelResponse:
-            del request, on_text
+            del request, on_text, on_thinking
             raise RuntimeError("not used")
 
     agent = Agent(model=_NopModel(), handlers=[])

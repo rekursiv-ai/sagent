@@ -79,12 +79,18 @@ SystemPromptArg = SystemPrompt | Callable[[], SystemPrompt]
 
 _MAX_UNSAVED_EVENTS = 1000
 
+# Hard cap on shutdown-drain wait. Cooperative tasks cancel promptly;
+# uncancellable work (sync tools in ``asyncio.to_thread``) cannot be
+# stopped from the event loop, so the runner falls through after this.
+_DRAIN_TIMEOUT = 2.0
+
 # Sentinel placed in ``Agent.inbox`` by REPL pumps / Slack adapters /
 # any external driver to signal session end. Mirrors v1 export.
 QUIT_SENTINEL = "text/x-quit"
 
-# Error codes returned in ToolResponse.content for programmatic matching.
-ERROR_NO_PROMPT = "error:no_prompt"
+# Error code returned in the final assistant message when the agent's
+# tool-call-round cap was reached. Callers (AgentSpawn, orchestrator)
+# match on this string in the message content.
 ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
 
 
@@ -223,7 +229,7 @@ class Agent:
             self.session_dir = Path(session_dir)
             self.replacement_state.storage_dir = self.session_dir
             self._load_session()
-        default = core_handlers(compactor=compactor)
+        default = core_handlers()
         for h in handlers if handlers is not None else default:
             self.register(h)
 
@@ -580,6 +586,7 @@ class Agent:
             raise ValueError("No prompt provided.")
         events: asyncio.Queue[Message | None] = asyncio.Queue()
         self.inbox.put(TextMessage(prompt, "text/x-user-message"))
+        cost_before = _subtree_cost(self)
 
         async def _drive() -> Message:
             # Forward inbox traffic onto ``events`` via a wildcard
@@ -602,7 +609,8 @@ class Agent:
                 # Mirror v1's ``application/x-done`` request-boundary
                 # sentinel: emit before terminating so callers like
                 # ``AgentSpawn._ChildForwarder`` can build a per-call
-                # summary from the per-call token totals.
+                # summary from the per-call token totals + cost.
+                cost_delta = max(0.0, _subtree_cost(self) - cost_before)
                 events.put_nowait(
                     JsonMessage(
                         json_freeze(
@@ -611,6 +619,7 @@ class Agent:
                                     self.cost_tracker.last_request.input_tokens
                                 ),
                                 "output_tokens": (self.cost_tracker.call_output_tokens),
+                                "cost_usd": cost_delta,
                             },
                         ),
                         "application/x-done",
@@ -691,7 +700,11 @@ class Agent:
         """Run one handler against one message, dispatching by spawn mode."""
         if handler.spawn:
             task = asyncio.create_task(self._wrap_spawn(handler, msg))
-            self.tasks[msg.id] = task
+            # Key by ``id(task)`` rather than ``msg.id`` so multiple
+            # spawned handlers fanned out from the same descriptor each
+            # get their own slot. Otherwise the second create_task
+            # clobbers the first and ``_wait_for_idle`` returns early.
+            self.tasks[id(task)] = task
             return
         try:
             await handler.handle(self, msg)
@@ -705,12 +718,29 @@ class Agent:
         except Exception as e:  # noqa: BLE001 -- surface as inbox error
             self.inbox.put(_error_message(msg, e))
         finally:
-            _ = self.tasks.pop(msg.id, None)
+            task = asyncio.current_task()
+            if task is not None:
+                _ = self.tasks.pop(id(task), None)
 
     async def _drain_tasks(self) -> None:
-        """Await all in-flight spawned tasks; called on shutdown."""
-        if self.tasks:
-            _ = await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        """Cancel and await in-flight spawned tasks; called on shutdown.
+
+        Cancels each task before awaiting so cooperative tasks can
+        unwind promptly on quit. Tasks blocked on uncancellable work
+        (sync tools in ``asyncio.to_thread``) cannot be forced to stop;
+        we wait up to ``_DRAIN_TIMEOUT`` and then proceed -- the
+        process-level shutdown will close their executor.
+        """
+        if not self.tasks:
+            return
+        for task in list(self.tasks.values()):
+            if not task.done():
+                _ = task.cancel()
+        try:
+            async with asyncio.timeout(_DRAIN_TIMEOUT):
+                _ = await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        except (TimeoutError, asyncio.CancelledError):
+            logger.debug("Drain timed out; %d tasks still running.", len(self.tasks))
 
     def _unregister_wildcard(self, handler: Handler) -> None:
         """Remove ``handler`` from the wildcard list (best-effort)."""
@@ -923,6 +953,23 @@ class RunHandle:
                     self._drained = True
                     break
         return await self._task
+
+
+def _subtree_cost(agent: Agent) -> float:
+    """Return the active subtree cost: the inherited ledger if present, else the tracker.
+
+    Used by ``Agent.run`` to bracket a single-run cost delta. For the
+    root run, the run's own ledger isn't installed yet at ``run`` entry
+    so we fall back to ``cost_tracker.total_cost_usd`` (which equals
+    snapshot + previously-folded ledgers). For nested children, the
+    parent's ledger is already in the ContextVar; reading it gives a
+    subtree-wide measurement that includes any descendants the child
+    spawns.
+    """
+    ledger = cost_ledger_var.get()
+    if ledger is not None:
+        return ledger.total_cost_usd
+    return agent.cost_tracker.total_cost_usd
 
 
 def _error_message(origin: Message, exc: BaseException) -> Message:

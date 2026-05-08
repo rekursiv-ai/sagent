@@ -628,17 +628,21 @@ class _OpenAISubModel(_OpenAIModel):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream a request via the OpenAI Responses API.
 
         Args:
           request: Model request to send.
           on_text: Callback invoked with each text chunk as it arrives.
+          on_thinking: Reserved; the OpenAI Responses API does not
+              expose reasoning summaries as separate stream deltas.
 
         Returns:
           response: Assembled model response after the stream closes.
 
         """
+        del on_thinking  # not exposed as a stream delta on this endpoint
         sdk = await self._provider.get_sdk()
         # The ChatGPT Codex subscription endpoint rejects some public
         # Responses API knobs, including ``temperature`` and

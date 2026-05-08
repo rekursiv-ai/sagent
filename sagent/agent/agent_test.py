@@ -63,8 +63,9 @@ class _FakeModel(MockModelCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        del on_text
+        del on_text, on_thinking
         return await self.buffer(request=request)
 
 
@@ -169,6 +170,7 @@ async def test_streaming_chunks_post_to_inbox() -> None:
             self,
             request: ModelRequest,
             on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
         ) -> ModelResponse:
             self.requests.append(request)
             if on_text is not None:
@@ -562,8 +564,9 @@ async def test_overflow_recovery_compacts_and_retries() -> None:
             self,
             request: ModelRequest,
             on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
         ) -> ModelResponse:
-            del on_text
+            del on_text, on_thinking
             self.requests.append(request)
             self.calls += 1
             if self.calls == 1:
@@ -693,6 +696,95 @@ async def test_session_save_noop_without_session_dir() -> None:
         agent.run(json_freeze({"prompt": "p"})),
         timeout=2.0,
     )
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_abort_during_tool_batch_synthesizes_interrupted_results() -> None:
+    """Aborting mid-tool-batch must keep history consistent.
+
+    Without the synthesized tool_results, the assistant message's
+    ``tool_use`` blocks dangle and the next provider request 400s with
+    ``tool_use ids were found without tool_result blocks``.
+    """
+    started = asyncio.Event()
+
+    class _SlowTool:
+        name = "slow"
+        tool_id = "application/x-tool-slow"
+        description = "Hangs until cancelled."
+        supports_microcompaction = False
+        directive_schema: JSON = json_freeze({"type": "object", "properties": {}})
+
+        def prompt(self) -> str:
+            return ""
+
+        def summary(self, msg: Message) -> str:
+            del msg
+            return self.name
+
+        async def run(self, msg: Message) -> Message:
+            del msg
+            started.set()
+            await asyncio.Event().wait()
+            return TextMessage("never", "text/plain")
+
+    tool_call = tool_call_message("qid_slow", "slow", json_freeze({}))
+    response = _model_response(tool_calls=[tool_call])
+    agent = Agent(model=_FakeModel([response]), tools=[cast("Tool", _SlowTool())])
+    agent.inbox.put(TextMessage("go", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    agent.inbox.put_left(TextMessage("", "text/x-abort"))
+    # Give the dispatch loop time to process the cancellation and the
+    # synthesized tool_results that ToolBatchHandler posts before we
+    # send the quit sentinel.
+    for _ in range(100):
+        if any(m.descriptor == "multipart/x-tool-result" for m in agent.history):
+            break
+        await asyncio.sleep(0.01)
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    await asyncio.wait_for(loop_task, timeout=3.0)
+    # The assistant tool_use must have a matching tool_result of any kind.
+    tool_results = [
+        m for m in agent.history if m.descriptor == "multipart/x-tool-result"
+    ]
+    assert len(tool_results) == 1, [m.descriptor for m in agent.history]
+    parts = cast("tuple[Message, ...]", tool_results[0].content)
+    descriptors = [p.descriptor for p in parts]
+    assert "text/x-error" in descriptors
+    error_part = next(p for p in parts if p.descriptor == "text/x-error")
+    assert "interrupted" in str(error_part.content).lower()
+
+
+@pytest.mark.asyncio
+async def test_model_call_auto_repairs_dangling_tool_use() -> None:
+    """Resumed sessions with poisoned history are self-healing.
+
+    If history has an assistant ``tool_use`` block that was never paired
+    with a ``tool_result`` (e.g. crash-resume from an older session),
+    ``ModelCallHandler._build_request`` runs ``repair_dangling_tool_calls``
+    so the request the provider sees is well-formed.
+    """
+    poisoned_call = tool_call_message("qid_orphan", "echo", json_freeze({"text": "hi"}))
+    poisoned_assistant = MultipartMessage(
+        (TextMessage("", "text/plain"), poisoned_call),
+        "multipart/x-model-message",
+    )
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    agent.history.append(TextMessage("u", "text/x-user-message"))
+    agent.history.append(poisoned_assistant)
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "next"})),
+        timeout=2.0,
+    )
+    # The model received a repaired history (synthetic tool_result).
+    sent_descriptors = [m.descriptor for m in model.requests[-1].messages]
+    # Order should include the synthetic result between the poisoned
+    # assistant and the new user message.
+    pos_assistant = sent_descriptors.index("multipart/x-model-message")
+    assert sent_descriptors[pos_assistant + 1] == "multipart/x-tool-result"
 
 
 def test_last_assistant_message_returns_empty_when_none() -> None:

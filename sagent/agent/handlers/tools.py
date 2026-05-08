@@ -79,7 +79,15 @@ class ToolBatchHandler(SpawnedHandler):
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
-        """Dispatch the batch, post the result envelope."""
+        """Dispatch the batch, post the result envelope.
+
+        On cancellation (``/abort`` mid-batch), synthesizes
+        ``[interrupted]`` placeholders for any unfilled foreground tool
+        calls before re-raising. Without that step the assistant
+        message's ``tool_use`` blocks would have no matching
+        ``tool_result`` and the next provider request would 400 with
+        ``tool_use ids were found without tool_result blocks``.
+        """
         tool_calls = list(cast("tuple[Message, ...]", msg.content))
         if tool_calls:
             agent.activity.num_tool_call_rounds += 1
@@ -89,7 +97,7 @@ class ToolBatchHandler(SpawnedHandler):
             # user sees what's running while the tool executes.
             tool = agent._tools.get(tc_tool_id(req))  # noqa: SLF001 -- handler intimate
             label = tool_call_label(tool, req)
-            agent.inbox.put(TextMessage(label, "text/x-tool-label"))
+            _ = agent.inbox.put(TextMessage(label, "text/x-tool-label"))
             directive = tc_directive(req)
             delay = int_val(directive.get("delay"), 0)
             background = bool_val(directive.get("background"), False) or delay > 0
@@ -97,8 +105,18 @@ class ToolBatchHandler(SpawnedHandler):
                 _dispatch_background(agent, req, delay)
             else:
                 fg_calls.append(req)
-        results = await _dispatch_foreground(agent, fg_calls) if fg_calls else []
-        agent.inbox.put(
+        try:
+            results = await _dispatch_foreground(agent, fg_calls) if fg_calls else []
+        except asyncio.CancelledError:
+            # Post each synthetic tool_result directly so HistoryHandler
+            # appends them, but skip the batch-result envelope so
+            # ToolBatchResultHandler does NOT auto-post a follow-up
+            # text/x-model-call. After abort, control returns to the
+            # user instead of immediately re-engaging the model.
+            for req in fg_calls:
+                _ = agent.inbox.put(_interrupted_result(req))
+            raise
+        _ = agent.inbox.put(
             MultipartMessage(
                 tuple(results),
                 "multipart/x-tool-batch-result",
@@ -106,6 +124,18 @@ class ToolBatchHandler(SpawnedHandler):
             ),
         )
         _drain_tool_state_signals(agent)
+
+
+def _interrupted_result(req: Message) -> Message:
+    """Synthetic ``[interrupted]`` tool-result for an unfilled foreground call."""
+    return MultipartMessage(
+        (
+            TextMessage(get_queue_id(req), "text/x-queue-id"),
+            TextMessage("[interrupted]", "text/x-error"),
+        ),
+        "multipart/x-tool-result",
+        parent_id=req.id,
+    )
 
 
 class ToolBatchResultHandler(InlineHandler):

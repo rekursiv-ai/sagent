@@ -10,8 +10,9 @@ specific lifecycle moments:
   the in-flight call; reset to 0 at call start.
 - ``active``: True iff a call is in flight.
 
-Token estimate: ``live_response_tokens`` = ``live_response_chars // 4``
-(matches v1's heuristic).
+Token estimate: callers convert ``live_response_chars`` via the
+agent's ``budget.chars_per_token`` (see ``Agent.live_model_response_tokens``)
+so models with non-default ratios estimate correctly.
 """
 
 from __future__ import annotations
@@ -48,11 +49,6 @@ class ActivityTracker:
     num_tool_call_rounds: int = 0
     truncation_recoveries: int = 0
     last_stop_reason: str | None = None
-
-    @property
-    def live_response_tokens(self) -> int:
-        """Estimated output tokens streamed so far (chars/4 heuristic)."""
-        return self.live_response_chars // 4
 
 
 class ActivityHandler(InlineHandler):

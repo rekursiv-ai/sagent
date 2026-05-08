@@ -23,6 +23,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
 
 from sagent.repl.input import InputSource
+from sagent.repl.slash import QUIT_WORDS
 
 
 if TYPE_CHECKING:
@@ -30,9 +31,6 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from sagent.agent.agent import Agent
-
-
-_QUIT_WORDS = {"/quit"}
 
 
 class PromptToolkitInputSource(InputSource):
@@ -65,7 +63,7 @@ class PromptToolkitInputSource(InputSource):
             self._drain_for_quit()
             return None
         stripped = text.strip()
-        if stripped.lower() in _QUIT_WORDS:
+        if stripped.lower() in QUIT_WORDS:
             self._drain_for_quit()
             return None
         return text

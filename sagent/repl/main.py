@@ -97,7 +97,7 @@ async def run_repl(
                 printer=printer,
             ),
         )
-        replay_messages(agent, console, console)
+        replay_messages(agent, console)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:

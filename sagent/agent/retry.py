@@ -151,6 +151,7 @@ async def send_with_retry(
     request: ModelRequest,
     *,
     on_text: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
     max_attempts: int,
     persistent_retry: bool,
     log_event: Callable[..., None],
@@ -168,6 +169,10 @@ async def send_with_retry(
       model: Model to send the request to.
       request: Fully-built model request.
       on_text: Streaming callback for live text chunks.
+      on_thinking: Streaming callback for live thinking chunks.
+          Only fires on the first streaming attempt; ignored on
+          retries (the buffered fallback has no separate thinking
+          stream and the renderer would render thinking twice).
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       log_event: Structured event logger.
@@ -196,6 +201,10 @@ async def send_with_retry(
             break
         use_stream = on_text is not None and stream_failures < _STREAM_FALLBACK_AFTER
         live = on_text if (use_stream and attempt == 0) else None
+        # Thinking streams only on the first streaming attempt; on
+        # retry we read thinking from the final response so the
+        # renderer never sees the same content twice.
+        live_thinking = on_thinking if (use_stream and attempt == 0) else None
         chunks: list[str] = []
         capture = _make_stream_callback(chunks, live)
         try:
@@ -203,6 +212,7 @@ async def send_with_retry(
                 resp = await model.stream(
                     request=request,
                     on_text=capture,
+                    on_thinking=live_thinking,
                 )
                 full = "".join(chunks)
             else:

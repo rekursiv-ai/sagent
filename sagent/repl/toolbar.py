@@ -45,7 +45,7 @@ def render_toolbar(agent: Agent) -> str:
     tokens = agent.cost_tracker.total
     cost = float(agent.cost_tracker.total_cost_usd)
     output_tokens = tokens.output_tokens + (
-        activity.live_response_tokens if activity.active else 0
+        agent.live_model_response_tokens if activity.active else 0
     )
     bracket = (
         f"[{format_elapsed(activity.elapsed_seconds)}"

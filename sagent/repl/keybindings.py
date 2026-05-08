@@ -7,10 +7,15 @@ swapped for v2's deque + handler model:
 - ``agent.tool_state.abort_event.set() + agent.inflight.cancel()`` ->
   put_left ``text/x-abort`` (handled by :class:`AbortHandler`).
 
+Slash-command parsing for the active path goes through
+:func:`repl.slash.parse_slash` so this path and the idle
+``PromptInputHandler`` always agree on which commands are recognized.
+
 Bindings:
 
-- Enter: when active, queue the text into ``agent.inbox`` as a user
-  message; when idle, submit (returns from ``prompt_async``).
+- Enter: when active, parse the text and dispatch the typed slash
+  command / user message; when idle, submit (returns from
+  ``prompt_async``).
 - Alt+Enter: insert a newline (multi-line composition).
 - Up: when buffer empty and inbox non-empty, lift the tail entry back
   into the buffer; otherwise history-backward.
@@ -31,15 +36,13 @@ from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
 from sagent.custom_types import TextMessage
+from sagent.repl.slash import dispatch, parse_slash
 
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyPressEvent
 
     from sagent.agent.agent import Agent
-
-
-_QUIT_WORDS = ("/quit",)
 
 
 def build_key_bindings(agent: Agent) -> KeyBindings:
@@ -61,73 +64,23 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
 def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
     """Queue input into ``agent.inbox`` while active, otherwise submit."""
     buf = event.current_buffer
-    if bool(agent.tasks):
-        text = buf.text.strip()
-        if text.lower() in _QUIT_WORDS:
-            buf.validate_and_handle()
-            return
-        if text == "/clear" or text.startswith("/clear "):
-            # Urgent: preempt anything queued / in-flight (parity w/ v1).
-            agent.inbox.put_left(
-                TextMessage(text[6:].strip(), "text/x-clear-request"),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text == "/compact" or text.startswith("/compact "):
-            agent.inbox.put(
-                TextMessage(text[8:].strip(), "text/x-compact-request"),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text == "/uncompact" or text.startswith("/uncompact "):
-            agent.inbox.put(
-                TextMessage(text[10:].strip(), "text/x-uncompact-request"),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text == "/model" or text.startswith("/model "):
-            agent.inbox.put(
-                TextMessage(text[6:].strip(), "text/x-model-switch-request"),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text == "/provider" or text.startswith("/provider "):
-            rest = text[9:].strip()
-            args_str = f"--provider {rest}" if rest else ""
-            agent.inbox.put(
-                TextMessage(args_str, "text/x-model-switch-request"),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text.startswith("/abort"):
-            agent.inbox.put_left(TextMessage("", "text/x-abort"))
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text.startswith("/"):
-            cmd = text.split(maxsplit=1)[0]
-            agent.inbox.put(
-                TextMessage(
-                    f"unknown command: {cmd}. Supported: "
-                    "/clear /compact /uncompact /model /provider "
-                    "/abort /quit",
-                    "text/x-error",
-                ),
-            )
-            buf.append_to_history()
-            buf.reset()
-            return
-        if text:
-            agent.inbox.put(TextMessage(text, "text/x-user-message"))
-            buf.append_to_history()
-            buf.reset()
+    if not agent.tasks:
+        buf.validate_and_handle()
         return
-    buf.validate_and_handle()
+    text = buf.text
+    action = parse_slash(text)
+    if action is None:
+        return
+    if action.quit:
+        # Let the idle path translate /quit on the next tick.
+        buf.validate_and_handle()
+        return
+    if action.descriptor == "text/x-user-message":
+        _ = agent.inbox.put(TextMessage(text.strip(), "text/x-user-message"))
+    else:
+        dispatch(agent, action)
+    buf.append_to_history()
+    buf.reset()
 
 
 def _kb_newline(event: KeyPressEvent) -> None:

@@ -453,12 +453,18 @@ class Model(Protocol):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Send a request with optional streaming callback.
+        """Send a request with optional streaming callbacks.
 
         Args:
           request: Full model request.
           on_text: Callback invoked with each text chunk during streaming.
+          on_thinking: Callback invoked with each thinking chunk during
+              streaming. Providers that don't expose thinking deltas
+              (or models without thinking enabled) ignore this argument
+              and the caller falls back to extracting thinking content
+              from the final response.
 
         Returns:
           response: Complete model response.

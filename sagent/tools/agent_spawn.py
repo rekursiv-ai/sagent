@@ -734,6 +734,9 @@ class _ChildForwarder:
             self._stats.model_response_tokens = (
                 opt_int(event.content, "output_tokens") or 0
             )
+            cost_raw = event.content.get("cost_usd")
+            if isinstance(cost_raw, (int, float)):
+                self._stats.cost_usd = float(cost_raw)
             self._stats.done = True
             elapsed = time.monotonic() - self._stats.start
             done_inner = JsonMessage(

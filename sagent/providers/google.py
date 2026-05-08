@@ -406,17 +406,22 @@ class _GeminiModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream via :streamGenerateContent (alt=sse).
 
         Args:
           request: Model request.
           on_text: Optional callback invoked with each text chunk as it arrives.
+          on_thinking: Optional callback for thinking chunks. Gemini's
+              streaming response surfaces thinking parts inline; this
+              wraps them so the renderer can show them as they arrive.
 
         Returns:
           response: Translated model response assembled from streamed chunks.
 
         """
+        del on_thinking  # gemini streams thinking inline as text; no separate hook
         url = f"{_API_BASE}/models/{self._model_id}:streamGenerateContent?alt=sse"
         body = _build_request(request, self.max_image_dim, self.max_image_bytes)
         client = await self._get_client()

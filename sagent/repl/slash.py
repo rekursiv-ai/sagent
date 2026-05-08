@@ -1,0 +1,166 @@
+"""Slash-command parsing shared by the active and idle REPL paths.
+
+Single source of truth for ``/clear``, ``/compact``, ``/uncompact``,
+``/model``, ``/provider``, ``/abort``, ``/login``, ``/quit``. Both
+``keybindings._kb_submit`` (active path: a model call or tool batch is
+running) and ``PromptInputHandler.handle`` (idle path: prompt has
+returned) call :func:`parse_slash` and then dispatch the resulting
+:class:`SlashAction` against ``agent.inbox``.
+
+Keeping a single table avoids the v1 wart where the two paths drifted
+on which commands they accepted (``/login`` was idle-only, ``/abort``
+echoed differently, etc.).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+import dataclasses
+
+from sagent.custom_types import TextMessage
+from sagent.lib.descriptors import TextDescriptor
+
+
+if TYPE_CHECKING:
+    from sagent.agent.agent import Agent
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True, slots=True)
+class SlashAction:
+    """One inbox message to post in response to a typed line.
+
+    Attributes:
+      descriptor: Inbox descriptor to post.
+      content: Message content (typically the post-prefix arg string).
+      urgent: True to ``put_left`` (preempt queued messages).
+      echo: Optional confirmation line for the printer.
+      quit: True if this action terminates the REPL loop.
+
+    """
+
+    descriptor: TextDescriptor
+    content: str = ""
+    urgent: bool = False
+    echo: str | None = None
+    quit: bool = False
+
+
+# Quit phrases recognized by both REPL paths.
+QUIT_WORDS: frozenset[str] = frozenset({"/quit"})
+
+
+def parse_slash(line: str) -> SlashAction | None:
+    """Translate a typed line into an inbox action, or ``None`` for plain text.
+
+    Empty / whitespace-only input returns ``None`` (caller should
+    ignore). Any unknown ``/foo`` returns a ``text/x-error`` action.
+    Non-slash input returns a ``text/x-user-message`` action so a
+    single dispatch site handles both branches.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.lower() in QUIT_WORDS:
+        return SlashAction(descriptor="text/x-quit", quit=True)
+    arg = _arg_after("/clear", stripped)
+    if arg is not None:
+        note = f" ({arg})" if arg else ""
+        return SlashAction(
+            descriptor="text/x-clear-request",
+            content=arg,
+            urgent=True,
+            echo=f"[/clear] history cleared{note}",
+        )
+    arg = _arg_after("/compact", stripped)
+    if arg is not None:
+        note = f" ({arg})" if arg else ""
+        return SlashAction(
+            descriptor="text/x-compact-request",
+            content=arg,
+            echo=f"[/compact] queued{note}",
+        )
+    arg = _arg_after("/uncompact", stripped)
+    if arg is not None:
+        note = f" ({arg})" if arg else ""
+        return SlashAction(
+            descriptor="text/x-uncompact-request",
+            content=arg,
+            echo=f"[/uncompact] queued{note}",
+        )
+    arg = _arg_after("/model", stripped)
+    if arg is not None:
+        # ModelSwitchHandler echoes its own status; no echo here.
+        return SlashAction(
+            descriptor="text/x-model-switch-request",
+            content=arg,
+        )
+    arg = _arg_after("/provider", stripped)
+    if arg is not None:
+        # Sugar for ``/model --provider PROV [model_id]``.
+        return SlashAction(
+            descriptor="text/x-model-switch-request",
+            content=f"--provider {arg}" if arg else "",
+        )
+    if stripped.startswith("/abort"):
+        return SlashAction(
+            descriptor="text/x-abort",
+            urgent=True,
+            echo="[/abort] cancelling in-flight tasks",
+        )
+    if stripped == "/login":
+        return SlashAction(descriptor="text/x-login-request")
+    if stripped.startswith("/"):
+        cmd = stripped.split(maxsplit=1)[0]
+        return SlashAction(
+            descriptor="text/x-error",
+            content=(
+                f"unknown command: {cmd}. Supported: "
+                "/clear /compact /uncompact /model /provider /login"
+                " /abort /quit"
+            ),
+        )
+    return SlashAction(descriptor="text/x-user-message", content=line)
+
+
+def dispatch(agent: Agent, action: SlashAction) -> None:
+    """Post ``action`` to ``agent.inbox`` according to its urgent flag."""
+    msg = TextMessage(action.content, action.descriptor)
+    if action.urgent:
+        _ = agent.inbox.put_left(msg)
+    else:
+        _ = agent.inbox.put(msg)
+
+
+def supported_descriptors() -> Iterable[str]:
+    """Return the set of inbox descriptors the parser may emit.
+
+    Used by handler registries that want to assert every emitted
+    descriptor has a subscriber.
+    """
+    return {
+        "text/x-clear-request",
+        "text/x-compact-request",
+        "text/x-uncompact-request",
+        "text/x-model-switch-request",
+        "text/x-abort",
+        "text/x-login-request",
+        "text/x-error",
+        "text/x-user-message",
+        "text/x-quit",
+    }
+
+
+def _arg_after(prefix: str, stripped: str) -> str | None:
+    """Return the argument after ``prefix``, or ``None`` if it doesn't match.
+
+    Matches the bare prefix (``/clear``) and the prefix with an arg
+    (``/clear xyz``); rejects unrelated commands sharing a prefix
+    (``/clearxyz``).
+    """
+    if stripped == prefix:
+        return ""
+    if stripped.startswith(prefix + " "):
+        return stripped[len(prefix) + 1 :].strip()
+    return None

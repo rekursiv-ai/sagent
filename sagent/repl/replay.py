@@ -28,13 +28,12 @@ if TYPE_CHECKING:
     from sagent.custom_types import Message
 
 
-def replay_messages(agent: Agent, console: Console, out: Console) -> None:
+def replay_messages(agent: Agent, console: Console) -> None:
     """Render persisted messages into scrollback.
 
     Args:
       agent: Agent whose ``history`` to replay.
-      console: Console for tool labels, errors, and the resume footer.
-      out: Console for markdown and user bars.
+      console: Console for all replayed output.
 
     """
     messages = agent.history
@@ -47,20 +46,20 @@ def replay_messages(agent: Agent, console: Console, out: Console) -> None:
                 if msg.descriptor == "text/x-user-message"
                 else ""
             )
-            _print_user_bar(out, content)
+            print_user_bar(console, content)
         elif msg.descriptor == "multipart/x-model-message":
             parts = cast(tuple["Message", ...], msg.content)
             for p in parts:
                 if is_thinking(p.descriptor):
                     text = thinking_text(p)
                     if text:
-                        _emit_thinking(out, text)
+                        _emit_thinking(console, text)
             text_content = "\n".join(
                 cast(str, p.content) for p in parts if p.descriptor == "text/plain"
             )
             if text_content.strip():
-                out.print()
-                out.print(TightMarkdown(text_content))
+                console.print()
+                console.print(TightMarkdown(text_content))
             for p in parts:
                 if p.descriptor == "multipart/x-tool-call":
                     label = get_tool_name(p)
@@ -82,11 +81,6 @@ def replay_messages(agent: Agent, console: Console, out: Console) -> None:
             style="dim",
         ),
     )
-
-
-def _print_user_bar(out: Console, text: str) -> None:
-    """Render a user message as a full-width dark-gray bar."""
-    print_user_bar(out, text)
 
 
 def _emit_thinking(out: Console, text: str) -> None:

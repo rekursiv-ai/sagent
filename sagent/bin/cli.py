@@ -40,23 +40,27 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import cast
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import signal
 import sys
 
 from sagent import providers, sessions, tools
-from sagent.agent import Agent
+from sagent.agent import QUIT_SENTINEL, Agent
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
     Model,
     ModelSpec,
     Provider,
+    TextMessage,
     Tool,
 )
 from sagent.lib.json import json_freeze
@@ -469,6 +473,45 @@ def _configure_logging(level: str | None) -> None:
     logging.getLogger("sagent").setLevel(value)
 
 
+async def _with_signals(
+    agent: Agent,
+    coro: Coroutine[object, object, None],
+) -> None:
+    """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit.
+
+    First signal: post ``text/x-quit`` to ``agent.inbox`` and let the
+    dispatch loop drain on its own. Mirrors typing ``/quit`` from the
+    REPL but works when prompt-toolkit isn't capturing input (between
+    turns, during shutdown drain, headless mode).
+
+    Second signal: ``os._exit(1)``. Skips ``atexit`` cleanup so a sync
+    tool wedged in ``asyncio.to_thread`` can't block process exit on a
+    ``ThreadPoolExecutor.join``. The user already asked twice; honor it.
+
+    Modeled on ``loop/experimental/switchboard/hub.py:828``.
+    """
+    loop = asyncio.get_running_loop()
+    triggered = False
+
+    def _on_signal() -> None:
+        nonlocal triggered
+        if triggered:
+            os._exit(1)
+        triggered = True
+        _ = agent.inbox.put_left(TextMessage("", QUIT_SENTINEL))
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        # Windows / non-mainthread runners don't support add_signal_handler.
+        with contextlib.suppress(NotImplementedError):
+            loop.add_signal_handler(sig, _on_signal)
+    try:
+        await coro
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError, ValueError):
+                _ = loop.remove_signal_handler(sig)
+
+
 async def _run_headless(
     agent: Agent,
     *,
@@ -575,13 +618,16 @@ def main() -> None:
         agent.max_response_tokens = args.max_response_tokens
     agent.tool_state.additional_dirs = list(args.add_dir)
     if args.output_format == "text" and args.input_format == "text":
-        asyncio.run(run_repl(agent, history=args.history))
+        asyncio.run(_with_signals(agent, run_repl(agent, history=args.history)))
     else:
         asyncio.run(
-            _run_headless(
+            _with_signals(
                 agent,
-                input_format=args.input_format,
-                output_format=args.output_format,
+                _run_headless(
+                    agent,
+                    input_format=args.input_format,
+                    output_format=args.output_format,
+                ),
             )
         )
 

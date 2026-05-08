@@ -50,6 +50,7 @@ TextDescriptor = Literal[
     "text/x-compact-request",
     "text/x-uncompact-request",
     "text/x-model-switch-request",
+    "text/x-login-request",
     "text/x-status-update",
     # Inbox spine descriptors -- internal flow.
     "text/x-model-call",
