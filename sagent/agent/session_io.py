@@ -206,8 +206,12 @@ def read_jsonl(path: Path, label: str) -> list[MutableJSON]:
     return parse_jsonl(raw_text)
 
 
-def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
-    """Insert synthetic tool results for unresolved tool_calls.
+def normalize_tool_history(
+    messages: list[Message],
+    *,
+    synthesize_missing: bool,
+) -> list[Message]:
+    """Normalize tool call/result ordering in live history.
 
     Anthropic's API requires every ``tool_use`` block in an assistant
     message to be immediately followed (in the next user message) by
@@ -217,51 +221,67 @@ def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
     tool_result isn't - resuming the session fails with a 400
     ``tool_use ids were found without tool_result blocks``.
 
-    For each model response with tool calls, we inspect the
-    consecutive tool results immediately following and synthesize
-    ``[interrupted]`` results for any tool_call id that has no result.
+    Drops unexpected tool_result messages from live history. When
+    ``synthesize_missing`` is true, also inserts ``[interrupted]``
+    results for live tool calls missing a result. The append-only
+    session log remains the source for forensic recovery.
 
     Args:
       messages: Conversation history to repair.
+      synthesize_missing: Whether to insert interrupted results for
+          tool calls with no matching result.
 
     Returns:
-      repaired: New list with synthetic results injected.
+      normalized: New list with orphan results dropped and, optionally,
+          synthetic results injected.
 
     """
     out: list[Message] = []
     i = 0
     while i < len(messages):
         msg = messages[i]
-        out.append(msg)
         if msg.descriptor == "multipart/x-model-message":
+            out.append(msg)
             tc_msgs = response_tool_calls(msg)
             if tc_msgs:
+                expected = {get_queue_id(tc) for tc in tc_msgs}
                 seen: set[str] = set()
                 j = i + 1
                 while (
                     j < len(messages)
                     and messages[j].descriptor == "multipart/x-tool-result"
                 ):
-                    seen.add(get_queue_id(messages[j]))
-                    out.append(messages[j])
+                    qid = get_queue_id(messages[j])
+                    if qid in expected and qid not in seen:
+                        seen.add(qid)
+                        out.append(messages[j])
                     j += 1
-                out.extend(
-                    MultipartMessage(
-                        (
-                            TextMessage(get_queue_id(tc), "text/x-queue-id"),
-                            TextMessage("[interrupted]", "text/x-error"),
-                        ),
-                        "multipart/x-tool-result",
+                if synthesize_missing:
+                    out.extend(
+                        MultipartMessage(
+                            (
+                                TextMessage(get_queue_id(tc), "text/x-queue-id"),
+                                TextMessage("[interrupted]", "text/x-error"),
+                            ),
+                            "multipart/x-tool-result",
+                        )
+                        for tc in tc_msgs
+                        if get_queue_id(tc) not in seen
                     )
-                    for tc in tc_msgs
-                    if get_queue_id(tc) not in seen
-                )
                 i = j
             else:
                 i += 1
+        elif msg.descriptor == "multipart/x-tool-result":
+            i += 1
         else:
+            out.append(msg)
             i += 1
     return out
+
+
+def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
+    """Repair provider-request history by normalizing tool results."""
+    return normalize_tool_history(messages, synthesize_missing=True)
 
 
 def strip_read_result(content: str) -> str:
@@ -487,7 +507,7 @@ def load_session(
     except OSError:
         logger.warning("Could not read session file, starting fresh.")
         return None
-    return meta, messages
+    return meta, normalize_tool_history(messages, synthesize_missing=False)
 
 
 def _migrate_legacy_session(

@@ -82,6 +82,10 @@ class AgentSend:
             preview = preview[:37] + "..."
         return f"{self.name} → {to}: {preview}" if to else self.name
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return a listing of active agents available for messaging.
 

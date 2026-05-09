@@ -26,6 +26,8 @@ from sagent.tools.lib.bash import Node
 
 
 bash = Bash()
+summary_bash = Bash()
+summary_bash.emit_tool_summary = True
 
 
 def _msg(directive: JSON) -> Message:
@@ -75,17 +77,17 @@ class TestBash:
 
     @pytest.mark.anyio
     async def test_summary_result_clean_run_reports_line_count(self) -> None:
-        """Stdout-only successful run summarises as ``{N}L``."""
+        """Stdout-only successful run summarises as ``{N}L`` when enabled."""
         response = await bash.run(
             _msg(json_freeze({"command": "printf 'a\\nb\\nc\\n'"}))
         )
-        assert bash.summary_result(response) == "3L"
+        assert summary_bash.summary_result(response) == "3L"
 
     @pytest.mark.anyio
     async def test_summary_result_nonzero_exit_includes_code(self) -> None:
         """Non-zero exit appends ``· exit {code}`` to the summary."""
         response = await bash.run(_msg(json_freeze({"command": "false"})))
-        summary = bash.summary_result(response)
+        summary = summary_bash.summary_result(response)
         assert summary is not None
         assert "exit 1" in summary
 
@@ -95,7 +97,11 @@ class TestBash:
         response = await bash.run(_msg(json_freeze({"command": "true"})))
         # ``Bash._run`` returns "(no output)" for empty stdout/exit 0.
         # Body text "(no output)" is one line, so summary is "1L".
-        assert bash.summary_result(response) == "1L"
+        assert summary_bash.summary_result(response) == "1L"
+
+    def test_tool_summary_disabled_by_default(self) -> None:
+        assert Bash.emit_tool_summary is False
+        assert bash.summary_result(TextMessage("x", "text/plain")) is None
 
 
 class TestBashEdgeCases:

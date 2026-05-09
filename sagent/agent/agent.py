@@ -863,7 +863,7 @@ class Agent:
         # mid-history. Those inserts aren't on disk yet; flag for a
         # ``clear``-barrier repersist below once the agent state is
         # otherwise consistent.
-        repair_inserted = len(repaired) != len(messages)
+        repair_inserted = len(repaired) > len(messages)
         self.history = repaired
         # Disk view matches what we just loaded; cursor follows.
         self._persisted_idx = len(messages)

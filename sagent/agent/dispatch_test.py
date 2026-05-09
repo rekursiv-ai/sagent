@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, override
 
 import asyncio
 import time
@@ -221,10 +221,27 @@ class _MockTool:
     def prompt(self) -> str:
         return ""
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)
         text = directive.get("text", "")
         return TextMessage(str(text), "text/plain")
+
+
+class _SummaryTool(_MockTool):
+    def __init__(self, *, emit_tool_summary: bool) -> None:
+        super().__init__()
+        self.name = "summary"
+        self.tool_id = "application/x-tool-summary"
+        self.emit_tool_summary = emit_tool_summary
+
+    @override
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return "receipt" if self.emit_tool_summary else None
 
 
 class _StrictTool:
@@ -248,6 +265,10 @@ class _StrictTool:
 
     def prompt(self) -> str:
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)
@@ -274,6 +295,10 @@ class _SleepTool:
 
     def prompt(self) -> str:
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         del msg
@@ -316,6 +341,61 @@ class TestToolDispatch:
         response = await agent.run(json_freeze({"prompt": "echo hello"}))
         assert str(response.content) == "Echo said: hello"
         assert len(model.requests) == 2
+
+    @pytest.mark.anyio
+    async def test_tool_summary_requires_explicit_opt_in(self) -> None:
+        model = _MockModel(
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        tool_call_message(
+                            "t1", "summary", json_freeze({"text": "hello"})
+                        ),
+                    ],
+                    stop_reason="model_tool_use",
+                ),
+                ModelResponse(text="done"),
+            ],
+        )
+        agent = Agent(model=model, tools=[_SummaryTool(emit_tool_summary=False)])
+
+        await agent.run(json_freeze({"prompt": "call summary"}))
+
+        tool_result = next(
+            m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
+        )
+        assert isinstance(tool_result, MultipartMessage)
+        assert not any(
+            p.descriptor == "text/x-tool-summary" for p in tool_result.content
+        )
+
+    @pytest.mark.anyio
+    async def test_tool_summary_opt_in_emits_receipt_part(self) -> None:
+        model = _MockModel(
+            responses=[
+                ModelResponse(
+                    tool_calls=[
+                        tool_call_message(
+                            "t1", "summary", json_freeze({"text": "hello"})
+                        ),
+                    ],
+                    stop_reason="model_tool_use",
+                ),
+                ModelResponse(text="done"),
+            ],
+        )
+        agent = Agent(model=model, tools=[_SummaryTool(emit_tool_summary=True)])
+
+        await agent.run(json_freeze({"prompt": "call summary"}))
+
+        tool_result = next(
+            m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
+        )
+        assert isinstance(tool_result, MultipartMessage)
+        assert any(
+            p.descriptor == "text/x-tool-summary" and p.content == "receipt"
+            for p in tool_result.content
+        )
 
     @pytest.mark.anyio
     async def test_unknown_tool(self) -> None:
@@ -696,6 +776,10 @@ class TestSerialFileMutation:
             def prompt(self) -> str:
                 return ""
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             async def run(self, msg: Message) -> Message:
                 directive = get_directive(msg)
                 order.append(str(directive.get("file_path", "")))
@@ -720,6 +804,10 @@ class TestSerialFileMutation:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> Message:
                 del msg
@@ -794,6 +882,10 @@ class TestConditionalRuleInjection:
             def prompt(self) -> str:
                 return ""
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             async def run(self, msg: Message) -> Message:
                 del msg
                 return TextMessage("file contents\n", "text/plain")
@@ -857,6 +949,10 @@ class TestConditionalRuleInjection:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> Message:
                 del msg
@@ -924,6 +1020,10 @@ class TestConditionalRuleInjection:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> Message:
                 del msg
@@ -993,6 +1093,10 @@ class TestStreamingToolDispatch:
             def prompt(self) -> str:
                 return ""
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             async def run(self, msg: Message) -> AsyncGenerator[Message, None]:
                 del msg
                 yield TextMessage("progress 1", "text/plain")
@@ -1054,6 +1158,10 @@ class TestStreamingToolDispatch:
             def prompt(self) -> str:
                 return ""
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             async def run(self, msg: Message) -> AsyncGenerator[Message, None]:
                 del msg
                 yield TextMessage("step 1", "text/plain")
@@ -1113,6 +1221,10 @@ class TestStreamingToolDispatch:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> AsyncGenerator[Message, None]:
                 del msg

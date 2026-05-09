@@ -105,6 +105,10 @@ class _MockTool:
     def prompt(self) -> str:
         return ""
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)
         return TextMessage(str(directive.get("text", "")), "text/plain")
@@ -129,6 +133,10 @@ class _SlowTool:
 
     def prompt(self) -> str:
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)

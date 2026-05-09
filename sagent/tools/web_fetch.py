@@ -114,6 +114,10 @@ class WebFetch:
             url = url[:57] + "..."
         return f"WebFetch {url}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental system-prompt text.
 

@@ -404,6 +404,7 @@ class _ToolImpl:
         "_max_result_chars",
         "description",
         "directive_schema",
+        "emit_tool_summary",
         "name",
         "supports_microcompaction",
         "tool_id",
@@ -429,6 +430,7 @@ class _ToolImpl:
         hints.pop("return", None)
         self.directive_schema = schema or json_freeze(_build_schema(fn, hints))
         self.supports_microcompaction = supports_microcompaction
+        self.emit_tool_summary = False
 
     def summary(self, msg: Message) -> str:
         """Return a short label for this tool invocation.
@@ -451,6 +453,11 @@ class _ToolImpl:
 
         """
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        """Return no receipt for decorator-based tools by default."""
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         """Invoke the wrapped function, propagating exceptions to the caller.

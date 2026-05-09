@@ -106,6 +106,7 @@ class AgentSpawn:
     tool_id: str = "application/x-tool-agentspawn"
     description: str = load_tool_description("agentspawn")
     supports_microcompaction: bool = False
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -291,6 +292,8 @@ class AgentSpawn:
 
     def summary_result(self, result: Message) -> str | None:
         """Return a one-line receipt for the child result."""
+        if not self.emit_tool_summary:
+            return None
         text = flat_text(result).strip()
         if not text:
             return "completed with no output"

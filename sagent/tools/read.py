@@ -77,6 +77,7 @@ class Read:
     tool_id: str = "application/x-tool-read"
     description: str = load_tool_description("Read")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -185,6 +186,8 @@ class Read:
         binary formats, ``(unchanged)`` when the file matches the
         last-read snapshot, ``None`` for errors.
         """
+        if not self.emit_tool_summary:
+            return None
         if result.descriptor == "text/x-error":
             return None
         if result.descriptor != "text/plain":

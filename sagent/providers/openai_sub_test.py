@@ -464,6 +464,10 @@ class _FakeTool:
         del msg
         return ""
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str | None:
         return None
 

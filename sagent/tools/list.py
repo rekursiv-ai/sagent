@@ -99,6 +99,10 @@ class List:
         path = str(directive.get("path", "")) or "."
         return f"List {path}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 

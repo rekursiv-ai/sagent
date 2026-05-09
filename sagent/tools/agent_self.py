@@ -173,6 +173,10 @@ class AgentSelf:
             return f"AgentSelf cache_ttl={d.get('ttl', '')}"
         return f"AgentSelf {op}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return dynamic system-prompt guidance.
 

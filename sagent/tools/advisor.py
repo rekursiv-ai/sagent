@@ -122,6 +122,10 @@ class Advisor:
         del msg
         return "Advisor consulting…"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return the system prompt nudge for advisor usage.
 

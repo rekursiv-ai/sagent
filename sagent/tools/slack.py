@@ -159,6 +159,10 @@ class Slack:
         suffix = f":{channel}" if channel else ""
         return f"Slack {operation}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return per-request system prompt text.
 
