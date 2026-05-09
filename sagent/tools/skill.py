@@ -185,6 +185,10 @@ class Skill:
         skill = str(directive.get("skill", ""))
         return f"Skill {skill}" if skill else "Skill"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return a per-request listing of discoverable skills.
 

@@ -434,6 +434,10 @@ class TestSendWithTools:
                 del msg
                 return self.name
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             def prompt(self) -> str | None:
                 return None
 

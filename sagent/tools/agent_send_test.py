@@ -275,6 +275,10 @@ class TestAgentRegistration:
             def prompt(self) -> str:
                 return ""
 
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
             async def run(self, msg: Message) -> Message:
                 del msg
                 captured.append("myagent" in agent_registry)

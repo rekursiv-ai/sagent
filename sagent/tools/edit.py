@@ -155,6 +155,10 @@ class Edit:
         fname = Path(file_path).name if file_path else "?"
         return f"Edit {fname}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 

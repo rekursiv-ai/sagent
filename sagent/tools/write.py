@@ -30,6 +30,7 @@ class Write:
     tool_id: str = "application/x-tool-write"
     description: str = load_tool_description("Write")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -58,6 +59,8 @@ class Write:
 
     def summary_result(self, result: Message) -> str | None:
         """One-line receipt: confirmation count from the success message."""
+        if not self.emit_tool_summary:
+            return None
         if result.descriptor != "text/plain":
             return None
         text = str(result.content).strip()

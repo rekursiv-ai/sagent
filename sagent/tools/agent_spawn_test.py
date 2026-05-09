@@ -157,6 +157,10 @@ class _MarkerTool:
     def prompt(self) -> str:
         return ""
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     async def run(self, msg: Message) -> Message:
         del msg
         self.calls += 1
@@ -290,8 +294,16 @@ class TestHappyPath:
     async def test_summary_result_reports_child_output_line_count(self) -> None:
         parent = _parent(model=_MockModel([_response("one\ntwo")]))
         tool = AgentTool()
+        tool.emit_tool_summary = True
         response = await _run_under_parent(parent, tool, prompt="hi")
         assert tool.summary_result(response) == "2L"
+
+    @pytest.mark.anyio
+    async def test_summary_result_off_by_default(self) -> None:
+        parent = _parent(model=_MockModel([_response("one\ntwo")]))
+        tool = AgentTool()
+        response = await _run_under_parent(parent, tool, prompt="hi")
+        assert tool.summary_result(response) is None
 
 
 class TestInheritance:
@@ -348,6 +360,10 @@ class TestInheritance:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> Message:
                 del msg

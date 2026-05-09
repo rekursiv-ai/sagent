@@ -224,20 +224,23 @@ def _dim_baseline(line: str) -> str:
     return _ANSI_DIM + rebound + _ANSI_DIM_OFF
 
 
+_CHILD_INDENT = "  "
+
+
 def _gutter_width(label: str) -> int:
     """Width of the gutter column for a given child label.
 
-    Format is ``"<label>  :  "`` -- two spaces, colon, two spaces, so
-    the gutter is ``len(label) + 5``. Held to a floor of 12 columns
-    for visual consistency when labels are short (``Agent_0`` is the
-    typical case at 12 chars exactly).
+    Format is ``"  <label>  :  "`` -- leading 2-space indent matching
+    parent tool labels, then ``len(label) + 5`` for ``"  :  "``. Held
+    to a floor of 14 columns for visual consistency when labels are
+    short (``Agent_0`` is the typical case at 14 chars exactly).
     """
-    return max(12, len(label) + 5)
+    return max(14, len(label) + 5 + len(_CHILD_INDENT))
 
 
 def _gutter_prefix(label: str, width: int) -> str:
     """Render the first-line gutter for ``label`` padded to ``width``."""
-    pfx = f"{label}  :  "
+    pfx = f"{_CHILD_INDENT}{label}  :  "
     if len(pfx) < width:
         pfx = pfx.ljust(width)
     return pfx

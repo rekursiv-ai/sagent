@@ -37,6 +37,10 @@ class CharacterCount:
         text = str(get_directive(msg).get("text", ""))
         return f"CharacterCount {len(text)} chars"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return optional tool-specific system prompt text."""
         return ""

@@ -215,6 +215,10 @@ class Wiki:
         suffix = f":{slug}" if slug else ""
         return f"Wiki {operation}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return per-request system prompt text.
 

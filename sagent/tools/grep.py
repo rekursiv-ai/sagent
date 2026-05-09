@@ -94,6 +94,7 @@ class Grep:
     tool_id: str = "application/x-tool-grep"
     description: str = load_tool_description("Grep")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -205,6 +206,8 @@ class Grep:
 
     def summary_result(self, result: Message) -> str | None:
         """One-line receipt: hit count."""
+        if not self.emit_tool_summary:
+            return None
         if result.descriptor != "text/plain":
             return None
         text = str(result.content).strip()

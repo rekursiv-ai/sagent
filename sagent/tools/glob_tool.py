@@ -54,6 +54,7 @@ class Glob:
     tool_id: str = "application/x-tool-glob"
     description: str = load_tool_description("Glob")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -114,6 +115,8 @@ class Glob:
 
     def summary_result(self, result: Message) -> str | None:
         """One-line receipt: number of matches."""
+        if not self.emit_tool_summary:
+            return None
         if result.descriptor != "text/plain":
             return None
         text = str(result.content).strip()

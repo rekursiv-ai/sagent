@@ -246,6 +246,10 @@ class PaperAuthor:
             return f"PaperAuthor {raw_id}"
         return "PaperAuthor"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental system-prompt text.
 

@@ -222,15 +222,16 @@ class ModelCallHandler(SpawnedHandler):
                 for t in tools_list
             ]
         repaired = repair_dangling_tool_calls(agent.history)
-        if len(repaired) != len(agent.history):
+        if repaired != agent.history:
             logger.info(
-                "Repaired %d dangling tool_use block(s) in history.",
-                len(repaired) - len(agent.history),
+                "Repaired invalid tool call/result ordering in history.",
             )
+            repair_inserted = len(repaired) > len(agent.history)
             agent.history[:] = repaired
-            # Repair inserted synthesized results mid-history; persist
-            # via clear barrier so the on-disk live view matches memory.
-            agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
+            if repair_inserted:
+                # Repair inserted synthesized results mid-history; persist
+                # via clear barrier so the on-disk live view matches memory.
+                agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
         return ModelRequest(
             messages=list(agent.history),
             system=agent.system_prompt(),

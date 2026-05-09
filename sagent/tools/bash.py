@@ -104,6 +104,7 @@ class Bash:
     tool_id: str = "application/x-tool-bash"
     description: str = _render_bash_description(load_tool_description("Bash"))
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -174,18 +175,14 @@ class Bash:
         return f"Bash {cmd}" if cmd else "Bash"
 
     def summary_result(self, result: Message) -> str | None:
-        r"""One-line receipt: line count + nonzero exit code.
-
-        ``Bash._run`` appends ``\n[exit code: N]`` for non-zero exits;
-        recognise that suffix and surface it in the receipt. For
-        clean runs, just report the line count of stdout.
-        """
+        """One-line receipt: line count + nonzero exit code."""
+        if not self.emit_tool_summary:
+            return None
         if result.descriptor != "text/plain":
             return None
         text = str(result.content)
         if not text:
             return "no output"
-        # Detect appended exit-code marker.
         exit_match = _BASH_EXIT_RE.search(text)
         body = text[: exit_match.start()] if exit_match else text
         lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)

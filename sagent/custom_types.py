@@ -190,6 +190,10 @@ class _BaseTool(Protocol):
         """Return a human-readable summary of a pending invocation."""
         ...
 
+    def summary_result(self, result: Message) -> str | None:
+        """Return a human-readable summary of a completed invocation."""
+        ...
+
     def prompt(self) -> str | None:
         """Build the system prompt section for this tool.
 

@@ -82,6 +82,10 @@ class UserMessageHandler(InlineHandler):
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
+        # Reset abort_event at every turn boundary. ``run_loop`` only
+        # clears it once per session, so a Ctrl+C earlier in the session
+        # otherwise poisons all subsequent sync-polling tools.
+        agent.tool_state.abort_event.clear()
         if _has_pending_model_call(agent):
             return
         agent.inbox.put(TextMessage("", "text/x-model-call", parent_id=msg.id))

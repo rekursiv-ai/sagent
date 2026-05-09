@@ -74,6 +74,10 @@ class PlayAudio:
         name = Path(path).name if path else "?"
         return f"PlayAudio {name}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return per-request system prompt text.
 

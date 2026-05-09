@@ -110,6 +110,10 @@ class _EchoTool:
         del msg
         return self.name
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         return ""
 
@@ -525,6 +529,10 @@ async def test_tool_state_compact_flag_becomes_message() -> None:
             del msg
             return self.name
 
+        def summary_result(self, result: Message) -> str | None:
+            del result
+            return None
+
         def prompt(self) -> str:
             return ""
 
@@ -774,6 +782,24 @@ async def test_abort_handler_cancels_inflight_tasks() -> None:
     await loop_task
     assert cancelled == ["cancelled"]
     assert agent.tool_state.abort_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_abort_event_clears_on_next_user_message() -> None:
+    """Fresh user message clears ``abort_event`` from a prior cancel.
+
+    Regression: ``run_loop`` only clears ``abort_event`` once at session
+    start, so a Ctrl+C earlier in the REPL session would otherwise
+    poison every subsequent sync-polling tool (e.g. Bash) for the rest
+    of the session. ``UserMessageHandler`` clears at every turn boundary.
+    """
+    model = _FakeModel([_model_response("ok"), _model_response("ok")])
+    agent = Agent(model=model)
+    agent.tool_state.abort_event.set()
+    agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    assert not agent.tool_state.abort_event.is_set()
 
 
 @pytest.mark.real_sleep
@@ -1101,6 +1127,10 @@ async def test_abort_during_tool_batch_synthesizes_interrupted_results() -> None
         def summary(self, msg: Message) -> str:
             del msg
             return self.name
+
+        def summary_result(self, result: Message) -> str | None:
+            del result
+            return None
 
         async def run(self, msg: Message) -> Message:
             del msg

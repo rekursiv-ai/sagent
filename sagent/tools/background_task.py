@@ -140,6 +140,10 @@ class BackgroundTask:
             return f"BackgroundTask {op} {job_id}"
         return f"BackgroundTask {op}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return background-task usage guidance for the system prompt.
 

@@ -206,6 +206,10 @@ class Linear:
         suffix = f":{ident}" if ident else ""
         return f"Linear {operation}{suffix}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return per-request system prompt text.
 
