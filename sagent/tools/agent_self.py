@@ -555,6 +555,7 @@ def _do_diagnostics(
     lines.extend(_spec_lines(spec))
     if agent is not None:
         lines.extend(_agent_option_lines(agent))
+        lines.extend(_session_lines(agent))
     return TextMessage("\n".join(lines), "text/plain")
 
 
@@ -655,3 +656,11 @@ def _agent_option_lines(agent: Agent) -> list[str]:
         f"Effort:             {effort}",
         f"Supported model_options: {supported_text}",
     ]
+
+
+def _session_lines(agent: Agent) -> list[str]:
+    """Format session identity and path."""
+    lines = [f"Session ID:         {agent.session_id}"]
+    if agent.session_dir is not None:
+        lines.append(f"Session dir:        {agent.session_dir}")
+    return lines
