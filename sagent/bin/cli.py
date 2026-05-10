@@ -162,8 +162,10 @@ def _resolve_session_dir(args: argparse.Namespace) -> str | None:
         return _resolve_continue(cwd)
     if args.continue_all:
         return _resolve_continue_all()
-    if args.resume:
-        return _resolve_resume(cwd)
+    if args.resume is not None:
+        if args.resume is True:
+            return _resolve_resume(cwd)
+        return _resolve_resume_hash(str(args.resume), cwd)
     if args.resume_all:
         return _resolve_resume_all()
     return str(sessions.new_session_dir(cwd))
@@ -176,6 +178,22 @@ def _resolve_continue(cwd: Path) -> str:
         sys.stderr.write(f"[resume] {latest.path}\n")
         return str(latest.path)
     sys.stderr.write("[resume] no prior sessions for this cwd; starting fresh.\n")
+    return str(sessions.new_session_dir(cwd))
+
+
+def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
+    """Resume a session by hash prefix (directory name match)."""
+    for s in sessions.list_sessions(cwd):
+        if s.path.name.startswith(session_hash):
+            sys.stderr.write(f"[resume] {s.path}\n")
+            return str(s.path)
+    for s in sessions.list_all_sessions():
+        if s.path.name.startswith(session_hash):
+            sys.stderr.write(f"[resume] {s.path}\n")
+            return str(s.path)
+    sys.stderr.write(
+        f"[resume] no session matching {session_hash!r}; starting fresh.\n"
+    )
     return str(sessions.new_session_dir(cwd))
 
 
@@ -387,8 +405,11 @@ def _parse_cli_args(
 
     parser.add_argument(
         "--resume",
-        action="store_true",
-        help="Interactive picker over past sessions for this cwd.",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="HASH",
+        help="Resume a session. No arg: interactive picker. With HASH: resume that session.",
     )
     parser.add_argument(
         "--continue",

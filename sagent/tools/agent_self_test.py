@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -461,6 +462,8 @@ class _LimitAgent:
         self.model_spec = ModelSpec(provider="Anthropic", auth="env", model_id="model")
         self.swapped_spec: ModelSpec | None = None
         self._next_op: PendingOp | None = None
+        self.session_id: str = "test1234"
+        self.session_dir: Path | None = None
 
     @property
     def budget(self) -> ContextBudget:
