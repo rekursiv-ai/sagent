@@ -760,6 +760,21 @@ class _ChildForwarder:
         self._label = label
 
     def __call__(self, event: Event) -> None:
+        if isinstance(event, ChildEvent):
+            self._parent_agent.publish(
+                ChildEvent(label=f"{self._label}/{event.label}", inner=event.inner)
+            )
+            return
+        if isinstance(event, ChildDoneEvent):
+            self._parent_agent.publish(
+                ChildDoneEvent(
+                    label=f"{self._label}/{event.label}",
+                    elapsed=event.elapsed,
+                    tokens=event.tokens,
+                    cost=event.cost,
+                )
+            )
+            return
         if isinstance(event, TextChunkEvent):
             self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4

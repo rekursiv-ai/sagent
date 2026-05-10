@@ -142,7 +142,7 @@ class AgentSend:
                 parent_id=msg.id,
             )
 
-        target.inbox.put(
+        target.inbox.put_left(
             TextMessage(f"[from {sender}]: {content}", "text/x-user-message")
         )
         return TextMessage(

@@ -20,6 +20,7 @@ import pytest
 
 from sagent.agent import Agent, PendingOp
 from sagent.custom_types import (
+    ErrorEvent,
     Event,
     Model,
     ModelRequest,
@@ -222,6 +223,32 @@ class TestCancellation:
             await consumer
         kinds = [type(e).__name__ for e in events]
         assert "InterruptedEvent" in kinds
+
+
+class TestPublish:
+    def test_observer_exception_swallowed_and_logged(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        agent = _build_agent(_MockModel())
+        events: list[Event] = []
+
+        def good(ev: Event) -> None:
+            events.append(ev)
+
+        def bad(ev: Event) -> None:
+            del ev
+            raise RuntimeError("kaboom")
+
+        agent.observers.extend([bad, good])
+        with caplog.at_level("WARNING", logger="sagent.agent.agent"):
+            agent.publish(ErrorEvent(text="hi"))
+        # ``good`` still saw the event (fan-out continued past ``bad``).
+        assert len(events) == 1
+        # Warning is one-liner; no ERROR-level traceback dump.
+        records = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("RuntimeError" in r.getMessage() for r in records)
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
 
 
 if __name__ == "__main__":

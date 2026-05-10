@@ -6,6 +6,8 @@ lives in ``agent/agent_test.py``.
 
 from __future__ import annotations
 
+from typing import override
+
 from sagent.custom_types import (
     ChildEvent,
     ErrorEvent,
@@ -197,6 +199,33 @@ class TestRenderObserver:
         label, items = printer.child_blocks[0]
         assert label == "Agent_0"
         assert items[0].descriptor == "text/x-tool-label"
+
+
+class _RaisingPrinter(RecordingPrinter):
+    """``RecordingPrinter`` whose ``write_thinking`` raises, to exercise self-report."""
+
+    @override
+    def write_thinking(self, text: str) -> None:
+        del text
+        raise RuntimeError("boom")
+
+
+class TestRenderObserverSelfReport:
+    def test_dispatch_failure_routed_to_tool_error(self) -> None:
+        printer = _RaisingPrinter()
+        obs = make_render_observer(printer)
+        obs(ThinkingEvent("planning..."))
+        assert len(printer.tool_errors) == 1
+        msg = printer.tool_errors[0]
+        assert "ThinkingEvent" in msg
+        assert "RuntimeError" in msg
+        assert "boom" in msg
+        assert printer.thinkings == []
+
+    def test_dispatch_failure_does_not_propagate(self) -> None:
+        printer = _RaisingPrinter()
+        obs = make_render_observer(printer)
+        obs(ThinkingEvent("x"))  # must not raise
 
 
 if __name__ == "__main__":

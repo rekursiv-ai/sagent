@@ -63,6 +63,7 @@ from sagent.custom_exceptions import ModelTerminationError
 from sagent.custom_types import (
     Compactor,
     ContextBudget,
+    ErrorEvent,
     Event,
     InterruptedEvent,
     Message,
@@ -607,8 +608,14 @@ class Agent:
         for obs in self.observers:
             try:
                 obs(event)
-            except Exception:
-                logger.exception("observer raised on %r", type(event).__name__)
+            except Exception as e:  # noqa: BLE001 -- dispatch safety net
+                logger.warning(
+                    "observer raised on %s: %s: %s",
+                    type(event).__name__,
+                    type(e).__name__,
+                    e,
+                )
+                logger.debug("observer traceback", exc_info=True)
 
     # -- Persistent driver loop ---------------------------------------
 
@@ -774,10 +781,16 @@ class Agent:
                 try:
                     self.save_session()
                 except OSError as save_err:
-                    logger.warning(
-                        "Event log save failed (%s); truncating in memory.",
-                        save_err,
+                    self.publish(
+                        ErrorEvent(
+                            text=(
+                                f"event log save failed: "
+                                f"{type(save_err).__name__}: {save_err}; "
+                                f"truncating in memory"
+                            ),
+                        ),
                     )
+                    logger.debug("event log save failed", exc_info=True)
                     self._event_log = self._event_log[-_MAX_UNSAVED_EVENTS:]
             else:
                 self._event_log = self._event_log[-_MAX_UNSAVED_EVENTS:]
@@ -1275,7 +1288,8 @@ class Agent:
             )
             self._run_start_tokens = None
             self._run_start_cost_usd = 0.0
-        cost_root_var.reset(state.token)
+        with contextlib.suppress(ValueError):
+            cost_root_var.reset(state.token)
 
     def _account_cancelled(self) -> None:
         """Best-effort cost record when cancel arrived outside a model call."""
@@ -1387,13 +1401,17 @@ class Agent:
         except Exception as e:  # noqa: BLE001 -- compactor errors are heterogeneous
             if count_failures:
                 self.compaction_state.compact_failures += 1
-            logger.warning(
-                "Compaction failed (%d/%d): %s: %s",
-                self.compaction_state.compact_failures,
-                MAX_COMPACT_FAILURES,
-                type(e).__name__,
-                e,
+            self.publish(
+                ErrorEvent(
+                    text=(
+                        f"compaction failed "
+                        f"({self.compaction_state.compact_failures}/"
+                        f"{MAX_COMPACT_FAILURES}): "
+                        f"{type(e).__name__}: {e}"
+                    ),
+                ),
             )
+            logger.debug("compaction failed", exc_info=True)
             return False
         finally:
             self.compaction_state.compacting = False
@@ -1430,7 +1448,12 @@ class Agent:
             raw_text = path.read_text(encoding="utf-8")
             loaded = [load_message(rec) for rec in parse_jsonl(raw_text)]
         except (OSError, KeyError, AssertionError, TypeError) as e:
-            logger.warning("Recompact transcript load failed: %s", e)
+            self.publish(
+                ErrorEvent(
+                    text=f"recompact transcript load failed: {type(e).__name__}: {e}",
+                ),
+            )
+            logger.debug("recompact transcript load failed", exc_info=True)
             return
         if not loaded:
             return
