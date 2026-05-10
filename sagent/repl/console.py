@@ -26,6 +26,7 @@ from sagent.repl.format import (
     print_user_bar,
     set_terminal_title,
 )
+from sagent.repl.render import render_tool_result
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
 
@@ -266,11 +267,6 @@ def _render_child_item(printer: ConsolePrinter, item: Message) -> None:
     elif desc == "text/x-hint-tool-use-nudge" and isinstance(item, TextMessage):
         printer.write_hint(item.content)
     elif desc == "multipart/x-tool-result" and isinstance(item, MultipartMessage):
-        # Lazy import: render.py imports console.py at module load.
-        from sagent.repl.render import (  # noqa: PLC0415
-            render_tool_result,
-        )
-
         render_tool_result(printer, item)
     elif desc == "application/x-child-done" and isinstance(item, JsonMessage):
         data = cast("Mapping[str, float]", item.content)

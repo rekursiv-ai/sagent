@@ -17,7 +17,7 @@ Layout:
     :func:`core_handlers` factory.
   - :mod:`handlers.activity` -- ``ActivityTracker`` + ``ActivityHandler``.
   - :mod:`handlers.compact` -- ``BudgetWatcher`` + ``CompactHandler`` +
-    ``UncompactHandler`` + shared ``run_compaction`` helper.
+    ``RecompactHandler`` + shared ``run_compaction`` helper.
   - :mod:`handlers.model` -- ``ModelCallHandler`` + ``ModelResponseHandler``.
   - :mod:`handlers.tools` -- ``ToolBatchHandler`` + ``ToolBatchResultHandler``.
   - :mod:`handlers.model_switch` -- ``/model`` slash-command handler.
@@ -35,10 +35,11 @@ from sagent.agent.handlers.base import (
 from sagent.agent.handlers.compact import (
     BudgetWatcher,
     CompactHandler,
-    UncompactHandler,
+    RecompactHandler,
 )
 from sagent.agent.handlers.core import (
     AbortHandler,
+    BreakHandler,
     ClearHandler,
     HistoryHandler,
     SessionSaveHandler,
@@ -61,6 +62,7 @@ __all__ = [
     "AbortHandler",
     "ActivityHandler",
     "ActivityTracker",
+    "BreakHandler",
     "BudgetWatcher",
     "ClearHandler",
     "CompactHandler",
@@ -70,12 +72,12 @@ __all__ = [
     "ModelCallHandler",
     "ModelResponseHandler",
     "ModelSwitchHandler",
+    "RecompactHandler",
     "SessionSaveHandler",
     "SpawnedHandler",
     "StatsHandler",
     "ToolBatchHandler",
     "ToolBatchResultHandler",
-    "UncompactHandler",
     "UserMessageHandler",
     "core_handlers",
 ]

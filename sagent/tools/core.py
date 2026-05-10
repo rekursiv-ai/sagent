@@ -28,7 +28,6 @@ import inspect
 import itertools
 import logging
 import re
-import threading
 import time
 import typing
 
@@ -609,10 +608,6 @@ class ToolState:
         # Per-request session stats written by the Agent, read by the
         # Diagnostics tool. Stays empty until the first model request completes.
         self.stats: dict[str, float | int] = {}
-        # Set by the REPL on Ctrl+C - tools poll this to abort early.
-        # threading.Event is safe to check from both sync tool threads
-        # and the asyncio main thread.
-        self.abort_event: threading.Event = threading.Event()
         # Per-request bashlex parse cache: command string → trees (or None).
         # Populated by the agent's pre-dispatch concurrency check; read
         # by the Bash tool's matcher dispatch. Eliminates the

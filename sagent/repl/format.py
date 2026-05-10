@@ -6,7 +6,8 @@ slack adapter, headless output) that needs the same formatting:
 
 - :func:`print_user_bar` -- full-width dark-gray user-message bar.
 - :func:`set_terminal_title` -- OSC 0 title escape, no-op off TTY.
-- :func:`format_elapsed` -- compact ``Hh Mm`` / ``Mm Ss`` / ``Ss`` string.
+- :func:`format_elapsed` -- compact duration with seconds always shown,
+  growing into ``m`` / ``h`` / ``d`` as it spills over.
 - :func:`format_count` -- abbreviate token counts (``12K``, ``1.8M``).
 """
 
@@ -82,23 +83,29 @@ def set_terminal_title(text: str, max_len: int = 80) -> None:
 
 
 def format_elapsed(seconds: float) -> str:
-    """Format a duration as a compact integer-second string.
+    """Format a duration with seconds always shown; spill into m / h / d.
 
     Args:
       seconds: Elapsed time in seconds. Sub-second values floor to ``"0s"``.
 
     Returns:
-      formatted: E.g. ``"12s"``, ``"1m 23s"``, ``"2h 17m"``.
+      formatted: E.g. ``"12s"``, ``"1m 23s"``, ``"2h 17m 4s"``,
+          ``"3d 1h 2m 5s"``.
 
     """
     s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        m, sec = divmod(s, 60)
-        return f"{m}m {sec}s"
-    h, rem = divmod(s, 3600)
-    return f"{h}h {rem // 60}m"
+    days, rem = divmod(s, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, secs = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if days or hours:
+        parts.append(f"{hours}h")
+    if days or hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 def format_count(n: int) -> str:

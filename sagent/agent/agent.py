@@ -1,11 +1,9 @@
-"""Agent v2: deque + handler registry + dispatch loop.
+"""Agent: deque + handler registry + dispatch loop.
 
 The agent IS its deque. Empty deque + no in-flight tasks = idle.
 Messages drive everything: user input, model calls, tool batches,
 streaming chunks, abort, quit. Handlers register against descriptors
 and post follow-up messages to advance the conversation.
-
-See ``docs/private/inbox_refactor.md`` for the full design.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import asyncio
+import collections
 import contextlib
 import dataclasses
 import itertools
@@ -100,8 +99,7 @@ class Agent:
     but the contract is preserved.
     """
 
-    # Tool-shaped attribute (not full Tool conformance -- see
-    # Addendum A in docs/private/inbox_refactor.md). Agent results
+    # Tool-shaped attribute (not full Tool conformance). Agent results
     # are the final summary of a subagent's work; dropping one on
     # cache-cold would hide the whole subtask's output. Always keep
     # the last message.
@@ -155,23 +153,14 @@ class Agent:
             "Callable[[], SystemPrompt]",
             system if callable(system) else (lambda s=system: s),
         )
-        self._tools: dict[str, Tool] = {}
+        self.tools_map: dict[str, Tool] = {}
         for t in tools or []:
-            if t.tool_id in self._tools:
+            if t.tool_id in self.tools_map:
                 raise ValueError(f"Duplicate tool: {t.tool_id!r}")
-            self._tools[t.tool_id] = t
+            self.tools_map[t.tool_id] = t
         self.compactor = compactor
         if budget is not None:
-            if budget.max_request_tokens > model.max_request_tokens:
-                raise ValueError(
-                    f"budget.max_request_tokens={budget.max_request_tokens:,}"
-                    f" exceeds model's {model.max_request_tokens:,}",
-                )
-            if budget.max_response_tokens > model.max_response_tokens:
-                raise ValueError(
-                    f"budget.max_response_tokens={budget.max_response_tokens:,}"
-                    f" exceeds model's {model.max_response_tokens:,}",
-                )
+            _validate_budget(budget, model)
         self._budget = budget
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
@@ -190,6 +179,20 @@ class Agent:
         self.cost_tracker = CostTracker(max_budget_usd=max_budget_usd)
         self.inbox: Deque[Message] = Deque()
         self.history: list[Message] = []
+        # User messages arriving while ``model_lock`` is held are
+        # parked here by ``HistoryHandler`` instead of being appended
+        # to ``history`` immediately. The in-flight call has already
+        # built its request from a snapshot of history; mutating that
+        # history mid-call would let a later queued model call (built
+        # after the assistant response is appended) see an assistant
+        # terminal, which Anthropic's claude-opus-4-7+1m rejects.
+        # The pending queue is drained into ``history`` when the
+        # in-flight call ends (``text/x-call-ended``), with a single
+        # ``text/x-model-call`` enqueued covering all drained messages.
+        # ``text/x-call-ended`` fires on every exit path (success,
+        # cancel, error), so messages parked during a *cancelled*
+        # call are drained too rather than stranded.
+        self.history_pending: collections.deque[Message] = collections.deque()
         self.tool_state = ToolState()
         self.activity = ActivityTracker()
         # Model calls hold this lock for the full duration of the
@@ -210,13 +213,20 @@ class Agent:
         self._handlers: dict[str, list[Handler]] = {}
         self._wildcards: list[Handler] = []
         self.tasks: dict[int, asyncio.Task[None]] = {}
+        # Set when the dispatch loop is between messages (waiting on
+        # ``inbox.get``); cleared while a message is being processed
+        # by its handler chain. ``_wait_for_idle`` waits on this event
+        # so a handler that posts a follow-up message before returning
+        # cannot race ``QUIT_SENTINEL``.
+        self._dispatch_idle: asyncio.Event = asyncio.Event()
+        self._dispatch_idle.set()
         self._session_id = str(uuid.uuid4())[:8]
         self._status: str = ""
         self._event_log: list[dict[str, object]] = []
         # Cursor: index up to which ``self.history`` has been persisted
         # to ``session.jsonl``. Saves append ``self.history[idx:]``;
         # wholesale-replacement paths (``/clear``, compact, repair on
-        # load) call ``_save_session(clear=True)`` to write a barrier
+        # load) call ``save_session(clear=True)`` to write a barrier
         # marker and re-persist the current history fresh.
         self._persisted_idx: int = 0
         # Spawn-tree cost tracking (parity with v1).
@@ -275,25 +285,29 @@ class Agent:
             )
         self._budget = dataclasses.replace(self.budget, max_response_tokens=value)
 
+    def reset_budget(self) -> None:
+        """Clear explicit budget so it auto-derives from the model on next access."""
+        self._budget = None
+
     @property
     def thinking(self) -> str | None:
         """Thinking mode for this agent (e.g. ``"adaptive"``). ``None`` disables."""
         return self._thinking
 
-    def set_thinking(self, value: str | None) -> None:
-        """Update the thinking mode for subsequent model calls.
-
-        Used by ``ModelCallHandler`` when the API rejects the current
-        mode (e.g. Haiku 4.5 doesn't accept ``"adaptive"``) so the
-        rest of the session degrades gracefully instead of looping
-        on the same 400.
-        """
+    @thinking.setter
+    def thinking(self, value: str | None) -> None:
         self._thinking = value
 
     @property
     def effort(self) -> str | None:
         """Effort level for this agent (provider-specific; may be ``None``)."""
         return self._effort
+
+    @effort.setter
+    def effort(self, value: str | None) -> None:
+        if value is not None and not self.model.supports_effort:
+            raise ValueError(f"Model {self.model.model_id!r} does not support effort.")
+        self._effort = value
 
     @property
     def cache_ttl(self) -> str:
@@ -316,25 +330,16 @@ class Agent:
         """Session status for terminal titlebar (empty until set)."""
         return self._status
 
-    def set_status(self, status: str) -> None:
-        """Set the session status, persist, and post a status-update message.
-
-        Args:
-          status: New status string for the terminal titlebar.
-
-        """
-        self._status = status
-        self._save_session()
-        self.inbox.put(TextMessage(status, "text/x-status-update"))
+    @status.setter
+    def status(self, value: str) -> None:
+        self._status = value
+        self.save_session()
+        self.inbox.put(TextMessage(value, "text/x-status-update"))
 
     @property
     def messages(self) -> list[Message]:
         """Alias for ``history`` (v1 compatibility)."""
         return self.history
-
-    @messages.setter
-    def messages(self, value: list[Message]) -> None:
-        self.history = value
 
     @property
     def tools(self) -> list[Tool]:
@@ -342,9 +347,9 @@ class Agent:
 
         Returns a list (v1 contract) so consumers like ``AgentSpawn``
         and ``advisor`` can iterate without dict-vs-list contortions.
-        Handlers needing dict semantics use ``agent._tools`` directly.
+        Handlers needing dict semantics use ``agent.tools_map`` directly.
         """
-        return list(self._tools.values())
+        return list(self.tools_map.values())
 
     @property
     def system(self) -> SystemPrompt:
@@ -477,7 +482,7 @@ class Agent:
             diff = changed_files_context()
             if diff:
                 parts.append(diff)
-        for tool in self._tools.values():
+        for tool in self.tools_map.values():
             section = tool.prompt()
             if section:
                 parts.append(section)
@@ -486,11 +491,21 @@ class Agent:
     def swap_model(self, model: Model, *, spec: ModelSpec | None = None) -> None:
         """Replace the active model and (optionally) its spec.
 
+        Re-validates the explicit budget invariant the constructor
+        enforces: an explicit ``budget`` must fit within the new
+        model's context. ``budget=None`` derives from the model on
+        access, so no validation is needed there.
+
         Args:
           model: New model instance.
           spec: Recipe that produced ``model``; ``None`` clears it.
 
+        Raises:
+          ValueError: Explicit budget exceeds the new model's limits.
+
         """
+        if self._budget is not None:
+            _validate_budget(self._budget, model)
         self.model = model
         self.model_spec = spec
 
@@ -538,9 +553,6 @@ class Agent:
         # a root run).
         parent_state = tool_state_var.get(None)
         self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
-        # Reset the abort flag so a previously-cancelled session
-        # doesn't poison subsequent runs.
-        self.tool_state.abort_event.clear()
         try:
             with tool_state_context(self.tool_state):
                 await self._dispatch_loop()
@@ -590,6 +602,7 @@ class Agent:
         events: asyncio.Queue[Message | None] = asyncio.Queue()
         self.inbox.put(TextMessage(prompt, "text/x-user-message"))
         cost_before = _subtree_cost(self)
+        tokens_before = _subtree_tokens(self)
 
         async def _drive() -> Message:
             # Forward inbox traffic onto ``events`` via a wildcard
@@ -612,16 +625,17 @@ class Agent:
                 # Mirror v1's ``application/x-done`` request-boundary
                 # sentinel: emit before terminating so callers like
                 # ``AgentSpawn._ChildForwarder`` can build a per-call
-                # summary from the per-call token totals + cost.
+                # summary. Token counts and cost bracket the same run
+                # via ``_subtree_{cost,tokens}`` so all three numbers
+                # describe the same time horizon.
                 cost_delta = max(0.0, _subtree_cost(self) - cost_before)
+                tokens_delta = _subtree_tokens(self) - tokens_before
                 events.put_nowait(
                     JsonMessage(
                         json_freeze(
                             {
-                                "input_tokens": (
-                                    self.cost_tracker.last_request.input_tokens
-                                ),
-                                "output_tokens": (self.cost_tracker.call_output_tokens),
+                                "input_tokens": tokens_delta.input_tokens,
+                                "output_tokens": tokens_delta.output_tokens,
                                 "cost_usd": cost_delta,
                             },
                         ),
@@ -652,15 +666,19 @@ class Agent:
         while True:
             items = await self.inbox.get_all()
             if any(m.descriptor == QUIT_SENTINEL for m in items):
-                self._save_session()
+                self.save_session()
                 return
             prompts: list[str] = []
             for m in items:
-                if m.descriptor == "text/x-clear-request":
-                    # Re-enqueue so ClearHandler runs on the next loop tick.
-                    self.inbox.put_left(m)
+                if m.descriptor == "text/x-user-message" and isinstance(m, TextMessage):
+                    prompts.append(m.content)
                 else:
-                    prompts.append(str(m.content))
+                    logger.warning(
+                        "run_forever: dropping inbox message with"
+                        " unexpected descriptor=%r; only"
+                        " text/x-user-message is accepted between runs.",
+                        m.descriptor,
+                    )
             if not prompts:
                 continue
             prompt = "\n\n".join(prompts)
@@ -683,21 +701,41 @@ class Agent:
         """The bare dispatch loop, no context setup."""
         while True:
             msg = await self.inbox.get()
-            if msg.descriptor == QUIT_SENTINEL:
-                await self._drain_tasks()
-                return
-            for h in self._handlers.get(msg.descriptor, ()):
-                await self._invoke(h, msg)
-            for h in self._wildcards:
-                await self._invoke(h, msg)
+            self._dispatch_idle.clear()
+            try:
+                if msg.descriptor == QUIT_SENTINEL:
+                    await self._drain_tasks()
+                    return
+                for h in self._handlers.get(msg.descriptor, ()):
+                    await self._invoke(h, msg)
+                for h in self._wildcards:
+                    await self._invoke(h, msg)
+            finally:
+                self._dispatch_idle.set()
 
     async def _wait_for_idle(self) -> None:
-        """Block until the inbox is empty and no spawned tasks are in flight."""
+        """Block until queued, in-flight, and dispatched work all finish.
+
+        Returns when (1) the deque is empty, (2) the dispatch loop has
+        finished its last message (``_dispatch_idle`` set), and (3) no
+        spawned tasks remain. Re-loops if a spawned-task completion
+        racing its own pop from ``self.tasks`` left a fresh post in
+        the deque.
+
+        Asyncio single-threaded contract: the caller (``Agent.run``'s
+        ``_drive``) posts ``QUIT_SENTINEL`` immediately after this
+        returns, with no intervening ``await``. Peer producers cannot
+        slip a post between the return and the QUIT.
+        """
         while True:
             await self.inbox.wait_for_empty()
-            if not self.tasks:
-                return
-            _ = await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+            await self._dispatch_idle.wait()
+            if self.tasks:
+                _ = await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+                continue
+            if self.inbox:
+                continue
+            return
 
     async def _invoke(self, handler: Handler, msg: Message) -> None:
         """Run one handler against one message, dispatching by spawn mode."""
@@ -756,7 +794,7 @@ class Agent:
         """Record a structured event for session.jsonl.
 
         Caps in-memory growth: when the buffer exceeds
-        ``_MAX_UNSAVED_EVENTS``, flush via ``_save_session`` if a
+        ``_MAX_UNSAVED_EVENTS``, flush via ``save_session`` if a
         session_dir is configured, else truncate.
         """
         entry = {
@@ -770,7 +808,7 @@ class Agent:
         if len(self._event_log) > _MAX_UNSAVED_EVENTS:
             if self.session_dir is not None:
                 try:
-                    self._save_session()
+                    self.save_session()
                 except OSError as save_err:
                     logger.warning(
                         "Event log save failed (%s); truncating in memory.",
@@ -808,7 +846,7 @@ class Agent:
             total_active_elapsed_seconds=self.activity.elapsed_seconds,
         )
 
-    def _save_session(self, *, clear: bool = False) -> None:
+    def save_session(self, *, clear: bool = False) -> None:
         """Append meta + new messages + events to ``session_dir/session.jsonl``.
 
         Normal saves append ``self.history[self._persisted_idx:]`` --
@@ -900,7 +938,7 @@ class Agent:
         if repair_inserted:
             # Repair added messages that aren't on disk; persist via a
             # clear barrier so the file's live view matches memory.
-            self._save_session(clear=True)
+            self.save_session(clear=True)
 
 
 class _DriveForwarder:
@@ -1000,6 +1038,48 @@ def _subtree_cost(agent: Agent) -> float:
     if ledger is not None:
         return ledger.total_cost_usd
     return agent.cost_tracker.total_cost_usd
+
+
+def _validate_budget(budget: ContextBudget, model: Model) -> None:
+    """Raise if ``budget`` exceeds ``model``'s context limits.
+
+    Shared by ``Agent.__init__`` and ``Agent.swap_model`` so the
+    invariant has a single definition.
+
+    Args:
+      budget: Caller-supplied context budget.
+      model: Target model whose limits the budget must fit within.
+
+    Raises:
+      ValueError: Either ``max_request_tokens`` or ``max_response_tokens``
+        exceeds the model's corresponding limit.
+
+    """
+    if budget.max_request_tokens > model.max_request_tokens:
+        raise ValueError(
+            f"budget.max_request_tokens={budget.max_request_tokens:,}"
+            f" exceeds model's {model.max_request_tokens:,}",
+        )
+    if budget.max_response_tokens > model.max_response_tokens:
+        raise ValueError(
+            f"budget.max_response_tokens={budget.max_response_tokens:,}"
+            f" exceeds model's {model.max_response_tokens:,}",
+        )
+
+
+def _subtree_tokens(agent: Agent) -> TokenCount:
+    """Subtree token counts: inherited ledger if present, else the tracker.
+
+    Counterpart to :func:`_subtree_cost` for token bracketing in
+    ``Agent.run``'s ``application/x-done`` event. The same fall-back
+    logic applies: root run reads ``cost_tracker.total`` (no ledger
+    installed yet at ``run`` entry); nested children read the
+    ContextVar ledger, which already aggregates parent + descendants.
+    """
+    ledger = cost_ledger_var.get()
+    if ledger is not None:
+        return ledger.tokens
+    return agent.cost_tracker.total
 
 
 def _error_message(origin: Message, exc: BaseException) -> Message:

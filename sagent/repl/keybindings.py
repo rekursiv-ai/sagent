@@ -8,8 +8,8 @@ swapped for v2's deque + handler model:
   put_left ``text/x-abort`` (handled by :class:`AbortHandler`).
 
 Slash-command parsing for the active path goes through
-:func:`repl.slash.parse_slash` so this path and the idle
-the REPL input pump always agree on which commands are recognized.
+:func:`repl.slash.parse_slash` so this path and the idle REPL
+input pump always agree on which commands are recognized.
 
 Bindings:
 
@@ -75,10 +75,7 @@ def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
         # Let the idle path translate /quit on the next tick.
         buf.validate_and_handle()
         return
-    if action.descriptor == "text/x-user-message":
-        _ = agent.inbox.put(TextMessage(text.strip(), "text/x-user-message"))
-    else:
-        dispatch(agent, action)
+    dispatch(agent, action)
     buf.append_to_history()
     buf.reset()
 
@@ -98,8 +95,8 @@ def _kb_up(agent: Agent, event: KeyPressEvent) -> None:
                 buf.text = f"/clear {content}".rstrip()
             elif tail.descriptor == "text/x-compact-request":
                 buf.text = f"/compact {content}".rstrip()
-            elif tail.descriptor == "text/x-uncompact-request":
-                buf.text = f"/uncompact {content}".rstrip()
+            elif tail.descriptor == "text/x-recompact-request":
+                buf.text = f"/recompact {content}".rstrip()
             elif tail.descriptor == "text/x-model-switch-request":
                 buf.text = f"/model {content}".rstrip()
             else:

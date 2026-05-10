@@ -1,35 +1,29 @@
-Mutate the current agent's own state.
+Patch the current agent's own state.
 
-Use this tool for:
-- `operation="status"` — update the terminal titlebar when starting a task
-  or changing focus. Keep status short: 3-7 words, sentence case.
-- `operation="diagnostics"` — inspect token, cost, model, provider, auth,
-  and context-limit state.
-- `operation="compact"` — queue conversation summarization to free context.
-- `operation="recompact"` — redo the previous compaction with new guidance.
-- `operation="model"` — switch the current agent to another model backend.
-- `operation="limits"` — change this agent's context-token limits.
-- `operation="cache_ttl"` — set the prompt-cache TTL for outgoing requests
-  (`"5m"` default or `"1h"` extended). Switch to `"1h"` when typical gaps
-  between turns exceed 5 minutes; pays 2x input rate on cache writes but
-  avoids prefix rebuilds. Affects only Anthropic providers.
-- `operation="clear"` — request a destructive conversation-history clear.
-  Use only when the user explicitly asks for a clear or fresh start.
+All fields are optional. Omitted fields are left unchanged.
 
-Model switching:
-- Usually pass only `model_id`. Known model prefixes infer provider/auth.
-- Omit `provider`, `auth`, and `account` unless the user explicitly asks for
-  a provider/account or inference would choose the wrong backend.
-- `auth` is the suffix of a zero-argument `from_<auth>()` constructor on the
-  provider, for example `env` for API-key environment variables.
+Fields:
+- `status` -- update the terminal/status text. Keep it short: 3-7 words,
+  sentence case.
+- `context` -- queue a context mutation: `"clear"`, `"compact"`, or
+  `"recompact"`. Omit to preserve context.
+- `context_prompt` -- optional clear reason or compaction/recompaction
+  guidance. Only used with `context`.
+- `model_id` -- optional model ID. Known model prefixes infer provider/auth.
+- `provider` -- optional provider class name override.
+- `auth` -- optional auth method suffix, for example `env` or `credentials`.
+- `account` -- optional credential account name.
+- `max_request_tokens` -- optional request-token limit.
+- `max_response_tokens` -- optional response-token limit.
+- `model_options` -- optional provider/model-specific settings. To see possible
+  keys for the active or selected model, call with `diagnostics=true`.
+- `diagnostics` -- set true to include current model, usage, limits, cache,
+  and supported `model_options` in the result.
+- `catalog` -- optional read-only diagnostics query: `"providers"` lists known
+  provider names; `"models"` lists known models for `catalog_provider` or the
+  active provider.
+- `catalog_provider` -- provider name for `catalog="models"`.
 
-Limit changes:
-- Use `operation="limits"` when changing this agent's token limits.
-- With `operation="limits"`, include `max_request_tokens`,
-  `max_response_tokens`, or both.
-- `max_request_tokens` and `max_response_tokens` are token counts, not bytes,
-  chars, or percentages.
-- Do not attach limit fields to `status`, `clear`, `compact`, `recompact`,
-  `diagnostics`, or `model`; those operations do not change limits.
-- The current values are the active agent's current token limits, initialized
-  from the active model and possibly changed by an earlier limits operation.
+Top-level fields are stable Sagent semantics. Provider-specific controls such
+as `thinking`, `effort`, and `cache_ttl` belong under `model_options` and are
+validated against the active or selected model.

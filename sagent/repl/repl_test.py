@@ -392,28 +392,46 @@ async def test_child_event_buffers_streaming_chunks_into_one_block() -> None:
 
 
 @pytest.mark.asyncio
-async def test_child_event_x_interleave_flushes_on_label_change() -> None:
-    """When a different child emits, the prior label flushes immediately.
-
-    X-interleave: real-time visibility for both children, even if
-    the in-progress label hadn't reached a stable Markdown boundary.
-    """
+async def test_child_event_x_interleave_keeps_unstable_text_buffered() -> None:
+    """Interleaved children flush complete items but not unstable text."""
     printer = RecordingPrinter()
     handler = RenderChildEvent(printer)
     agent = Agent(model=_StreamingFakeModel([_model_response("ack")]))
     await handler.handle(
         agent,
-        _child_envelope("Agent_0", TextMessage("partial", "text/plain")),
+        _child_envelope("Agent_0", TextMessage("implementation pass", "text/plain")),
     )
-    # Pre-interleave: nothing flushed (no boundary yet).
-    assert printer.child_blocks == []
-    # Different child arrives -> flush Agent_0's pending text first.
     await handler.handle(
         agent,
-        _child_envelope("Agent_1", TextMessage("other", "text/plain")),
+        _child_envelope("Agent_1", TextMessage("configured per", "text/plain")),
     )
-    assert len(printer.child_blocks) == 1
-    assert printer.child_blocks[0][0] == "Agent_0"
+    assert printer.child_blocks == []
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_0", TextMessage(" is: wire\n\nNext", "text/plain")),
+    )
+    assert [(label, len(items)) for label, items in printer.child_blocks] == [
+        ("Agent_0", 1)
+    ]
+    await handler.handle(
+        agent,
+        _child_envelope("Agent_1", TextMessage("-state limits;\n\nNext", "text/plain")),
+    )
+    assert [(label, len(items)) for label, items in printer.child_blocks] == [
+        ("Agent_0", 1),
+        ("Agent_1", 1),
+    ]
+
+    rendered = [
+        (label, str(item.content))
+        for label, items in printer.child_blocks
+        for item in items
+        if item.descriptor == "text/plain"
+    ]
+    assert rendered == [
+        ("Agent_0", "implementation pass is: wire"),
+        ("Agent_1", "configured per-state limits;"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -510,7 +528,7 @@ async def test_prompt_input_routes_user_text() -> None:
 
 @pytest.mark.asyncio
 async def test_prompt_input_routes_slash_commands() -> None:
-    """``/clear``, ``/compact``, ``/uncompact``, ``/abort`` map cleanly."""
+    """``/clear``, ``/compact``, ``/recompact``, ``/abort`` map cleanly."""
     seen: list[tuple[str, str]] = []
 
     class _Trace(InlineHandler):
@@ -518,7 +536,7 @@ async def test_prompt_input_routes_slash_commands() -> None:
             "text/x-clear-request",
             "text/x-abort",
             "text/x-compact-request",
-            "text/x-uncompact-request",
+            "text/x-recompact-request",
             "text/x-user-message",
         )
 
@@ -531,7 +549,7 @@ async def test_prompt_input_routes_slash_commands() -> None:
         [
             "/clear",
             "/compact focus on bugs",
-            "/uncompact",
+            "/recompact",
             "after",
             "/abort",
             "/quit",
@@ -547,7 +565,7 @@ async def test_prompt_input_routes_slash_commands() -> None:
     assert ("text/x-abort", "") in seen
     assert ("text/x-clear-request", "") in seen
     assert ("text/x-compact-request", "focus on bugs") in seen
-    assert ("text/x-uncompact-request", "") in seen
+    assert ("text/x-recompact-request", "") in seen
     assert ("text/x-user-message", "after") in seen
 
 
@@ -640,6 +658,20 @@ def test_break_and_abort_parse_with_scope() -> None:
     assert br is not None
     assert br.descriptor == "text/x-break"
     assert br.content == "all"
+
+
+def test_user_message_content_is_stripped() -> None:
+    """``parse_slash`` returns trimmed content for plain text input.
+
+    Regression: idle and active REPL paths previously disagreed on
+    normalization (idle posted the raw line, active posted
+    ``text.strip()``). Centralizing the strip in ``parse_slash``
+    guarantees both paths post identical inbox content.
+    """
+    action = parse_slash("  hello world  \n")
+    assert action is not None
+    assert action.descriptor == "text/x-user-message"
+    assert action.content == "hello world"
 
 
 def test_clear_only_fires_on_exact_line() -> None:

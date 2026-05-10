@@ -108,7 +108,7 @@ Important public properties:
 | `last_model_request_tokens` | Last request token count. |
 | `last_model_response_tokens` | Last response token count. |
 
-`swap_model(model, spec=...)` replaces the active model and its model recipe. `AgentSelf(operation="model")` uses the same mechanism.
+`swap_model(model, spec=...)` replaces the active model and its model recipe. `AgentSelf(model_id="...")` uses the same mechanism.
 
 ## Messages
 

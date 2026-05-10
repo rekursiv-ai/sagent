@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 
 import asyncio
-import threading
 import time
 
 import pytest
@@ -542,11 +541,6 @@ class TestToolState:
         _ = s.consume_changed_files()
         # Same params after consumption should dedup against current mtime.
         assert s.check_unchanged(str(f), offset=5, limit=100, last_lines=0)
-
-    def test_abort_event_present(self) -> None:
-        s = ToolState()
-        assert isinstance(s.abort_event, threading.Event)
-        assert not s.abort_event.is_set()
 
 
 # -- get/set_tool_state context var -----------------------------------

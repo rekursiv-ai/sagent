@@ -15,12 +15,14 @@ import pytest
 from sagent.agent.agent import Agent, _last_assistant_message
 from sagent.agent.handlers import (
     InlineHandler,
+    ModelCallHandler,
     SpawnedHandler,
     core_handlers,
 )
 from sagent.agent.session_io import load_session
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
+    ContextBudget,
     Message,
     ModelRequest,
     ModelResponse,
@@ -74,6 +76,10 @@ class _FakeModel(MockModelCaps):
         return await self.buffer(request=request)
 
 
+class _ThinkingFakeModel(_FakeModel):
+    supports_thinking = True
+
+
 def _model_response(
     text: str = "",
     *,
@@ -89,6 +95,24 @@ def _model_response(
         tokens=TokenCount(input_tokens=10, output_tokens=5),
         stop_reason="model_finished" if not tool_calls else "model_tool_use",
     )
+
+
+def test_build_request_omits_thinking_when_model_does_not_support_it() -> None:
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model, thinking="adaptive")
+
+    request = ModelCallHandler()._build_request(agent)
+
+    assert request.thinking is None
+
+
+def test_build_request_keeps_thinking_when_model_supports_it() -> None:
+    model = _ThinkingFakeModel([_model_response("ok")])
+    agent = Agent(model=model, thinking="adaptive")
+
+    request = ModelCallHandler()._build_request(agent)
+
+    assert request.thinking == "adaptive"
 
 
 class _EchoTool:
@@ -484,8 +508,16 @@ async def test_tool_batch_dispatches_parallel_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_unknown_returns_error() -> None:
-    """A tool call to a nonexistent tool yields a structured error result."""
+async def test_tool_unknown_returns_error_unwrapped_in_inbox() -> None:
+    """Tool errors land in inbox / history as raw text, no ``<tool_use_error>`` tags.
+
+    Regression: the wrap was applied at dispatch time, so the renderer
+    saw ``<tool_use_error>...</tool_use_error>`` literally on screen.
+    The wrap is now applied only at LLM-request build time -- inbox,
+    history, and renderer all see plain error text. The model's
+    request still gets the wrapped form (covered in
+    :func:`test_tool_error_wrapped_for_llm_request`).
+    """
     model = _FakeModel(
         [
             _model_response(
@@ -503,12 +535,49 @@ async def test_tool_unknown_returns_error() -> None:
     )
     tr = next(m for m in agent.history if m.descriptor == "multipart/x-tool-result")
     parts = cast(tuple[Message, ...], tr.content)
-    error_part = next(
-        p
-        for p in parts
-        if "error" in p.descriptor or "tool_use_error" in str(p.content)
+    error_part = next(p for p in parts if p.descriptor == "text/x-error")
+    error_text = str(error_part.content)
+    assert "No such tool" in error_text
+    assert "<tool_use_error>" not in error_text, error_text
+    assert "</tool_use_error>" not in error_text, error_text
+
+
+@pytest.mark.asyncio
+async def test_tool_error_wrapped_for_llm_request() -> None:
+    """LLM request sees the same error wrapped in ``<tool_use_error>`` tags.
+
+    Companion to :func:`test_tool_unknown_returns_error_unwrapped_in_inbox`:
+    inbox stays raw, request gets the wrap so the model can recognize
+    error parts inside a concatenated ``text/plain`` + ``text/x-error``
+    block.
+    """
+    model = _FakeModel(
+        [
+            _model_response(
+                tool_calls=[
+                    tool_call_message("t1", "nope", json_freeze({})),
+                ],
+            ),
+            _model_response("ack"),
+        ],
     )
-    assert "No such tool" in str(error_part.content)
+    agent = Agent(model=model, tools=[_EchoTool()])
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    # Second model request includes the tool-result envelope with the
+    # error wrapped for the LLM.
+    second_req = model.requests[1]
+    tool_result_msg = next(
+        m for m in second_req.messages if m.descriptor == "multipart/x-tool-result"
+    )
+    parts = cast(tuple[Message, ...], tool_result_msg.content)
+    error_part = next(p for p in parts if p.descriptor == "text/x-error")
+    error_text = str(error_part.content)
+    assert error_text.startswith("<tool_use_error>")
+    assert error_text.endswith("</tool_use_error>")
+    assert "No such tool" in error_text
 
 
 @pytest.mark.asyncio
@@ -660,6 +729,114 @@ async def test_budget_watcher_triggers_compaction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_budget_watcher_orders_maintain_before_model_request() -> None:
+    """BudgetWatcher.maintain must run before ModelCallHandler builds the request.
+
+    With both handlers spawned on ``text/x-model-call``, the model_lock
+    + FIFO scheduling are the only mechanism enforcing ordering. If the
+    lock dance breaks, ModelCallHandler could build its request before
+    BudgetWatcher mutates history -- we'd ship pre-compaction history
+    to the provider.
+    """
+    events: list[str] = []
+
+    class _RecordingCompactor(_StubCompactor):
+        @override
+        def maintain(
+            self,
+            messages: list[Message],
+            tools: dict[str, Tool],
+            **kwargs: object,
+        ) -> None:
+            events.append("maintain")
+            super().maintain(messages, tools, **kwargs)
+
+    class _RecordingModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            events.append("stream")
+            return await super().stream(request, on_text, on_thinking)
+
+    compactor = _RecordingCompactor(should=False)
+    model = _RecordingModel([_model_response("ok")])
+    agent = Agent(model=model, compactor=compactor)
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert events == ["maintain", "stream"], events
+
+
+@pytest.mark.asyncio
+async def test_abort_during_budget_compaction_returns_promptly() -> None:
+    """``/abort`` mid-compaction must cancel the compaction and free the lock.
+
+    With ``BudgetWatcher`` as ``SpawnedHandler``, the compaction task
+    lives in ``agent.tasks``. ``AbortHandler`` cancels everything in
+    ``agent.tasks``; the cancellation must propagate through the lock
+    block so subsequent model calls can acquire ``model_lock`` again.
+    Regression target: the prior inline ``BudgetWatcher`` blocked the
+    dispatch loop, so ``/abort`` could not even be processed until
+    compaction returned.
+    """
+    started = asyncio.Event()
+    blocking = asyncio.Event()
+
+    class _BlockingCompactor(_StubCompactor):
+        @override
+        async def compact(
+            self,
+            messages: list[Message],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[Message]:
+            del (
+                messages,
+                model,
+                transcript_path,
+                direction,
+                keep_recent,
+                custom_instructions,
+                summary_pointers,
+            )
+            started.set()
+            await blocking.wait()  # would block forever without cancel
+            return [TextMessage("never", "text/x-user-message")]
+
+    compactor = _BlockingCompactor(should=True)
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model, compactor=compactor)
+
+    async def _abort_after_started() -> None:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        agent.inbox.put_left(TextMessage("", "text/x-abort"))
+
+    abort_task = asyncio.create_task(_abort_after_started())
+    try:
+        # Use a short total timeout: if /abort doesn't unstick the lock,
+        # this hangs. Compactor.compact would otherwise wait forever on
+        # ``blocking``; the cancel must propagate through.
+        _ = await asyncio.wait_for(
+            agent.run(json_freeze({"prompt": "p"})),
+            timeout=3.0,
+        )
+    finally:
+        blocking.set()
+        _ = await abort_task
+    # After abort, the lock must be released so the test exits cleanly.
+    assert not agent.model_lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_budget_watcher_skipped_without_compactor() -> None:
     """No compactor -> BudgetWatcher is a no-op; conversation proceeds."""
     model = _FakeModel([_model_response("ok")])
@@ -781,25 +958,66 @@ async def test_abort_handler_cancels_inflight_tasks() -> None:
     agent.inbox.put(TextMessage("", "text/x-quit"))
     await loop_task
     assert cancelled == ["cancelled"]
-    assert agent.tool_state.abort_event.is_set()
 
 
+@pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_abort_event_clears_on_next_user_message() -> None:
-    """Fresh user message clears ``abort_event`` from a prior cancel.
+async def test_user_message_during_text_only_response_triggers_follow_up() -> None:
+    """A directive typed while the model is producing a text-only response
+    must still trigger a follow-up model call.
 
-    Regression: ``run_loop`` only clears ``abort_event`` once at session
-    start, so a Ctrl+C earlier in the REPL session would otherwise
-    poison every subsequent sync-polling tool (e.g. Bash) for the rest
-    of the session. ``UserMessageHandler`` clears at every turn boundary.
+    Regression: ``UserMessageHandler`` bailed when ``model_lock`` was
+    held, so a directive arriving during an in-flight response was
+    appended to history but never triggered a fresh model call. With
+    no tool calls in the response, ``ToolBatchResultHandler`` couldn't
+    re-trigger either -- the directive sat stranded in history.
     """
-    model = _FakeModel([_model_response("ok"), _model_response("ok")])
+    release_first = asyncio.Event()
+    first_started = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                first_started.set()
+                await release_first.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel(
+        [_model_response("first response"), _model_response("second response")],
+    )
     agent = Agent(model=model)
-    agent.tool_state.abort_event.set()
-    agent.inbox.put(TextMessage("hi", "text/x-user-message"))
-    agent.inbox.put(TextMessage("", "text/x-quit"))
-    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
-    assert not agent.tool_state.abort_event.is_set()
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(first_started.wait(), timeout=1.0)
+        agent.inbox.put(TextMessage("second", "text/x-user-message"))
+        release_first.set()
+        # Wait for the SECOND model call to start (proves the directive
+        # routed through). Then quit and join.
+        for _ in range(100):
+            if len(model.requests) >= 2:
+                break
+            await asyncio.sleep(0.02)
+    finally:
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+    assert len(model.requests) == 2, [
+        [str(m.content) for m in r.messages] for r in model.requests
+    ]
+    second_messages = [str(m.content) for m in model.requests[1].messages]
+    assert "second" in second_messages, second_messages
 
 
 @pytest.mark.real_sleep
@@ -1194,6 +1412,745 @@ async def test_model_call_auto_repairs_dangling_tool_use() -> None:
     # assistant and the new user message.
     pos_assistant = sent_descriptors.index("multipart/x-model-message")
     assert sent_descriptors[pos_assistant + 1] == "multipart/x-tool-result"
+
+
+@pytest.mark.asyncio
+async def test_recompact_handler_reads_versioned_pre_compact_path(
+    tmp_path: Path,
+) -> None:
+    """``/recompact`` reads ``pre_compact_{count-1}.jsonl``, not ``pre_compact.jsonl``.
+
+    Regression for the path mismatch where ``run_compaction`` wrote
+    versioned filenames but ``RecompactHandler`` opened the unversioned
+    one and silently no-opped on every invocation.
+    """
+    compactor = _StubCompactor(should=False)
+    model = _FakeModel(
+        [_model_response("first"), _model_response("second")],
+    )
+    agent = Agent(
+        model=model,
+        compactor=compactor,
+        session_dir=tmp_path,
+    )
+    agent.history.extend(
+        [
+            TextMessage("u1", "text/x-user-message"),
+            TextMessage("a1", "text/plain"),
+        ],
+    )
+    # First compaction writes ``pre_compact_0.jsonl`` and bumps count to 1.
+    agent.inbox.put(TextMessage("", "text/x-compact-request"))
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "next"})),
+        timeout=2.0,
+    )
+    assert (tmp_path / "pre_compact_0.jsonl").exists()
+    assert agent.compaction_state.compact_count == 1
+    initial_compact_calls = len(compactor.compact_calls)
+    # /recompact must locate ``pre_compact_0.jsonl`` and re-run compaction.
+    agent.inbox.put(TextMessage("retry", "text/x-recompact-request"))
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "again"})),
+        timeout=2.0,
+    )
+    assert len(compactor.compact_calls) > initial_compact_calls, (
+        "RecompactHandler did not invoke compactor.compact -- it likely "
+        "looked at the wrong filename."
+    )
+
+
+@pytest.mark.asyncio
+async def test_recompact_handler_noop_with_no_prior_compaction(
+    tmp_path: Path,
+) -> None:
+    """Without a prior compaction there is no transcript to reload."""
+    compactor = _StubCompactor(should=False)
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(
+        model=model,
+        compactor=compactor,
+        session_dir=tmp_path,
+    )
+    agent.inbox.put(TextMessage("", "text/x-recompact-request"))
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert compactor.compact_calls == []
+
+
+@pytest.mark.asyncio
+async def test_activity_clears_after_stream_end() -> None:
+    """``active`` resets on ``text/x-stream-end`` so cancel paths recover.
+
+    Regression for the stuck-toolbar bug where the cancel path emitted
+    ``text/x-stream-end`` but ``ActivityHandler`` only cleared ``active``
+    on ``multipart/x-model-message``, leaving ``Agent.active`` true after
+    ``/abort``.
+    """
+    model = _FakeModel([_model_response("ok")])
+    agent = Agent(model=model)
+    # Simulate a model call lifecycle using only the descriptors the
+    # cancel path emits.
+    agent.inbox.put(TextMessage("", "text/x-model-call"))
+    agent.inbox.put(TextMessage("partial", "text/plain"))
+    agent.inbox.put(TextMessage("", "text/x-stream-end"))
+    agent.inbox.put(TextMessage("", "text/x-quit"))
+    await asyncio.wait_for(agent.run_loop(), timeout=2.0)
+    assert agent.activity.active is False
+    assert agent.activity.live_response_chars == 0
+    assert agent.activity.elapsed_seconds >= 0.0
+
+
+def test_swap_model_rejects_budget_exceeding_new_model_request() -> None:
+    """``swap_model`` rejects when budget.max_request_tokens > model's."""
+
+    class _SmallModel(_FakeModel):
+        @property
+        @override
+        def max_request_tokens(self) -> int:
+            return 50_000
+
+        @property
+        @override
+        def model_id(self) -> str:
+            return "small"
+
+    big_model = _FakeModel([])
+    small_model = _SmallModel([])
+    budget = ContextBudget(max_request_tokens=80_000, max_response_tokens=8_192)
+    agent = Agent(model=big_model, budget=budget)
+    with pytest.raises(ValueError, match="max_request_tokens"):
+        agent.swap_model(small_model)
+    assert agent.model is big_model
+
+
+def test_swap_model_rejects_budget_exceeding_new_model_response() -> None:
+    """``swap_model`` rejects when budget.max_response_tokens > model's."""
+
+    class _SmallResponseModel(_FakeModel):
+        max_response_tokens: int = 1_024
+
+        @property
+        @override
+        def model_id(self) -> str:
+            return "small-response"
+
+    big_model = _FakeModel([])
+    small_model = _SmallResponseModel([])
+    budget = ContextBudget(max_request_tokens=10_000, max_response_tokens=8_192)
+    agent = Agent(model=big_model, budget=budget)
+    with pytest.raises(ValueError, match="max_response_tokens"):
+        agent.swap_model(small_model)
+    assert agent.model is big_model
+
+
+def test_swap_model_allows_swap_when_budget_unset() -> None:
+    """Without an explicit budget, swap_model derives from the model."""
+
+    class _SmallModel(_FakeModel):
+        @property
+        @override
+        def max_request_tokens(self) -> int:
+            return 50_000
+
+        @property
+        @override
+        def model_id(self) -> str:
+            return "small"
+
+    agent = Agent(model=_FakeModel([]))
+    new_model = _SmallModel([])
+    agent.swap_model(new_model)
+    assert agent.model is new_model
+    # Budget tracks the new model.
+    assert agent.budget.max_request_tokens == 50_000
+
+
+@pytest.mark.asyncio
+async def test_run_done_envelope_tokens_are_per_run() -> None:
+    """``application/x-done`` reports this run's tokens, not cumulative.
+
+    Three-time-horizons regression:
+
+    - ``input_tokens`` was ``last_request.input_tokens`` -- only the
+      most recent provider call's input, not the run's total.
+    - ``output_tokens`` was ``cost_tracker.call_output_tokens`` --
+      process-cumulative, never reset.
+    - ``cost_usd`` was per-run.
+
+    Differentiating values (100 then 200, 50 then 75) catches both
+    sides of the bug: if input were last-call only it would equal 200,
+    if output were cumulative it would equal 50+75=125.
+    """
+    first = ModelResponse(
+        content=MultipartMessage(
+            (TextMessage("first", "text/plain"),),
+            "multipart/x-model-message",
+        ),
+        tokens=TokenCount(input_tokens=100, output_tokens=50),
+        total_cost=0.001,
+        stop_reason="model_finished",
+    )
+    second = ModelResponse(
+        content=MultipartMessage(
+            (TextMessage("second", "text/plain"),),
+            "multipart/x-model-message",
+        ),
+        tokens=TokenCount(input_tokens=200, output_tokens=75),
+        total_cost=0.002,
+        stop_reason="model_finished",
+    )
+    model = _FakeModel([first, second])
+    agent = Agent(model=model)
+    _ = await agent.run(json_freeze({"prompt": "first"}))
+    handle = agent.run(json_freeze({"prompt": "second"}))
+    seen: dict[str, object] | None = None
+    async for event in handle:
+        if event.descriptor == "application/x-done":
+            seen = cast(dict[str, object], event.content)
+    _ = await handle
+    assert seen is not None
+    assert seen["input_tokens"] == 200, seen
+    assert seen["output_tokens"] == 75, seen
+    assert seen["cost_usd"] == pytest.approx(0.002, rel=1e-6), seen
+
+
+@pytest.mark.asyncio
+async def test_wait_for_idle_blocks_while_inline_handler_running() -> None:
+    """``_wait_for_idle`` must not return while an inline handler awaits.
+
+    Regression for the dispatch race: ``wait_for_empty`` checks deque
+    state but not handler state. A handler that was mid-await with an
+    empty deque looked "idle" to ``_wait_for_idle``; ``_drive`` would
+    then post ``QUIT_SENTINEL`` and the handler's eventual follow-up
+    post would land after QUIT in FIFO order, dropping it.
+
+    Fixed via the ``_dispatch_idle`` event: the dispatch loop clears
+    it while processing a message, sets it when looping back to
+    ``inbox.get``. ``_wait_for_idle`` waits on it before returning.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _Blocker(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-status",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent, msg
+            started.set()
+            await release.wait()
+
+    agent = Agent(model=_FakeModel([]), handlers=[_Blocker()])
+    agent.inbox.put(TextMessage("", "text/x-status"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        # Deque is empty (Blocker pulled the trigger) and Blocker is
+        # mid-await. ``_wait_for_idle`` must observe this as "still
+        # running" -- a 50ms timeout that fires confirms the wait
+        # actually blocked rather than returning prematurely.
+        wait_returned = False
+        try:
+            await asyncio.wait_for(agent._wait_for_idle(), timeout=0.05)
+            wait_returned = True
+        except TimeoutError:
+            pass
+        assert not wait_returned, (
+            "_wait_for_idle returned while inline handler was still"
+            " awaiting; a follow-up post would race QUIT_SENTINEL"
+        )
+        release.set()
+        await asyncio.wait_for(agent._wait_for_idle(), timeout=1.0)
+    finally:
+        # Always release Blocker so the dispatch loop can drain.
+        release.set()
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_peer_post_during_run_is_either_dispatched_or_queued() -> None:
+    """A peer-task post during ``run`` is dispatched or queued, never lost.
+
+    Race-lockdown for ``_wait_for_idle`` + QUIT_SENTINEL ordering. Asyncio
+    is single-threaded so no yield occurs between ``_wait_for_idle``
+    returning and ``_drive`` posting QUIT, but a peer task that posts
+    during one of ``_wait_for_idle``'s internal awaits can land before
+    QUIT (and be dispatched) or after run completion (and stay in the
+    deque for a subsequent run). Either is acceptable; losing the post
+    is not.
+
+    The test posts an unrelated descriptor so it is observable on the
+    other side: a sink handler subscribes to it; if dispatched, sink
+    fires; if queued, the message remains in ``agent.inbox`` after
+    ``run`` returns. Both outcomes pass; only "neither" fails.
+    """
+    captured: list[str] = []
+    handler_running = asyncio.Event()
+    handler_release = asyncio.Event()
+
+    class _SlowResponse(InlineHandler):
+        descriptors: tuple[str, ...] = ("multipart/x-model-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent, msg
+            handler_running.set()
+            await handler_release.wait()
+
+    class _Sink(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-help-request",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            captured.append(str(msg.content))
+
+    model = _FakeModel(
+        [
+            ModelResponse(
+                content=MultipartMessage(
+                    (TextMessage("ok", "text/plain"),),
+                    "multipart/x-model-message",
+                ),
+                tokens=TokenCount(input_tokens=1, output_tokens=1),
+                stop_reason="model_finished",
+            ),
+        ],
+    )
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), _SlowResponse(), _Sink()],
+    )
+
+    async def peer_producer() -> None:
+        await handler_running.wait()
+        agent.inbox.put(TextMessage("from-peer", "text/x-help-request"))
+        handler_release.set()
+
+    producer_task = asyncio.create_task(peer_producer())
+    handle = agent.run(json_freeze({"prompt": "p"}))
+    _ = await asyncio.wait_for(handle, timeout=2.0)
+    await producer_task
+
+    queued = [m for m in agent.inbox if m.descriptor == "text/x-help-request"]
+    assert captured == ["from-peer"] or queued, (
+        "Peer post was lost: not dispatched and not queued."
+        f" captured={captured}"
+        f" inbox_descriptors={[m.descriptor for m in agent.inbox]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_post_after_yield_processed_in_same_run() -> None:
+    """A handler that yields then posts must have its post dispatched.
+
+    End-to-end version of ``test_wait_for_idle_blocks_while_inline_handler_running``:
+    rather than asserting ``_wait_for_idle`` blocks, this asserts the
+    user-observable invariant -- the post fires the sink handler in the
+    same run.
+    """
+    captured: list[str] = []
+
+    class _SlowPoster(InlineHandler):
+        descriptors: tuple[str, ...] = ("multipart/x-model-message",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del msg
+            for _ in range(20):
+                await asyncio.sleep(0)
+            agent.inbox.put(TextMessage("late", "text/x-help-request"))
+
+    class _Sink(InlineHandler):
+        descriptors: tuple[str, ...] = ("text/x-help-request",)
+
+        @override
+        async def handle(self, agent: Agent, msg: Message) -> None:
+            del agent
+            captured.append(str(msg.content))
+
+    model = _FakeModel(
+        [
+            ModelResponse(
+                content=MultipartMessage(
+                    (TextMessage("ok", "text/plain"),),
+                    "multipart/x-model-message",
+                ),
+                tokens=TokenCount(input_tokens=1, output_tokens=1),
+                stop_reason="model_finished",
+            ),
+        ],
+    )
+    agent = Agent(
+        model=model,
+        handlers=[*core_handlers(), _SlowPoster(), _Sink()],
+    )
+    _ = await asyncio.wait_for(
+        agent.run(json_freeze({"prompt": "p"})),
+        timeout=2.0,
+    )
+    assert captured == ["late"]
+
+
+@pytest.mark.asyncio
+async def test_run_forever_drops_unexpected_descriptors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only ``text/x-user-message`` becomes a prompt; others are dropped.
+
+    External producers (Slack, AgentSend, REPL) post ``text/x-user-message``
+    between runs. Anything else hitting the inbox between runs is a
+    misuse and gets logged + dropped rather than silently stringified
+    into a fake user prompt.
+    """
+    response = ModelResponse(
+        content=MultipartMessage(
+            (TextMessage("ok", "text/plain"),),
+            "multipart/x-model-message",
+        ),
+        tokens=TokenCount(input_tokens=1, output_tokens=1),
+        stop_reason="model_finished",
+    )
+    model = _FakeModel([response])
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("ignored junk", "text/x-status-update"))
+    agent.inbox.put(TextMessage("hello", "text/x-user-message"))
+    gen = agent.run_forever()
+    with caplog.at_level("WARNING"):
+        async for event in gen:
+            if event is None:
+                agent.inbox.put(TextMessage("", "text/x-quit"))
+                break
+        async for _ in gen:
+            pass
+    last = model.requests[-1].messages[-1]
+    assert last.descriptor == "text/x-user-message"
+    assert "hello" in cast(str, last.content)
+    assert "ignored junk" not in cast(str, last.content)
+    assert any("text/x-status-update" in r.message for r in caplog.records)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_clear_drops_deferred_history_pending() -> None:
+    """``/clear`` must wipe ``history_pending`` alongside ``history``.
+
+    Otherwise a user message typed during an in-flight call survives
+    ``/clear`` and reappears in the cleared history when the call's
+    response lands. Since ``HistoryHandler`` runs its drain inside the
+    ``multipart/x-model-message`` branch, the response is appended
+    *before* the parked message, so the cleared session ends up with
+    an assistant turn at history index 0 -- a shape no honest session
+    should have.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            started.set()
+            await release.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel([_model_response("first response")])
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        agent.inbox.put(TextMessage("typed-during", "text/x-user-message"))
+        for _ in range(20):
+            if agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 1, (
+            "Test setup: expected the mid-call user message to be parked"
+            " before /clear is posted."
+        )
+        agent.inbox.put_left(TextMessage("", "text/x-clear-request"))
+        for _ in range(50):
+            if not agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 0, (
+            "/clear left a parked message in history_pending:"
+            f" {[str(m.content) for m in agent.history_pending]}"
+        )
+    finally:
+        release.set()
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_abort_drops_deferred_history_pending() -> None:
+    """``/abort`` must wipe ``history_pending`` for the local-scope path.
+
+    Symmetric with the existing inbox drain on abort: queued
+    typed-ahead user messages already get dropped. Parked siblings
+    (in ``history_pending``) should follow the same fate.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            started.set()
+            await release.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel([_model_response("first response")])
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        agent.inbox.put(TextMessage("typed-during", "text/x-user-message"))
+        for _ in range(20):
+            if agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 1
+        agent.inbox.put_left(TextMessage("", "text/x-abort"))
+        for _ in range(50):
+            if not agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 0, (
+            "/abort left a parked message in history_pending:"
+            f" {[str(m.content) for m in agent.history_pending]}"
+        )
+    finally:
+        release.set()
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_break_closes_parking_window_for_messages_queued_behind_it() -> None:
+    """``/break`` must wait for cancellation to settle before returning.
+
+    Residual race after the point-in-time clear: ``BreakHandler.handle``
+    runs synchronously and clears ``history_pending``, but
+    ``_cancel_local_tasks`` only schedules cancellation -- ``model_lock``
+    stays held until the spawn task next yields and ``CancelledError``
+    propagates through ``async with agent.model_lock``. A user message
+    queued behind ``/break`` in the same inbox dispatches without any
+    intervening yield, sees ``model_lock.locked()`` true, and gets
+    parked. The cancel never produces ``multipart/x-model-message``,
+    so ``HistoryHandler``'s drain trigger never fires -- the message
+    is stranded in ``history_pending``.
+
+    Fix: ``BreakHandler`` must await the cancelled tasks before
+    returning.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            started.set()
+            await release.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel([_model_response("first response")])
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        # Queue ``/break`` followed immediately by another user
+        # message. Without an awaited cancel, the second message
+        # parks because the lock hasn't been released yet.
+        agent.inbox.put(TextMessage("", "text/x-break"))
+        agent.inbox.put(TextMessage("after-break", "text/x-user-message"))
+        for _ in range(50):
+            if not agent.tasks and not agent.model_lock.locked():
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 0, (
+            "/break did not close the parking window:"
+            f" {[str(m.content) for m in agent.history_pending]} parked"
+            " after /break (will be stranded since cancel does not"
+            " trigger the drain)"
+        )
+    finally:
+        release.set()
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_break_drops_deferred_history_pending() -> None:
+    """``/break`` must wipe ``history_pending``.
+
+    The cancel path in ``ModelCallHandler`` posts
+    ``text/x-stream-end`` + ``text/x-interrupted``, not
+    ``multipart/x-model-message``, so ``HistoryHandler``'s drain
+    trigger never fires after a break. Without explicit cleanup the
+    parked message sits indefinitely and surfaces in a *later* run
+    as if typed after the next user message -- silent reordering
+    across the interrupt boundary.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            started.set()
+            await release.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel([_model_response("first response")])
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        agent.inbox.put(TextMessage("typed-during", "text/x-user-message"))
+        for _ in range(20):
+            if agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 1
+        agent.inbox.put_left(TextMessage("", "text/x-break"))
+        for _ in range(50):
+            if not agent.history_pending:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 0, (
+            "/break left a parked message in history_pending:"
+            f" {[str(m.content) for m in agent.history_pending]}"
+        )
+    finally:
+        release.set()
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_multi_deferred_drain_emits_single_model_call() -> None:
+    """N parked messages drain as one combined turn, not N redundant calls.
+
+    Pre-fix behavior: each parked message produced its own
+    ``text/x-model-call``; all N requests were byte-identical (same
+    history snapshot at the moment of drain), so N-1 of them were
+    wasted API spend. Post-fix: one drain, one model_call, one
+    response that addresses all parked messages in a combined turn.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _SlowModel(_FakeModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del on_thinking
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                started.set()
+                await release.wait()
+            if on_text is not None:
+                on_text("ok")
+            resp = self._responses[min(self._idx, len(self._responses) - 1)]
+            self._idx += 1
+            return resp
+
+    model = _SlowModel(
+        [
+            _model_response("first response"),
+            _model_response("combined response"),
+        ],
+    )
+    agent = Agent(model=model)
+    agent.inbox.put(TextMessage("first", "text/x-user-message"))
+    loop_task = asyncio.create_task(agent.run_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        agent.inbox.put(TextMessage("second", "text/x-user-message"))
+        agent.inbox.put(TextMessage("third", "text/x-user-message"))
+        for _ in range(20):
+            if len(agent.history_pending) == 2:
+                break
+            await asyncio.sleep(0.005)
+        assert len(agent.history_pending) == 2
+        release.set()
+        for _ in range(200):
+            if len(model.requests) >= 2 and not agent.history_pending:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        agent.inbox.put(TextMessage("", "text/x-quit"))
+        await asyncio.wait_for(loop_task, timeout=2.0)
+    assert len(model.requests) == 2, (
+        "Drain produced redundant model calls:"
+        f" {len(model.requests)} requests sent for 1 prompt + 2 mid-call messages"
+    )
+    second_request_descriptors = [m.descriptor for m in model.requests[1].messages]
+    assert second_request_descriptors[-1] == "text/x-user-message"
+    second_contents = [str(m.content) for m in model.requests[1].messages]
+    assert "second" in second_contents
+    assert "third" in second_contents
 
 
 def test_last_assistant_message_returns_empty_when_none() -> None:

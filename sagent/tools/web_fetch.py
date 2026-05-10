@@ -235,10 +235,7 @@ async def _fetch_body(
         as generic text or HTML.
 
     """
-    is_reddit_get = method == "GET" and urlparse(raw_url).hostname in {
-        "reddit.com",
-        "www.reddit.com",
-    }
+    is_reddit_get = method == "GET" and _is_reddit_url(raw_url)
 
     if not is_reddit_get:
         body = await asyncio.to_thread(
@@ -361,6 +358,17 @@ async def _fetch_old_reddit(raw_url: str) -> bytes:
             "Reddit returned a JavaScript verification page for "
             f"{raw_url}; old Reddit fallback failed: {e}"
         ) from e
+
+
+def _is_reddit_url(raw_url: str) -> bool:
+    """True for ``reddit.com`` and any subdomain (``old``, ``np``, ``new``).
+
+    Matches subdomains so legacy thread URLs still take the JSON /
+    verification-fallback path. ``urlparse(...).hostname`` is already
+    lowercased.
+    """
+    hostname = urlparse(raw_url).hostname or ""
+    return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
 
 def _is_reddit_verification_page(content: bytes) -> bool:

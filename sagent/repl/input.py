@@ -1,4 +1,4 @@
-"""REPL input pump + ``LoginHandler`` + ``InputSource`` abstraction.
+"""REPL input pump + ``InputSource`` abstraction.
 
 The input pump is a long-running coroutine, spawned as a *hidden*
 background task in ``agent.background_tasks``. It loops on an
@@ -18,17 +18,21 @@ in ``agent.tasks`` (all abortable); long-running infra lives in
 Slash commands flow through the FIFO with typed text so user intent
 order is preserved. Only urgent actions (``/clear``, ``/abort``) jump
 the queue -- they exist to preempt in-flight model/tool work.
+
+Command handlers (``/login``, ``/help``, ``/tasks``) live in
+:mod:`repl.render` next to the other render-side handlers; they all
+need a printer to surface output and are bundled by
+:func:`repl.render.repl_handler_set`.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, override
+from typing import TYPE_CHECKING, Protocol
 
 import asyncio
+import logging
 import time
 
-from sagent import providers as _providers
-from sagent.agent.handlers.base import InlineHandler
 from sagent.custom_types import TextMessage
 from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.repl.slash import (
@@ -42,14 +46,15 @@ from sagent.tools.background_task import BackgroundTaskEntry
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
-    from sagent.custom_types import Message
     from sagent.repl.render import Printer
+
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
     "QUIT_WORDS",
     "InputSource",
-    "LoginHandler",
     "StubInputSource",
     "spawn_repl_pump",
 ]
@@ -100,23 +105,33 @@ async def _input_pump(
 
     Runs until the source returns ``None`` (EOF) or a ``quit`` action
     is dispatched. Either way: post ``text/x-quit`` to the inbox so
-    the dispatch loop terminates cleanly.
+    the dispatch loop terminates cleanly. A pump-internal exception
+    is logged and surfaced as ``text/x-error`` rather than killing
+    the task silently -- otherwise the terminal accepts no further
+    input with no signal as to why.
     """
     while True:
-        line = await source.next_line()
-        if line is None:
-            _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
-            return
-        action = parse_slash(line)
-        if action is None:
-            continue
-        if action.descriptor == "text/x-user-message":
-            # Pass the original (untrimmed) line through.
-            _ = agent.inbox.put(TextMessage(line, "text/x-user-message"))
-            continue
-        _apply(agent, action, printer)
-        if action.quit:
-            return
+        try:
+            line = await source.next_line()
+            if line is None:
+                _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+                return
+            action = parse_slash(line)
+            if action is None:
+                continue
+            _apply(agent, action, printer)
+            if action.quit:
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("REPL input pump raised; surfacing as error")
+            _ = agent.inbox.put(
+                TextMessage(
+                    f"[input pump] {type(exc).__name__}: {exc}",
+                    "text/x-error",
+                ),
+            )
 
 
 def _apply(agent: Agent, action: SlashAction, printer: Printer | None) -> None:
@@ -149,145 +164,3 @@ def spawn_repl_pump(
         hidden=True,
     )
     return task
-
-
-_HELP_TEXT = """\
-sagent commands
-
-  /help                       this list
-  /quit                       exit
-
-  /clear                      wipe context (logs preserved on disk)
-  /compact [hints]            compact history
-  /uncompact [hints]          revert compaction
-
-  /model    [args]            switch model
-  /provider <name>            switch provider
-  /login                      re-auth current provider
-
-  /tasks                      list running work (agents + fg + bg)
-  /break    [<label>|all]     cancel current step          (Ctrl+Z analog)
-  /abort    [<label>|all]     cancel step + queue          (Ctrl+C analog)
-                              "all" also kills background tasks\
-"""
-
-
-class HelpHandler(InlineHandler):
-    """Print the slash-command reference on ``text/x-help-request``.
-
-    The verbatim block lives in ``_HELP_TEXT`` so the parser, the
-    handler, and the user are all reading the same canonical list.
-    """
-
-    descriptors: tuple[str, ...] = ("text/x-help-request",)
-
-    def __init__(self, printer: Printer | None = None) -> None:
-        self._printer = printer
-
-    @override
-    async def handle(self, agent: Agent, msg: Message) -> None:
-        del agent, msg
-        if self._printer is not None:
-            self._printer.write_line(_HELP_TEXT)
-
-
-class TasksHandler(InlineHandler):
-    """Print live work on ``text/x-tasks-request``.
-
-    Lists every registered agent in :data:`agent_registry` with its
-    foreground task count and visible background task summaries.
-    Hidden bg tasks (REPL pump, daemons) are filtered out -- they're
-    infrastructure, not user-actionable. Foreground tasks are reported
-    as a count rather than per-task because the in-flight registry
-    keys by task identity (``id(task)``), which isn't meaningful to
-    surface.
-    """
-
-    descriptors: tuple[str, ...] = ("text/x-tasks-request",)
-
-    def __init__(self, printer: Printer | None = None) -> None:
-        self._printer = printer
-
-    @override
-    async def handle(self, agent: Agent, msg: Message) -> None:
-        del msg
-        if self._printer is None:
-            return
-        # Lazy import to avoid a top-level cycle (tools.core <-> repl).
-        from sagent.tools.core import agent_registry  # noqa: PLC0415
-
-        lines: list[str] = []
-        now = time.time()
-        total_fg = 0
-        total_bg = 0
-        for label, other in agent_registry.items():
-            visible_bg = [j for j in other.background_tasks.values() if not j.hidden]
-            fg = len(other.tasks)
-            bg = len(visible_bg)
-            total_fg += fg
-            total_bg += bg
-            tag = " (self)" if other is agent else ""
-            lines.append(f"  {label}{tag:<8s}  fg={fg} bg={bg}")
-            for job in visible_bg:
-                phase = (
-                    "cancelled"
-                    if job.task.cancelled()
-                    else (
-                        "completed"
-                        if job.task.done()
-                        else (
-                            "sleeping"
-                            if job.delay_sec > 0 and (now - job.started) < job.delay_sec
-                            else "running"
-                        )
-                    )
-                )
-                lines.append(
-                    f"    bg: {job.queue_id:<10s}  {job.tool_name:<16s}  "
-                    f"{phase:<10s}  {now - job.started:.0f}s"
-                )
-        header = (
-            f"sagent: {len(agent_registry)} agent(s), "
-            f"{total_fg} foreground, {total_bg} background"
-        )
-        out = header + "\n" + "\n".join(lines) if lines else header
-        self._printer.write_line(out)
-
-
-class LoginHandler(InlineHandler):
-    """Handle ``text/x-login-request`` by invoking the provider's ``login``.
-
-    Slash-command parsing emits ``text/x-login-request`` so both REPL
-    paths (active keybinding, idle prompt) take the same code path; the
-    actual re-auth lives here.
-    """
-
-    descriptors: tuple[str, ...] = ("text/x-login-request",)
-
-    def __init__(self, printer: Printer | None = None) -> None:
-        self._printer = printer
-
-    @override
-    async def handle(self, agent: Agent, msg: Message) -> None:
-        del msg
-        spec = agent.model_spec
-        if spec is None:
-            self._write("[/login] agent has no model spec")
-            return
-        prov_cls = getattr(_providers, spec.provider, None)
-        if prov_cls is None:
-            self._write(f"[/login] unknown provider {spec.provider!r}")
-            return
-        login_fn = getattr(prov_cls, "login", None)
-        if login_fn is None:
-            self._write(f"[/login] {spec.provider} has no login method")
-            return
-        try:
-            login_fn()
-            self._write(f"[/login] {spec.provider} re-authenticated")
-        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-            self._write(f"[/login] {exc}")
-
-    def _write(self, line: str) -> None:
-        if self._printer is not None:
-            self._printer.write_line(line)

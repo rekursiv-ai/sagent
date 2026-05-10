@@ -103,7 +103,7 @@ def dynamic_prompt(agent: Agent) -> FormattedText:
         "text/x-user-message",
         "text/x-clear-request",
         "text/x-compact-request",
-        "text/x-uncompact-request",
+        "text/x-recompact-request",
         "text/x-model-switch-request",
     ):
         preview = _format_preview(tail.descriptor, str(tail.content))
@@ -120,7 +120,7 @@ def _format_preview(descriptor: str, content: str) -> str:
     cmd_for = {
         "text/x-clear-request": "/clear",
         "text/x-compact-request": "/compact",
-        "text/x-uncompact-request": "/uncompact",
+        "text/x-recompact-request": "/recompact",
         "text/x-model-switch-request": "/model",
     }
     cmd = cmd_for.get(descriptor, "")

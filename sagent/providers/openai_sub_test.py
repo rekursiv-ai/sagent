@@ -23,6 +23,7 @@ from openai.types.responses.response_usage import InputTokensDetails
 
 import pytest
 
+from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
     Message,
     ModelRequest,
@@ -125,6 +126,14 @@ class _AsyncIterator:
         return val
 
 
+class _FailingAsyncIterator:
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> object:
+        raise RuntimeError("context_length_exceeded")
+
+
 class TestFromCredentials:
     def test_basic(self) -> None:
         p = _make_provider()
@@ -168,7 +177,7 @@ class TestModel:
 
     def test_default_max_request_tokens(self) -> None:
         m = _make_provider().model()
-        assert m.max_request_tokens == 1_050_000
+        assert m.max_request_tokens == 272_000
 
     def test_custom_max_request_tokens(self) -> None:
         m = _make_provider().model("gpt-5.4", max_request_tokens=64_000)
@@ -176,7 +185,7 @@ class TestModel:
 
     def test_max_response_tokens(self) -> None:
         m = _make_provider().model()
-        assert m.max_response_tokens == 128_000
+        assert m.max_response_tokens == 32_000
 
 
 class TestUtilityModel:
@@ -389,6 +398,48 @@ class TestIsContextOverflow:
     def test_unrelated(self) -> None:
         m = _make_provider().model()
         assert not m.is_context_overflow(RuntimeError("rate limit"))
+
+
+class TestStreamContextOverflow:
+    @pytest.mark.anyio
+    async def test_create_context_overflow_raises_prompt_too_long(self) -> None:
+        class _Responses:
+            async def create(self, **kwargs: object) -> object:
+                del kwargs
+                raise RuntimeError("Your input exceeds the context window.")
+
+        class _Sdk:
+            responses = _Responses()
+
+        provider = _make_provider()
+        model = provider.model()
+        request = ModelRequest(messages=[_user("hello")])
+
+        with (
+            patch.object(provider, "get_sdk", AsyncMock(return_value=_Sdk())),
+            pytest.raises(PromptTooLongError),
+        ):
+            await model.stream(request=request)
+
+    @pytest.mark.anyio
+    async def test_stream_context_overflow_raises_prompt_too_long(self) -> None:
+        class _Responses:
+            async def create(self, **kwargs: object) -> object:
+                del kwargs
+                return _FailingAsyncIterator()
+
+        class _Sdk:
+            responses = _Responses()
+
+        provider = _make_provider()
+        model = provider.model()
+        request = ModelRequest(messages=[_user("hello")])
+
+        with (
+            patch.object(provider, "get_sdk", AsyncMock(return_value=_Sdk())),
+            pytest.raises(PromptTooLongError),
+        ):
+            await model.stream(request=request)
 
 
 class TestBuildInput:

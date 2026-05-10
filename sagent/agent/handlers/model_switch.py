@@ -107,7 +107,7 @@ _KV_KEYS = {"provider", "auth", "account", "model", "model_id"}
 def _parse_args(
     tokens: list[str],
     spec: ModelSpec,
-) -> tuple[str, str, str | None, str | None] | str:
+) -> tuple[str, str, str | None, str] | str:
     """Parse ``/model`` arguments.
 
     Accepts three interchangeable forms (mix-and-match in one call):
@@ -118,25 +118,31 @@ def _parse_args(
       - bare ``MODEL_ID`` (positional; inherits other fields from spec)
 
     Returns ``(prov_name, auth, account, model_id)`` on success, or an
-    error string on failure.
+    error string on failure. ``model_id`` defaults to ``spec.model_id``
+    when omitted so ``/model --provider X`` carries the existing model
+    rather than silently picking the new provider's default.
     """
     prov_name = spec.provider
     auth = spec.auth
     account = spec.account
-    model_id: str | None = None
+    model_id = spec.model_id
+    nothing_supplied = True
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok in _FLAG_PROVIDER and i + 1 < len(tokens):
             prov_name = tokens[i + 1]
+            nothing_supplied = False
             i += 2
             continue
         if tok in _FLAG_AUTH and i + 1 < len(tokens):
             auth = tokens[i + 1]
+            nothing_supplied = False
             i += 2
             continue
         if tok in _FLAG_ACCOUNT and i + 1 < len(tokens):
             account = tokens[i + 1]
+            nothing_supplied = False
             i += 2
             continue
         if "=" in tok and not tok.startswith("-"):
@@ -153,14 +159,16 @@ def _parse_args(
                 account = None if value in ("", "default") else value
             else:  # "model" or "model_id"
                 model_id = value
+            nothing_supplied = False
             i += 1
             continue
         if not tok.startswith("-"):
             model_id = tok
+            nothing_supplied = False
             i += 1
             continue
         return f"[/model] unknown flag: {tok}"
-    if not model_id and prov_name == spec.provider and auth == spec.auth:
+    if nothing_supplied:
         return (
             "[/model] usage: /model [provider=P] [auth=A] [account=ACCT]"
             " [model=MODEL_ID]   (or --provider/--auth/--account flags,"

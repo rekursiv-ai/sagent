@@ -17,6 +17,7 @@ from sagent.bin.cli import (
     _build_provider_model,
     _configure_logging,
     _parse_cli_args,
+    _parse_stream_json,
     _resolve_continue,
     _resolve_resume,
     _resolve_session_dir,
@@ -69,7 +70,7 @@ class TestParseCliArgs:
         )
 
         assert proc.returncode == 0, proc.stderr
-        assert "Interactive CLI agent." in proc.stdout
+        assert "CLI agent (REPL or headless)." in proc.stdout
 
     def test_max_request_tokens(self) -> None:
         assert _parse(["--max-request-tokens", "8192"]).max_request_tokens == 8192
@@ -599,6 +600,41 @@ class TestAccountFlag:
             build_provider("Anthropic", "env", account="work")
         # Factory called without ``account`` - no TypeError crash.
         assert captured == {"called": True}
+
+
+class TestParseStreamJson:
+    """Pin the helper's contract so callers can rely on raise-and-catch."""
+
+    def test_joins_prompts_with_blank_lines(self) -> None:
+        raw = '{"prompt": "a"}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_blank_lines(self) -> None:
+        raw = '{"prompt": "a"}\n\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_objects_without_prompt(self) -> None:
+        raw = '{"prompt": "a"}\n{"other": "x"}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_non_string_prompt(self) -> None:
+        raw = '{"prompt": 42}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "b"
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert _parse_stream_json("") == ""
+
+    def test_raises_value_error_on_invalid_json(self) -> None:
+        with pytest.raises(ValueError, match="invalid JSON"):
+            _parse_stream_json("{not json}\n")
+
+    def test_raises_type_error_on_non_object_line(self) -> None:
+        with pytest.raises(TypeError, match="requires JSON objects"):
+            _parse_stream_json("[1, 2, 3]\n")
+
+    def test_raises_type_error_on_scalar(self) -> None:
+        with pytest.raises(TypeError, match="requires JSON objects"):
+            _parse_stream_json('"just a string"\n')
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ and ``handlers/`` for the standard handler set.
 
 Session persistence
 -------------------
-``_save_session`` serializes ``history`` and metadata to
+``Agent.save_session`` serializes ``history`` and metadata to
 ``session.jsonl`` after every model response (via
 :class:`SessionSaveHandler`). Manual triggers (``set_status``,
 ``ClearHandler``) save immediately so the on-disk state never

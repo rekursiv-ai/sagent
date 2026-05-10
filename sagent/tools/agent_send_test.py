@@ -37,9 +37,13 @@ def _msg(directive: JSON) -> Message:
 
 
 class _FakeAgent:
+    """Minimal ``AgentLike`` stub for ``agent_registry`` insertion."""
+
     def __init__(self, name: str = "fake") -> None:
         self.name = name
         self.inbox: Deque[Message] = Deque()
+        # Required by the AgentLike protocol so agent_registry typecheck-
+        # accepts this stub. Not exercised by the tests in this module.
         self.tasks: dict[int, asyncio.Task[None]] = {}
         self.background_tasks: dict[str, BackgroundTaskEntry] = {}
 

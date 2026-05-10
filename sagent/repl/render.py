@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, cast, override
 
+import time
+
+from sagent import providers as _providers
 from sagent.agent.handlers.base import Handler, InlineHandler
 from sagent.agent.handlers.model_switch import ModelSwitchHandler
 from sagent.custom_types import TextMessage
 from sagent.lib.message import get_queue_id
-from sagent.repl.input import HelpHandler, LoginHandler, TasksHandler
 from sagent.repl.render_diff import find_stable_boundary
 
 
@@ -301,9 +303,10 @@ class RenderChildEvent(InlineHandler):
     2. Atomic event from the same child (tool label, tool result,
        thinking, error, hint, child-done) -- those render in the
        same labeled block.
-    3. Different child label arriving (X-interleave) -- prior label
-       flushes immediately so both children remain visible in
-       real-time.
+    3. Different child labels flush only already-complete pending items,
+       not unstable streaming text. Provider chunks are arbitrary
+       fragments, so label-change flushes of raw text turn concurrent
+       child streams into mid-word gutter lines.
 
     Flushed output goes through ``Printer.write_child_block(label,
     items)`` where items is the list of ``(descriptor, content)``
@@ -337,12 +340,16 @@ class RenderChildEvent(InlineHandler):
     def _consume(self, label: str, inner: Message) -> None:
         # X-interleave: when a different label emits, flush the
         # other one's pending state so both children remain visible
-        # in real-time. Tighter blocks per-flush, but no head-of-line
-        # blocking on a slow streamer.
-        for other in list(self._text_buf.keys() | self._items.keys()):
+        # in real-time.
+        for other in list(self._items):
             if other != label:
-                self._flush(other)
+                self._emit_pending(other)
         if inner.descriptor == "text/plain":
+            # X-interleave is item-level only: complete paragraphs,
+            # tool events, and errors may surface when another child
+            # speaks, but raw provider chunks stay buffered until a
+            # real text boundary. Label changes are scheduler
+            # interleaving, not parse boundaries.
             self._text_buf[label] = self._text_buf.get(label, "") + str(inner.content)
             buf = self._text_buf[label]
             boundary = find_stable_boundary(buf)
@@ -386,8 +393,8 @@ class RenderChildEvent(InlineHandler):
         """Force-flush everything for ``label``: text_buf + items.
 
         Used when the buffered tail must surface even if no stable
-        boundary has been reached -- atomic event arriving, label
-        change (X-interleave), end of stream.
+        boundary has been reached -- atomic event arriving or end of
+        stream.
         """
         self._move_text_to_items(label)
         self._emit_pending(label)
@@ -419,6 +426,148 @@ class RenderStatusTitle(InlineHandler):
     async def handle(self, agent: Agent, msg: Message) -> None:
         del agent
         self._printer.set_terminal_title(str(msg.content))
+
+
+_HELP_TEXT = """\
+sagent commands
+
+  /help                       this list
+  /quit                       exit
+
+  /clear                      wipe context (logs preserved on disk)
+  /compact [hints]            compact history
+  /recompact [hints]          re-run the most recent compaction
+
+  /model    [args]            switch model
+  /provider <name>            switch provider
+  /login                      re-auth current provider
+
+  /tasks                      list running work (agents + fg + bg)
+  /break    [<label>|all]     cancel current step          (Ctrl+Z analog)
+  /abort    [<label>|all]     cancel step + queue          (Ctrl+C analog)
+                              "all" also kills background tasks\
+"""
+
+
+class HelpHandler(InlineHandler):
+    """Print the slash-command reference on ``text/x-help-request``.
+
+    The verbatim block lives in ``_HELP_TEXT`` so the parser, the
+    handler, and the user are all reading the same canonical list.
+    """
+
+    descriptors: tuple[str, ...] = ("text/x-help-request",)
+
+    def __init__(self, printer: Printer | None = None) -> None:
+        self._printer = printer
+
+    @override
+    async def handle(self, agent: Agent, msg: Message) -> None:
+        del agent, msg
+        if self._printer is not None:
+            self._printer.write_line(_HELP_TEXT)
+
+
+class TasksHandler(InlineHandler):
+    """Print live work on ``text/x-tasks-request``.
+
+    Lists every registered agent in :data:`agent_registry` with its
+    foreground task count and visible background task summaries.
+    Hidden bg tasks (REPL pump, daemons) are filtered out -- they're
+    infrastructure, not user-actionable. Foreground tasks are reported
+    as a count rather than per-task because the in-flight registry
+    keys by task identity (``id(task)``), which isn't meaningful to
+    surface.
+    """
+
+    descriptors: tuple[str, ...] = ("text/x-tasks-request",)
+
+    def __init__(self, printer: Printer | None = None) -> None:
+        self._printer = printer
+
+    @override
+    async def handle(self, agent: Agent, msg: Message) -> None:
+        del msg
+        if self._printer is None:
+            return
+        # Lazy import to avoid a top-level cycle (tools.core <-> repl).
+        from sagent.tools.core import agent_registry  # noqa: PLC0415
+
+        lines: list[str] = []
+        now = time.time()
+        total_fg = 0
+        total_bg = 0
+        for label, other in agent_registry.items():
+            visible_bg = [j for j in other.background_tasks.values() if not j.hidden]
+            fg = len(other.tasks)
+            bg = len(visible_bg)
+            total_fg += fg
+            total_bg += bg
+            tag = " (self)" if other is agent else ""
+            lines.append(f"  {label}{tag:<8s}  fg={fg} bg={bg}")
+            for job in visible_bg:
+                phase = (
+                    "cancelled"
+                    if job.task.cancelled()
+                    else (
+                        "completed"
+                        if job.task.done()
+                        else (
+                            "sleeping"
+                            if job.delay_sec > 0 and (now - job.started) < job.delay_sec
+                            else "running"
+                        )
+                    )
+                )
+                lines.append(
+                    f"    bg: {job.queue_id:<10s}  {job.tool_name:<16s}  "
+                    f"{phase:<10s}  {now - job.started:.0f}s"
+                )
+        header = (
+            f"sagent: {len(agent_registry)} agent(s), "
+            f"{total_fg} foreground, {total_bg} background"
+        )
+        out = header + "\n" + "\n".join(lines) if lines else header
+        self._printer.write_line(out)
+
+
+class LoginHandler(InlineHandler):
+    """Handle ``text/x-login-request`` by invoking the provider's ``login``.
+
+    Slash-command parsing emits ``text/x-login-request`` so both REPL
+    paths (active keybinding, idle prompt) take the same code path; the
+    actual re-auth lives here.
+    """
+
+    descriptors: tuple[str, ...] = ("text/x-login-request",)
+
+    def __init__(self, printer: Printer | None = None) -> None:
+        self._printer = printer
+
+    @override
+    async def handle(self, agent: Agent, msg: Message) -> None:
+        del msg
+        spec = agent.model_spec
+        if spec is None:
+            self._write("[/login] agent has no model spec")
+            return
+        prov_cls = getattr(_providers, spec.provider, None)
+        if prov_cls is None:
+            self._write(f"[/login] unknown provider {spec.provider!r}")
+            return
+        login_fn = getattr(prov_cls, "login", None)
+        if login_fn is None:
+            self._write(f"[/login] {spec.provider} has no login method")
+            return
+        try:
+            login_fn()
+            self._write(f"[/login] {spec.provider} re-authenticated")
+        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+            self._write(f"[/login] {exc}")
+
+    def _write(self, line: str) -> None:
+        if self._printer is not None:
+            self._printer.write_line(line)
 
 
 def repl_handler_set(printer: Printer) -> list[Handler]:

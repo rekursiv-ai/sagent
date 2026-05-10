@@ -10,10 +10,8 @@ placeholder for each background call and spawns the worker; posts
 and triggers the next ``text/x-model-call``.
 
 Compact / recompact / clear flags raised by tools during dispatch are
-converted to inbox messages here -- this is the bridge between the
-existing ``tool_state`` flag mechanism and the new descriptor spine.
-A future slice will migrate the tools themselves to post messages
-directly and remove the flag conversion.
+converted to inbox messages here -- the bridge between the
+``tool_state`` flag mechanism and the descriptor spine.
 """
 
 from __future__ import annotations
@@ -95,7 +93,7 @@ class ToolBatchHandler(SpawnedHandler):
         for req in tool_calls:
             # Surface a UI label for each call BEFORE dispatch so the
             # user sees what's running while the tool executes.
-            tool = agent._tools.get(tc_tool_id(req))  # noqa: SLF001 -- handler intimate
+            tool = agent.tools_map.get(tc_tool_id(req))
             label = tool_call_label(tool, req)
             _ = agent.inbox.put(TextMessage(label, "text/x-tool-label"))
             directive = tc_directive(req)
@@ -160,7 +158,13 @@ async def _dispatch_foreground(
     agent: Agent,
     tool_calls: list[Message],
 ) -> list[Message]:
-    """Execute foreground calls with the existing batching rules."""
+    """Execute foreground calls with the existing batching rules.
+
+    Tool results land on the inbox as raw ``text/x-error`` for the
+    renderer; the ``<tool_use_error>`` wrapping for the LLM is applied
+    in :meth:`ModelCallHandler._build_request` (single seam) so the
+    REPL never sees the XML tags.
+    """
     raw_results = await _dispatch_tools(agent, tool_calls)
     tool_names = {get_queue_id(tc): tc_tool_id(tc) for tc in tool_calls}
     results = enforce_message_budget(
@@ -168,8 +172,7 @@ async def _dispatch_foreground(
         tool_names,
         agent.replacement_state,
     )
-    results = add_tool_input_batch_hint(results)
-    return [_wrap_errors_for_llm(r) for r in results]
+    return add_tool_input_batch_hint(results)
 
 
 async def _dispatch_tools(
@@ -222,7 +225,7 @@ async def _invoke_tool_safe(agent: Agent, req: Message) -> Message:
     """
     events: asyncio.Queue[Message | None] = asyncio.Queue()
     try:
-        result = await invoke_tool(agent._tools, req, events)  # noqa: SLF001 -- handler intimate
+        result = await invoke_tool(agent.tools_map, req, events)
     except Exception as e:  # noqa: BLE001 -- dispatch safety net
         logger.debug("Tool %s raised", get_tool_name(req), exc_info=True)
         result = MultipartMessage(
@@ -294,8 +297,15 @@ def _postprocess_results(
     return out
 
 
-def _wrap_errors_for_llm(tr: Message) -> Message:
-    """Wrap ``text/x-error`` parts in ``<tool_use_error>`` for the LLM transcript."""
+def wrap_errors_for_llm(tr: Message) -> Message:
+    """Wrap ``text/x-error`` parts in ``<tool_use_error>`` for the LLM transcript.
+
+    Applied at request-build time only (see
+    :meth:`ModelCallHandler._build_request`); inbox / history /
+    renderer all see the raw error text.
+    """
+    if tr.descriptor != "multipart/x-tool-result":
+        return tr
     changed = False
     parts: list[Message] = []
     for p in cast("tuple[Message, ...]", tr.content):
@@ -337,7 +347,7 @@ def _dispatch_background(agent: Agent, req: Message, delay_sec: float) -> None:
         "multipart/x-tool-result",
         parent_id=req.id,
     )
-    agent.inbox.put(_wrap_errors_for_llm(placeholder))
+    agent.inbox.put(placeholder)
 
 
 async def _bg_worker(
@@ -384,9 +394,10 @@ async def _bg_worker(
 def _drain_tool_state_signals(agent: Agent) -> None:
     """Convert ``tool_state`` flags raised by tools into inbox messages.
 
-    Bridge between the existing flag mechanism and the new descriptor
-    spine. Slice 3+ migrates the Compact/Recompact/Clear tools to post
-    messages directly; this helper is removed at that point.
+    ``clear`` uses ``put_left`` so the wipe runs before any queued
+    follow-ups (e.g. an immediate model-call posted by the same batch);
+    ``compact`` / ``recompact`` use plain ``put`` so the conversation
+    drains naturally and they fire at the next idle point.
     """
     if agent.tool_state.compact_requested is not None:
         instructions = agent.tool_state.compact_requested
@@ -398,7 +409,7 @@ def _drain_tool_state_signals(agent: Agent) -> None:
         instructions = agent.tool_state.recompact_requested
         agent.tool_state.recompact_requested = None
         agent.inbox.put(
-            TextMessage(instructions or "", "text/x-uncompact-request"),
+            TextMessage(instructions or "", "text/x-recompact-request"),
         )
     if agent.tool_state.clear_requested is not None:
         reason = agent.tool_state.clear_requested

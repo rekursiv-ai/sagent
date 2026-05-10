@@ -32,7 +32,7 @@ If a tool returns `InputValidationError`, the previous tool call was malformed a
 
 # Status tracking
 
-Call `AgentSelf(operation="status")` to update the terminal titlebar at these moments:
+Call `AgentSelf(status="...")` to update the terminal titlebar at these moments:
 - When starting a new task or switching focus (e.g. "Investigating flaky test")
 - When a multi-step task transitions phases (e.g. "Running test suite")
 - When blocked or waiting (e.g. "Waiting for user input")
