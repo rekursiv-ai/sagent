@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, override
 from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
 
+from sagent.custom_types import Message
 from sagent.repl.input import InputSource
 from sagent.repl.slash import QUIT_WORDS
 
@@ -84,10 +85,7 @@ class PromptToolkitInputSource(InputSource):
 
 
 def dynamic_prompt(agent: Agent) -> FormattedText:
-    """Build the dynamic prompt with a dim preview of the queued tail entry.
-
-    When the inbox has a queued user message at its tail, render a one-line
-    preview above the ``> `` prompt so the user sees what's about to be sent.
+    """Build the dynamic prompt with queued follow-up previews.
 
     Args:
       agent: Agent whose inbox is inspected for queued text.
@@ -97,12 +95,25 @@ def dynamic_prompt(agent: Agent) -> FormattedText:
 
     """
     parts: list[tuple[str, str]] = []
-    tail = agent.inbox.peek_tail()
-    if tail is not None and tail.descriptor == "text/x-user-message":
-        parts.append(("class:queued", _collapse_preview(str(tail.content))))
-        parts.append(("", "\n"))
+    messages = agent.queued_user_messages()
+    if messages:
+        for line in _queued_preview_lines(messages):
+            parts.append(("class:queued", line))
+            parts.append(("", "\n"))
     parts.append(("class:prompt", "> "))
     return FormattedText(parts)
+
+
+def _queued_preview_lines(messages: list[Message]) -> list[str]:
+    """Return compact prompt preview lines for queued user messages."""
+    lines = ["Queued follow-up inputs"]
+    shown = messages[:3]
+    lines.extend(f"  ↳ {_collapse_preview(str(msg.content))}" for msg in shown)
+    hidden = len(messages) - len(shown)
+    if hidden:
+        lines.append(f"  … +{hidden} more")
+    lines.append("  Shift+Left edit last queued message")
+    return lines
 
 
 def _collapse_preview(text: str, width: int = 60) -> str:

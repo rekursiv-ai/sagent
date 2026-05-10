@@ -5,11 +5,11 @@ that the input pump consumes on the next ``next_line()`` call.
 
 Bindings:
 
-- Enter: when foreground active, dispatch the typed line via the input
-  pump's slash-router; when idle, submit (returns from ``prompt_async``).
+- Enter: submit to the input pump.
+- Tab: submit to the input pump; this is the explicit queue key while active.
 - Alt+Enter: insert a newline (multi-line composition).
-- Up: when buffer empty and inbox non-empty, lift the tail entry back
-  into the buffer; otherwise history-backward.
+- Shift+Left: lift the newest queued user message back into the buffer.
+- Up: history-backward.
 - Shift-Up / Shift-Down: prefix-based history search.
 - Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
 - Ctrl+C: ``agent.abort()`` while active; exit when idle.
@@ -27,6 +27,7 @@ from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
 from sagent.custom_types import TextMessage
+from sagent.lib.descriptors import QUEUED_USER_MESSAGE
 
 
 if TYPE_CHECKING:
@@ -47,8 +48,10 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
     """
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent))
+    kb.add("tab", filter=~is_done)(functools.partial(_kb_queue, agent))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("up")(functools.partial(_kb_up, agent))
+    kb.add("s-left")(functools.partial(_kb_edit_latest_queued, agent))
+    kb.add("up")(_kb_history_back)
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
@@ -60,7 +63,7 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
 
 
 def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
-    """Active path: queue or dispatch; idle path: submit."""
+    """Submit when idle; type ahead inline while active."""
     buf = event.current_buffer
     if agent.work is None:
         buf.validate_and_handle()
@@ -73,20 +76,39 @@ def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
     buf.reset()
 
 
+def _kb_queue(agent: Agent, event: KeyPressEvent) -> None:
+    """Queue an end-of-turn follow-up while active; submit when idle."""
+    buf = event.current_buffer
+    if agent.work is None:
+        buf.validate_and_handle()
+        return
+    text = buf.text
+    if not text.strip():
+        return
+    _ = agent.inbox.put(TextMessage(text, QUEUED_USER_MESSAGE))
+    buf.append_to_history()
+    buf.reset()
+
+
 def _kb_newline(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
-def _kb_up(agent: Agent, event: KeyPressEvent) -> None:
-    """Pop inbox tail into the buffer, or navigate history."""
+def _kb_edit_latest_queued(agent: Agent, event: KeyPressEvent) -> None:
+    """Pop the newest queued user message into an empty buffer."""
     buf = event.current_buffer
-    if len(agent.inbox) > 0 and not buf.text.strip():
-        tail = agent.inbox.pop_tail()
-        if tail is not None:
-            buf.text = str(tail.content)
-            buf.cursor_position = len(buf.text)
-            return
-    buf.history_backward(count=1)
+    if buf.text.strip():
+        return
+    tail = agent.pop_latest_queued_user_message()
+    if tail is None:
+        return
+    buf.text = str(tail.content)
+    buf.cursor_position = len(buf.text)
+
+
+def _kb_history_back(event: KeyPressEvent) -> None:
+    """Navigate prompt history backward."""
+    event.current_buffer.history_backward(count=1)
 
 
 def _kb_history_prefix_back(event: KeyPressEvent) -> None:

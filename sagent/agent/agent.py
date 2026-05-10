@@ -88,6 +88,7 @@ from sagent.custom_types import (
 from sagent.lib.asyncio_collections import Deque
 from sagent.lib.compaction import write_pre_compact_transcript
 from sagent.lib.descriptors import (
+    QUEUED_USER_MESSAGE,
     QUIT_SENTINEL,
     has_error,
 )
@@ -562,6 +563,22 @@ class Agent:
         for m in kept:
             _ = self.inbox.put(m)
 
+    def queued_user_messages(self) -> list[Message]:
+        """Return queued editable user follow-ups in FIFO order."""
+        return [m for m in self.inbox if m.descriptor == QUEUED_USER_MESSAGE]
+
+    def pop_latest_queued_user_message(self) -> Message | None:
+        """Pop the newest editable user follow-up, preserving other inbox items."""
+        items = self.inbox.drain()
+        popped: Message | None = None
+        for idx in range(len(items) - 1, -1, -1):
+            if items[idx].descriptor == QUEUED_USER_MESSAGE:
+                popped = items.pop(idx)
+                break
+        for item in items:
+            _ = self.inbox.put(item)
+        return popped
+
     def abort_all_bg(self) -> None:
         """Like ``abort``, plus terminate every visible background job."""
         self.abort()
@@ -800,6 +817,7 @@ class Agent:
 
     async def _do_run(self, msg: Message) -> AsyncGenerator[Event, None]:
         """The real turn loop. Runs as ``self.work`` via ``_start_foreground``."""
+        msg = _normalize_queued_user_message(msg)
         self.history.append(msg)
         yield UserBarEvent(_user_text(msg))
         try:
@@ -1586,6 +1604,13 @@ def _validate_budget(budget: ContextBudget, model: Model) -> None:
             f"budget.max_response_tokens={budget.max_response_tokens:,}"
             f" exceeds model's {model.max_response_tokens:,}",
         )
+
+
+def _normalize_queued_user_message(msg: Message) -> Message:
+    """Convert REPL queue markers to ordinary user messages before history."""
+    if isinstance(msg, TextMessage) and msg.descriptor == QUEUED_USER_MESSAGE:
+        return dataclasses.replace(msg, descriptor="text/x-user-message")
+    return msg
 
 
 def _user_text(msg: Message) -> str:

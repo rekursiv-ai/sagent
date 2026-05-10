@@ -36,6 +36,7 @@ TextDescriptor = Literal[
     "text/x-queue-id",
     "text/x-user-injected",
     "text/x-user-message",
+    "text/x-queued-user-message",
     "text/x-interrupted",
     "text/x-status",
     "text/x-agent-label",
@@ -147,6 +148,9 @@ Descriptor = (
 # literal string. New sentinels go here, not at the use site.
 
 QUIT_SENTINEL: Literal["text/x-quit"] = "text/x-quit"
+QUEUED_USER_MESSAGE: Literal["text/x-queued-user-message"] = (
+    "text/x-queued-user-message"
+)
 
 
 # -- Runtime frozensets (derived from Literals) ----------------------------
