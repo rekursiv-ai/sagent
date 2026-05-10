@@ -6,13 +6,20 @@ lives in ``agent/agent_test.py``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import override
 
+from prompt_toolkit.formatted_text import to_plain_text
+
+from sagent.agent.agent import Agent
 from sagent.custom_types import (
     ChildEvent,
     ErrorEvent,
     InterruptedEvent,
+    ModelRequest,
+    ModelResponse,
     MultipartMessage,
+    Pricing,
     StatusUpdateEvent,
     StreamEndEvent,
     TextChunkEvent,
@@ -23,6 +30,8 @@ from sagent.custom_types import (
     TurnCompleteEvent,
     UserBarEvent,
 )
+from sagent.lib.descriptors import QUEUED_USER_MESSAGE
+from sagent.repl.prompt import dynamic_prompt
 from sagent.repl.render import (
     RecordingPrinter,
     make_render_observer,
@@ -115,6 +124,83 @@ class TestParseSlash:
     def test_empty_returns_none(self) -> None:
         assert parse_slash("") is None
         assert parse_slash("   \n") is None
+
+
+class TestQueuedFollowUps:
+    def test_agent_lists_and_pops_latest_tab_queued_message(self) -> None:
+        agent = Agent(model=_NoopModel())
+        agent.inbox.put(TextMessage("inline", "text/x-user-message"))
+        agent.inbox.put(TextMessage("first", QUEUED_USER_MESSAGE))
+        agent.inbox.put(TextMessage("control", "text/x-quit"))
+        agent.inbox.put(TextMessage("second", QUEUED_USER_MESSAGE))
+
+        assert [str(m.content) for m in agent.queued_user_messages()] == [
+            "first",
+            "second",
+        ]
+        popped = agent.pop_latest_queued_user_message()
+
+        assert popped is not None
+        assert str(popped.content) == "second"
+        assert [(m.descriptor, str(m.content)) for m in agent.inbox] == [
+            ("text/x-user-message", "inline"),
+            (QUEUED_USER_MESSAGE, "first"),
+            ("text/x-quit", "control"),
+        ]
+
+    def test_dynamic_prompt_renders_only_tab_queued_follow_ups(self) -> None:
+        agent = Agent(model=_NoopModel())
+        agent.inbox.put(TextMessage("inline", "text/x-user-message"))
+        agent.inbox.put(TextMessage("control", "text/x-quit"))
+        agent.inbox.put(TextMessage("second\nline", QUEUED_USER_MESSAGE))
+
+        text = to_plain_text(dynamic_prompt(agent))
+
+        assert "Queued follow-up inputs" in text
+        assert "inline" not in text
+        assert "second (+1 more line)" in text
+        assert "Shift+Left edit last queued message" in text
+        assert "control" not in text
+
+
+class _NoopModel:
+    model_id = "noop"
+    max_request_tokens = 16_000
+    max_response_tokens = 8_000
+    supports_thinking = False
+    supports_effort = False
+    supports_cache_control = False
+    supports_streaming = True
+    supports_context_management = False
+    supports_persistent_retry = False
+    supports_account_auth = False
+    max_image_dim = 0
+    max_image_bytes = 0
+    pricing = Pricing()
+
+    def estimate_text_token_count(self, text: str) -> int:
+        return len(text) // 4
+
+    def estimate_image_token_count(self, data: bytes) -> int:
+        del data
+        return 0
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        del request
+        raise AssertionError("Noop model should not be called")
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        raise AssertionError("Noop model should not be called")
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        del error
+        return False
 
 
 class TestRenderObserver:

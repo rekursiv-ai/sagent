@@ -34,7 +34,7 @@ from sagent.custom_types import (
     TextMessage,
     TokenCount,
 )
-from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.lib.descriptors import QUEUED_USER_MESSAGE, QUIT_SENTINEL
 
 
 pytestmark = pytest.mark.anyio
@@ -182,6 +182,16 @@ class TestRun:
             pass
         descriptors = [m.descriptor for m in agent.history]
         assert descriptors == ["text/x-user-message", "multipart/x-model-message"]
+
+    async def test_queued_follow_up_normalizes_before_history(self) -> None:
+        model = _MockModel()
+        model.responses.append(_model_response("hi back"))
+        agent = _build_agent(model)
+
+        async for _ev in agent.run(TextMessage("hi", QUEUED_USER_MESSAGE)):
+            pass
+
+        assert agent.history[0].descriptor == "text/x-user-message"
 
 
 class TestPendingOp:
