@@ -35,7 +35,7 @@ from sagent.agent import Agent
 from sagent.custom_types import Message, Model, TextMessage
 from sagent.lib import debug_log
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive
+from sagent.lib.message import get_directive, response_text
 
 
 _SYSTEM = (
@@ -179,4 +179,9 @@ class Advisor:
             system=self._system,
             tools=[],
         )
-        return await sub.run(json_freeze({"prompt": prompt}))
+        async for _event in sub.run(TextMessage(prompt, "text/x-user-message")):
+            pass
+        for m in reversed(sub.history):
+            if m.descriptor == "multipart/x-model-message":
+                return TextMessage(response_text(m), "text/plain")
+        return TextMessage("", "text/plain")

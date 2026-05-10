@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sagent.agent import PendingOp
 from sagent.custom_types import (
     ContextBudget,
     JsonMessage,
@@ -20,7 +21,6 @@ from sagent.tools.agent_self import AgentSelf
 from sagent.tools.core import (
     ToolState,
     current_agent_var,
-    get_tool_state,
     tool_state_context,
 )
 
@@ -111,7 +111,10 @@ class TestPatch:
                 )
             )
             assert result.descriptor == "text/plain"
-            assert tool_state.compact_requested == "keep the API spec"
+            del tool_state  # not used in v3 -- ops live on agent._next_op
+            assert agent._next_op is not None
+            assert agent._next_op.kind == "compact"
+            assert agent._next_op.args == "keep the API spec"
         finally:
             current_agent_var.reset(token)
 
@@ -251,7 +254,7 @@ class TestPatch:
             assert agent.status == ""
             assert agent.cache_ttl == "5m"
             assert agent.max_request_tokens == 200_000
-            assert get_tool_state().compact_requested is None
+            assert agent._next_op is None
         finally:
             current_agent_var.reset(token)
 
@@ -457,6 +460,7 @@ class _LimitAgent:
         )
         self.model_spec = ModelSpec(provider="Anthropic", auth="env", model_id="model")
         self.swapped_spec: ModelSpec | None = None
+        self._next_op: PendingOp | None = None
 
     @property
     def budget(self) -> ContextBudget:

@@ -24,16 +24,44 @@ from sagent.custom_types import (
     MultipartDescriptor,
     MultipartMessage,
     StreamingTool,
+    TextChunkEvent,
     TextDescriptor,
     TextMessage,
     TokenCount,
+    ToolLabelEvent,
 )
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive, tool_call_message
+from sagent.lib.message import (
+    get_directive,
+    response_text,
+    tool_call_message,
+)
 from sagent.testing import MockModelCaps
 
 
 # -- Compatibility factories -------------------------------------------
+
+
+async def _run(agent: Agent, prompt: str) -> Message:
+    """v3-compat helper: run one turn and return the last assistant text.
+
+    Tests written against the v2 ``await agent.run(directive)`` shape
+    expect a ``Message``-like result with a ``.content`` attribute. v3's
+    ``run`` is an ``AsyncGenerator[Event, None]``; this helper drains it
+    and returns the last ``multipart/x-model-message`` flattened to
+    ``text/plain``.
+    """
+    async for _ev in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            text = response_text(m)
+            if isinstance(m, MultipartMessage):
+                for part in m.content:
+                    if part.descriptor == "text/x-error":
+                        return TextMessage(str(part.content), "text/x-error")
+            return TextMessage(text, "text/plain")
+    return TextMessage("", "text/plain")
 
 
 def UserMessage(content: str) -> Message:  # noqa: N802 -- PascalCase factory mimics Message constructor
@@ -338,7 +366,7 @@ class TestToolDispatch:
             model=model,
             tools=[_MockTool()],
         )
-        response = await agent.run(json_freeze({"prompt": "echo hello"}))
+        response = await _run(agent, "echo hello")
         assert str(response.content) == "Echo said: hello"
         assert len(model.requests) == 2
 
@@ -359,7 +387,7 @@ class TestToolDispatch:
         )
         agent = Agent(model=model, tools=[_SummaryTool(emit_tool_summary=False)])
 
-        await agent.run(json_freeze({"prompt": "call summary"}))
+        await _run(agent, "call summary")
 
         tool_result = next(
             m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
@@ -386,7 +414,7 @@ class TestToolDispatch:
         )
         agent = Agent(model=model, tools=[_SummaryTool(emit_tool_summary=True)])
 
-        await agent.run(json_freeze({"prompt": "call summary"}))
+        await _run(agent, "call summary")
 
         tool_result = next(
             m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
@@ -421,7 +449,7 @@ class TestToolDispatch:
             description="Test agent.",
             model=model,
         )
-        await agent.run(json_freeze({"prompt": "call missing tool"}))
+        await _run(agent, "call missing tool")
         second_request = model.requests[1]
         tool_results = [
             m
@@ -461,9 +489,7 @@ class TestToolDispatch:
             model=model,
             tools=[_StrictTool()],
         )
-        response = await agent.run(
-            json_freeze({"prompt": "call strict with empty input"})
-        )
+        response = await _run(agent, "call strict with empty input")
         assert str(response.content) == "Recovered."
         second_request = model.requests[1]
         tool_results = [
@@ -512,13 +538,15 @@ class TestToolDispatch:
             tools=[_StrictTool()],
         )
 
-        events = [event async for event in agent.run(json_freeze({"prompt": "call"}))]
+        labels: list[str] = []
+        agent.observers.append(
+            lambda ev: (
+                labels.append(ev.text) if isinstance(ev, ToolLabelEvent) else None
+            )
+        )
+        async for _event in agent.run(TextMessage("call", "text/x-user-message")):
+            pass
 
-        labels = [
-            str(e.content)
-            for e in events
-            if isinstance(e, TextMessage) and e.descriptor == "text/x-tool-label"
-        ]
         assert "Invalid strict call: missing `value`" in labels
         assert "Strict normal summary" not in labels
 
@@ -545,7 +573,7 @@ class TestToolDispatch:
             tools=[_StrictTool()],
         )
 
-        await agent.run(json_freeze({"prompt": "call strict twice"}))
+        await _run(agent, "call strict twice")
 
         second_request = model.requests[1]
         result_text = "\n".join(
@@ -584,7 +612,7 @@ class TestToolDispatch:
             tools=[_StrictTool()],
         )
 
-        await agent.run(json_freeze({"prompt": "call strict with extra"}))
+        await _run(agent, "call strict with extra")
 
         second_request = model.requests[1]
         result_text = "\n".join(
@@ -617,7 +645,7 @@ class TestToolDispatch:
             tools=[_MockTool()],
             max_tool_call_rounds=3,
         )
-        result = await agent.run(json_freeze({"prompt": "infinite loop"}))
+        result = await _run(agent, "infinite loop")
         assert result.descriptor == "text/x-error"
         assert ERROR_MAX_TOOL_CALL_ROUNDS in str(result.content)
 
@@ -647,7 +675,7 @@ class TestParallelDispatch:
             ],
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # Structural check: every tool started before any tool finished
         # -- proves the gather actually ran them concurrently. No
         # wall-clock bound: under parallel-test load (xdist -n 4) the
@@ -681,7 +709,7 @@ class TestParallelDispatch:
             ],
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # Structural concurrency check (see sibling test for rationale).
         assert max(tool.starts) < min(tool.ends)
 
@@ -709,7 +737,7 @@ class TestParallelDispatch:
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
         t0 = time.monotonic()
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         elapsed = time.monotonic() - t0
         assert elapsed >= 0.035, f"expected serial dispatch, took {elapsed:.3f}s"
         assert tool.starts[1] >= tool.ends[0]
@@ -741,7 +769,7 @@ class TestParallelDispatch:
             ],
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         assert tool.starts[1] - tool.starts[0] < 0.05
         assert tool.starts[2] >= tool.ends[1] - 0.01
         assert tool.starts[3] >= tool.ends[2] - 0.01
@@ -841,7 +869,7 @@ class TestSerialFileMutation:
             model=model,
             tools=[_EditTool(), _ReadTool()],
         )
-        response = await agent.run(json_freeze({"prompt": "edit twice"}))
+        response = await _run(agent, "edit twice")
         assert str(response.content) == "done"
         assert len(order) == 3
 
@@ -912,7 +940,7 @@ class TestConditionalRuleInjection:
         )
         agent = Agent(name="t", description="t", model=model, tools=[_ReadStub()])
         agent.tool_state.bash_cwd = str(tmp_path)
-        await agent.run(json_freeze({"prompt": "read foo.py"}))
+        await _run(agent, "read foo.py")
 
         tool_results = [
             m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
@@ -980,7 +1008,7 @@ class TestConditionalRuleInjection:
         )
         agent = Agent(name="t", description="t", model=model, tools=[_BashStub()])
         agent.tool_state.bash_cwd = str(tmp_path)
-        await agent.run(json_freeze({"prompt": "run it"}))
+        await _run(agent, "run it")
 
         tool_results = [
             m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
@@ -1054,7 +1082,7 @@ class TestConditionalRuleInjection:
         )
         agent = Agent(name="t", description="t", model=model, tools=[_ReadStub()])
         agent.tool_state.bash_cwd = str(tmp_path)
-        await agent.run(json_freeze({"prompt": "read the python files"}))
+        await _run(agent, "read the python files")
 
         tool_results = [
             m for m in agent.messages if m.descriptor == "multipart/x-tool-result"
@@ -1126,7 +1154,7 @@ class TestStreamingToolDispatch:
             model=model,
             tools=[tool],
         )
-        response = await agent.run(json_freeze({"prompt": "stream it"}))
+        response = await _run(agent, "stream it")
         assert str(response.content) == "done"
         # The second model request should have the tool result.
         second_request = model.requests[1]
@@ -1187,21 +1215,19 @@ class TestStreamingToolDispatch:
             model=model,
             tools=[_StreamTool()],
         )
-        collected = [event async for event in agent.run(json_freeze({"prompt": "go"}))]
+        chunks: list[str] = []
+        agent.observers.append(
+            lambda ev: (
+                chunks.append(ev.text) if isinstance(ev, TextChunkEvent) else None
+            )
+        )
+        async for _event in agent.run(TextMessage("go", "text/x-user-message")):
+            pass
 
-        # Intermediate events ("step 1", "step 2") should be in the
-        # event stream. The final "result" becomes the tool result, not
-        # an intermediate event.
-        intermediates = [
-            e
-            for e in collected
-            if e.descriptor == "text/plain"
-            and isinstance(e, TextMessage)
-            and e.content.startswith("step")
-        ]
-        assert len(intermediates) == 2
-        assert str(intermediates[0].content) == "step 1"
-        assert str(intermediates[1].content) == "step 2"
+        # Intermediate events ("step 1", "step 2") surface as TextChunkEvent
+        # observer events. The final "result" becomes the tool result.
+        steps = [c for c in chunks if c.startswith("step")]
+        assert steps == ["step 1", "step 2"]
 
     @pytest.mark.anyio
     async def test_streaming_tool_empty_generator_raises(self) -> None:

@@ -86,9 +86,8 @@ class PromptToolkitInputSource(InputSource):
 def dynamic_prompt(agent: Agent) -> FormattedText:
     """Build the dynamic prompt with a dim preview of the queued tail entry.
 
-    Mirrors v1's ``input_pane.dynamic_prompt``: when the inbox has a
-    queued message at its tail, render a one-line preview above the
-    ``> `` prompt so the user sees what's about to be sent.
+    When the inbox has a queued user message at its tail, render a one-line
+    preview above the ``> `` prompt so the user sees what's about to be sent.
 
     Args:
       agent: Agent whose inbox is inspected for queued text.
@@ -99,32 +98,11 @@ def dynamic_prompt(agent: Agent) -> FormattedText:
     """
     parts: list[tuple[str, str]] = []
     tail = agent.inbox.peek_tail()
-    if tail is not None and tail.descriptor in (
-        "text/x-user-message",
-        "text/x-clear-request",
-        "text/x-compact-request",
-        "text/x-recompact-request",
-        "text/x-model-switch-request",
-    ):
-        preview = _format_preview(tail.descriptor, str(tail.content))
-        parts.append(("class:queued", _collapse_preview(preview)))
+    if tail is not None and tail.descriptor == "text/x-user-message":
+        parts.append(("class:queued", _collapse_preview(str(tail.content))))
         parts.append(("", "\n"))
     parts.append(("class:prompt", "> "))
     return FormattedText(parts)
-
-
-def _format_preview(descriptor: str, content: str) -> str:
-    """Prefix the preview with the slash command for non-user descriptors."""
-    if descriptor == "text/x-user-message":
-        return content
-    cmd_for = {
-        "text/x-clear-request": "/clear",
-        "text/x-compact-request": "/compact",
-        "text/x-recompact-request": "/recompact",
-        "text/x-model-switch-request": "/model",
-    }
-    cmd = cmd_for.get(descriptor, "")
-    return f"{cmd} {content}".rstrip()
 
 
 def _collapse_preview(text: str, width: int = 60) -> str:

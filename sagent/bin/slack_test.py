@@ -43,8 +43,8 @@ class _FakeAgent:
     def __init__(self, name: str) -> None:
         self.name = name
         self.inbox: Deque[Message] = Deque()
-        self.tasks: dict[int, asyncio.Task[None]] = {}
-        self.background_tasks: dict[str, BackgroundTaskEntry] = {}
+        self.work: asyncio.Task[object] | None = None
+        self.background: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(*names: str) -> dict[str, _FakeAgent]:

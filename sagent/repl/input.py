@@ -1,28 +1,15 @@
 """REPL input pump + ``InputSource`` abstraction.
 
-The input pump is a long-running coroutine, spawned as a *hidden*
-background task in ``agent.background_tasks``. It loops on an
-``InputSource`` (real prompt-toolkit in production; ``StubInputSource``
-in tests), classifies each line via :func:`repl.slash.parse_slash`, and
-dispatches the resulting :class:`SlashAction` to ``agent.inbox``.
+The pump is a long-running coroutine spawned as a *hidden* background
+task in ``agent.background``. It loops on an :class:`InputSource`,
+parses each line via :func:`repl.slash.parse_slash`, and dispatches the
+resulting :class:`SlashAction` directly against the agent's public API.
 
-The pump is intentionally NOT a ``Handler``. Earlier versions made it a
-``SpawnedHandler`` subscribed to ``text/x-bootstrap``, which lumped it
-into ``agent.tasks`` alongside dispatch-step work; ``/abort`` then
-indiscriminately cancelled it and deadlocked the terminal (no reader
-on stdin, raw mode never restored). Moving it to ``background_tasks``
-with ``hidden=True`` is the clean separation: dispatch-step tasks live
-in ``agent.tasks`` (all abortable); long-running infra lives in
-``background_tasks`` (cancelled only at agent shutdown).
-
-Slash commands flow through the FIFO with typed text so user intent
-order is preserved. Only urgent actions (``/clear``, ``/abort``) jump
-the queue -- they exist to preempt in-flight model/tool work.
-
-Command handlers (``/login``, ``/help``, ``/tasks``) live in
-:mod:`repl.render` next to the other render-side handlers; they all
-need a printer to surface output and are bundled by
-:func:`repl.render.repl_handler_set`.
+The pump is intentionally NOT a Handler / Tool / inbox sender. v2's
+spawned-handler pump tangled with ``agent.tasks`` and got cancelled by
+``/abort``, deadlocking the terminal. v3 keeps it cleanly in
+``agent.background[hidden=True]`` so user-initiated abort can never tear
+down the input loop.
 """
 
 from __future__ import annotations
@@ -34,14 +21,33 @@ import logging
 import time
 
 from sagent.custom_types import TextMessage
-from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
-    QUIT_WORDS,
+    Abort,
+    AbortAll,
+    Break,
+    BreakAll,
+    Clear,
+    Compact,
+    Help,
+    Login,
+    ModelSwitch,
+    Quit,
+    Recompact,
     SlashAction,
-    dispatch,
+    Tasks,
+    Text,
     parse_slash,
 )
 from sagent.tools.background_task import BackgroundTaskEntry
+from sagent.tools.core import agent_registry
+
+
+# Cycle break: ``run_repl`` imports ``spawn_repl_pump`` from this module.
+# Lazy module proxy so the dispatch helpers (do_switch_model / do_login /
+# format_tasks) are reachable without re-introducing a top-level cycle.
+_run_repl = lazy_import("sagent.repl.run_repl")
+_render = lazy_import("sagent.repl.render")
 
 
 if TYPE_CHECKING:
@@ -53,26 +59,19 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
-    "QUIT_WORDS",
+    "REPL_PUMP_KEY",
     "InputSource",
     "StubInputSource",
     "spawn_repl_pump",
 ]
 
 
-# Stable key for the REPL pump entry in ``agent.background_tasks``.
-# Using a sentinel name (rather than a generated qid) makes the
-# entry easy to look up and unit-test, and trivially distinct from
-# user-scheduled background tools whose qids start with ``qid_``.
+# Stable key for the REPL pump entry in ``agent.background``.
 REPL_PUMP_KEY = "__repl_pump__"
 
 
 class InputSource(Protocol):
-    """Source of user input lines.
-
-    Implementations include a real prompt-toolkit session and the
-    in-process :class:`StubInputSource` used by tests.
-    """
+    """Source of user input lines."""
 
     async def next_line(self) -> str | None:
         """Return the next line, or ``None`` to terminate the input loop."""
@@ -80,65 +79,16 @@ class InputSource(Protocol):
 
 
 class StubInputSource:
-    """In-process queue of pre-staged lines for tests.
-
-    Attributes:
-      lines: Remaining lines to deliver, in order. ``None`` ends the loop.
-
-    """
+    """In-process queue of pre-staged lines for tests."""
 
     def __init__(self, lines: list[str | None]) -> None:
         self._lines: list[str | None] = list(lines)
 
     async def next_line(self) -> str | None:
+        """Return the next staged line, or ``None`` when the queue empties."""
         if not self._lines:
             return None
         return self._lines.pop(0)
-
-
-async def _input_pump(
-    agent: Agent,
-    source: InputSource,
-    printer: Printer | None,
-) -> None:
-    """Read lines from ``source`` and post the parsed action to the inbox.
-
-    Runs until the source returns ``None`` (EOF) or a ``quit`` action
-    is dispatched. Either way: post ``text/x-quit`` to the inbox so
-    the dispatch loop terminates cleanly. A pump-internal exception
-    is logged and surfaced as ``text/x-error`` rather than killing
-    the task silently -- otherwise the terminal accepts no further
-    input with no signal as to why.
-    """
-    while True:
-        try:
-            line = await source.next_line()
-            if line is None:
-                _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
-                return
-            action = parse_slash(line)
-            if action is None:
-                continue
-            _apply(agent, action, printer)
-            if action.quit:
-                return
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("REPL input pump raised; surfacing as error")
-            _ = agent.inbox.put(
-                TextMessage(
-                    f"[input pump] {type(exc).__name__}: {exc}",
-                    "text/x-error",
-                ),
-            )
-
-
-def _apply(agent: Agent, action: SlashAction, printer: Printer | None) -> None:
-    """Dispatch ``action`` and emit any echo line."""
-    dispatch(agent, action)
-    if action.echo is not None and printer is not None:
-        printer.write_line(action.echo)
 
 
 def spawn_repl_pump(
@@ -149,18 +99,133 @@ def spawn_repl_pump(
 ) -> asyncio.Task[None]:
     """Spawn the REPL input pump as a hidden background task.
 
-    The task lands in ``agent.background_tasks`` keyed by
-    ``REPL_PUMP_KEY`` with ``hidden=True``: the ``BackgroundTask``
-    tool's ``list`` operation filters it out, and ``/abort`` (which
-    targets ``agent.tasks``) leaves it alone -- so user-initiated
-    abort can never tear down the input loop.
+    Args:
+      agent: Agent to drive.
+      source: Where lines come from (prompt-toolkit in production).
+      printer: Optional sink for status echoes (``/help``, ``/tasks``,
+          ``/login``, ``/model``).
+
+    Returns:
+      task: The running pump task.
+
     """
     task = asyncio.create_task(_input_pump(agent, source, printer))
-    agent.background_tasks[REPL_PUMP_KEY] = BackgroundTaskEntry(
+    agent.background[REPL_PUMP_KEY] = BackgroundTaskEntry(
         task=task,
         tool_name="repl-input",
         queue_id=REPL_PUMP_KEY,
         started=time.time(),
         hidden=True,
+        kind="tool",
     )
     return task
+
+
+async def _input_pump(
+    agent: Agent,
+    source: InputSource,
+    printer: Printer | None,
+) -> None:
+    """Read lines from ``source`` and dispatch the parsed action."""
+    while True:
+        try:
+            line = await source.next_line()
+            if line is None:
+                agent.shutdown(force=False)
+                return
+            action = parse_slash(line)
+            if action is None:
+                continue
+            should_exit = await _dispatch(agent, action, printer)
+            if should_exit:
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("REPL input pump raised; surfacing as error")
+            if printer is not None:
+                printer.write_tool_error(f"[input pump] {type(exc).__name__}: {exc}")
+
+
+async def _dispatch(
+    agent: Agent,
+    action: SlashAction,
+    printer: Printer | None,
+) -> bool:
+    """Dispatch one parsed slash action; return True to exit the pump."""
+    if isinstance(action, Quit):
+        agent.shutdown(force=False)
+        return True
+    if isinstance(action, Abort):
+        if action.target in ("", agent.name):
+            agent.abort()
+        else:
+            other = agent_registry.get(action.target)
+            if isinstance(other, type(agent)):
+                other.abort()
+            elif printer is not None:
+                printer.write_tool_error(f"[/abort] unknown agent: {action.target}")
+        return False
+    if isinstance(action, AbortAll):
+        agent.abort_all_bg()
+        for label, other in list(agent_registry.items()):
+            if other is agent or not isinstance(other, type(agent)):
+                continue
+            other.abort_all_bg()
+            del label  # silence ruff
+        return False
+    if isinstance(action, Break):
+        if action.target in ("", agent.name):
+            agent.cancel()
+        else:
+            other = agent_registry.get(action.target)
+            if isinstance(other, type(agent)):
+                other.cancel()
+            elif printer is not None:
+                printer.write_tool_error(f"[/break] unknown agent: {action.target}")
+        return False
+    if isinstance(action, BreakAll):
+        agent.cancel()
+        for other in list(agent_registry.values()):
+            if other is agent or not isinstance(other, type(agent)):
+                continue
+            other.cancel()
+        return False
+    if isinstance(action, Clear):
+        await agent.clear()
+        if printer is not None:
+            printer.write_line("[/clear] history cleared")
+        return False
+    if isinstance(action, Compact):
+        await agent.compact(action.args)
+        if printer is not None:
+            note = f" ({action.args})" if action.args else ""
+            printer.write_line(f"[/compact] done{note}")
+        return False
+    if isinstance(action, Recompact):
+        await agent.recompact(action.args)
+        if printer is not None:
+            note = f" ({action.args})" if action.args else ""
+            printer.write_line(f"[/recompact] done{note}")
+        return False
+    if isinstance(action, ModelSwitch):
+        _run_repl.do_switch_model(agent, action.args, printer)
+        return False
+    if isinstance(action, Login):
+        _run_repl.do_login(agent, printer)
+        return False
+    if isinstance(action, Help):
+        if printer is not None:
+            printer.write_line(_render.HELP_TEXT)
+        return False
+    if isinstance(action, Tasks):
+        if printer is not None:
+            printer.write_line(_run_repl.format_tasks(agent))
+        return False
+    if isinstance(action, Text):
+        _ = agent.inbox.put(TextMessage(action.content, "text/x-user-message"))
+        return False
+    # Remaining variant: Unknown -- surface the parse error.
+    if printer is not None:
+        printer.write_tool_error(action.text)
+    return False

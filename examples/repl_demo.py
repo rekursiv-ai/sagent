@@ -26,7 +26,6 @@ import asyncio
 import sys
 
 from sagent.agent.agent import Agent
-from sagent.agent.handlers import core_handlers
 from sagent.custom_types import (
     ModelRequest,
     ModelResponse,
@@ -103,7 +102,7 @@ def main() -> None:
 
     sys.stderr.write(f"{model.model_id}\n")
 
-    agent = Agent(model=model, handlers=core_handlers())
+    agent = Agent(model=model)
     asyncio.run(run_repl(agent))
 
 

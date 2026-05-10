@@ -1,10 +1,8 @@
-"""REPL handler bundle for ``Agent``.
+"""REPL surface for ``Agent``.
 
-The REPL is a *handler bundle* registered on the same agent that
-runs the dispatch loop. Render handlers consume descriptors the
-model + tool dispatch produce; the input pump runs as a hidden
-background task on ``agent.background_tasks`` and posts user
-messages back into the inbox.
+The REPL attaches one render observer to ``agent.observers`` and runs an
+input pump as a hidden background task. ``run_repl`` is the entry point;
+the rest of this package provides the pieces it composes.
 
 CLI orchestrators build the agent like this::
 
@@ -25,36 +23,28 @@ from sagent.repl.input import (
 )
 from sagent.repl.prompt import PromptToolkitInputSource
 from sagent.repl.render import (
+    HELP_TEXT,
     Printer,
     RecordingPrinter,
-    RenderChildEvent,
-    RenderError,
-    RenderInterrupted,
-    RenderStream,
-    RenderToolLabel,
-    RenderToolResult,
-    RenderUserBar,
-    repl_handler_set,
+    RenderObserver,
+    make_render_observer,
+    render_tool_result,
 )
 from sagent.repl.replay import replay_messages
 from sagent.repl.run_repl import run_repl
 
 
 __all__ = [
+    "HELP_TEXT",
     "ConsolePrinter",
     "InputSource",
     "Printer",
     "PromptToolkitInputSource",
     "RecordingPrinter",
-    "RenderChildEvent",
-    "RenderError",
-    "RenderInterrupted",
-    "RenderStream",
-    "RenderToolLabel",
-    "RenderToolResult",
-    "RenderUserBar",
+    "RenderObserver",
     "StubInputSource",
-    "repl_handler_set",
+    "make_render_observer",
+    "render_tool_result",
     "replay_messages",
     "run_repl",
     "spawn_repl_pump",

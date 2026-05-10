@@ -42,6 +42,9 @@ def render_toolbar(agent: Agent) -> str:
     activity = agent.activity
     if activity.elapsed_seconds <= 0 and not activity.active:
         return ""
+    # ``cost_tracker`` is the single store; descendants write through to
+    # it via ``cost_root_var`` so this read is always live, including
+    # during the in-flight model call.
     tokens = agent.cost_tracker.total
     cost = float(agent.cost_tracker.total_cost_usd)
     output_tokens = tokens.output_tokens + (

@@ -709,3 +709,108 @@ class ModelSpec:
 
     account: str | None = None
     """Optional account override (used by account auth)."""
+
+
+# -- Agent observer events (v3) ---------------------------------------------
+#
+# The agent publishes these to its observer list (synchronous fan-out).
+# 13 closed-set event types -- adding requires justification per
+# docs/private/agent_refactor.md §18.3.
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class UserBarEvent:
+    """The agent received a user message; render as a full-width bar."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class TextChunkEvent:
+    """A streaming text fragment from the model."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ThinkingEvent:
+    """A thinking block from the model."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ToolLabelEvent:
+    """Multi-line label for a tool invocation about to execute."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ToolResultEvent:
+    """A completed tool result; ``msg`` is the ``multipart/x-tool-result``."""
+
+    msg: Message
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class StreamEndEvent:
+    """Streaming text for one model call has ended; flush buffered markdown."""
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ErrorEvent:
+    """A user-visible error; render as a red dim line."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class InterruptedEvent:
+    """The current step was cancelled; render the dim ``[interrupted]`` line."""
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class StatusUpdateEvent:
+    """The agent's status was set; render via terminal title."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class TurnCompleteEvent:
+    """The current turn finished with no tool calls (model is idle)."""
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ChildEvent:
+    """An event from a child agent, wrapped with its label."""
+
+    label: str
+    inner: Event
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ChildDoneEvent:
+    """A child agent completed its turn; carries totals for the gutter."""
+
+    label: str
+    elapsed: float
+    tokens: int
+    cost: float
+
+
+type Event = (
+    UserBarEvent
+    | TextChunkEvent
+    | ThinkingEvent
+    | ToolLabelEvent
+    | ToolResultEvent
+    | StreamEndEvent
+    | ErrorEvent
+    | InterruptedEvent
+    | StatusUpdateEvent
+    | TurnCompleteEvent
+    | ChildEvent
+    | ChildDoneEvent
+)

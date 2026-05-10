@@ -15,6 +15,7 @@ import dataclasses
 from sagent import providers
 from sagent.custom_types import Message, Model, ModelSpec, TextMessage
 from sagent.lib.json import JSON, int_val, json_freeze, json_unfreeze
+from sagent.lib.lazy_import import lazy_import
 from sagent.lib.message import get_directive
 from sagent.providers import (
     PROVIDER_NAMES,
@@ -26,6 +27,12 @@ from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
 )
+
+
+# Cycle break: ``tools/__init__.py`` imports ``AgentSelf`` and is imported
+# by ``agent.agent``; agent_self needs ``PendingOp`` from agent.agent at
+# call time. Module proxy defers the load to first attribute access.
+_agent_module = lazy_import("sagent.agent.agent")
 
 
 if TYPE_CHECKING:
@@ -513,14 +520,18 @@ def _plan_one_limit(raw: object, attr: str) -> int | TextMessage | None:
 
 
 def _commit_context(context: str, prompt: str) -> None:
-    """Queue a validated context mutation."""
-    state = get_tool_state()
+    """Queue a validated context mutation as ``agent._next_op``."""
+    agent = current_agent_var.get(None)
+    if agent is None:
+        return
+    if context not in ("clear", "compact", "recompact"):
+        return
     if context == "clear":
-        state.clear_requested = prompt
+        agent._next_op = _agent_module.PendingOp(kind="clear", args=prompt)  # noqa: SLF001
     elif context == "compact":
-        state.compact_requested = prompt
+        agent._next_op = _agent_module.PendingOp(kind="compact", args=prompt)  # noqa: SLF001
     elif context == "recompact":
-        state.recompact_requested = prompt
+        agent._next_op = _agent_module.PendingOp(kind="recompact", args=prompt)  # noqa: SLF001
 
 
 def _do_diagnostics(
