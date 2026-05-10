@@ -735,8 +735,14 @@ class _ChildForwarder:
         self._label = label
 
     def _put(self, event: Message) -> None:
-        """Post the envelope onto the parent's inbox."""
-        self._parent_agent.inbox.put(event)
+        """Post the envelope onto the parent's inbox.
+
+        ``Deque.put`` returns ``False`` when the deque is at capacity;
+        the parent's inbox is intentionally unbounded so the return is
+        ignored. If we ever introduce a bound, this site needs to log
+        or raise instead of silently dropping the child event.
+        """
+        _ = self._parent_agent.inbox.put(event)
 
     def __call__(self, event: Message) -> None:
         if isinstance(event, JsonMessage) and event.descriptor == "application/x-done":

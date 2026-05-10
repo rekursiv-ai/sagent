@@ -200,12 +200,17 @@ class TestLoadSession:
             encoding="utf-8",
         )
 
+        original = session_file.read_text(encoding="utf-8")
+
         loaded = session_io.load_session(tmp_path, {})
 
         assert loaded is not None
         meta, messages = loaded
         assert meta["session_id"] == "s1"
         assert messages == [msg]
+        corrupt_files = list(tmp_path.glob("session.jsonl.corrupt-*"))
+        assert len(corrupt_files) == 1
+        assert corrupt_files[0].read_text(encoding="utf-8") == original
 
     def test_clear_marker_drops_prior_messages(self, tmp_path: Path) -> None:
         """``kind: clear`` resets the live messages list during load."""

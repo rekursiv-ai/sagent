@@ -22,7 +22,7 @@ from sagent.agent.handlers.base import Handler, InlineHandler
 from sagent.agent.handlers.compact import (
     BudgetWatcher,
     CompactHandler,
-    UncompactHandler,
+    RecompactHandler,
 )
 from sagent.agent.handlers.model import (
     ModelCallHandler,
@@ -52,16 +52,52 @@ class HistoryHandler(InlineHandler):
     message verbatim. Other handlers subscribe to the same descriptors
     for routing follow-ups; ``HistoryHandler`` must register first so
     the message is in history before downstream handlers act on it.
+
+    Mid-call deferral: when a ``text/x-user-message`` arrives while
+    ``model_lock`` is held, the in-flight call has already snapshotted
+    history into a ``ModelRequest``. Appending the user message to
+    ``history`` now would mean the next queued model call (which
+    builds *after* the assistant response is appended) sees an
+    assistant terminal, which Anthropic's claude-opus-4-7+1m rejects
+    ("assistant message prefill not supported"). Instead, park the
+    user message on ``agent.history_pending``. The drain runs on
+    ``text/x-call-ended`` -- emitted by ``ModelCallHandler``'s
+    ``finally`` after lock release on every path (success, cancel,
+    error) -- so messages parked during a *cancelled* call are also
+    drained, not stranded.
     """
 
     descriptors: tuple[str, ...] = (
         "text/x-user-message",
         "multipart/x-model-message",
         "multipart/x-tool-result",
+        "text/x-call-ended",
     )
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
+        if msg.descriptor == "text/x-call-ended":
+            # The in-flight call has ended (success, cancel, or error);
+            # drain any user messages parked while ``model_lock`` was
+            # held. Emit a single ``text/x-model-call`` covering all
+            # drained messages -- emitting one per parked message
+            # would produce byte-identical redundant requests because
+            # each spawned ``ModelCallHandler`` snapshots history
+            # *after* the drain. ``parent_id`` follows the convention
+            # used by ``UserMessageHandler``: the id of the user
+            # message that triggered the call (here, the most recent
+            # parked message).
+            if agent.history_pending:
+                drained = list(agent.history_pending)
+                agent.history_pending.clear()
+                agent.history.extend(drained)
+                agent.inbox.put(
+                    TextMessage("", "text/x-model-call", parent_id=drained[-1].id),
+                )
+            return
+        if msg.descriptor == "text/x-user-message" and agent.model_lock.locked():
+            agent.history_pending.append(msg)
+            return
         agent.history.append(msg)
 
 
@@ -71,28 +107,40 @@ class HistoryHandler(InlineHandler):
 class UserMessageHandler(InlineHandler):
     """Trigger a model call when a user message arrives.
 
-    Coalesces back-to-back user messages: if a ``text/x-model-call``
-    is already queued or the ``model_lock`` is held, the in-flight
-    call already sees the appended history, so posting another would
-    just produce a redundant request. Mirrors v1's drain-and-batch
-    on a per-message basis.
+    Coalesces back-to-back user messages. If a ``text/x-model-call``
+    is already queued, posting another would produce a redundant
+    request. If ``model_lock`` is held, ``HistoryHandler`` has parked
+    this message on ``agent.history_pending`` and will post a fresh
+    ``text/x-model-call`` when the in-flight response drains pending
+    -- posting one here would race that drain.
     """
 
     descriptors: tuple[str, ...] = ("text/x-user-message",)
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
-        # Reset abort_event at every turn boundary. ``run_loop`` only
-        # clears it once per session, so a Ctrl+C earlier in the session
-        # otherwise poisons all subsequent sync-polling tools.
-        agent.tool_state.abort_event.clear()
         if _has_pending_model_call(agent):
             return
         agent.inbox.put(TextMessage("", "text/x-model-call", parent_id=msg.id))
 
 
 def _has_pending_model_call(agent: Agent) -> bool:
-    """Return True if a model call is already queued or being processed."""
+    """Return True iff a model call is already queued or in flight.
+
+    Returns True when either a ``text/x-model-call`` is queued in the
+    inbox or ``model_lock`` is held by an in-flight call. A user
+    message arriving mid-call is *not* stranded by this check:
+    ``HistoryHandler`` parks it on ``agent.history_pending`` and
+    drains the queue itself when the in-flight call ends (the
+    ``text/x-call-ended`` event from ``ModelCallHandler``'s
+    ``finally``). The drain posts a single ``text/x-model-call``
+    that combines all deferred messages into one turn. Without the
+    lock check, ``UserMessageHandler`` would enqueue a second model
+    call whose handler races to build its request *after* the
+    in-flight response is appended to history, producing an
+    assistant-terminal request that Anthropic's claude-opus-4-7+1m
+    rejects.
+    """
     if agent.model_lock.locked():
         return True
     return any(queued.descriptor == "text/x-model-call" for queued in agent.inbox)
@@ -122,10 +170,11 @@ class ClearHandler(InlineHandler):
     async def handle(self, agent: Agent, msg: Message) -> None:
         del msg
         agent.history.clear()
+        agent.history_pending.clear()
         agent.cost_tracker.last_request = TokenCount()
         agent.activity.num_tool_call_rounds = 0
         agent.tool_state.reset_file_tracking()
-        agent._save_session(clear=True)  # noqa: SLF001 -- handler is agent's intimate helper
+        agent.save_session(clear=True)
 
 
 # -- AbortHandler ------------------------------------------------------
@@ -136,23 +185,29 @@ def _cancel_local_tasks(agent: Agent) -> None:
 
     Hidden background tasks (REPL pump, daemons) live in
     ``agent.background_tasks`` and are untouched here -- bash-style
-    foreground/background separation.
+    foreground/background separation. Cancellation propagates through
+    ``await``s natively; subprocess-backed tools (Bash) kill their
+    process groups in their own ``CancelledError`` handlers.
     """
-    agent.tool_state.abort_event.set()
     for task in list(agent.tasks.values()):
         if not task.done():
             _ = task.cancel()
 
 
-def _drain_inbox_preserving_quit(agent: Agent) -> None:
-    """Drop pending inbox messages but keep ``text/x-quit`` sentinels.
+def _drop_pending_user_input(agent: Agent) -> None:
+    """Drop typed-ahead user input, keep ``text/x-quit`` sentinels.
 
-    Without preservation, the dispatch loop would never see the quit
-    that was queued behind the abort.
+    Both queues represent user input the agent has not yet acted on:
+    the inbox holds messages awaiting dispatch; ``history_pending``
+    holds messages parked by ``HistoryHandler`` while ``model_lock``
+    is held. ``/abort`` should erase both, matching the verb's
+    "throw away typed-ahead" semantics. The ``text/x-quit`` sentinel
+    survives so the dispatch loop still terminates cleanly.
     """
     kept = [m for m in agent.inbox.drain() if m.descriptor == QUIT_SENTINEL]
     for m in kept:
         _ = agent.inbox.put(m)
+    agent.history_pending.clear()
 
 
 def _cancel_visible_background(agent: Agent) -> None:
@@ -167,9 +222,15 @@ def _cancel_visible_background(agent: Agent) -> None:
 class BreakHandler(InlineHandler):
     """Cancel the in-flight step (``/break``; Ctrl+Z analog).
 
-    The queue and background tasks survive: ``/break`` is the
-    "interrupt this step, keep planned follow-ups" verb. ``content``
-    selects the scope:
+    The inbox queue and background tasks survive: ``/break`` is the
+    "interrupt this step, keep planned follow-ups" verb. Messages
+    parked in ``history_pending`` (typed *during* the in-flight call,
+    not after it) do not survive -- the cancel path posts
+    ``text/x-stream-end`` + ``text/x-interrupted``, never
+    ``multipart/x-model-message``, so ``HistoryHandler``'s drain
+    trigger never fires; preserving them would silently reorder them
+    behind whatever the user types next, across the interrupt
+    boundary. ``content`` selects the scope:
 
     - ``""``: this agent only.
     - ``"<label>"``: forward to that agent (cross-agent reach via inbox).
@@ -186,9 +247,11 @@ class BreakHandler(InlineHandler):
         target = str(msg.content).strip()
         if target in ("", agent.name):
             _cancel_local_tasks(agent)
+            agent.history_pending.clear()
             return
         if target == "all":
             _cancel_local_tasks(agent)
+            agent.history_pending.clear()
             for other in list(agent_registry.values()):
                 if other is agent:
                     continue
@@ -229,16 +292,16 @@ class AbortHandler(InlineHandler):
         target = str(msg.content).strip()
         if target in ("", agent.name):
             _cancel_local_tasks(agent)
-            _drain_inbox_preserving_quit(agent)
+            _drop_pending_user_input(agent)
             return
         if target == "bg":
             _cancel_local_tasks(agent)
-            _drain_inbox_preserving_quit(agent)
+            _drop_pending_user_input(agent)
             _cancel_visible_background(agent)
             return
         if target == "all":
             _cancel_local_tasks(agent)
-            _drain_inbox_preserving_quit(agent)
+            _drop_pending_user_input(agent)
             _cancel_visible_background(agent)
             for other in list(agent_registry.values()):
                 if other is agent:
@@ -290,7 +353,7 @@ class StatsHandler(InlineHandler):
 class SessionSaveHandler(InlineHandler):
     """Persist ``session.jsonl`` after every model response.
 
-    Delegates to ``agent._save_session()``; that helper builds the full
+    Delegates to ``agent.save_session()``; that helper builds the full
     meta (model spec, status, tokens, cost, compaction, etc.) so resumed
     sessions can restore the model and continue.
     """
@@ -300,7 +363,7 @@ class SessionSaveHandler(InlineHandler):
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
         del msg
-        agent._save_session()  # noqa: SLF001 -- handler is agent's intimate helper
+        agent.save_session()
 
 
 # -- Standard handler-set factory -------------------------------------
@@ -335,7 +398,7 @@ def core_handlers() -> list[Handler]:
         ToolBatchHandler(),
         ToolBatchResultHandler(),
         CompactHandler(),
-        UncompactHandler(),
+        RecompactHandler(),
         ClearHandler(),
         BreakHandler(),
         AbortHandler(),

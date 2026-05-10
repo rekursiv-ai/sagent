@@ -33,6 +33,7 @@ from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
 )
+from sagent.tools.prompt_text import escape_prompt_text
 
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,7 @@ class Skill:
             body = s.body
             if len(body) > self._MAX_CHARS_PER_SKILL:
                 body = body[: self._MAX_CHARS_PER_SKILL] + "\n... (truncated)"
+            body = escape_prompt_text(body)
             if total + len(body) > budget_chars:
                 break
             total += len(body)
@@ -267,9 +269,9 @@ class Skill:
             )
         get_tool_state().invoked_skills.add(match.name)
         preface = f"<skill name='{match.name}' source='{match.source}'>\n"
-        body = match.body
+        body = escape_prompt_text(match.body)
         if args:
-            body += f"\n\nArguments: {args}"
+            body += f"\n\nArguments: {escape_prompt_text(args)}"
         return TextMessage(f"{preface}{body}\n</skill>", "text/plain")
 
 

@@ -17,6 +17,7 @@ class ModelProfile:
     max_request_tokens: int
     max_response_tokens: int
     pricing: Pricing = Pricing()  # noqa: RUF009 -- frozen dataclass, no mutable default risk
+    supports_thinking: bool = True
 
 
 def compute_cost(

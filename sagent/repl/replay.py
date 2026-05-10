@@ -41,7 +41,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     messages = agent.history
     if not messages:
         return
-    tools = agent._tools  # noqa: SLF001 -- replay needs the tool registry to format labels
+    tools = agent.tools_map
     for msg in messages:
         if is_user_message(msg.descriptor):
             content = (

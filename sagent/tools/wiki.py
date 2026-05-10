@@ -30,6 +30,7 @@ from sagent.tools.core import (
     run_sync,
 )
 from sagent.tools.input_errors import tool_input_error_text
+from sagent.tools.prompt_text import escape_prompt_text
 
 
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ def _read_page_op(root: Path, slug: str) -> str | Message:
     content = read_page(root, slug)
     if content is None:
         return TextMessage(f"No such page: {slug}", "text/x-error")
-    return content
+    return escape_prompt_text(content)
 
 
 def _read_index_op(root: Path) -> str | Message:
@@ -299,7 +300,7 @@ def _read_index_op(root: Path) -> str | Message:
     if not idx.exists():
         return "(no index.md)"
     try:
-        return idx.read_text(encoding="utf-8")
+        return escape_prompt_text(idx.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as e:
         return TextMessage(f"Read error: {e}", "text/x-error")
 

@@ -481,6 +481,7 @@ def load_session(
 
     meta: MutableJSON = {}
     messages: list[Message] = []
+    corrupt_preserved = False
     try:
         with session_file.open(encoding="utf-8") as f:
             for line_num, raw_line in enumerate(f, start=1):
@@ -499,6 +500,9 @@ def load_session(
                         # view. Bytes remain in the file for forensics.
                         messages = []
                 except (json.JSONDecodeError, KeyError, TypeError):
+                    if not corrupt_preserved:
+                        _preserve_corrupt_session(session_file)
+                        corrupt_preserved = True
                     logger.warning(
                         "Skipping corrupt session line %s in %s.",
                         line_num,
@@ -508,6 +512,15 @@ def load_session(
         logger.warning("Could not read session file, starting fresh.")
         return None
     return meta, normalize_tool_history(messages, synthesize_missing=False)
+
+
+def _preserve_corrupt_session(session_file: Path) -> None:
+    """Copy corrupt session bytes aside before recovery continues."""
+    backup = session_file.with_name(f"{session_file.name}.corrupt-{time.time_ns()}")
+    try:
+        backup.write_bytes(session_file.read_bytes())
+    except OSError:
+        logger.exception("Could not preserve corrupt session file %s.", session_file)
 
 
 def _migrate_legacy_session(

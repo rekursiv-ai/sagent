@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import (
     IO,
     TYPE_CHECKING,
+    ClassVar,
     NotRequired,
     TypedDict,
     cast,
@@ -87,6 +88,7 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
 
+from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
     Message,
     ModelRequest,
@@ -109,6 +111,7 @@ from sagent.lib.message import (
     tool_call_message,
 )
 from sagent.providers.lib.cost import (
+    ModelProfile,
     Pricing,
     compute_cost,
 )
@@ -142,6 +145,12 @@ _SCOPES = (
 )
 _REFRESH_BUFFER_SEC = 300.0
 _CALLBACK_PORT = 1455
+# Codex's subscription backend currently exposes a smaller practical
+# context window than the public API model metadata. Local budgeting must
+# plan against the wire contract so auto-compaction runs before the backend
+# rejects an oversized request.
+_SUBSCRIPTION_MAX_REQUEST_TOKENS = 272_000
+_SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
 
 _EFFORT_PREFIXES = ("o", "gpt-5")
 
@@ -150,6 +159,21 @@ _FINISH_MAP: dict[str, str] = {
     "incomplete": "length",
     "failed": "stop",
 }
+
+
+def _subscription_profile(profile: ModelProfile) -> ModelProfile:
+    """Clamp public API model metadata to the subscription wire contract."""
+    return ModelProfile(
+        max_request_tokens=min(
+            profile.max_request_tokens,
+            _SUBSCRIPTION_MAX_REQUEST_TOKENS,
+        ),
+        max_response_tokens=min(
+            profile.max_response_tokens,
+            _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
+        ),
+        pricing=profile.pricing,
+    )
 
 
 class OpenAISubscription(OpenAI):
@@ -166,6 +190,12 @@ class OpenAISubscription(OpenAI):
     # OpenAI (API key) defaults to gpt-5.5 for current frontier capability.
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_UTILITY_MODEL = "gpt-5.4-mini"
+    # Keep pricing inherited from the public API profiles, but clamp limits
+    # separately because subscription auth is a different backend contract.
+    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        name: _subscription_profile(profile)
+        for name, profile in OpenAI.KNOWN_MODELS.items()
+    }
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
@@ -654,20 +684,28 @@ class _OpenAISubModel(_OpenAIModel):
             if request.effort is not None and self.supports_effort
             else openai.omit
         )
-        event_stream: AsyncResponseStream = await sdk.responses.create(  # pyright: ignore[reportCallIssue,reportUnknownVariableType]  # ty: ignore[no-matching-overload] -- SDK overload resolution fails on stream=True literal
-            model=self._model_id,
-            input=_build_input(request),
-            instructions=request.system or "",
-            store=False,
-            stream=True,
-            tools=(_build_tools(request.tools) if request.tools else openai.omit),
-            reasoning=reasoning,  # pyright: ignore[reportArgumentType] -- Reasoning|Omit is valid; overload resolution failure cascades
-        )
-        return await _consume_stream(
-            event_stream,  # pyright: ignore[reportUnknownArgumentType] -- typed above; overload suppression loses it
-            pricing=self._profile.pricing,
-            on_text=on_text,
-        )
+        try:
+            event_stream: AsyncResponseStream = await sdk.responses.create(  # pyright: ignore[reportCallIssue,reportUnknownVariableType]  # ty: ignore[no-matching-overload] -- SDK overload resolution fails on stream=True literal
+                model=self._model_id,
+                input=_build_input(request),
+                instructions=request.system or "",
+                store=False,
+                stream=True,
+                tools=(_build_tools(request.tools) if request.tools else openai.omit),
+                reasoning=reasoning,  # pyright: ignore[reportArgumentType] -- Reasoning|Omit is valid; overload resolution failure cascades
+            )
+            return await _consume_stream(
+                event_stream,  # pyright: ignore[reportUnknownArgumentType] -- typed above; overload suppression loses it
+                pricing=self._profile.pricing,
+                on_text=on_text,
+            )
+        except Exception as exc:
+            if self.is_context_overflow(exc):
+                # The compactor's shrink-and-retry path keys off
+                # PromptTooLongError; leaking raw SDK errors makes outer
+                # recovery retry unchanged history instead of dropping groups.
+                raise PromptTooLongError(str(exc)) from exc
+            raise
 
 
 # -- Request building --------------------------------------------------

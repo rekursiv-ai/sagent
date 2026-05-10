@@ -1,17 +1,23 @@
-"""Compaction handlers: ``BudgetWatcher``, ``CompactHandler``, ``UncompactHandler``.
+"""Compaction handlers: ``BudgetWatcher``, ``CompactHandler``, ``RecompactHandler``.
 
 Compaction has three triggers, all routed to a shared ``_run_compaction``
 helper that mutates ``agent.history`` exactly once:
 
-- ``BudgetWatcher`` (inline, fires on ``text/x-model-call``): pre-flight
-  check; if estimated input tokens exceed the budget, run microcompact +
-  full compaction synchronously before ``ModelCallHandler`` is invoked.
+- ``BudgetWatcher`` (spawned, fires on ``text/x-model-call``): pre-flight
+  check; runs microcompact and (if needed) full compaction. Spawned
+  rather than inline so a long compaction does not freeze the dispatch
+  loop -- ``/abort`` and ``/break`` stay responsive while compaction is
+  running. Acquires ``agent.model_lock`` first so ``ModelCallHandler``
+  (also spawned on the same descriptor) waits behind it; CPython
+  asyncio's FIFO task scheduling combined with the lock's FIFO wait
+  queue gives ``BudgetWatcher`` deterministic priority since it
+  registers first in :func:`core_handlers`.
 - ``CompactHandler`` (inline, fires on ``text/x-compact-request``):
   user-or-tool-initiated compaction.
-- ``UncompactHandler`` (inline, fires on ``text/x-uncompact-request``):
-  reload ``pre_compact.jsonl`` from disk and re-run compaction with
-  custom instructions (or different model, or whatever you want to
-  retry against the un-compacted transcript).
+- ``RecompactHandler`` (inline, fires on ``text/x-recompact-request``):
+  reload the most recent ``pre_compact_N.jsonl`` from disk and re-run
+  compaction with custom instructions (or a different model, or whatever
+  you want to retry against the un-compacted transcript).
 
 Overflow recovery (running compaction when the provider rejects a
 request as over-budget) is folded into ``ModelCallHandler`` itself.
@@ -24,7 +30,10 @@ from typing import TYPE_CHECKING, cast, override
 import logging
 
 from sagent.agent.compaction import post_compact_enrich
-from sagent.agent.handlers.base import InlineHandler
+from sagent.agent.handlers.base import (
+    InlineHandler,
+    SpawnedHandler,
+)
 from sagent.agent.session_io import load_message
 from sagent.custom_types import Message, TokenCount
 from sagent.lib.compaction import write_pre_compact_transcript
@@ -45,13 +54,22 @@ logger = logging.getLogger(__name__)
 MAX_COMPACT_FAILURES = 3
 
 
-class BudgetWatcher(InlineHandler):
+class BudgetWatcher(SpawnedHandler):
     """Pre-flight budget check before each ``text/x-model-call``.
 
     Runs ``compactor.maintain`` (microcompact stale file reads) and,
     if the post-microcompact estimate still exceeds budget, runs full
-    compaction. Fires inline so the ``ModelCallHandler`` (registered
-    after) sees the compacted history when it dispatches.
+    compaction. Acquires ``agent.model_lock`` so ``ModelCallHandler``
+    (also spawned on the same descriptor) waits until BudgetWatcher
+    releases -- CPython asyncio's FIFO task scheduling and the lock's
+    FIFO wait queue give us deterministic ordering as long as
+    BudgetWatcher is registered first in :func:`core_handlers`.
+
+    Spawned (not inline) so a long compaction does not freeze the
+    dispatch loop -- ``/abort`` cancels ``agent.tasks``, which
+    includes this handler's task; the cancel unwinds through
+    :func:`run_compaction`'s ``finally`` so ``compacting`` resets
+    cleanly.
     """
 
     descriptors: tuple[str, ...] = ("text/x-model-call",)
@@ -62,24 +80,25 @@ class BudgetWatcher(InlineHandler):
         del msg
         if agent.compactor is None:
             return
-        agent.compactor.maintain(
-            agent.history,
-            agent._tools,  # noqa: SLF001 -- handler is agent's intimate helper
-            read_cache=agent.tool_state.read_cache,
-            last_response_time=agent.cost_tracker.last_response_time,
-        )
-        system = agent.system_prompt()
-        input_tokens = max(
-            agent.cost_tracker.last_request.input_tokens,
-            estimate_total_tokens(system, agent.history, agent.model),
-        )
-        compacted = await _maybe_compact(agent, input_tokens)
-        if not compacted and input_tokens > (
-            agent.max_request_tokens
-            - agent.max_response_tokens
-            - agent.budget.buffer_tokens
-        ):
-            await _force_compact(agent)
+        async with agent.model_lock:
+            agent.compactor.maintain(
+                agent.history,
+                agent.tools_map,
+                read_cache=agent.tool_state.read_cache,
+                last_response_time=agent.cost_tracker.last_response_time,
+            )
+            system = agent.system_prompt()
+            input_tokens = max(
+                agent.cost_tracker.last_request.input_tokens,
+                estimate_total_tokens(system, agent.history, agent.model),
+            )
+            compacted = await _maybe_compact(agent, input_tokens)
+            if not compacted and input_tokens > (
+                agent.max_request_tokens
+                - agent.max_response_tokens
+                - agent.budget.buffer_tokens
+            ):
+                await _force_compact(agent)
 
 
 class CompactHandler(InlineHandler):
@@ -100,17 +119,23 @@ class CompactHandler(InlineHandler):
         )
 
 
-class UncompactHandler(InlineHandler):
-    """Reload pre-compact transcript and re-run compaction."""
+class RecompactHandler(InlineHandler):
+    """Reload the most recent pre-compact transcript and re-run compaction."""
 
-    descriptors: tuple[str, ...] = ("text/x-uncompact-request",)
+    descriptors: tuple[str, ...] = ("text/x-recompact-request",)
 
     @override
     async def handle(self, agent: Agent, msg: Message) -> None:
         """Reload from disk, re-run compaction, install or roll back."""
         if agent.compactor is None or agent.session_dir is None:
             return
-        transcript = agent.session_dir / "pre_compact.jsonl"
+        # ``run_compaction`` writes ``pre_compact_{n}.jsonl`` then increments
+        # ``compact_count``; the latest readable file is at ``count - 1``.
+        # When count == 0 no compaction has run yet -- nothing to recompact.
+        count = agent.compaction_state.compact_count
+        if count == 0:
+            return
+        transcript = agent.session_dir / f"pre_compact_{count - 1}.jsonl"
         if not transcript.exists():
             return
         try:
@@ -239,7 +264,7 @@ async def run_compaction(
         session_dir=agent.session_dir,
         tool_state=agent.tool_state,
         budget=agent.budget,
-        tools=agent._tools,  # noqa: SLF001 -- handler is agent's intimate helper
+        tools=agent.tools_map,
         background_tasks=agent.background_tasks,
         estimate_tokens=agent.max_request_tokens - used,
         headroom=headroom,
@@ -248,7 +273,7 @@ async def run_compaction(
     agent.cost_tracker.last_request = TokenCount()
     # History was wholesale-replaced; persist via clear barrier so the
     # on-disk live view matches memory (prior bytes preserved).
-    agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
+    agent.save_session(clear=True)
     return True
 
 

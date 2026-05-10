@@ -101,7 +101,7 @@ def main() -> None:
         provider = build_provider(args.provider, args.auth, account=args.account)
         model = provider.model(args.model)
 
-    sys.stderr.write(f"[v2] {model.model_id}\n")
+    sys.stderr.write(f"{model.model_id}\n")
 
     agent = Agent(model=model, handlers=core_handlers())
     asyncio.run(run_repl(agent))

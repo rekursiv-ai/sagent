@@ -1,4 +1,4 @@
-"""Tests for repl.render."""
+"""Tests for repl.format."""
 
 from __future__ import annotations
 
@@ -75,9 +75,13 @@ class TestFormatElapsed:
         assert format_elapsed(3599.0) == "59m 59s"
 
     def test_rolls_at_60min(self) -> None:
-        assert format_elapsed(3600.0) == "1h 0m"
-        assert format_elapsed(3600.0 + 23 * 60.0) == "1h 23m"
-        assert format_elapsed(2 * 3600.0 + 17 * 60.0) == "2h 17m"
+        assert format_elapsed(3600.0) == "1h 0m 0s"
+        assert format_elapsed(3600.0 + 23 * 60.0 + 7) == "1h 23m 7s"
+        assert format_elapsed(2 * 3600.0 + 17 * 60.0 + 42) == "2h 17m 42s"
+
+    def test_rolls_at_24h(self) -> None:
+        assert format_elapsed(86_400.0) == "1d 0h 0m 0s"
+        assert format_elapsed(2 * 86_400 + 3 * 3600 + 5 * 60 + 9) == "2d 3h 5m 9s"
 
 
 class TestFormatCount:

@@ -31,6 +31,7 @@ from sagent.agent.handlers.compact import (
     estimate_total_tokens,
     run_compaction,
 )
+from sagent.agent.handlers.tools import wrap_errors_for_llm
 from sagent.agent.retry import send_with_retry
 from sagent.agent.session_io import repair_dangling_tool_calls
 from sagent.custom_exceptions import ModelTerminationError
@@ -110,6 +111,17 @@ class ModelCallHandler(SpawnedHandler):
         ``text/x-thinking`` so RenderThinking can display it.
         """
         del msg
+        try:
+            await self._handle_inner(agent)
+        finally:
+            # Single "call ended" event for the dispatch loop. Fires
+            # after ``model_lock`` is released regardless of success,
+            # cancel, or error -- ``HistoryHandler``'s drain triggers
+            # on this so cancel paths drain pending too without
+            # special-case wiring.
+            _ = agent.inbox.put(TextMessage("", "text/x-call-ended"))
+
+    async def _handle_inner(self, agent: Agent) -> None:
         if _round_limit_exceeded(agent):
             _post_round_limit_response(agent)
             return
@@ -213,8 +225,8 @@ class ModelCallHandler(SpawnedHandler):
         found without tool_result blocks``. The repair is idempotent;
         a clean history is returned unchanged.
         """
-        tools_list: list[Tool] = list(agent._tools.values())  # noqa: SLF001 -- handler intimate
-        if tools_list and "application/x-tool-backgroundtask" in agent._tools:  # noqa: SLF001 -- handler intimate
+        tools_list: list[Tool] = list(agent.tools_map.values())
+        if tools_list and "application/x-tool-backgroundtask" in agent.tools_map:
             tools_list = [
                 t
                 if t.tool_id == "application/x-tool-backgroundtask"
@@ -231,14 +243,14 @@ class ModelCallHandler(SpawnedHandler):
             if repair_inserted:
                 # Repair inserted synthesized results mid-history; persist
                 # via clear barrier so the on-disk live view matches memory.
-                agent._save_session(clear=True)  # noqa: SLF001 -- intimate helper
+                agent.save_session(clear=True)
         return ModelRequest(
-            messages=list(agent.history),
+            messages=[wrap_errors_for_llm(m) for m in agent.history],
             system=agent.system_prompt(),
             tools=tools_list or None,
             max_response_tokens=agent.max_response_tokens,
-            thinking=agent.thinking,
-            effort=agent.effort,
+            thinking=agent.thinking if agent.model.supports_thinking else None,
+            effort=agent.effort if agent.model.supports_effort else None,
             cache_ttl=agent.cache_ttl,
         )
 
@@ -251,11 +263,9 @@ class ModelCallHandler(SpawnedHandler):
     ) -> ModelResponse:
         """Send; on context-overflow run compaction in-band and retry.
 
-        Adaptive-thinking fallback: some models (e.g. Haiku 4.5) advertise
-        ``supports_thinking=True`` but reject ``thinking="adaptive"`` with
-        a 400. When the API explicitly says thinking isn't supported, we
-        clear ``agent.thinking`` for the rest of the session and retry
-        once -- so ``/model`` to a non-adaptive model just works.
+        Adaptive-thinking fallback: if a provider capability table is
+        stale and the API says thinking is unsupported, clear
+        ``agent.thinking`` for the rest of the session and retry once.
         """
         last_error: Exception | None = None
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
@@ -283,7 +293,7 @@ class ModelCallHandler(SpawnedHandler):
                         agent.model.model_id,
                         request.thinking,
                     )
-                    agent.set_thinking(None)
+                    agent.thinking = None
                     request = dataclasses.replace(request, thinking=None)
                     continue
                 if not agent.model.is_context_overflow(e):

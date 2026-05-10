@@ -50,8 +50,8 @@ Prompt-too-long recovery drops older grouped rounds while preserving tool-use/to
 Agents with `AgentSelf` can request compaction:
 
 ```text
-AgentSelf(operation="compact")
-AgentSelf(operation="recompact", custom_instructions="focus on API decisions")
+AgentSelf(context="compact")
+AgentSelf(context="recompact", context_prompt="focus on API decisions")
 ```
 
 `recompact` repeats the previous compaction with new guidance.
@@ -122,7 +122,7 @@ agent.max_response_tokens = 8_192
 Agents can also call:
 
 ```text
-AgentSelf(operation="limits", max_request_tokens=200000)
+AgentSelf(max_request_tokens=200000)
 ```
 
 Explicit limits are validated against the model's advertised maximums.

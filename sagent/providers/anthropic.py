@@ -198,6 +198,7 @@ class Anthropic:
             max_request_tokens=200_000,
             max_response_tokens=64_000,
             pricing=_HAIKU,
+            supports_thinking=False,
         ),
     }
 
@@ -496,7 +497,7 @@ class _AnthropicModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether this model supports thinking mode."""
-        return True
+        return self._profile.supports_thinking
 
     @property
     def supports_effort(self) -> bool:
@@ -586,7 +587,8 @@ class _AnthropicModel:
         messages: list[anthropic.types.MessageParam],
     ) -> dict[str, object]:
         """Build kwargs for the Anthropic messages API."""
-        has_thinking = request.thinking in ("adaptive", "enabled")
+        thinking = request.thinking if self.supports_thinking else None
+        has_thinking = thinking in ("adaptive", "enabled")
         max_tok = request.max_response_tokens or self.max_response_tokens
         kwargs: dict[str, object] = {
             "model": _strip_context_tag(self._model_id),
@@ -595,10 +597,10 @@ class _AnthropicModel:
             "temperature": request.temperature,
             "system": self._provider.build_system(request.system, messages),
         }
-        if request.thinking == "adaptive":
+        if thinking == "adaptive":
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["temperature"] = 1.0
-        elif request.thinking == "enabled":
+        elif thinking == "enabled":
             kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": max_tok,

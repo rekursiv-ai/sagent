@@ -10,6 +10,7 @@ from sagent.custom_types import (
     MessageBase,
     MultipartMessage,
     TextMessage,
+    TokenCount,
 )
 from sagent.lib.json import json_freeze
 from sagent.lib.message import tool_call_message
@@ -72,3 +73,31 @@ def test_tool_call_message() -> None:
     assert len(msg.content) == 2
     assert msg.content[0].descriptor == "text/x-queue-id"
     assert msg.content[1].descriptor == "application/x-tool-bash"
+
+
+def test_token_count_arithmetic() -> None:
+    """``__add__`` and ``__sub__`` are pointwise on all four counters."""
+    a = TokenCount(
+        input_tokens=10,
+        output_tokens=20,
+        cache_creation_tokens=30,
+        cache_read_tokens=40,
+    )
+    b = TokenCount(
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_tokens=3,
+        cache_read_tokens=4,
+    )
+    assert a + b == TokenCount(
+        input_tokens=11,
+        output_tokens=22,
+        cache_creation_tokens=33,
+        cache_read_tokens=44,
+    )
+    assert a - b == TokenCount(
+        input_tokens=9,
+        output_tokens=18,
+        cache_creation_tokens=27,
+        cache_read_tokens=36,
+    )

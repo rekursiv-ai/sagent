@@ -58,9 +58,12 @@ class ActivityHandler(InlineHandler):
 
     - ``text/x-model-call``: mark a call as active; record start time.
     - ``text/plain``: accumulate streamed chars.
-    - ``text/x-stream-end``: end of streamed text for this call.
-    - ``multipart/x-model-message``: model call complete -- accumulate
-      elapsed, reset live counters.
+    - ``text/x-stream-end``: model call done (or cancelled / round-limited);
+      accumulate elapsed and reset live counters. Reset must hang off
+      ``text/x-stream-end`` rather than ``multipart/x-model-message``
+      because the cancel path in ``ModelCallHandler`` emits stream-end
+      but never the model-message; using model-message would leave
+      ``active`` stuck True after ``/abort``.
 
     The ordering inside ``core_handlers`` puts ``ActivityHandler``
     before the spawned ``ModelCallHandler`` so ``active`` flips True
@@ -71,7 +74,6 @@ class ActivityHandler(InlineHandler):
         "text/x-model-call",
         "text/plain",
         "text/x-stream-end",
-        "multipart/x-model-message",
     )
 
     @override
@@ -87,8 +89,6 @@ class ActivityHandler(InlineHandler):
             tracker.live_response_chars += len(str(msg.content))
             return
         if msg.descriptor == "text/x-stream-end":
-            return
-        if msg.descriptor == "multipart/x-model-message":
             if tracker.active:
                 tracker.elapsed_seconds += (
                     asyncio.get_running_loop().time() - tracker.current_call_start

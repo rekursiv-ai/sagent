@@ -1,6 +1,6 @@
 """Slash-command parsing shared by the active and idle REPL paths.
 
-Single source of truth for ``/clear``, ``/compact``, ``/uncompact``,
+Single source of truth for ``/clear``, ``/compact``, ``/recompact``,
 ``/model``, ``/provider``, ``/abort``, ``/login``, ``/quit``. Both
 ``keybindings._kb_submit`` (active path: a model call or tool batch is
 running) and the REPL input pump (idle path: prompt has returned)
@@ -85,13 +85,13 @@ def parse_slash(line: str) -> SlashAction | None:
             content=arg,
             echo=f"[/compact] queued{note}",
         )
-    arg = _arg_after("/uncompact", stripped)
+    arg = _arg_after("/recompact", stripped)
     if arg is not None:
         note = f" ({arg})" if arg else ""
         return SlashAction(
-            descriptor="text/x-uncompact-request",
+            descriptor="text/x-recompact-request",
             content=arg,
-            echo=f"[/uncompact] queued{note}",
+            echo=f"[/recompact] queued{note}",
         )
     arg = _arg_after("/model", stripped)
     if arg is not None:
@@ -141,11 +141,14 @@ def parse_slash(line: str) -> SlashAction | None:
             descriptor="text/x-error",
             content=(
                 f"unknown command: {cmd}. Supported: "
-                "/help /clear /compact /uncompact /model /provider"
+                "/help /clear /compact /recompact /model /provider"
                 " /login /tasks /break /abort /quit"
             ),
         )
-    return SlashAction(descriptor="text/x-user-message", content=line)
+    # Strip user input so the active and idle REPL paths post identical
+    # inbox content for the same typed line. Without this both call sites
+    # have to re-decide a normalization policy and they disagree.
+    return SlashAction(descriptor="text/x-user-message", content=stripped)
 
 
 def dispatch(agent: Agent, action: SlashAction) -> None:
@@ -168,7 +171,7 @@ def supported_descriptors() -> Iterable[str]:
         "text/x-help-request",
         "text/x-tasks-request",
         "text/x-compact-request",
-        "text/x-uncompact-request",
+        "text/x-recompact-request",
         "text/x-model-switch-request",
         "text/x-break",
         "text/x-abort",

@@ -40,7 +40,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -64,7 +64,7 @@ from sagent.custom_types import (
     Tool,
 )
 from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import json_freeze
+from sagent.lib.json import json_freeze, json_unfreeze
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
 from sagent.repl import run_repl
@@ -370,8 +370,12 @@ def _parse_cli_args(
         dest="input_format",
         choices=["text", "stream-json"],
         default="text",
-        help="Input format: text (default) or stream-json (NDJSON from stdin).",
+        help=(
+            "Input format for headless mode: text (default) or stream-json"
+            ' (NDJSON of {"prompt": ...} objects, joined with blank lines).'
+        ),
     )
+
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -483,34 +487,59 @@ async def _with_signals(
     First signal: post ``text/x-quit`` to ``agent.inbox`` and let the
     dispatch loop drain on its own. Mirrors typing ``/quit`` from the
     REPL but works when prompt-toolkit isn't capturing input (between
-    turns, during shutdown drain, headless mode).
+    turns, during shutdown drain).
 
     Second signal: ``os._exit(1)``. Skips ``atexit`` cleanup so a sync
     tool wedged in ``asyncio.to_thread`` can't block process exit on a
     ``ThreadPoolExecutor.join``. The user already asked twice; honor it.
 
+    Headless note: the asyncio handler is suspended inside
+    :func:`_run_headless` while the initial stdin read is blocked --
+    ``to_thread`` cannot be cancelled mid-read, so during that window
+    the default Python KeyboardInterrupt is what gets the user out.
+
     Modeled on ``loop/experimental/switchboard/hub.py:828``.
     """
     loop = asyncio.get_running_loop()
-    triggered = False
-
-    def _on_signal() -> None:
-        nonlocal triggered
-        if triggered:
-            os._exit(1)
-        triggered = True
-        _ = agent.inbox.put_left(TextMessage("", QUIT_SENTINEL))
-
+    handler = _quit_handler(agent)
     for sig in (signal.SIGINT, signal.SIGTERM):
         # Windows / non-mainthread runners don't support add_signal_handler.
         with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, _on_signal)
+            loop.add_signal_handler(sig, handler)
     try:
         await coro
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(NotImplementedError, ValueError):
+            with contextlib.suppress(NotImplementedError, RuntimeError):
                 _ = loop.remove_signal_handler(sig)
+
+
+def _parse_stream_json(raw: str) -> str:
+    """Parse NDJSON stdin: each non-empty line is ``{"prompt": "..."}``.
+
+    Joins prompt fields with blank lines. Raises ``ValueError`` on
+    unparseable JSON or ``TypeError`` on the wrong shape, so programmatic
+    clients see a hard failure instead of silently wrong behavior; the
+    caller maps that to an exit code.
+    """
+    prompts: list[str] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj: object = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
+        if not isinstance(obj, dict):
+            raise TypeError("stream-json input requires JSON objects per line.")
+        # cast: isinstance narrows to dict but can't parameterize key type.
+        # JSON deserialization guarantees str keys, so this assumption holds.
+        parsed = json_unfreeze(cast(Mapping[str, object], obj))
+        p = parsed.get("prompt")
+        if isinstance(p, str) and p:
+            prompts.append(p)
+    return "\n\n".join(prompts)
 
 
 async def _run_headless(
@@ -522,22 +551,45 @@ async def _run_headless(
     """Non-interactive execution for piped/scripted usage.
 
     Reads stdin via ``asyncio.to_thread`` so the asyncio event loop
-    keeps iterating while the read is blocked. Without this, an idle
-    stdin starves the SIGINT / SIGTERM handler installed by
-    :func:`_with_signals` and Ctrl+C can't unstick the process.
+    keeps iterating while the read is blocked. The asyncio signal
+    handler from :func:`_with_signals` is suspended for the duration
+    of the read because ``to_thread`` cannot be cancelled mid-read --
+    Python's default SIGINT handler (KeyboardInterrupt) is what gets
+    the user out. Once the prompt is read and the agent run starts,
+    the asyncio handlers take over and the first signal posts a
+    graceful ``text/x-quit``.
     """
-    raw = await asyncio.to_thread(sys.stdin.read)
+    loop = asyncio.get_running_loop()
+    # Suspend the asyncio signal handler so SIGINT during the blocked
+    # stdin read raises KeyboardInterrupt instead of being swallowed
+    # by ``add_signal_handler`` (which would post QUIT to an inbox no
+    # one reads pre-prompt). Restored before agent.run() so the
+    # graceful path is active during the actual work.
+    suspended: list[signal.Signals] = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.remove_signal_handler(sig)
+            suspended.append(sig)
+    try:
+        raw = await asyncio.to_thread(sys.stdin.read)
+    except KeyboardInterrupt:
+        # Unix convention: a process killed by signal N exits with
+        # ``128 + N``. SIGINT is signal 2, so 130. Shells interpret
+        # this as "interrupted by Ctrl+C" -- scripts wrapping the
+        # headless mode see the same exit code as any other
+        # interrupted command.
+        sys.stderr.write("Interrupted before input was provided.\n")
+        sys.exit(130)
+    finally:
+        for sig in suspended:
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _quit_handler(agent))
     if input_format == "stream-json":
-        prompts: list[str] = []
-        for raw_line in raw.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            p = obj.get("prompt", "")
-            if p:
-                prompts.append(p)
-        prompt = "\n\n".join(prompts)
+        try:
+            prompt = _parse_stream_json(raw)
+        except (ValueError, TypeError) as e:
+            sys.stderr.write(f"Error: {e}\n")
+            sys.exit(1)
     else:
         prompt = raw.strip()
     if not prompt:
@@ -565,9 +617,44 @@ async def _run_headless(
         sys.stdout.write("\n")
 
 
+def _quit_handler(agent: Agent) -> Callable[[], None]:
+    """Return a signal handler that posts ``text/x-quit`` once, then exits.
+
+    Mirrors :func:`_with_signals`' two-strikes contract for
+    re-installation after a signal-handler suspension.
+    """
+    triggered = False
+
+    def _on_signal() -> None:
+        nonlocal triggered
+        if triggered:
+            os._exit(1)
+        triggered = True
+        _ = agent.inbox.put_left(TextMessage("", QUIT_SENTINEL))
+
+    return _on_signal
+
+
 def main() -> None:
     """Parse args and launch the REPL or headless runner."""
-    parser = argparse.ArgumentParser(description="Interactive CLI agent.")
+    parser = argparse.ArgumentParser(
+        description="CLI agent (REPL or headless).",
+        epilog=(
+            "modes:\n"
+            "  tty stdin       interactive REPL\n"
+            "  non-tty stdin   headless one-shot (read prompt from stdin to EOF)\n"
+            "\n"
+            "examples:\n"
+            "  sagent                                  # REPL\n"
+            "  echo 'fix the bug' | sagent             # headless, text in, text out\n"
+            "  sagent < prompt.txt                     # headless, text from file\n"
+            "  sagent --output-format json < p.txt     # text in, JSON result out\n"
+            "  sagent --input-format stream-json \\\n"
+            "         --output-format stream-json \\\n"
+            "         < prompts.ndjson                 # NDJSON in, NDJSON events out\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     args, remaining = _parse_cli_args(parser)
     if remaining == ["login"]:
         _do_login(args)
@@ -590,7 +677,9 @@ def main() -> None:
     )
     compactor = SummaryCompactor() if args.compact else None
 
-    sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
+    headless = not sys.stdin.isatty()
+    if not headless:
+        sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
 
     session_dir = None if args.no_session else _resolve_session_dir(args)
 
@@ -601,7 +690,8 @@ def main() -> None:
         agent_tools.append(
             Advisor(model=advisor_model, max_uses=args.advisor_max_uses),
         )
-        sys.stderr.write(f"[advisor] {advisor_model.model_id}\n")
+        if not headless:
+            sys.stderr.write(f"[advisor] {advisor_model.model_id}\n")
 
     agent = Agent(
         name=args.name,
@@ -625,7 +715,11 @@ def main() -> None:
     if args.max_response_tokens is not None:
         agent.max_response_tokens = args.max_response_tokens
     agent.tool_state.additional_dirs = list(args.add_dir)
-    if args.output_format == "text" and args.input_format == "text":
+    if not headless:
+        if args.output_format != "text":
+            sys.stderr.write(
+                "Note: --output-format is ignored in interactive REPL mode.\n"
+            )
         asyncio.run(_with_signals(agent, run_repl(agent, history=args.history)))
     else:
         asyncio.run(

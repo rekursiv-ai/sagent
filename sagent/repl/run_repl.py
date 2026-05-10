@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import asyncio
 import contextlib
 import functools
+import logging
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -44,6 +45,9 @@ from sagent.repl.toolbar import render_toolbar
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
+
+
+logger = logging.getLogger(__name__)
 
 
 _DEFAULT_HISTORY = Path.home() / ".sagent_history"
@@ -107,11 +111,15 @@ async def run_repl(
         try:
             await agent.run_loop()
         finally:
-            # Pump may still be blocked on stdin; cancel and let the
-            # OS reclaim the terminal. ``with contextlib.suppress``
-            # so a stray exception during shutdown doesn't mask the
-            # real reason the loop exited.
+            # Pump may still be blocked on stdin; cancel and await.
+            # CancelledError is the expected shutdown path; any other
+            # exception is a pump bug -- log it via the logger so the
+            # primary failure (whatever made ``run_loop`` exit) still
+            # propagates.
             pump_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await pump_task
+            try:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump_task
+            except Exception:
+                logger.exception("REPL input pump raised during shutdown")
             _ = agent.background_tasks.pop(REPL_PUMP_KEY, None)

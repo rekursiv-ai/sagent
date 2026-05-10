@@ -277,6 +277,15 @@ class TokenCount:
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
         )
 
+    def __sub__(self, other: TokenCount) -> TokenCount:
+        return TokenCount(
+            input_tokens=self.input_tokens - other.input_tokens,
+            output_tokens=self.output_tokens - other.output_tokens,
+            cache_creation_tokens=self.cache_creation_tokens
+            - other.cache_creation_tokens,
+            cache_read_tokens=self.cache_read_tokens - other.cache_read_tokens,
+        )
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:

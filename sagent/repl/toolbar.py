@@ -48,7 +48,7 @@ def render_toolbar(agent: Agent) -> str:
         agent.live_model_response_tokens if activity.active else 0
     )
     bracket = (
-        f"[{format_elapsed(activity.elapsed_seconds)}"
+        f"[{format_elapsed(agent.total_active_elapsed_seconds)}"
         f" {format_count(tokens.input_tokens)}↑"
         f" {format_count(output_tokens)}↓"
         f" {format_count(tokens.cache_creation_tokens)}↟"

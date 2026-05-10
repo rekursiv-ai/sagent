@@ -22,7 +22,9 @@ just checks for the ``bash_match`` protocol.
 
 from __future__ import annotations
 
-from sagent.tools.agent_self import AgentSelf
+from sagent.tools.agent_self import (
+    AgentSelf,
+)
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.background_task import BackgroundTask
