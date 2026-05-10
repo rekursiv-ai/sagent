@@ -660,7 +660,9 @@ def _agent_option_lines(agent: Agent) -> list[str]:
 
 def _session_lines(agent: Agent) -> list[str]:
     """Format session identity and path."""
-    lines = [f"Session ID:         {agent.session_id}"]
     if agent.session_dir is not None:
+        lines = [f"Session:            {agent.session_dir.name}"]
         lines.append(f"Session dir:        {agent.session_dir}")
+    else:
+        lines = [f"Session:            {agent.session_id} (ephemeral)"]
     return lines

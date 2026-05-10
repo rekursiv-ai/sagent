@@ -23,6 +23,7 @@ import dataclasses
 import functools
 import logging
 import shlex
+import sys
 import time
 
 from prompt_toolkit import PromptSession
@@ -124,13 +125,8 @@ async def run_repl(
             except Exception:
                 logger.exception("REPL input pump raised during shutdown")
             _ = agent.background.pop(REPL_PUMP_KEY, None)
-            if agent.session_dir is not None:
-                session_hash = agent.session_dir.name
-                console.print(
-                    f"[session {session_hash}]",
-                    style="dim",
-                    highlight=False,
-                )
+    if agent.session_dir is not None:
+        sys.stderr.write(f"[session {agent.session_dir.name}]\n")
 
 
 def do_switch_model(
