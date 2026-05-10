@@ -687,14 +687,20 @@ class AgentSpawn:
     ) -> Path | None:
         """Per-child subdir under ``session_root_dir``, or None.
 
-        Shape: ``<session_root_dir>/<parent_session_id>/<child_uuid>/``.
-        When no root is configured, the child runs ephemerally (no
-        transcript).
+        Shape: ``<root>/<parent_session_id>/<child_uuid>/``.
+
+        Resolution order for root:
+        1. Explicit ``session_root_dir`` from factory construction.
+        2. Parent agent's ``session_dir`` (inherits logging from parent).
+        3. ``None`` → ephemeral (no transcript).
         """
-        if self._session_root_dir is None:
+        root = self._session_root_dir
+        if root is None and parent_agent is not None:
+            root = parent_agent.session_dir
+        if root is None:
             return None
         parent_id = parent_agent.session_id if parent_agent is not None else "root"
-        return self._session_root_dir / parent_id / str(uuid.uuid4())
+        return root / parent_id / str(uuid.uuid4())
 
 
 def _pick_field(
