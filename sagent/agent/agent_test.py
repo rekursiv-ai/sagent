@@ -11,6 +11,7 @@ the corresponding ``tools/*_test.py`` and ``providers/*_test.py``.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import cast
 
 import asyncio
@@ -19,9 +20,12 @@ import contextlib
 import pytest
 
 from sagent.agent import Agent, PendingOp
+from sagent.agent.agent import _MAX_UNSAVED_EVENTS
 from sagent.custom_types import (
+    Compactor,
     ErrorEvent,
     Event,
+    Message,
     Model,
     ModelRequest,
     ModelResponse,
@@ -223,6 +227,89 @@ class TestCancellation:
             await consumer
         kinds = [type(e).__name__ for e in events]
         assert "InterruptedEvent" in kinds
+
+
+class TestErrorEventPublication:
+    """save/compaction/recompact failures must publish ErrorEvent."""
+
+    def test_save_failure_publishes_error_event(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent = _build_agent(_MockModel())
+        agent.session_dir = tmp_path
+        agent._event_log = [{"ts": 0.0} for _ in range(_MAX_UNSAVED_EVENTS + 1)]
+        events: list[Event] = []
+        agent.observers.append(events.append)
+
+        def boom(*, clear: bool = False) -> None:
+            del clear
+            raise OSError("disk full")
+
+        monkeypatch.setattr(agent, "save_session", boom)
+        agent.log_event("trigger")
+
+        errs = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(errs) == 1
+        assert "event log save failed" in errs[0].text
+        assert "OSError" in errs[0].text
+
+    async def test_compaction_failure_publishes_error_event(self) -> None:
+        agent = _build_agent(_MockModel())
+        events: list[Event] = []
+        agent.observers.append(events.append)
+
+        class _BoomCompactor:
+            async def should_compact(
+                self,
+                input_tokens: int,
+                max_request_tokens: int,
+                max_response_tokens: int = 0,
+            ) -> bool:
+                del input_tokens, max_request_tokens, max_response_tokens
+                return True
+
+            async def compact(self, **kwargs: object) -> list[Message]:
+                del kwargs
+                raise RuntimeError("compactor exploded")
+
+        agent.compactor = cast(Compactor, _BoomCompactor())
+        ok = await agent._do_compact("")
+
+        assert ok is False
+        errs = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(errs) == 1
+        assert "compaction failed" in errs[0].text
+        assert "RuntimeError" in errs[0].text
+
+    async def test_recompact_load_failure_publishes_error_event(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent = _build_agent(_MockModel())
+        agent.session_dir = tmp_path
+        agent.compactor = cast(Compactor, object())
+        agent.compaction_state.compact_count = 1
+        (tmp_path / "pre_compact_0.jsonl").write_text("{}\n", encoding="utf-8")
+        events: list[Event] = []
+        agent.observers.append(events.append)
+
+        def boom(data: object) -> Message:
+            del data
+            raise KeyError("descriptor")
+
+        monkeypatch.setattr(
+            "sagent.agent.agent.load_message",
+            boom,
+        )
+        await agent._do_recompact("")
+
+        errs = [e for e in events if isinstance(e, ErrorEvent)]
+        assert len(errs) == 1
+        assert "recompact transcript load failed" in errs[0].text
+        assert "KeyError" in errs[0].text
 
 
 class TestPublish:
