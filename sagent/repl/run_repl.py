@@ -107,6 +107,16 @@ async def run_repl(
         try:
             await agent.serve_forever()
         finally:
+            agent.shutdown(force=True)
+            bg_tasks = [
+                job.task
+                for job in list(agent.background.values())
+                if not job.task.done()
+            ]
+            for t in bg_tasks:
+                _ = t.cancel()
+            if bg_tasks:
+                await asyncio.gather(*bg_tasks, return_exceptions=True)
             _ = pump_task.cancel()
             try:
                 with contextlib.suppress(asyncio.CancelledError):

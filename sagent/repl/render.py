@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Protocol, cast
 
+import logging
+
 from sagent.custom_types import (
     ChildDoneEvent,
     ChildEvent,
@@ -35,6 +37,9 @@ from sagent.custom_types import (
 )
 from sagent.lib.message import get_queue_id
 from sagent.repl.render_diff import find_stable_boundary
+
+
+logger = logging.getLogger(__name__)
 
 
 class Printer(Protocol):
@@ -189,6 +194,15 @@ class RenderObserver:
         self._child_items: dict[str, list[Message]] = {}
 
     def __call__(self, event: Event) -> None:
+        try:
+            self._dispatch(event)
+        except Exception as e:  # noqa: BLE001 -- display safety net
+            self._printer.write_tool_error(
+                f"render failed for {type(event).__name__}: {type(e).__name__}: {e}",
+            )
+            logger.debug("render observer failed", exc_info=True)
+
+    def _dispatch(self, event: Event) -> None:
         if isinstance(event, UserBarEvent):
             self._printer.write_user_bar(event.text)
         elif isinstance(event, TextChunkEvent):
