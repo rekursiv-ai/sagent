@@ -19,6 +19,7 @@ from sagent.custom_types import (
     TokenCount,
 )
 from sagent.lib.asyncio_collections import Deque
+from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import JSON, json_freeze
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_send import AgentSend, _deliver
@@ -44,8 +45,8 @@ class _FakeAgent:
         self.inbox: Deque[Message] = Deque()
         # Required by the AgentLike protocol so agent_registry typecheck-
         # accepts this stub. Not exercised by the tests in this module.
-        self.tasks: dict[int, asyncio.Task[None]] = {}
-        self.background_tasks: dict[str, BackgroundTaskEntry] = {}
+        self.work: asyncio.Task[object] | None = None
+        self.background: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(name: str) -> _FakeAgent:
@@ -256,7 +257,10 @@ class TestAgentRegistration:
         model = _MockModel()
         agent = Agent(model=model, system="test", name="root")
         assert "root" not in agent_registry
-        await agent.run(json_freeze({"prompt": "hi"}))
+        # Drive one message through the same loop entry the REPL uses.
+        agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+        agent.shutdown(force=False)
+        await agent.serve_forever()
         assert "root" not in agent_registry
 
     @pytest.mark.anyio
@@ -316,7 +320,9 @@ class TestAgentRegistration:
             ]
         )
         agent = Agent(model=model, system="test", name="myagent", tools=[capture])
-        await agent.run(json_freeze({"prompt": "go"}))
+        agent.inbox.put(TextMessage("go", "text/x-user-message"))
+        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+        await agent.serve_forever()
         assert captured == [True]
 
 

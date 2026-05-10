@@ -14,19 +14,19 @@ from __future__ import annotations
 import asyncio
 
 from sagent.agent import Agent
-from sagent.custom_types import Message, MultipartMessage, TextMessage
-from sagent.lib.json import json_freeze
+from sagent.custom_types import TextMessage
+from sagent.lib.message import response_text
 from sagent.providers import Anthropic
 from sagent.tools import Bash, Read
 
 
-def _text(msg: Message) -> str:
-    if isinstance(msg, TextMessage):
-        return msg.content
-    if isinstance(msg, MultipartMessage):
-        for p in msg.content:
-            if isinstance(p, TextMessage) and p.descriptor == "text/plain":
-                return p.content
+async def _run_and_get_text(agent: Agent, prompt: str) -> str:
+    """Drive one turn of ``agent.run`` and return the final assistant text."""
+    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            return response_text(m) or "(no text)"
     return "(no text)"
 
 
@@ -44,28 +44,26 @@ async def main() -> None:
     )
 
     print("=== Test 1: Simple bash tool use ===")
-    response = await scientist.run(
-        json_freeze({"prompt": "What Python version is installed? Use bash."}),
+    text = await _run_and_get_text(
+        scientist,
+        "What Python version is installed? Use bash.",
     )
-    print(f"Response: {_text(response)}\n")
+    print(f"Response: {text}\n")
 
     print("=== Test 2: Read a file ===")
-    response = await scientist.run(
-        json_freeze({"prompt": "Read sagent/__init__.py and tell me what it exports."}),
+    text = await _run_and_get_text(
+        scientist,
+        "Read sagent/__init__.py and tell me what it exports.",
     )
-    print(f"Response: {_text(response)}\n")
+    print(f"Response: {text}\n")
 
     print("=== Test 3: Multi-step ===")
-    response = await scientist.run(
-        json_freeze(
-            {
-                "prompt": "List the Python files in"
-                " sagent/ using bash,"
-                " then read the shortest one. Summarize."
-            }
-        ),
+    text = await _run_and_get_text(
+        scientist,
+        "List the Python files in sagent/ using bash, then read the shortest"
+        " one. Summarize.",
     )
-    print(f"Response: {_text(response)}\n")
+    print(f"Response: {text}\n")
 
 
 if __name__ == "__main__":

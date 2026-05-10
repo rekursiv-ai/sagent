@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import dataclasses
 import logging
@@ -12,9 +13,11 @@ from sagent.custom_types import (
     CompactRestorable,
     ContextBudget,
     Message,
+    Model,
     Tool,
 )
 from sagent.lib.compaction import reattach_files
+from sagent.lib.descriptors import is_binary, is_multipart
 from sagent.lib.message import append_to_first_user_message
 from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import ToolState
@@ -168,3 +171,37 @@ async def post_compact_enrich(
         inject_background_status(messages, background_tasks)
     except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
         logger.warning("inject_background_status failed", exc_info=True)
+
+
+def estimate_total_tokens(
+    system: str,
+    messages: list[Message],
+    model: Model,
+) -> int:
+    """Estimate total tokens for a (system, messages) pair.
+
+    Args:
+      system: System prompt text.
+      messages: Conversation history.
+      model: Model used for token estimation.
+
+    Returns:
+      total: Estimated input token count.
+
+    """
+    total = model.estimate_text_token_count(system)
+    for msg in messages:
+        total += _estimate_message_tokens(msg, model)
+    return total
+
+
+def _estimate_message_tokens(msg: Message, model: Model) -> int:
+    """Recursively estimate tokens for one message; handles multipart + binary."""
+    if is_multipart(msg.descriptor):
+        return sum(
+            _estimate_message_tokens(p, model)
+            for p in cast("tuple[Message, ...]", msg.content)
+        )
+    if is_binary(msg.descriptor):
+        return model.estimate_image_token_count(cast("bytes", msg.content))
+    return model.estimate_text_token_count(str(msg.content))

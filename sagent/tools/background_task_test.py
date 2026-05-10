@@ -19,13 +19,30 @@ from sagent.custom_types import (
     TokenCount,
 )
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive, tool_call_message
+from sagent.lib.message import (
+    get_directive,
+    response_text,
+    tool_call_message,
+)
 from sagent.testing import MockModelCaps
 from sagent.tools.background_task import (
     BackgroundTask,
     BackgroundTaskEntry,
 )
 from sagent.tools.core import current_agent_var
+
+
+# -- v3-compat helper --------------------------------------------------
+
+
+async def _run(agent: Agent, prompt: str) -> Message:
+    """Drain ``run`` and return the last assistant text as a Message."""
+    async for _ev in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            return TextMessage(response_text(m), "text/plain")
+    return TextMessage("", "text/plain")
 
 
 # -- Factories ---------------------------------------------------------
@@ -172,7 +189,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # Placeholder was appended to messages.
         placeholders = [
             m
@@ -206,9 +223,9 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_SlowTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # Wait for the background task to finish (may already have).
-        job = agent.background_tasks.get("t1")
+        job = agent.background.get("t1")
         if job is not None:
             await job.task
         # The bg post becomes a text/x-user-message either still in
@@ -240,7 +257,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # delay=0 still backgrounds (delay implies background).
         placeholders = [
             m for m in agent.messages if "Running in background" in str(m.content)
@@ -267,7 +284,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        result = await agent.run(json_freeze({"prompt": "go"}))
+        result = await _run(agent, "go")
         assert str(result.content) == "done"
         # No placeholders -- tool ran synchronously.
         placeholders = [
@@ -313,7 +330,7 @@ class TestBackgroundTaskTool:
             return TextMessage("", "text/plain")
 
         task = asyncio.create_task(_long_wait())
-        agent.background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="slow",
             queue_id="j1",
@@ -334,7 +351,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "Cancelled" in str(result.content)
-            assert "j1" not in agent.background_tasks
+            assert "j1" not in agent.background
             assert task.cancelling()
         finally:
             current_agent_var.reset(token)
@@ -349,7 +366,7 @@ class TestBackgroundTaskTool:
             return TextMessage("the-result", "text/plain")
 
         task = asyncio.create_task(_delayed_result())
-        agent.background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="echo",
             queue_id="j1",
@@ -370,7 +387,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "the-result" in str(result.content)
-            assert "j1" not in agent.background_tasks
+            assert "j1" not in agent.background
         finally:
             current_agent_var.reset(token)
 

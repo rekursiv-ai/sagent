@@ -6,7 +6,8 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.custom_types import TextMessage
+from sagent.lib.message import response_text
 from sagent.providers import Google
 from sagent.tools import tool
 
@@ -24,17 +25,16 @@ async def main() -> None:
         system="Use WordCount whenever exact word counts matter.",
         tools=[word_count],
     )
-    result = await agent.run(
-        json_freeze(
-            {
-                "prompt": (
-                    "How many words are in 'typed agents compose cleanly'?"
-                    " Use the tool, then answer in one sentence."
-                ),
-            }
-        )
+    prompt = (
+        "How many words are in 'typed agents compose cleanly'?"
+        " Use the tool, then answer in one sentence."
     )
-    sys.stdout.write(f"{result.content}\n")
+    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            sys.stdout.write(f"{response_text(m)}\n")
+            return
 
 
 if __name__ == "__main__":

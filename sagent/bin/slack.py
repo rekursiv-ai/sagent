@@ -82,13 +82,25 @@ from sagent.bin.cli import (
 )
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
+    ChildDoneEvent,
+    ChildEvent,
+    ErrorEvent,
+    InterruptedEvent,
+    JsonMessage,
     Message,
     ModelSpec,
+    MultipartMessage,
+    StatusUpdateEvent,
+    TextChunkEvent,
     TextMessage,
+    ThinkingEvent,
+    ToolLabelEvent,
+    ToolResultEvent,
+    UserBarEvent,
     is_message,
 )
 from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import MutableJSON
+from sagent.lib.json import MutableJSON, json_freeze
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
@@ -642,8 +654,14 @@ class SlackAdapter:
             e: asyncio.Queue[Message | None] = events,
         ) -> None:
             try:
-                async for event in c.run_forever():
-                    e.put_nowait(event)
+                fwd = _make_event_forwarder(e)
+                c.observers.append(fwd)
+                try:
+                    await c.serve_forever()
+                finally:
+                    if fwd in c.observers:
+                        c.observers.remove(fwd)
+                    e.put_nowait(None)
             finally:
                 agent_registry.pop(c.name, None)
 
@@ -774,6 +792,61 @@ async def _flush_log(
         chunk_len += line_len
     if chunk:
         await slack.send(channel_id, "\n".join(chunk))
+
+
+def _make_event_forwarder(
+    queue: asyncio.Queue[Message | None],
+) -> Callable[[object], None]:
+    """Build an agent observer that translates v3 ``Event`` payloads to messages.
+
+    Reuses the v2 ``Message`` shape so the existing ``log_tap`` /
+    ``_render_event`` chain keeps working unchanged.
+    """
+
+    def _translate(ev: object) -> Message | None:
+        if isinstance(ev, TextChunkEvent):
+            return TextMessage(ev.text, "text/plain")
+        if isinstance(ev, ThinkingEvent):
+            return TextMessage(ev.text, "text/x-thinking")
+        if isinstance(ev, ToolLabelEvent):
+            return TextMessage(ev.text, "text/x-tool-label")
+        if isinstance(ev, ToolResultEvent):
+            return ev.msg
+        if isinstance(ev, ErrorEvent):
+            return TextMessage(ev.text, "text/x-error")
+        if isinstance(ev, InterruptedEvent):
+            return TextMessage("", "text/x-interrupted")
+        if isinstance(ev, StatusUpdateEvent):
+            return TextMessage(ev.text, "text/x-status-update")
+        if isinstance(ev, UserBarEvent):
+            return TextMessage(ev.text, "text/x-user-message")
+        if isinstance(ev, ChildEvent):
+            inner = _translate(ev.inner)
+            if inner is None:
+                return None
+            return MultipartMessage(
+                (TextMessage(ev.label, "text/x-agent-label"), inner),
+                "multipart/x-child-event",
+            )
+        if isinstance(ev, ChildDoneEvent):
+            return JsonMessage(
+                json_freeze(
+                    {
+                        "elapsed": ev.elapsed,
+                        "model_response_tokens": ev.tokens,
+                        "cost_usd": ev.cost,
+                    },
+                ),
+                "application/x-child-done",
+            )
+        return None
+
+    def _fwd(ev: object) -> None:
+        msg = _translate(ev)
+        if msg is not None:
+            queue.put_nowait(msg)
+
+    return _fwd
 
 
 def _render_event(event: Message) -> str | None:

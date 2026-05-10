@@ -1,23 +1,19 @@
-"""Agent: deque + handler registry + dispatch loop.
+"""Agent: actor-model with one foreground slot, observer fan-out, mailbox.
 
-The agent IS its deque. Every signal -- user input, model response,
-tool batch, abort, quit -- is a message routed through the dispatch
-loop to descriptor-keyed handlers. See ``agent.py`` for the runtime
-and ``handlers/`` for the standard handler set.
+Three primitives, one role each:
 
-Session persistence
--------------------
-``Agent.save_session`` serializes ``history`` and metadata to
-``session.jsonl`` after every model response (via
-:class:`SessionSaveHandler`). Manual triggers (``set_status``,
-``ClearHandler``) save immediately so the on-disk state never
-trails the in-memory state by more than one model call.
+- ``self.inbox``: external work queue (``Deque[Message]``)
+- ``self.work``: the one foreground task (``asyncio.Task | None``)
+- ``self.observers``: synchronous fan-out callables for ``Event`` payloads
+
+See ``docs/private/agent_refactor.md`` for the design rationale.
 """
 
 from sagent.agent.agent import (
     ERROR_MAX_TOOL_CALL_ROUNDS,
+    ActivityTracker,
     Agent,
-    RunHandle,
+    PendingOp,
     SystemPrompt,
 )
 from sagent.compactor import MICROCOMPACT_KEEP_RECENT
@@ -28,9 +24,10 @@ from sagent.tools.background_task import BackgroundTaskEntry
 __all__ = [
     "ERROR_MAX_TOOL_CALL_ROUNDS",
     "MICROCOMPACT_KEEP_RECENT",
+    "ActivityTracker",
     "Agent",
     "BackgroundTaskEntry",
     "ContextBudget",
-    "RunHandle",
+    "PendingOp",
     "SystemPrompt",
 ]

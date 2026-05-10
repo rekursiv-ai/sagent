@@ -8,7 +8,7 @@ import sys
 from sagent.agent import Agent
 from sagent.custom_types import Message, TextMessage
 from sagent.lib.json import json_freeze
-from sagent.lib.message import get_directive
+from sagent.lib.message import get_directive, response_text
 from sagent.providers import Google
 
 
@@ -58,17 +58,16 @@ async def main() -> None:
         system="Use CharacterCount whenever exact string length matters.",
         tools=[CharacterCount()],
     )
-    result = await agent.run(
-        json_freeze(
-            {
-                "prompt": (
-                    "How many characters are in 'agentic systems'? Use the"
-                    " tool, then answer in one sentence."
-                ),
-            }
-        )
+    prompt = (
+        "How many characters are in 'agentic systems'? Use the"
+        " tool, then answer in one sentence."
     )
-    sys.stdout.write(f"{result.content}\n")
+    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            sys.stdout.write(f"{response_text(m)}\n")
+            return
 
 
 if __name__ == "__main__":

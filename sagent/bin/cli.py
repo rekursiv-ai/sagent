@@ -40,7 +40,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -57,14 +57,23 @@ from sagent import providers, sessions, tools
 from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
+    ErrorEvent,
+    InterruptedEvent,
+    Message,
     Model,
     ModelSpec,
     Provider,
+    StatusUpdateEvent,
+    TextChunkEvent,
     TextMessage,
+    ThinkingEvent,
     Tool,
+    ToolLabelEvent,
+    ToolResultEvent,
 )
 from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import json_freeze, json_unfreeze
+from sagent.lib.json import json_unfreeze
+from sagent.lib.message import response_text
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
 from sagent.repl import run_repl
@@ -596,25 +605,54 @@ async def _run_headless(
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)
 
-    handle = agent.run(json_freeze({"prompt": prompt}))
+    user_msg = TextMessage(prompt, "text/x-user-message")
     if output_format == "stream-json":
-        async for event in handle:
-            if event.descriptor != "application/x-done":
-                json.dump(
-                    {"descriptor": event.descriptor, "content": str(event.content)},
-                    sys.stdout,
-                )
-                sys.stdout.write("\n")
-    result = await handle
+        async for event in agent.run(user_msg):
+            descriptor, content = _event_to_jsonable(event)
+            if descriptor is None:
+                continue
+            json.dump({"descriptor": descriptor, "content": content}, sys.stdout)
+            sys.stdout.write("\n")
+    else:
+        async for _event in agent.run(user_msg):
+            pass
+    result_text = _last_assistant_text(agent.history)
     if output_format == "stream-json":
-        json.dump({"content": str(result.content), "descriptor": "result"}, sys.stdout)
+        json.dump({"content": result_text, "descriptor": "result"}, sys.stdout)
         sys.stdout.write("\n")
     elif output_format == "json":
-        json.dump({"content": str(result.content)}, sys.stdout)
+        json.dump({"content": result_text}, sys.stdout)
         sys.stdout.write("\n")
     else:
-        sys.stdout.write(str(result.content))
+        sys.stdout.write(result_text)
         sys.stdout.write("\n")
+
+
+def _event_to_jsonable(event: object) -> tuple[str | None, str]:
+    """Translate one ``Event`` into a stream-json (descriptor, content) pair."""
+    if isinstance(event, TextChunkEvent):
+        return "text/plain", event.text
+    if isinstance(event, ThinkingEvent):
+        return "text/x-thinking", event.text
+    if isinstance(event, ToolLabelEvent):
+        return "text/x-tool-label", event.text
+    if isinstance(event, ToolResultEvent):
+        return "multipart/x-tool-result", str(event.msg.content)
+    if isinstance(event, ErrorEvent):
+        return "text/x-error", event.text
+    if isinstance(event, InterruptedEvent):
+        return "text/x-interrupted", ""
+    if isinstance(event, StatusUpdateEvent):
+        return "text/x-status-update", event.text
+    return None, ""
+
+
+def _last_assistant_text(history: Sequence[Message]) -> str:
+    """Return the final text from the last assistant message in ``history``."""
+    for msg in reversed(history):
+        if msg.descriptor == "multipart/x-model-message":
+            return response_text(msg)
+    return ""
 
 
 def _quit_handler(agent: Agent) -> Callable[[], None]:

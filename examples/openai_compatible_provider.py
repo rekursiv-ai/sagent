@@ -9,7 +9,8 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.custom_types import TextMessage
+from sagent.lib.message import response_text
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import OpenAICompat
 
@@ -40,8 +41,14 @@ async def main() -> None:
         system="Answer concisely.",
         tools=[],
     )
-    result = await agent.run(json_freeze({"prompt": "Say hello from Sagent."}))
-    sys.stdout.write(f"{result.content}\n")
+    async for _event in agent.run(
+        TextMessage("Say hello from Sagent.", "text/x-user-message"),
+    ):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            sys.stdout.write(f"{response_text(m)}\n")
+            return
 
 
 if __name__ == "__main__":
