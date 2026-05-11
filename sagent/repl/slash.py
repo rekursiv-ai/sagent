@@ -17,27 +17,22 @@ class Quit:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class Abort:
-    """User typed ``/abort [<label>]``; cancel step + drain queue."""
+class Halt:
+    """User typed ``/halt [<label>]`` (or Ctrl+C); halt the round loop.
+
+    Cancels the in-flight model call, expunges any zombie response,
+    requeues drained items, and arms ``block_until_user`` on the inbox.
+    Pre-existing tool tasks keep running (use :class:`Kill` to stop them).
+    """
 
     target: str = ""
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class AbortAll:
-    """User typed ``/abort all``; cancel + drain + kill visible bg jobs."""
+class Kill:
+    """User typed ``/kill <qid|all>``; cancel one or all outstanding tool tasks."""
 
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class Break:
-    """User typed ``/break [<label>]``; cancel current step only."""
-
-    target: str = ""
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class BreakAll:
-    """User typed ``/break all``; cancel current step on every agent."""
+    target: str  # queue-id or ``"all"``
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -97,10 +92,8 @@ class Unknown:
 
 type SlashAction = (
     Quit
-    | Abort
-    | AbortAll
-    | Break
-    | BreakAll
+    | Halt
+    | Kill
     | Clear
     | Compact
     | Recompact
@@ -118,8 +111,7 @@ QUIT_WORDS: frozenset[str] = frozenset({"/quit"})
 
 # Public list of supported commands; drives the unknown-command help line.
 _SUPPORTED = (
-    "/help /clear /compact /recompact /model /provider /login /tasks "
-    "/break /abort /quit"
+    "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill /quit"
 )
 
 
@@ -159,16 +151,14 @@ def parse_slash(line: str) -> SlashAction | None:
     arg = _arg_after("/provider", stripped)
     if arg is not None:
         return ModelSwitch(args=f"--provider {arg}" if arg else "")
-    arg = _arg_after("/break", stripped)
+    arg = _arg_after("/halt", stripped)
     if arg is not None:
-        if arg == "all":
-            return BreakAll()
-        return Break(target=arg)
-    arg = _arg_after("/abort", stripped)
+        return Halt(target=arg)
+    arg = _arg_after("/kill", stripped)
     if arg is not None:
-        if arg == "all":
-            return AbortAll()
-        return Abort(target=arg)
+        if not arg:
+            return Unknown(text="/kill requires <qid> or 'all'")
+        return Kill(target=arg)
     if stripped.startswith("/"):
         cmd = stripped.split(maxsplit=1)[0]
         return Unknown(text=f"unknown command: {cmd}. Supported: {_SUPPORTED}")

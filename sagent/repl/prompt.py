@@ -11,8 +11,8 @@ queued (uncommitted) inbox text first and surface a one-line preview
 so the user sees what got discarded before the session closes.
 
 Also exposes :func:`dynamic_prompt` -- the callable handed to
-``PromptSession`` so the prompt shows a dim preview of the queued
-tail entry (mirrors v1's ``input_pane.dynamic_prompt``).
+``PromptSession`` so the prompt shows a dim preview of any
+queued-tail follow-ups still in the inbox.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, override
 from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
 
-from sagent.custom_types import Message
+from sagent.agent.inbox import USER_SOURCE
 from sagent.repl.input import InputSource
 from sagent.repl.slash import QUIT_WORDS
 
@@ -73,47 +73,39 @@ class PromptToolkitInputSource(InputSource):
         """Surface and drain any queued inbox text before the loop ends."""
         if self._agent is None:
             return
-        tail = self._agent.inbox.peek_tail()
-        if tail is None or self._console is None:
-            self._agent.inbox.drain()
+        items = self._agent.inbox.drain_nowait()
+        if not items or self._console is None:
             return
+        tail = items[-1].msg
         preview = str(tail.content).replace("\n", " ")[:80]
         self._console.print(
             Text(f"[discarding queued message: {preview}]", style="dim yellow"),
         )
-        self._agent.inbox.drain()
 
 
 def dynamic_prompt(agent: Agent) -> FormattedText:
-    """Build the dynamic prompt with queued follow-up previews.
+    """Build the dynamic prompt with a dim preview of the most recent queued msg.
 
-    Args:
-      agent: Agent whose inbox is inspected for queued text.
+    Only renders when the agent is *busy* (a round is in flight or a
+    cohort hasn't emitted): then the user's typed message is genuinely
+    waiting and the preview is honest UX. When idle, the inbox is being
+    drained immediately and surfacing the message as "queued" during
+    that brief race window is misleading.
 
-    Returns:
-      prompt: Formatted text fragments for prompt-toolkit.
-
+    ``Up`` lifts the preview message back into the buffer for editing.
     """
     parts: list[tuple[str, str]] = []
-    messages = agent.queued_user_messages()
-    if messages:
-        for line in _queued_preview_lines(messages):
-            parts.append(("class:queued", line))
+    is_busy = agent.work is not None or any(
+        not c.emitted
+        for c in agent._active_cohorts  # noqa: SLF001 -- intentional view
+    )
+    if is_busy:
+        item = agent.inbox.peek_by_source(USER_SOURCE)
+        if item is not None and isinstance(item.msg.content, str):
+            parts.append(("class:queued", _collapse_preview(item.msg.content)))
             parts.append(("", "\n"))
     parts.append(("class:prompt", "> "))
     return FormattedText(parts)
-
-
-def _queued_preview_lines(messages: list[Message]) -> list[str]:
-    """Return compact prompt preview lines for queued user messages."""
-    lines = ["Queued follow-up inputs"]
-    shown = messages[:3]
-    lines.extend(f"  ↳ {_collapse_preview(str(msg.content))}" for msg in shown)
-    hidden = len(messages) - len(shown)
-    if hidden:
-        lines.append(f"  … +{hidden} more")
-    lines.append("  Shift+Left edit last queued message")
-    return lines
 
 
 def _collapse_preview(text: str, width: int = 60) -> str:

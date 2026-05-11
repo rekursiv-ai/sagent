@@ -688,7 +688,7 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
         if triggered:
             os._exit(1)
         triggered = True
-        _ = agent.inbox.put_left(TextMessage("", QUIT_SENTINEL))
+        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
 
     return _on_signal
 

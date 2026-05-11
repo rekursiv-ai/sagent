@@ -9,6 +9,7 @@ import asyncio
 import pytest
 
 from sagent.agent import Agent
+from sagent.agent.inbox import Inbox
 from sagent.custom_types import (
     JsonMessage,
     Message,
@@ -18,7 +19,6 @@ from sagent.custom_types import (
     TextMessage,
     TokenCount,
 )
-from sagent.lib.asyncio_collections import Deque
 from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import JSON, json_freeze
 from sagent.testing import MockModelCaps
@@ -42,7 +42,7 @@ class _FakeAgent:
 
     def __init__(self, name: str = "fake") -> None:
         self.name = name
-        self.inbox: Deque[Message] = Deque()
+        self.inbox: Inbox = Inbox()
         # Required by the AgentLike protocol so agent_registry typecheck-
         # accepts this stub. Not exercised by the tests in this module.
         self.work: asyncio.Task[object] | None = None
@@ -120,10 +120,10 @@ class TestRun:
             )
             assert result.descriptor == "text/plain"
             assert "Delivered" in str(result.content)
-            drained = target.inbox.drain()
+            drained = target.inbox.drain_nowait()
             assert len(drained) == 1
-            assert "[from agent]:" in str(drained[0].content)
-            assert "stop editing foo.py" in str(drained[0].content)
+            assert "[from agent]:" in str(drained[0].msg.content)
+            assert "stop editing foo.py" in str(drained[0].msg.content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -159,8 +159,8 @@ class TestRun:
         token = agent_label_var.set("Agent_0")
         try:
             await t.run(_msg(json_freeze({"to": "Agent1", "content": "hey"})))
-            drained = target.inbox.drain()
-            assert "[from Agent_0]:" in str(drained[0].content)
+            drained = target.inbox.drain_nowait()
+            assert "[from Agent_0]:" in str(drained[0].msg.content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -176,7 +176,7 @@ class TestRun:
             )
             assert result.descriptor == "text/plain"
             assert "Scheduled" in str(result.content)
-            assert target.inbox.empty()
+            assert len(target.inbox) == 0
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -184,10 +184,10 @@ class TestRun:
     def test_deliver_callback_formats_message(self) -> None:
         target = _FakeAgent("Agent_0")
         _deliver(target, "agent", "wake up", 60)
-        drained = target.inbox.drain()
+        drained = target.inbox.drain_nowait()
         assert len(drained) == 1
-        assert "[from agent, 60s ago]:" in str(drained[0].content)
-        assert "wake up" in str(drained[0].content)
+        assert "[from agent, 60s ago]:" in str(drained[0].msg.content)
+        assert "wake up" in str(drained[0].msg.content)
 
     def test_deliver_callback_dead_agent(self) -> None:
         _deliver(object(), "agent", "hello", 10)
@@ -202,9 +202,9 @@ class TestRun:
                 _msg(json_freeze({"to": "agent", "content": "note to self"}))
             )
             assert result.descriptor == "text/plain"
-            drained = me.inbox.drain()
+            drained = me.inbox.drain_nowait()
             assert len(drained) == 1
-            assert "[from agent]:" in str(drained[0].content)
+            assert "[from agent]:" in str(drained[0].msg.content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -258,7 +258,7 @@ class TestAgentRegistration:
         agent = Agent(model=model, system="test", name="root")
         assert "root" not in agent_registry
         # Drive one message through the same loop entry the REPL uses.
-        agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+        agent.inbox.send(TextMessage("hi", "text/x-user-message"), source="user")
         agent.shutdown(force=False)
         await agent.serve_forever()
         assert "root" not in agent_registry
@@ -320,8 +320,8 @@ class TestAgentRegistration:
             ]
         )
         agent = Agent(model=model, system="test", name="myagent", tools=[capture])
-        agent.inbox.put(TextMessage("go", "text/x-user-message"))
-        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+        agent.inbox.send(TextMessage("go", "text/x-user-message"), source="user")
+        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
         await agent.serve_forever()
         assert captured == [True]
 

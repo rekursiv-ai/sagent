@@ -2,11 +2,11 @@
 
 Three primitives, one role each:
 
-- ``self.inbox``: external work queue (``Deque[Message]``)
+- ``self.inbox``: external work queue (``Inbox`` of source-tagged items)
 - ``self.work``: the one foreground task (``asyncio.Task | None``)
 - ``self.observers``: synchronous fan-out callables for ``Event`` payloads
 
-See ``docs/private/agent_refactor.md`` for the design rationale.
+See ``docs/private/agent_refactor.md`` and ``docs/private/execution_model.md``.
 """
 
 from sagent.agent.agent import (

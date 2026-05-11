@@ -434,8 +434,9 @@ class SlackAdapter:
             owner = self._log_channel_owners[channel]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] log-channel {clean[:200]}")
-                agent_registry[owner].inbox.put(
-                    TextMessage(formatted, "text/x-user-message")
+                agent_registry[owner].inbox.send(
+                    TextMessage(formatted, "text/x-user-message"),
+                    source=f"slack:{user}",
                 )
             return
 
@@ -446,8 +447,9 @@ class SlackAdapter:
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
             self._log_route(f"[{user}->{target}] mention {clean[:200]}")
-            agent_registry[target].inbox.put(
-                TextMessage(formatted, "text/x-user-message")
+            agent_registry[target].inbox.send(
+                TextMessage(formatted, "text/x-user-message"),
+                source=f"slack:{user}",
             )
             return
 
@@ -457,8 +459,9 @@ class SlackAdapter:
             owner = self._thread_owners[thread_key]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] thread {clean[:200]}")
-                agent_registry[owner].inbox.put(
-                    TextMessage(formatted, "text/x-user-message")
+                agent_registry[owner].inbox.send(
+                    TextMessage(formatted, "text/x-user-message"),
+                    source=f"slack:{user}",
                 )
                 return
 
@@ -477,8 +480,9 @@ class SlackAdapter:
         if len(agents) == 1:
             self._thread_owners[(channel, thread_ts)] = agents[0]
             self._log_route(f"[{user}->{agents[0]}] default {clean[:200]}")
-            agent_registry[agents[0]].inbox.put(
-                TextMessage(formatted, "text/x-user-message")
+            agent_registry[agents[0]].inbox.send(
+                TextMessage(formatted, "text/x-user-message"),
+                source=f"slack:{user}",
             )
             return
 
@@ -544,8 +548,9 @@ class SlackAdapter:
             formatted = f"{source} {user} reacted with :{reaction}: to your message"
 
         self._log_route(f"[{user}->{agent_name}] reaction :{reaction}:")
-        agent_registry[agent_name].inbox.put(
-            TextMessage(formatted, "text/x-user-message")
+        agent_registry[agent_name].inbox.send(
+            TextMessage(formatted, "text/x-user-message"),
+            source=f"slack:{user}",
         )
 
     # -- Command handling --------------------------------------------------
@@ -671,7 +676,7 @@ class SlackAdapter:
     def stop_agent(self, label: str) -> None:
         agent = agent_registry.get(label)
         if agent:
-            agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+            agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
         self._active_agents.pop(label, None)
         _save_manifest(self._session_dir, self._active_agents)
 
@@ -1102,7 +1107,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Shutdown.
     for agent in list(agent_registry.values()):
-        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
     adapter_task.cancel()
     logger.info("Shutdown complete")
 

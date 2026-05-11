@@ -12,12 +12,16 @@ __all__ = ["ModelProfile", "Pricing", "compute_cost"]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelProfile:
-    """Per-model metadata: token limits and pricing."""
+    """Per-model metadata: token limits, pricing, tokenization density."""
 
     max_request_tokens: int
     max_response_tokens: int
     pricing: Pricing = Pricing()  # noqa: RUF009 -- frozen dataclass, no mutable default risk
     supports_thinking: bool = True
+    chars_per_token: float = 4.0
+    """Estimator divisor: ``int(len(text) / chars_per_token)``. Default
+    4.0 matches legacy behavior; override per model when the tokenizer
+    diverges (e.g. opus-4-7 measures 2.83 on mixed code+JSON content)."""
 
 
 def compute_cost(

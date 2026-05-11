@@ -6,15 +6,19 @@ that the input pump consumes on the next ``next_line()`` call.
 Bindings:
 
 - Enter: queue inline input while active; submit when idle.
-- Tab: queue an end-of-turn follow-up while active; submit when idle.
 - Alt+Enter: insert a newline (multi-line composition).
-- Shift+Left: lift the queued user message back into the buffer.
-- Up: history-backward.
+- Up: pull most recent queued user message into the buffer for editing; else history-backward.
 - Shift-Up / Shift-Down: prefix-based history search.
 - Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
-- Ctrl+C: ``agent.abort()`` while active; exit when idle.
+- Ctrl+C: ``agent.halt()`` while active; clear input buffer when idle. Never exits.
+- Ctrl+D / ``/quit``: exit the REPL.
 - Ctrl+_ / Esc-z: undo.
 - Ctrl+Z: suspend.
+
+The Tab follow-up queue (``QUEUED_USER_MESSAGE``) was removed per
+``execution_model.md`` §8 -- user messages go straight into the inbox
+as ``text/x-user-message``; the round loop merges them in arrival
+order along with peer / bg-tool deliveries.
 """
 
 from __future__ import annotations
@@ -26,8 +30,8 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.custom_types import TextDescriptor, TextMessage
-from sagent.lib.descriptors import QUEUED_USER_MESSAGE
+from sagent.agent.inbox import USER_SOURCE
+from sagent.custom_types import TextMessage
 
 
 if TYPE_CHECKING:
@@ -48,10 +52,8 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
     """
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent))
-    kb.add("tab", filter=~is_done)(functools.partial(_kb_queue, agent))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("s-left")(functools.partial(_kb_edit_latest_queued, agent))
-    kb.add("up")(_kb_history_back)
+    kb.add("up")(functools.partial(_kb_up, agent))
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
@@ -63,30 +65,15 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
 
 
 def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
-    """Submit when idle; queue inline input while active."""
+    """Submit when idle; queue input into the inbox while active."""
     if agent.work is None:
         event.current_buffer.validate_and_handle()
         return
-    _queue_buffer(agent, event, descriptor="text/x-user-message")
-
-
-def _kb_queue(agent: Agent, event: KeyPressEvent) -> None:
-    """Queue an end-of-turn follow-up while active; submit when idle."""
-    if agent.work is None:
-        event.current_buffer.validate_and_handle()
-        return
-    _queue_buffer(agent, event, descriptor=QUEUED_USER_MESSAGE)
-
-
-def _queue_buffer(
-    agent: Agent, event: KeyPressEvent, *, descriptor: TextDescriptor
-) -> None:
-    """Move non-empty active prompt text into the inbox."""
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
         return
-    _ = agent.inbox.put(TextMessage(text, descriptor))
+    agent.inbox.send(TextMessage(text, "text/x-user-message"), source=USER_SOURCE)
     buf.append_to_history()
     buf.reset()
 
@@ -95,20 +82,14 @@ def _kb_newline(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
-def _kb_edit_latest_queued(agent: Agent, event: KeyPressEvent) -> None:
-    """Pop the newest queued user message into an empty buffer."""
-    buf = event.current_buffer
-    if buf.text.strip():
+def _kb_up(agent: Agent, event: KeyPressEvent) -> None:
+    """Lift the most recent queued user message into the buffer; else history-back."""
+    item = agent.inbox.pop_by_source(USER_SOURCE)
+    if item is not None and isinstance(item.msg.content, str):
+        buf = event.current_buffer
+        buf.text = item.msg.content
+        buf.cursor_position = len(buf.text)
         return
-    tail = agent.pop_latest_queued_user_message()
-    if tail is None:
-        return
-    buf.text = str(tail.content)
-    buf.cursor_position = len(buf.text)
-
-
-def _kb_history_back(event: KeyPressEvent) -> None:
-    """Navigate prompt history backward."""
     event.current_buffer.history_backward(count=1)
 
 
@@ -141,11 +122,16 @@ def _kb_open_editor(event: KeyPressEvent) -> None:
 
 
 def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
-    """Active: ``agent.abort()``. Idle: exit."""
+    """Halt the active turn; never exit the REPL.
+
+    Idle path clears the input buffer (standard terminal convention --
+    abandon the line you were composing). To exit the REPL use Ctrl+D
+    or ``/quit``.
+    """
     if agent.work is not None:
-        agent.abort()
+        agent.halt()
         return
-    event.app.exit(exception=KeyboardInterrupt())
+    event.current_buffer.reset()
 
 
 def _kb_suspend(event: KeyPressEvent) -> None:

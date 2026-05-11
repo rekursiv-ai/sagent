@@ -143,62 +143,79 @@ class Anthropic:
     DEFAULT_MODEL = "claude-opus-4-7+1m"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
+    # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
+    # mixed code+JSON+thinking session (de89f75430bf). Three tokenizer
+    # generations cluster: opus-4-7 (2.83), opus/sonnet-4.6-4.5 (3.66),
+    # sonnet-4.5 / haiku-4.5 (4.83). Pure-English content tokenizes higher;
+    # these defaults err toward overcount for mixed agent traffic, which is
+    # the safe direction for the compaction trigger.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         "claude-opus-4-7": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=2.83,
         ),
         "claude-opus-4-7+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=2.83,
         ),
         "claude-opus-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=3.66,
         ),
         "claude-opus-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=3.66,
         ),
         "claude-opus-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=3.66,
         ),
         "claude-opus-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=3.66,
         ),
         "claude-sonnet-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            chars_per_token=3.66,
         ),
         "claude-sonnet-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            chars_per_token=3.66,
         ),
         "claude-sonnet-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            chars_per_token=4.83,
         ),
         "claude-sonnet-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            chars_per_token=4.83,
         ),
         "claude-haiku-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=64_000,
             pricing=_HAIKU,
             supports_thinking=False,
+            chars_per_token=4.83,
         ),
     }
 
@@ -363,19 +380,32 @@ class Anthropic:
 
 _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
 
+# Status codes that the Anthropic API uses for context-window overflow:
+# 400 returns ``BadRequestError`` with body ``"prompt is too long"``;
+# 413 returns ``RequestTooLargeError`` (not exposed in ``anthropic.__all__``)
+# with body ``"Request size exceeds model context window"``. Both should
+# normalize to ``PromptTooLongError`` so the compactor's shrink-retry and
+# the agent's overflow-recovery loop engage.
+_PROMPT_TOO_LONG_STATUS = frozenset({400, 413})
 
-def _raise_if_prompt_too_long(e: anthropic.BadRequestError) -> None:
+
+def _is_prompt_too_long_text(msg: str) -> bool:
+    """True if the error body text describes a context-window overflow."""
+    lower = msg.lower()
+    return "too long" in lower or "too_long" in lower or "context window" in lower
+
+
+def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
     """Re-raise as PromptTooLongError if this is a prompt-too-long error."""
-    msg = str(e).lower()  # anthropic types are annotation-only here
-    if "too long" in msg or "too_long" in msg:
-        actual, limit = None, None
-        m = _RE_ANTHROPIC_TOKENS.search(str(e))
-        if m:
-            actual = int(m.group(1).replace(",", ""))
-            limit = int(m.group(2).replace(",", ""))
-        raise PromptTooLongError(
-            str(e), actual_tokens=actual, limit_tokens=limit
-        ) from e
+    raw = str(e)  # anthropic types are annotation-only here
+    if not _is_prompt_too_long_text(raw):
+        return
+    actual, limit = None, None
+    m = _RE_ANTHROPIC_TOKENS.search(raw)
+    if m:
+        actual = int(m.group(1).replace(",", ""))
+        limit = int(m.group(2).replace(",", ""))
+    raise PromptTooLongError(raw, actual_tokens=actual, limit_tokens=limit) from e
 
 
 def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
@@ -525,7 +555,7 @@ class _AnthropicModel:
         return self._provider.subscription
 
     def estimate_text_token_count(self, text: str) -> int:
-        """Estimate token count for text using 4 chars/token heuristic.
+        """Estimate token count for text using the model's chars-per-token ratio.
 
         Args:
           text: Input text to estimate.
@@ -534,7 +564,7 @@ class _AnthropicModel:
           tokens: Estimated token count.
 
         """
-        return len(text) // 4
+        return int(len(text) / self._profile.chars_per_token)
 
     @property
     def pricing(self) -> Pricing:
@@ -576,10 +606,13 @@ class _AnthropicModel:
           overflow: ``True`` if the error is a context-window overflow.
 
         """
-        if not isinstance(error, anthropic.BadRequestError):
+        if isinstance(error, PromptTooLongError):
+            return True
+        if not isinstance(error, anthropic.APIStatusError):
             return False
-        msg = str(error).lower()
-        return "too long" in msg or "too_long" in msg or "context" in msg
+        if getattr(error, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
+            return False
+        return _is_prompt_too_long_text(str(error))
 
     def _build_kwargs(
         self,
@@ -669,7 +702,9 @@ class _AnthropicModel:
                 anthropic.types.Message,
                 await sdk.messages.create(**kwargs),  # pyright: ignore[reportArgumentType, reportCallIssue]  # ty: ignore[no-matching-overload] -- dynamic kwargs
             )
-        except anthropic.BadRequestError as e:
+        except anthropic.APIStatusError as e:
+            if getattr(e, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
+                raise
             debug_log.trace_error(
                 "bad_request",
                 kind="buffer",
@@ -732,7 +767,9 @@ class _AnthropicModel:
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(request.system, messages)
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
-        except anthropic.BadRequestError as e:
+        except anthropic.APIStatusError as e:
+            if getattr(e, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
+                raise
             debug_log.trace_error(
                 "bad_request",
                 kind="stream",

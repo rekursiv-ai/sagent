@@ -30,8 +30,9 @@ def _deliver(
     if inbox is None:
         logger.warning("Delayed message to dead agent from %s", sender)
         return
-    inbox.put(
-        TextMessage(f"[from {sender}, {delay}s ago]: {content}", "text/x-user-message")
+    inbox.send(
+        TextMessage(f"[from {sender}, {delay}s ago]: {content}", "text/x-user-message"),
+        source=sender,
     )
 
 
@@ -142,8 +143,9 @@ class AgentSend:
                 parent_id=msg.id,
             )
 
-        target.inbox.put_left(
-            TextMessage(f"[from {sender}]: {content}", "text/x-user-message")
+        target.inbox.send(
+            TextMessage(f"[from {sender}]: {content}", "text/x-user-message"),
+            source=sender,
         )
         return TextMessage(
             f"Delivered to {to}.",

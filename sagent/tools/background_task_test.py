@@ -232,7 +232,8 @@ class TestBackgroundDispatch:
         # the inbox (if posted after run exit) or already in history
         # (if processed by the dispatch loop). Either is correct for
         # the v2 spine.
-        sources = [*agent.inbox.drain(), *agent.messages]
+        inbox_msgs = [item.msg for item in agent.inbox.drain_nowait()]
+        sources = [*inbox_msgs, *agent.messages]
         assert any("bg-result" in str(item.content) for item in sources)
 
     @pytest.mark.anyio

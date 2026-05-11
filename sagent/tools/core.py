@@ -33,7 +33,6 @@ import typing
 import yaml
 
 from sagent.custom_types import Message, TextMessage
-from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.tools.lib.bash import BashParseCache
@@ -42,6 +41,7 @@ from sagent.tools.lib.bash import BashParseCache
 if TYPE_CHECKING:
     from sagent.agent import Agent
     from sagent.agent.cost_tracker import CostTracker
+    from sagent.agent.inbox import Inbox
     from sagent.tools.background_task import BackgroundTaskEntry
 
 
@@ -943,7 +943,7 @@ class AgentLike(Protocol):
     ``BackgroundTask`` to enumerate / cancel / foreground bg jobs.
 
     Attributes:
-      inbox: Deque holding pending external work.
+      inbox: Inbox holding pending external work.
       work: The one foreground asyncio task (``None`` when idle).
       background: All detached tasks keyed by stable id; the
           ``hidden`` field distinguishes infra (REPL pump, daemons)
@@ -951,7 +951,7 @@ class AgentLike(Protocol):
 
     """
 
-    inbox: Deque[Message]
+    inbox: Inbox
     work: asyncio.Task[object] | None
     background: dict[str, BackgroundTaskEntry]
 

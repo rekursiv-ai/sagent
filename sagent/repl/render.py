@@ -328,7 +328,6 @@ sagent commands
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)
-  /break    [<label>|all]     cancel current step          (Ctrl+Z analog)
-  /abort    [<label>|all]     cancel step + queue          (Ctrl+C analog)
-                              "all" also kills background tasks\
+  /halt     [<label>]         halt the current round; wait for redirect (Ctrl+C)
+  /kill     <qid|all>         cancel one or all outstanding tool tasks\
 """
