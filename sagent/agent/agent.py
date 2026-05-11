@@ -579,6 +579,35 @@ class Agent:
             _ = self.inbox.put(item)
         return popped
 
+    def enqueue_user(self, text: str) -> None:
+        r"""Queue a typed user follow-up at the inbox front, coalescing prior entry.
+
+        REPL ``Enter`` while ``self.work`` is active calls this. Coalesce: if a
+        queued user entry already exists, its content is merged with ``text``
+        (``"\\n\\n"`` separator) so multiple Enters become one merged next turn
+        instead of N redundant turns. Priority: the merged entry is put_left so
+        the user wins over any peer ``AgentSend`` or bg-tool completion that
+        arrived during the active turn.
+
+        Args:
+          text: New user-typed content. Whitespace-only is ignored.
+
+        """
+        if not text.strip():
+            return
+        items = self.inbox.drain()
+        existing: str | None = None
+        kept: list[Message] = []
+        for item in items:
+            if item.descriptor == QUEUED_USER_MESSAGE and existing is None:
+                existing = str(item.content)
+            else:
+                kept.append(item)
+        merged = f"{existing}\n\n{text}" if existing is not None else text
+        _ = self.inbox.put_left(TextMessage(merged, QUEUED_USER_MESSAGE))
+        for item in kept:
+            _ = self.inbox.put(item)
+
     def abort_all_bg(self) -> None:
         """Like ``abort``, plus terminate every visible background job."""
         self.abort()
@@ -669,7 +698,10 @@ class Agent:
         """Bare driver loop (ContextVars already installed)."""
         while not self._shutting_down:
             msg = await self.inbox.get()
-            if msg.descriptor == QUIT_SENTINEL:
+            # ``_shutting_down`` is the source of truth, not sentinel position.
+            # A peer ``AgentSend`` racing with ``shutdown`` could put_left ahead
+            # of QUIT, so re-check the flag before starting any new turn.
+            if self._shutting_down or msg.descriptor == QUIT_SENTINEL:
                 return
             try:
                 async for event in self.run(msg):

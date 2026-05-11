@@ -5,10 +5,10 @@ that the input pump consumes on the next ``next_line()`` call.
 
 Bindings:
 
-- Enter: submit to the input pump.
-- Tab: submit to the input pump; this is the explicit queue key while active.
+- Enter: submit to the input pump when idle; queue at the inbox front
+  (coalescing with any prior queued follow-up) while active.
 - Alt+Enter: insert a newline (multi-line composition).
-- Shift+Left: lift the newest queued user message back into the buffer.
+- Shift+Left: lift the queued user message back into the buffer.
 - Up: history-backward.
 - Shift-Up / Shift-Down: prefix-based history search.
 - Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
@@ -25,9 +25,6 @@ import functools
 
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
-
-from sagent.custom_types import TextMessage
-from sagent.lib.descriptors import QUEUED_USER_MESSAGE
 
 
 if TYPE_CHECKING:
@@ -48,7 +45,6 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
     """
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent))
-    kb.add("tab", filter=~is_done)(functools.partial(_kb_queue, agent))
     kb.add("escape", "enter")(_kb_newline)
     kb.add("s-left")(functools.partial(_kb_edit_latest_queued, agent))
     kb.add("up")(_kb_history_back)
@@ -63,7 +59,7 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
 
 
 def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
-    """Submit when idle; type ahead inline while active."""
+    """Submit when idle; coalesce-queue at front while active."""
     buf = event.current_buffer
     if agent.work is None:
         buf.validate_and_handle()
@@ -71,21 +67,7 @@ def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
     text = buf.text
     if not text.strip():
         return
-    _ = agent.inbox.put(TextMessage(text, "text/x-user-message"))
-    buf.append_to_history()
-    buf.reset()
-
-
-def _kb_queue(agent: Agent, event: KeyPressEvent) -> None:
-    """Queue an end-of-turn follow-up while active; submit when idle."""
-    buf = event.current_buffer
-    if agent.work is None:
-        buf.validate_and_handle()
-        return
-    text = buf.text
-    if not text.strip():
-        return
-    _ = agent.inbox.put(TextMessage(text, QUEUED_USER_MESSAGE))
+    agent.enqueue_user(text)
     buf.append_to_history()
     buf.reset()
 
