@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import argparse
+import json
 import os
 import subprocess
 
@@ -16,6 +17,7 @@ from sagent import sessions
 from sagent.bin.cli import (
     _build_provider_model,
     _configure_logging,
+    _event_to_json_record,
     _parse_cli_args,
     _parse_stream_json,
     _resolve_continue,
@@ -23,6 +25,11 @@ from sagent.bin.cli import (
     _resolve_session_dir,
     main,
     resolve_tools,
+)
+from sagent.custom_types import (
+    MultipartMessage,
+    TextMessage,
+    ToolResultEvent,
 )
 from sagent.providers import build_provider
 from sagent.providers.anthropic import Anthropic
@@ -600,6 +607,28 @@ class TestAccountFlag:
             build_provider("Anthropic", "env", account="work")
         # Factory called without ``account`` - no TypeError crash.
         assert captured == {"called": True}
+
+
+def test_event_to_json_record_serializes_tool_result_message() -> None:
+    msg = MultipartMessage(
+        (
+            TextMessage("call_1", "text/x-queue-id"),
+            TextMessage("line 1\nline 2", "text/plain"),
+        ),
+        "multipart/x-tool-result",
+    )
+
+    record = _event_to_json_record(ToolResultEvent(msg))
+
+    assert record is not None
+    assert record["descriptor"] == "multipart/x-tool-result"
+    assert json.dumps(record)
+    content = record["content"]
+    assert isinstance(content, list)
+    second = content[1]
+    assert isinstance(second, dict)
+    second_record = cast("dict[str, object]", second)
+    assert second_record["content"] == "line 1\nline 2"
 
 
 class TestParseStreamJson:

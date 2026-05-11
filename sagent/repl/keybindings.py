@@ -5,8 +5,8 @@ that the input pump consumes on the next ``next_line()`` call.
 
 Bindings:
 
-- Enter: submit to the input pump when idle; queue at the inbox front
-  (coalescing with any prior queued follow-up) while active.
+- Enter: queue inline input while active; submit when idle.
+- Tab: queue an end-of-turn follow-up while active; submit when idle.
 - Alt+Enter: insert a newline (multi-line composition).
 - Shift+Left: lift the queued user message back into the buffer.
 - Up: history-backward.
@@ -25,6 +25,9 @@ import functools
 
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
+
+from sagent.custom_types import TextDescriptor, TextMessage
+from sagent.lib.descriptors import QUEUED_USER_MESSAGE
 
 
 if TYPE_CHECKING:
@@ -45,6 +48,7 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
     """
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent))
+    kb.add("tab", filter=~is_done)(functools.partial(_kb_queue, agent))
     kb.add("escape", "enter")(_kb_newline)
     kb.add("s-left")(functools.partial(_kb_edit_latest_queued, agent))
     kb.add("up")(_kb_history_back)
@@ -59,15 +63,30 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
 
 
 def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
-    """Submit when idle; coalesce-queue at front while active."""
-    buf = event.current_buffer
+    """Submit when idle; queue inline input while active."""
     if agent.work is None:
-        buf.validate_and_handle()
+        event.current_buffer.validate_and_handle()
         return
+    _queue_buffer(agent, event, descriptor="text/x-user-message")
+
+
+def _kb_queue(agent: Agent, event: KeyPressEvent) -> None:
+    """Queue an end-of-turn follow-up while active; submit when idle."""
+    if agent.work is None:
+        event.current_buffer.validate_and_handle()
+        return
+    _queue_buffer(agent, event, descriptor=QUEUED_USER_MESSAGE)
+
+
+def _queue_buffer(
+    agent: Agent, event: KeyPressEvent, *, descriptor: TextDescriptor
+) -> None:
+    """Move non-empty active prompt text into the inbox."""
+    buf = event.current_buffer
     text = buf.text
     if not text.strip():
         return
-    agent.enqueue_user(text)
+    _ = agent.inbox.put(TextMessage(text, descriptor))
     buf.append_to_history()
     buf.reset()
 
