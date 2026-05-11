@@ -103,6 +103,8 @@ JsonDescriptor = Literal[
     "application/x-done",
     "application/x-child-done",
     "application/x-thinking-structured",
+    "application/x-file-stat",
+    "application/x-bash-state",
 ]
 
 ToolDescriptor = Literal[

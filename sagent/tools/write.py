@@ -6,8 +6,9 @@ from pathlib import Path
 
 import re
 
-from sagent.custom_types import Message, TextMessage
+from sagent.custom_types import Message, MultipartMessage, TextMessage
 from sagent.lib.atomic_file import atomic_write_bytes
+from sagent.lib.descriptors import has_error
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.message import get_directive
 from sagent.tools.core import (
@@ -17,6 +18,7 @@ from sagent.tools.core import (
     resolve_tool_path,
     run_sync,
 )
+from sagent.tools.lib.state_parts import file_stat_part
 
 
 # Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.
@@ -61,9 +63,16 @@ class Write:
         """One-line receipt: confirmation count from the success message."""
         if not self.emit_tool_summary:
             return None
-        if result.descriptor != "text/plain":
+        text: str | None = None
+        if result.descriptor == "text/plain":
+            text = str(result.content).strip()
+        elif isinstance(result, MultipartMessage):
+            for p in result.content:
+                if isinstance(p, TextMessage) and p.descriptor == "text/plain":
+                    text = p.content.strip()
+                    break
+        if text is None:
             return None
-        text = str(result.content).strip()
         # ``_run`` returns "Wrote N bytes to PATH"; surface the byte count.
         match = _WRITE_OK_RE.match(text)
         if match:
@@ -95,9 +104,15 @@ class Write:
         # Shared registry with Edit: same path → same lock → a concurrent
         # Edit and Write on the same file serialize against each other.
         async with get_file_write_lock(file_path):
-            return await run_sync(
+            result = await run_sync(
                 self._run, parent_id=msg.id, file_path=file_path, content=content
             )
+        if has_error(result):
+            return result
+        stat = file_stat_part(file_path)
+        if stat is None:
+            return result
+        return MultipartMessage((result, stat), "multipart/mixed", parent_id=msg.id)
 
     def _run(self, *, file_path: str, content: str) -> str | Message:
         p = Path(file_path)

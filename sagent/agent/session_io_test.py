@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import hashlib
 import json
 
 from sagent.agent import session_io
@@ -26,6 +27,7 @@ from sagent.lib.message import (
     get_tool_name,
     tool_call_message,
 )
+from sagent.tools.core import ToolState
 
 
 # -- Compatibility factories -------------------------------------------
@@ -470,6 +472,276 @@ class TestSerializationEdgeCases:
             "",
         )
         assert text == "hi"
+
+
+class TestRebuildToolState:
+    """Resume rebuild — file-stat path and back-compat path.
+
+    Verifies that the resume bug ("change-detection mtime baseline gets
+    reset to now at resume") is fixed when ``application/x-file-stat``
+    parts are present, and that pre-file-stat sessions still load.
+    """
+
+    def _read_use(self, qid: str, file_path: str) -> Message:
+        return tool_call_message(qid, "read", json_freeze({"file_path": file_path}))
+
+    def _read_result(
+        self,
+        *,
+        qid: str,
+        text: str,
+        stat_path: str | None,
+        stat_mtime: float | None,
+    ) -> Message:
+        parts: list[Message] = [
+            TextMessage(qid, "text/x-queue-id"),
+            TextMessage(text, "text/plain"),
+        ]
+        if stat_path is not None:
+            parts.append(
+                JsonMessage(
+                    json_freeze(
+                        {
+                            "path": stat_path,
+                            "mtime": stat_mtime if stat_mtime is not None else 0.0,
+                            "sha256": "deadbeef",
+                        }
+                    ),
+                    "application/x-file-stat",
+                )
+            )
+        return MultipartMessage(tuple(parts), "multipart/x-tool-result")
+
+    def test_file_stat_used_when_present(self, tmp_path: Path) -> None:
+        f = tmp_path / "x.txt"
+        f.write_text("1\thello\n")
+        original_mtime = 1_700_000_000.0  # arbitrary past timestamp
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[self._read_use("q1", str(f))]),
+            self._read_result(
+                qid="q1",
+                text="1\thello\n",
+                stat_path=str(f),
+                stat_mtime=original_mtime,
+            ),
+        ]
+        state = ToolState()
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        cached = state.read_cache[str(f.resolve())]
+        assert cached.mtime == original_mtime, (
+            "file-stat mtime should override stat-now"
+        )
+
+    def test_no_file_stat_falls_back_to_stat_at_rebuild(self, tmp_path: Path) -> None:
+        """Pre-file-stat sessions must use stat-at-rebuild, not synthetic mtime.
+
+        Using ``msg.timestamp`` as a fallback would trigger noisy
+        full-file diffs on first resume request for paths that cache no
+        content (Edit, partial Read). The fallback is therefore ``None``
+        so ``mark_read`` falls through to ``Path.stat()`` — same as the
+        pre-commit behavior.
+        """
+        f = tmp_path / "y.txt"
+        f.write_text("1\thi\n")
+        disk_mtime = f.stat().st_mtime
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[self._read_use("q2", str(f))]),
+            self._read_result(
+                qid="q2", text="1\thi\n", stat_path=None, stat_mtime=None
+            ),
+        ]
+        state = ToolState()
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        cached = state.read_cache[str(f.resolve())]
+        assert cached.mtime == disk_mtime, (
+            "missing file-stat should use stat-at-rebuild, not msg.timestamp"
+        )
+        # And consume_changed_files should be quiet because mtime matches.
+        assert state.consume_changed_files() == {}
+
+    def test_bash_state_restores_cwd_from_history(self, tmp_path: Path) -> None:
+        target_cwd = str(tmp_path)
+        bash_use = tool_call_message(
+            "b1", "bash", json_freeze({"command": "cd " + target_cwd})
+        )
+        bash_result = MultipartMessage(
+            (
+                TextMessage("b1", "text/x-queue-id"),
+                TextMessage("", "text/plain"),
+                JsonMessage(
+                    json_freeze({"cwd": target_cwd}),
+                    "application/x-bash-state",
+                ),
+            ),
+            "multipart/x-tool-result",
+        )
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[bash_use]),
+            bash_result,
+        ]
+        state = ToolState()
+        # Pre-rebuild cwd is process cwd; rebuild should override.
+        original_cwd = state.bash_cwd
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        assert state.bash_cwd == target_cwd
+        assert state.bash_cwd != original_cwd or target_cwd == original_cwd
+
+    def test_write_rebuild_uses_directive_content(self, tmp_path: Path) -> None:
+        """Write rebuild caches the directive's content with file-stat mtime."""
+        f = tmp_path / "w.txt"
+        written_content = "hello from write\n"
+        f.write_text(written_content)
+        original_mtime = 1_700_000_000.0
+        write_use = tool_call_message(
+            "w1",
+            "write",
+            json_freeze({"file_path": str(f), "content": written_content}),
+        )
+        write_result = MultipartMessage(
+            (
+                TextMessage("w1", "text/x-queue-id"),
+                TextMessage(f"Wrote {len(written_content)} bytes", "text/plain"),
+                JsonMessage(
+                    json_freeze(
+                        {
+                            "path": str(f.resolve()),
+                            "mtime": original_mtime,
+                            "sha256": "irrelevant-for-write",
+                        }
+                    ),
+                    "application/x-file-stat",
+                ),
+            ),
+            "multipart/x-tool-result",
+        )
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[write_use]),
+            write_result,
+        ]
+        state = ToolState()
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        cached = state.read_cache[str(f.resolve())]
+        assert cached.mtime == original_mtime
+
+    def test_edit_rebuild_caches_disk_when_sha_matches(self, tmp_path: Path) -> None:
+        """Edit rebuild trusts disk content when its sha matches file-stat."""
+        f = tmp_path / "e.txt"
+        post_edit_content = "post-edit content\n"
+        f.write_text(post_edit_content)
+        post_edit_sha = hashlib.sha256(post_edit_content.encode()).hexdigest()
+        original_mtime = 1_700_000_000.0
+        edit_use = tool_call_message(
+            "e1",
+            "edit",
+            json_freeze(
+                {
+                    "file_path": str(f),
+                    "old_string": "pre",
+                    "new_string": "post",
+                }
+            ),
+        )
+        edit_result = MultipartMessage(
+            (
+                TextMessage("e1", "text/x-queue-id"),
+                TextMessage("Replaced 1 occurrence(s)", "text/plain"),
+                JsonMessage(
+                    json_freeze(
+                        {
+                            "path": str(f.resolve()),
+                            "mtime": original_mtime,
+                            "sha256": post_edit_sha,
+                        }
+                    ),
+                    "application/x-file-stat",
+                ),
+            ),
+            "multipart/x-tool-result",
+        )
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[edit_use]),
+            edit_result,
+        ]
+        state = ToolState()
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        cached = state.read_cache[str(f.resolve())]
+        assert cached.mtime == original_mtime
+        # consume_changed_files would diff cache vs disk; matching sha
+        # means cache was populated from disk content → empty diff →
+        # ``if diff:`` guard excludes the path from changes.
+        changes = state.consume_changed_files()
+        assert changes == {}
+
+    def test_edit_rebuild_skips_disk_when_sha_mismatches(self, tmp_path: Path) -> None:
+        """Edit rebuild leaves content empty when external mod broke sha integrity."""
+        f = tmp_path / "ee.txt"
+        # Disk content NOW differs from what Edit produced.
+        f.write_text("externally modified content\n")
+        original_mtime = 1_700_000_000.0
+        edit_use = tool_call_message(
+            "e2",
+            "edit",
+            json_freeze(
+                {
+                    "file_path": str(f),
+                    "old_string": "x",
+                    "new_string": "y",
+                }
+            ),
+        )
+        edit_result = MultipartMessage(
+            (
+                TextMessage("e2", "text/x-queue-id"),
+                TextMessage("Replaced 1 occurrence(s)", "text/plain"),
+                JsonMessage(
+                    json_freeze(
+                        {
+                            "path": str(f.resolve()),
+                            "mtime": original_mtime,
+                            # sha of the post-edit content (NOT what's on disk).
+                            "sha256": "0" * 64,
+                        }
+                    ),
+                    "application/x-file-stat",
+                ),
+            ),
+            "multipart/x-tool-result",
+        )
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[edit_use]),
+            edit_result,
+        ]
+        state = ToolState()
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        # Cache mtime is from file-stat; cache content is empty due to
+        # sha mismatch. consume_changed_files diffs empty vs disk →
+        # full file appears as a diff so the model sees the drift.
+        changes = state.consume_changed_files()
+        assert str(f) in changes
+        assert "externally modified content" in changes[str(f)]
+
+    def test_legacy_session_without_either_part_still_loads(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-bash-state, pre-file-stat sessions must still rebuild cleanly."""
+        f = tmp_path / "z.txt"
+        f.write_text("1\told\n")
+        # Legacy result: queue-id + text/plain only, no JSON siblings.
+        legacy_result = MultipartMessage(
+            (
+                TextMessage("q3", "text/x-queue-id"),
+                TextMessage("1\told\n", "text/plain"),
+            ),
+            "multipart/x-tool-result",
+        )
+        messages: list[Message] = [
+            AssistantMessage(tool_calls=[self._read_use("q3", str(f))]),
+            legacy_result,
+        ]
+        state = ToolState()
+        # Should not raise; should mark the path as read so enforce_read passes.
+        session_io.rebuild_tool_state_from_messages(messages, state)
+        assert state.has_been_read(str(f))
 
 
 if __name__ == "__main__":

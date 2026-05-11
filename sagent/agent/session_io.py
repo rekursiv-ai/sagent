@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 import dataclasses
+import hashlib
 import json
 import logging
 import re
@@ -357,19 +358,30 @@ def rebuild_tool_state_from_messages(
                 edit_paths[qid] = fp_raw
 
     # Pass 2: match results, populate the content cache.
+    last_bash_cwd: str = ""
     for msg in messages:
         if msg.descriptor != "multipart/x-tool-result":
             continue
+        cwd = _bash_cwd_from_result(msg)
+        if cwd:
+            last_bash_cwd = cwd
         if has_error(msg):
             continue
         tid = get_queue_id(msg)
         text = flat_text(msg)
+        # Prefer the message's recorded file-stat (real mtime + path);
+        # fall back to msg.timestamp/1e9 for sessions written before
+        # ``application/x-file-stat`` parts existed.
+        # backwards-compat: msg.timestamp is "later than real mtime"
+        # so consume_changed_files always falls through to the content
+        # diff path; equal content → empty diff → no false reminder.
+        stat_path, stat_mtime, stat_sha = _file_stat_or_fallback(msg)
         if tid in read_full_uses:
             # Skip cleared/stub results - the earlier real Read
             # already populated the cache for this path.
             if text == CLEARED or text.startswith("[File unchanged"):
                 continue
-            fp = read_full_uses[tid]
+            fp = stat_path or read_full_uses[tid]
             # Skip content extraction for non-text reads (images,
             # PDFs, notebooks, binary, non-UTF-8). The result is a
             # marker or rendering, not file bytes - storing it as
@@ -380,27 +392,86 @@ def rebuild_tool_state_from_messages(
             if suffix in _NON_TEXT_READ_EXTS or text.startswith(
                 _NON_TEXT_READ_PREFIXES,
             ):
-                state.mark_read(fp)
+                state.mark_read(fp, mtime=stat_mtime)
             else:
                 state.mark_read(
                     fp,
                     content=strip_read_result(text),
+                    mtime=stat_mtime,
                 )
         elif tid in read_partial_uses:
             # Partial reads: can't reconstruct full content, but the
             # path still counts as "read" for Edit/Write's invariant.
-            state.mark_read(read_partial_uses[tid])
+            state.mark_read(stat_path or read_partial_uses[tid], mtime=stat_mtime)
         elif tid in write_uses:
-            fp, content = write_uses[tid]
-            state.mark_read(fp, content=content)
+            fp_use, content = write_uses[tid]
+            state.mark_read(stat_path or fp_use, content=content, mtime=stat_mtime)
         elif tid in edit_paths:
-            fp = edit_paths[tid]
-            # Edit's input has only old/new strings; read current
-            # disk content (post-edit state at process start).
+            fp = stat_path or edit_paths[tid]
+            # Edit's directive carries old/new strings only — no post-edit
+            # content. With ``stat_sha`` (new sessions) we verify disk
+            # integrity: matching hash → disk IS the post-edit baseline,
+            # cache it; mismatched → an external mutation between Edit
+            # and resume, leave content empty so the next request's
+            # ``consume_changed_files`` reports the full diff. Without
+            # ``stat_sha`` (pre-file-stat sessions) we fall back to the
+            # original optimistic behavior — cache current disk content
+            # — to preserve pre-commit semantics on legacy data.
             try:
-                state.mark_read(fp, content=Path(fp).read_text(encoding="utf-8"))
+                disk = Path(fp).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
-                state.mark_read(fp)
+                state.mark_read(fp, mtime=stat_mtime)
+                continue
+            if not stat_sha or (
+                hashlib.sha256(disk.encode("utf-8")).hexdigest() == stat_sha
+            ):
+                state.mark_read(fp, content=disk, mtime=stat_mtime)
+            else:
+                state.mark_read(fp, mtime=stat_mtime)
+    if last_bash_cwd:
+        state.bash_cwd = last_bash_cwd
+
+
+def _file_stat_or_fallback(msg: Message) -> tuple[str, float | None, str]:
+    """Return (abs_path, mtime, sha256) from an x-file-stat part, or fallback.
+
+    Returns ``("", None, "")`` when the part is absent so pre-file-stat
+    sessions still load with the original semantics: ``mark_read`` falls
+    through to ``stat()`` at rebuild time, matching pre-commit behavior
+    across every code path. Using a synthetic ``msg.timestamp`` fallback
+    here would trigger noisy full-file diffs on first resume request
+    for paths without cached content (Edit, partial Read, binary Read),
+    so we deliberately do not.
+    """
+    if not isinstance(msg, MultipartMessage):
+        return "", None, ""
+    for p in msg.content:
+        if p.descriptor == "application/x-file-stat":
+            data = cast(Mapping[str, object], p.content)
+            path = str(data.get("path") or "")
+            raw_mtime = data.get("mtime")
+            mtime = float(raw_mtime) if isinstance(raw_mtime, (int, float)) else None
+            sha = str(data.get("sha256") or "")
+            return path, mtime, sha
+    return "", None, ""  # backwards-compat: pre-file-stat sessions
+
+
+def _bash_cwd_from_result(msg: Message) -> str:
+    """Return the cwd from an ``application/x-bash-state`` part, or ''.
+
+    Used to replay bash cwd from history rather than relying solely on
+    SessionMeta's snapshot. Returns empty string when no part is present
+    (pre-bash-state sessions).
+    """
+    if not isinstance(msg, MultipartMessage):
+        return ""
+    for p in msg.content:
+        if p.descriptor == "application/x-bash-state":
+            data = cast(Mapping[str, object], p.content)
+            cwd = data.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                return cwd
+    return ""
 
 
 # -- Session persistence (called from Agent) -------------------------------

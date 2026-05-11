@@ -117,11 +117,12 @@ class TestRead:
         f.write_bytes(buf.getvalue())
         response = await read.run(_msg(json_freeze({"file_path": str(f)})))
         assert "image" in _text(response).lower()
-        # Image part: text/plain description + image/png attachment.
+        # Image part: text/plain description + image/png attachment + file-stat sibling.
         assert isinstance(response, MultipartMessage)
-        assert len(response.content) == 2
+        assert len(response.content) == 3
         assert response.content[1].descriptor == "image/png"
         assert response.content[1].content == buf.getvalue()
+        assert response.content[2].descriptor == "application/x-file-stat"
 
 
 class TestReadEdgeCases:

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+import dataclasses
 import json
 
 from sagent.custom_types import (
@@ -15,6 +16,7 @@ from sagent.custom_types import (
     MultipartMessage,
     TextMessage,
 )
+from sagent.lib.descriptors import has_error
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -44,6 +46,7 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
+from sagent.tools.lib.state_parts import file_stat_part
 
 
 _IMAGE_EXTS = {
@@ -141,7 +144,7 @@ class Read:
         limit = int_val(directive.get("limit"), 2000)
         last_lines = int_val(directive.get("last_lines"), 0)
         pages = str(directive.get("pages", ""))
-        return await run_sync(
+        result = await run_sync(
             self._run,
             parent_id=msg.id,
             file_path=file_path,
@@ -150,6 +153,7 @@ class Read:
             last_lines=last_lines,
             pages=pages,
         )
+        return _attach_file_stat(result, file_path, parent_id=msg.id)
 
     def summary(self, msg: Message) -> str:
         """Return a short label for this tool invocation.
@@ -190,11 +194,20 @@ class Read:
             return None
         if result.descriptor == "text/x-error":
             return None
-        if result.descriptor != "text/plain":
-            # Multipart (image, PDF) or notebook -- the inner descriptor
-            # carries the format. Fall back to a generic marker.
+        text: str | None = None
+        has_binary = False
+        if result.descriptor == "text/plain":
+            text = str(result.content)
+        elif isinstance(result, MultipartMessage):
+            for p in result.content:
+                if isinstance(p, TextMessage) and p.descriptor == "text/plain":
+                    text = p.content
+                elif p.descriptor.startswith(("image/", "application/pdf")):
+                    has_binary = True
+        if text is None:
+            return "binary" if has_binary else None
+        if has_binary:
             return "binary"
-        text = str(result.content)
         if text.startswith("[File unchanged"):
             return "unchanged"
         # Line-numbered output: count newlines in the rendered body.
@@ -297,6 +310,26 @@ class Read:
         if cmd.exe == "tail":
             return _match_head_tail(cwd, cmd.args, which="tail")
         return None
+
+
+def _attach_file_stat(result: Message, file_path: str, *, parent_id: int) -> Message:
+    """Attach an ``application/x-file-stat`` sibling part to a Read result.
+
+    Skipped for errors and the ``[File unchanged...]`` cache-hit string
+    (its prior result already carries file-stat). For the cache-hit path
+    the file may have changed on disk since the cache was warmed; we
+    deliberately do NOT re-stat — that would muddle the dedup contract.
+    """
+    if has_error(result):
+        return result
+    if isinstance(result, TextMessage) and result.content.startswith("[File unchanged"):
+        return result
+    stat = file_stat_part(file_path)
+    if stat is None:
+        return result
+    if isinstance(result, MultipartMessage):
+        return dataclasses.replace(result, content=(*result.content, stat))
+    return MultipartMessage((result, stat), "multipart/mixed", parent_id=parent_id)
 
 
 def _read_image(p: Path, *, file_path: str, suffix: str) -> Message:
