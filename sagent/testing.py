@@ -39,3 +39,7 @@ class MockModelCaps:
     def is_context_overflow(self, error: Exception) -> bool:
         del error
         return False
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False

@@ -58,6 +58,11 @@ class ScriptedModel:
         del error
         return False
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """Return false because the scripted model never raises API errors."""
+        del error
+        return False
+
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Return one tool call, then a final answer after the tool result."""
         if any(msg.descriptor == "multipart/x-tool-result" for msg in request.messages):

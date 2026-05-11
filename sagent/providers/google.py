@@ -373,6 +373,15 @@ class _GeminiModel:
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """No provider-specific transient cases beyond status codes.
+
+        Gemini errors are ``httpx.HTTPStatusError`` with a status code;
+        the shared status-code path in ``retry.py`` covers them.
+        """
+        del error
+        return False
+
     async def buffer(
         self,
         request: ModelRequest,

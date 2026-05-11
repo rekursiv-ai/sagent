@@ -17,8 +17,8 @@ Constants:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import asyncio
 import logging
@@ -49,7 +49,6 @@ RETRY_BASE_SEC = 0.5
 MAX_RETRY_DELAY = 32.0
 PERSISTENT_MAX_BACKOFF_SEC = 300.0
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
-RETRYABLE_PROVIDER_ERROR_TYPES = frozenset({"rate_limit_error", "server_error"})
 
 # Depth cap when unwinding ``__cause__`` chains - a pathological
 # self-referencing cycle must not hang us.
@@ -84,18 +83,24 @@ class RateLimitError(Exception):
         super().__init__(msg)
 
 
-def is_retryable(error: Exception) -> bool:
+def is_retryable(error: Exception, model: Model) -> bool:
     """Classify an error as retryable (transient) or fatal.
 
-    Retry on: transport errors, 408/409/429, and anything ≥ 500.
+    Asks the model's provider once (for SDK quirks the status-code
+    path can't see); on miss, walks transport/status/cause across
+    the cross-provider classifier. Providers receive the outer
+    error and own walking their own ``__cause__`` chain.
 
     Args:
       error: Exception to classify.
+      model: Active model; consulted for provider-specific edge cases.
 
     Returns:
       retryable: True if the error is transient.
 
     """
+    if model.is_retryable_provider_error(error):
+        return True
     return _is_retryable(error, 0)
 
 
@@ -253,7 +258,7 @@ async def send_with_retry(
             if model.is_context_overflow(e):
                 log_event("context_overflow", attempt=attempt)
                 raise
-            if not is_retryable(e):
+            if not is_retryable(e, model):
                 raise
             last_error = e
             if live is not None:
@@ -329,23 +334,10 @@ def _is_retryable(error: Exception, depth: int) -> bool:
     status = _error_status(error, 0)
     if status is not None and (status in RETRYABLE_STATUS_CODES or status >= 500):
         return True
-    if _provider_marks_retryable(error):
-        return True
     cause = error.__cause__
     if cause is not None and isinstance(cause, Exception) and depth < _MAX_CAUSE_DEPTH:
         return _is_retryable(cause, depth + 1)
     return False
-
-
-def _provider_marks_retryable(error: Exception) -> bool:
-    """Return True when a status-less provider error still declares retryability."""
-    body = getattr(error, "body", None)
-    if isinstance(body, Mapping):
-        body_map = cast(Mapping[object, object], body)
-        error_type = body_map.get("type")
-        if isinstance(error_type, str) and error_type in RETRYABLE_PROVIDER_ERROR_TYPES:
-            return True
-    return "you can retry" in str(error).lower()
 
 
 def _error_status(error: Exception, depth: int) -> int | None:

@@ -497,6 +497,24 @@ class Model(Protocol):
         """
         ...
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """Check whether an error is a provider-specific transient retryable.
+
+        Use for SDK quirks the cross-provider classifier in
+        ``retry.py`` can't see (e.g. an Anthropic error with no HTTP
+        status that still carries ``body["type"] == "server_error"``).
+        Status-code / transport-error classification stays in
+        ``retry.py``; this hook only adds the per-provider edge cases.
+
+        Args:
+          error: Exception raised during a model request.
+
+        Returns:
+          retryable: True if the provider considers this transient.
+
+        """
+        ...
+
 
 @runtime_checkable
 class Provider(Protocol):

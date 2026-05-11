@@ -115,6 +115,10 @@ class _MockModel:
         del error
         return False
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False
+
 
 def _build_agent(model: object) -> Agent:
     return Agent(

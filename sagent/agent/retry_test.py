@@ -100,6 +100,9 @@ class _StatuslessOpenAIStreamModel:
         del error
         return False
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        return "you can retry" in str(error).lower()
+
 
 async def test_statusless_openai_stream_api_error_retries(
     monkeypatch: pytest.MonkeyPatch,

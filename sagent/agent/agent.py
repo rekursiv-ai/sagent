@@ -472,25 +472,12 @@ class Agent:
     # -- Tool-shaped helpers (Agent-as-Tool ergonomics) ---------------
 
     def summary(self, msg: Message) -> str:
-        """Return the agent's name (Tool-protocol shape).
-
-        Args:
-          msg: Unused.
-
-        Returns:
-          name: Agent name.
-
-        """
+        """Return the agent's name (Tool-protocol shape)."""
         del msg
         return self.name
 
     def prompt(self) -> str:
-        """Return the per-request system-prompt contribution.
-
-        Returns:
-          text: Empty string.
-
-        """
+        """Per-request system-prompt contribution (none)."""
         return ""
 
     def system_prompt(self) -> str:
@@ -552,13 +539,6 @@ class Agent:
         ``clear``) to claim the foreground slot. The round loop also writes
         to ``self.work`` directly when running a round body so /halt and
         /kill can address them by the same handle.
-
-        Args:
-          coro: Strategy work to run as the foreground task.
-
-        Returns:
-          result: Whatever ``coro`` returned.
-
         """
         self.cancel()
         if self.work is not None:
@@ -600,8 +580,8 @@ class Agent:
         Searches active cohorts and ``self.background``. Cohort members
         produce a ``[Cancelled by user]`` ``tool_result`` via the cohort's
         natural emission; bg tasks produce a ``[Background tool cancelled:
-        ...]`` inbox message via the existing ``_bg_worker`` /
-        ``_on_promoted_done`` paths.
+        ...]`` inbox message via the shared :meth:`_post_bg_completion`
+        callback.
 
         Args:
           qid: Queue id of the task to cancel.
@@ -984,8 +964,17 @@ class Agent:
             self._emit_yielded(TurnCompleteEvent())
             return
 
-        # Compact BEFORE merge so the merge-rollback index stays valid
-        # if /halt fires later in this round.
+        # Compaction position is load-bearing: it MUST run before the
+        # merge step below so the ``merge_start_idx`` rollback in the
+        # /halt CancelledError handler stays valid. Reversing the order
+        # (merge then compact) lets the compactor rewrite ``self.history``
+        # underneath us; ``del self.history[merge_start_idx:]`` would
+        # then point into stale positions. If you ever need to move this
+        # after merge for latency reasons, also switch the halt path to
+        # reference-based rollback (capture merged Message objects, then
+        # ``self.history.remove(m)`` each on cancel) or drop the rollback
+        # entirely (let merged items stay in history; user redirect joins
+        # them on the next round).
         await self._maybe_compact()
         merge_start_idx = len(self.history)
         if not self._merge_items_into_history(items):
@@ -1584,12 +1573,9 @@ class Agent:
         parent's tracker via ContextVar copy; their open is a no-op.
         Root agents and persistent sub-agents (which run in their own
         task and want independent accounting) shadow the var with their
-        own tracker.
-
-        Returns:
-          state: Opaque token consumed by ``_close_cost_lifecycle``.
-              ``token=None`` means we did not open and close should no-op.
-
+        own tracker. Returns an opaque token consumed by
+        :meth:`_close_cost_lifecycle`; ``token=None`` means we did not
+        open and close should no-op.
         """
         if not self._persistent and cost_root_var.get(None) is not None:
             return _CostState(token=None)

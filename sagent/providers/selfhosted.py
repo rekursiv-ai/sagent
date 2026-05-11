@@ -554,6 +554,11 @@ class SelfHostedModel:
         del error
         return False
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """In-process generate calls have no transient retry surface."""
+        del error
+        return False
+
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Render messages via chat template, generate, and parse tool calls.
 

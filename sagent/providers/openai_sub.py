@@ -641,6 +641,19 @@ class _OpenAISubModel(_OpenAIModel):
         )
 
     @override
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """OpenAI Responses API can return statusless transient errors.
+
+        The Codex subscription endpoint occasionally raises
+        ``openai.APIError`` with ``status_code=None`` and a body
+        containing the "An error occurred ... You can retry your
+        request" copy. The shared status-code classifier in
+        ``retry.py`` misses these because the status is absent;
+        match on the SDK's canonical retry-hint substring instead.
+        """
+        return "you can retry" in str(error).lower()
+
+    @override
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Send a buffered request via the streaming path.
 
