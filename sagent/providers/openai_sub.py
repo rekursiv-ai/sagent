@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import (
     IO,
     TYPE_CHECKING,
+    ClassVar,
     NotRequired,
     TypedDict,
     cast,
@@ -87,6 +88,7 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
 
+from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
     Message,
     ModelRequest,
@@ -109,6 +111,7 @@ from sagent.lib.message import (
     tool_call_message,
 )
 from sagent.providers.lib.cost import (
+    ModelProfile,
     Pricing,
     compute_cost,
 )
@@ -142,6 +145,12 @@ _SCOPES = (
 )
 _REFRESH_BUFFER_SEC = 300.0
 _CALLBACK_PORT = 1455
+# Codex's subscription backend currently exposes a smaller practical
+# context window than the public API model metadata. Local budgeting must
+# plan against the wire contract so auto-compaction runs before the backend
+# rejects an oversized request.
+_SUBSCRIPTION_MAX_REQUEST_TOKENS = 272_000
+_SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
 
 _EFFORT_PREFIXES = ("o", "gpt-5")
 
@@ -150,6 +159,21 @@ _FINISH_MAP: dict[str, str] = {
     "incomplete": "length",
     "failed": "stop",
 }
+
+
+def _subscription_profile(profile: ModelProfile) -> ModelProfile:
+    """Clamp public API model metadata to the subscription wire contract."""
+    return ModelProfile(
+        max_request_tokens=min(
+            profile.max_request_tokens,
+            _SUBSCRIPTION_MAX_REQUEST_TOKENS,
+        ),
+        max_response_tokens=min(
+            profile.max_response_tokens,
+            _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
+        ),
+        pricing=profile.pricing,
+    )
 
 
 class OpenAISubscription(OpenAI):
@@ -166,6 +190,12 @@ class OpenAISubscription(OpenAI):
     # OpenAI (API key) defaults to gpt-5.5 for current frontier capability.
     DEFAULT_MODEL = "gpt-5.5"
     DEFAULT_UTILITY_MODEL = "gpt-5.4-mini"
+    # Keep pricing inherited from the public API profiles, but clamp limits
+    # separately because subscription auth is a different backend contract.
+    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        name: _subscription_profile(profile)
+        for name, profile in OpenAI.KNOWN_MODELS.items()
+    }
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
@@ -628,17 +658,21 @@ class _OpenAISubModel(_OpenAIModel):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream a request via the OpenAI Responses API.
 
         Args:
           request: Model request to send.
           on_text: Callback invoked with each text chunk as it arrives.
+          on_thinking: Reserved; the OpenAI Responses API does not
+              expose reasoning summaries as separate stream deltas.
 
         Returns:
           response: Assembled model response after the stream closes.
 
         """
+        del on_thinking  # not exposed as a stream delta on this endpoint
         sdk = await self._provider.get_sdk()
         # The ChatGPT Codex subscription endpoint rejects some public
         # Responses API knobs, including ``temperature`` and
@@ -650,20 +684,28 @@ class _OpenAISubModel(_OpenAIModel):
             if request.effort is not None and self.supports_effort
             else openai.omit
         )
-        event_stream: AsyncResponseStream = await sdk.responses.create(  # pyright: ignore[reportCallIssue,reportUnknownVariableType]  # ty: ignore[no-matching-overload] -- SDK overload resolution fails on stream=True literal
-            model=self._model_id,
-            input=_build_input(request),
-            instructions=request.system or "",
-            store=False,
-            stream=True,
-            tools=(_build_tools(request.tools) if request.tools else openai.omit),
-            reasoning=reasoning,  # pyright: ignore[reportArgumentType] -- Reasoning|Omit is valid; overload resolution failure cascades
-        )
-        return await _consume_stream(
-            event_stream,  # pyright: ignore[reportUnknownArgumentType] -- typed above; overload suppression loses it
-            pricing=self._profile.pricing,
-            on_text=on_text,
-        )
+        try:
+            event_stream: AsyncResponseStream = await sdk.responses.create(  # pyright: ignore[reportCallIssue,reportUnknownVariableType]  # ty: ignore[no-matching-overload] -- SDK overload resolution fails on stream=True literal
+                model=self._model_id,
+                input=_build_input(request),
+                instructions=request.system or "",
+                store=False,
+                stream=True,
+                tools=(_build_tools(request.tools) if request.tools else openai.omit),
+                reasoning=reasoning,  # pyright: ignore[reportArgumentType] -- Reasoning|Omit is valid; overload resolution failure cascades
+            )
+            return await _consume_stream(
+                event_stream,  # pyright: ignore[reportUnknownArgumentType] -- typed above; overload suppression loses it
+                pricing=self._profile.pricing,
+                on_text=on_text,
+            )
+        except Exception as exc:
+            if self.is_context_overflow(exc):
+                # The compactor's shrink-and-retry path keys off
+                # PromptTooLongError; leaking raw SDK errors makes outer
+                # recovery retry unchanged history instead of dropping groups.
+                raise PromptTooLongError(str(exc)) from exc
+            raise
 
 
 # -- Request building --------------------------------------------------
@@ -787,15 +829,14 @@ async def _consume_stream(
                 tc_id = str(item.call_id or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
                 tc_name = str(item.name or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
                 item_id = item.id or ""
-                args_str = "".join(tool_args.get(item_id, []))
-                args: MutableJSON = {}
-                if args_str:
-                    try:
-                        parsed = json.loads(args_str)
-                        if isinstance(parsed, dict):
-                            args = cast(MutableJSON, parsed)
-                    except json.JSONDecodeError:
-                        pass
+                delta_args = "".join(tool_args.get(item_id, []))
+                done_args = str(item.arguments or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                args = _parse_tool_arguments(
+                    delta_args,
+                    done_args,
+                    tool_name=tc_name,
+                    call_id=tc_id,
+                )
                 tool_calls.append(tool_call_message(tc_id, tc_name, json_freeze(args)))
         elif isinstance(event, oai_responses.ResponseCompletedEvent):
             resp = event.response
@@ -844,6 +885,103 @@ async def _consume_stream(
         output_cost=out_cost,
         total_cost=total_cost,
     )
+
+
+def _parse_tool_arguments(
+    delta_args: str,
+    done_args: str,
+    *,
+    tool_name: str,
+    call_id: str,
+) -> MutableJSON:
+    """Parse streamed function-call arguments with completed-item fallback."""
+    saw_args = False
+    parsed_by_source: dict[str, MutableJSON] = {}
+    for source, args_str in (("delta", delta_args), ("done", done_args)):
+        if not args_str:
+            continue
+        saw_args = True
+        try:
+            parsed = json.loads(args_str)
+        except json.JSONDecodeError:
+            logger.warning(
+                "OpenAI Responses tool arguments were invalid JSON: "
+                "source=%s tool=%s call_id=%s chars=%d",
+                source,
+                tool_name,
+                call_id,
+                len(args_str),
+            )
+            continue
+        if isinstance(parsed, dict):
+            parsed_obj = cast(MutableJSON, parsed)
+            parsed_by_source[source] = parsed_obj
+            if not parsed_obj:
+                logger.warning(
+                    "OpenAI Responses tool arguments were an empty JSON object: "
+                    "source=%s tool=%s call_id=%s chars=%d",
+                    source,
+                    tool_name,
+                    call_id,
+                    len(args_str),
+                )
+            continue
+        logger.warning(
+            "OpenAI Responses tool arguments were not a JSON object: "
+            "source=%s tool=%s call_id=%s",
+            source,
+            tool_name,
+            call_id,
+        )
+    if not saw_args:
+        logger.warning(
+            "OpenAI Responses tool arguments were empty: tool=%s call_id=%s",
+            tool_name,
+            call_id,
+        )
+    delta = parsed_by_source.get("delta")
+    done = parsed_by_source.get("done")
+    if delta is not None and done is not None and delta != done:
+        logger.warning(
+            "OpenAI Responses tool arguments differed between delta and done: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
+            "delta_keys=%d done_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta),
+            len(done),
+        )
+    if done:
+        logger.debug(
+            "OpenAI Responses selected completed tool arguments: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
+            "delta_keys=%d done_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta) if delta is not None else -1,
+            len(done),
+        )
+        return done
+    if delta:
+        logger.debug(
+            "OpenAI Responses selected streamed delta tool arguments: "
+            "tool=%s call_id=%s delta_chars=%d done_chars=%d delta_keys=%d",
+            tool_name,
+            call_id,
+            len(delta_args),
+            len(done_args),
+            len(delta),
+        )
+        return delta
+    if done is not None:
+        return done
+    if delta is not None:
+        return delta
+    return {}
 
 
 # -- JWT helpers -------------------------------------------------------

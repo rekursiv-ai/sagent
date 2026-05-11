@@ -7,6 +7,7 @@ append, async pop-from-front, tail access, and bulk drain.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterator
 
 import asyncio
 
@@ -25,7 +26,7 @@ class Deque[T]:
     when full so the caller can drop instead of block.
     """
 
-    __slots__ = ("_capacity", "_dq", "_not_empty")
+    __slots__ = ("_capacity", "_dq", "_empty", "_not_empty")
 
     def __init__(self, capacity: int | None = None) -> None:
         if capacity is not None and capacity <= 0:
@@ -33,6 +34,8 @@ class Deque[T]:
         self._dq: deque[T] = deque()
         self._capacity = capacity
         self._not_empty = asyncio.Event()
+        self._empty = asyncio.Event()
+        self._empty.set()
 
     @property
     def capacity(self) -> int | None:
@@ -43,6 +46,14 @@ class Deque[T]:
 
     def __bool__(self) -> bool:
         return bool(self._dq)
+
+    def __iter__(self) -> Iterator[T]:
+        """Iterate items front-to-back without removing them.
+
+        Snapshots the current contents into a tuple so concurrent
+        ``put`` / ``get`` during iteration don't corrupt traversal.
+        """
+        return iter(tuple(self._dq))
 
     def empty(self) -> bool:
         return not self._dq
@@ -56,6 +67,7 @@ class Deque[T]:
             return False
         self._dq.append(item)
         self._not_empty.set()
+        self._empty.clear()
         return True
 
     def put_left(self, item: T) -> bool:
@@ -64,6 +76,7 @@ class Deque[T]:
             return False
         self._dq.appendleft(item)
         self._not_empty.set()
+        self._empty.clear()
         return True
 
     def peek_tail(self) -> T | None:
@@ -72,14 +85,20 @@ class Deque[T]:
 
     def pop_tail(self) -> T | None:
         """Remove and return the most recently appended item."""
-        return self._dq.pop() if self._dq else None
+        item = self._dq.pop() if self._dq else None
+        if not self._dq:
+            self._empty.set()
+        return item
 
     async def get(self) -> T:
         """Pop from the left (front), awaiting until an item is available."""
         while not self._dq:
             self._not_empty.clear()
             await self._not_empty.wait()
-        return self._dq.popleft()
+        item = self._dq.popleft()
+        if not self._dq:
+            self._empty.set()
+        return item
 
     async def get_all(self) -> list[T]:
         """Wait for at least one item, then drain everything available."""
@@ -92,4 +111,22 @@ class Deque[T]:
         """Pop all items in FIFO order. Non-blocking."""
         out = list(self._dq)
         self._dq.clear()
+        self._empty.set()
         return out
+
+    async def wait_for_empty(self) -> None:
+        """Block until the deque is empty.
+
+        Returns immediately when ``len(self) == 0``. Used by the
+        agent dispatch loop's idle barrier alongside an in-flight
+        task gather.
+
+        Re-checks ``_dq`` after each ``Event.wait()`` because
+        ``asyncio.Event`` resolves outstanding waiters on ``set()``
+        and does not retract them on a subsequent ``clear()`` -- a
+        post-set ``clear()`` therefore lets a waiter return
+        spuriously while items are once again present.
+        """
+        while self._dq:
+            self._empty.clear()
+            await self._empty.wait()

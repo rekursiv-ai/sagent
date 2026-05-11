@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Generator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol, cast, get_type_hints, overload
 
@@ -28,17 +27,12 @@ import inspect
 import itertools
 import logging
 import re
-import threading
 import time
 import typing
 
 import yaml
 
-from sagent.custom_types import (
-    Message,
-    TextMessage,
-    TokenCount,
-)
+from sagent.custom_types import Message, TextMessage
 from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON, int_val, json_freeze
 from sagent.lib.message import get_directive
@@ -47,7 +41,8 @@ from sagent.tools.lib.bash import BashParseCache
 
 if TYPE_CHECKING:
     from sagent.agent import Agent
-    from sagent.custom_types import ModelResponse
+    from sagent.agent.cost_tracker import CostTracker
+    from sagent.tools.background_task import BackgroundTaskEntry
 
 
 logger = logging.getLogger(__name__)
@@ -152,17 +147,23 @@ def recipe_list(section: str, key: str) -> list[str]:
     return [str(x) for x in cast(list[object], items)]
 
 
+_MISSING_TOOL_DESCRIPTION = "Tool description unavailable; use the JSON schema exactly."
+
+
 def load_tool_description(name: str) -> str:
     """Load a tool description from the active recipe.
 
-    Paths are explicit in recipe.yaml -- no fallback search.
-    Substitutes ``{{NOW}}`` with the current ``Month YYYY``.
+    Tool descriptions are optional prompt fragments, so missing files soft-fail
+    to a generic agent-visible description. Other recipe assets stay strict at
+    their call sites. Paths are explicit in recipe.yaml -- no fallback search.
+    Substitutes ``{{NOW}}`` with the current
+    ``Month YYYY``.
 
     Args:
       name: Tool name (case-insensitive lookup).
 
     Returns:
-      description: Rendered tool description, or empty string on miss.
+      description: Rendered tool description, or a generic fallback on miss.
 
     """
     tool_descs = recipe_dict("tool_descriptions")
@@ -173,7 +174,16 @@ def load_tool_description(name: str) -> str:
             "Tool %r not in recipe %s", name, _recipe_path_override or _DEFAULT_RECIPE
         )
         return ""
-    text = read_asset(str(by_lower[key])).rstrip()
+    try:
+        text = read_asset(str(by_lower[key])).rstrip()
+    except FileNotFoundError:
+        logger.exception(
+            "Missing tool description asset for tool %r in recipe %s: %s",
+            name,
+            _recipe_path_override or _DEFAULT_RECIPE,
+            by_lower[key],
+        )
+        return _MISSING_TOOL_DESCRIPTION
     if _NOW_PLACEHOLDER in text:
         text = text.replace(_NOW_PLACEHOLDER, time.strftime("%B %Y"))
     return text
@@ -238,6 +248,7 @@ def _build_schema(
     schema: dict[str, object] = {
         "type": "object",
         "properties": properties,
+        "additionalProperties": False,
     }
     if required:
         schema["required"] = required
@@ -387,6 +398,7 @@ class _ToolImpl:
         "_max_result_chars",
         "description",
         "directive_schema",
+        "emit_tool_summary",
         "name",
         "supports_microcompaction",
         "tool_id",
@@ -412,6 +424,7 @@ class _ToolImpl:
         hints.pop("return", None)
         self.directive_schema = schema or json_freeze(_build_schema(fn, hints))
         self.supports_microcompaction = supports_microcompaction
+        self.emit_tool_summary = False
 
     def summary(self, msg: Message) -> str:
         """Return a short label for this tool invocation.
@@ -434,6 +447,11 @@ class _ToolImpl:
 
         """
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        """Return no receipt for decorator-based tools by default."""
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         """Invoke the wrapped function, propagating exceptions to the caller.
@@ -569,26 +587,9 @@ class ToolState:
         # walked alongside cwd's. Defaults off because it can blow the
         # prompt budget.
         self.additional_dirs: list[str] = []
-        # Deferred-compaction signal: the Compact tool sets this to
-        # ``custom_instructions``; the Agent drains it after the tool
-        # dispatch batch and runs compaction.
-        self.compact_requested: str | None = None
-        # Deferred full-clear signal: the Clear tool sets this to a
-        # ``reason`` string; the Agent drains it between model requests and
-        # wipes history + file caches.
-        self.clear_requested: str | None = None
-        # Deferred recompact signal: the Recompact tool sets this to
-        # ``custom_instructions``; the Agent drains it between model requests,
-        # reloads the pre-compact transcript, and re-runs the
-        # compactor with the new guidance.
-        self.recompact_requested: str | None = None
         # Per-request session stats written by the Agent, read by the
         # Diagnostics tool. Stays empty until the first model request completes.
         self.stats: dict[str, float | int] = {}
-        # Set by the REPL on Ctrl+C - tools poll this to abort early.
-        # threading.Event is safe to check from both sync tool threads
-        # and the asyncio main thread.
-        self.abort_event: threading.Event = threading.Event()
         # Per-request bashlex parse cache: command string → trees (or None).
         # Populated by the agent's pre-dispatch concurrency check; read
         # by the Bash tool's matcher dispatch. Eliminates the
@@ -899,13 +900,15 @@ max_depth_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "max_depth", default=None
 )
 
-# Shared cost ledger across a tree of Agents. The root Agent creates
-# one on entry if none exists; descendants read and mutate the same
-# instance (dict mutation in asyncio.gather children propagates
-# because tasks *share* the same CostLedger object even though each
-# gets its own copy of the ContextVar binding).
-cost_ledger_var: contextvars.ContextVar[CostLedger | None] = contextvars.ContextVar(
-    "cost_ledger", default=None
+# Subtree cost target: the ``CostTracker`` that descendants of the
+# active root agent write to. Root agents (top-level + persistent
+# subagents) install their own tracker here at lifecycle open;
+# sync subagents inherit by ContextVar copy and write through to
+# the root. Single-store cost flow -- there is no separate ledger
+# object. See ``agent.cost_tracker.CostTracker`` and the doc's
+# §20.1 (cost lifecycle).
+cost_root_var: contextvars.ContextVar[CostTracker | None] = contextvars.ContextVar(
+    "cost_root", default=None
 )
 
 # Hierarchical agent path. Root is ""; first child is "0", its
@@ -934,7 +937,23 @@ agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 class AgentLike(Protocol):
-    inbox: Deque[str]
+    """Minimal agent surface for tools that route messages between agents.
+
+    Used by ``AgentSend`` to drop messages onto a peer's inbox; by
+    ``BackgroundTask`` to enumerate / cancel / foreground bg jobs.
+
+    Attributes:
+      inbox: Deque holding pending external work.
+      work: The one foreground asyncio task (``None`` when idle).
+      background: All detached tasks keyed by stable id; the
+          ``hidden`` field distinguishes infra (REPL pump, daemons)
+          from user-scheduled bg tools and persistent subagents.
+
+    """
+
+    inbox: Deque[Message]
+    work: asyncio.Task[object] | None
+    background: dict[str, BackgroundTaskEntry]
 
 
 # Process-wide registry of live agents, keyed by label. Agents
@@ -942,35 +961,6 @@ class AgentLike(Protocol):
 # by ``AgentSend`` to route messages by label. Safe under sagent's
 # single-event-loop concurrency model; not thread-safe.
 agent_registry: dict[str, AgentLike] = {}
-
-
-@dataclass(slots=True, kw_only=True)
-class CostLedger:
-    """Aggregated cost/token stats across an Agent subtree.
-
-    Root ``Agent.run`` creates one and sets it as the active
-    ContextVar. Each subsequent model response (across the root and
-    every descendant subagent) accumulates into this same object by
-    in-place mutation - so parallel siblings spawned via
-    ``asyncio.gather`` share one authoritative ledger despite
-    ContextVar copy-on-spawn semantics.
-    """
-
-    total_cost_usd: float = 0.0
-    tokens: TokenCount = field(default_factory=TokenCount)
-    calls_by_model: dict[str, int] = field(default_factory=dict)
-
-    def accumulate(self, response: ModelResponse, model_id: str) -> None:
-        """Fold one ``ModelResponse`` into the running totals.
-
-        Args:
-          response: Model response with cost and token counts.
-          model_id: Model identifier for per-model call tracking.
-
-        """
-        self.total_cost_usd += response.total_cost
-        self.tokens = self.tokens + response.tokens
-        self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
 
 
 # Convenience functions that delegate to current state.

@@ -17,8 +17,8 @@ Constants:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import logging
@@ -49,6 +49,7 @@ RETRY_BASE_SEC = 0.5
 MAX_RETRY_DELAY = 32.0
 PERSISTENT_MAX_BACKOFF_SEC = 300.0
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
+RETRYABLE_PROVIDER_ERROR_TYPES = frozenset({"rate_limit_error", "server_error"})
 
 # Depth cap when unwinding ``__cause__`` chains - a pathological
 # self-referencing cycle must not hang us.
@@ -151,6 +152,7 @@ async def send_with_retry(
     request: ModelRequest,
     *,
     on_text: Callable[[str], None] | None = None,
+    on_thinking: Callable[[str], None] | None = None,
     max_attempts: int,
     persistent_retry: bool,
     log_event: Callable[..., None],
@@ -168,6 +170,10 @@ async def send_with_retry(
       model: Model to send the request to.
       request: Fully-built model request.
       on_text: Streaming callback for live text chunks.
+      on_thinking: Streaming callback for live thinking chunks.
+          Only fires on the first streaming attempt; ignored on
+          retries (the buffered fallback has no separate thinking
+          stream and the renderer would render thinking twice).
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       log_event: Structured event logger.
@@ -196,6 +202,10 @@ async def send_with_retry(
             break
         use_stream = on_text is not None and stream_failures < _STREAM_FALLBACK_AFTER
         live = on_text if (use_stream and attempt == 0) else None
+        # Thinking streams only on the first streaming attempt; on
+        # retry we read thinking from the final response so the
+        # renderer never sees the same content twice.
+        live_thinking = on_thinking if (use_stream and attempt == 0) else None
         chunks: list[str] = []
         capture = _make_stream_callback(chunks, live)
         try:
@@ -203,6 +213,7 @@ async def send_with_retry(
                 resp = await model.stream(
                     request=request,
                     on_text=capture,
+                    on_thinking=live_thinking,
                 )
                 full = "".join(chunks)
             else:
@@ -318,10 +329,23 @@ def _is_retryable(error: Exception, depth: int) -> bool:
     status = _error_status(error, 0)
     if status is not None and (status in RETRYABLE_STATUS_CODES or status >= 500):
         return True
+    if _provider_marks_retryable(error):
+        return True
     cause = error.__cause__
     if cause is not None and isinstance(cause, Exception) and depth < _MAX_CAUSE_DEPTH:
         return _is_retryable(cause, depth + 1)
     return False
+
+
+def _provider_marks_retryable(error: Exception) -> bool:
+    """Return True when a status-less provider error still declares retryability."""
+    body = getattr(error, "body", None)
+    if isinstance(body, Mapping):
+        body_map = cast(Mapping[object, object], body)
+        error_type = body_map.get("type")
+        if isinstance(error_type, str) and error_type in RETRYABLE_PROVIDER_ERROR_TYPES:
+            return True
+    return "you can retry" in str(error).lower()
 
 
 def _error_status(error: Exception, depth: int) -> int | None:

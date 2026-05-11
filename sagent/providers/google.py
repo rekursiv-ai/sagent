@@ -403,6 +403,7 @@ class _GeminiModel:
             if "too large" in msg or "too long" in msg or "context" in msg:
                 raise PromptTooLongError(r.text)
             raise ValueError(f"Google API 400: {r.text}")
+        r.raise_for_status()
         resp = _parse_response(r.json(), self._profile.pricing)
         logger.debug(
             "API response: tokens=%d/%d, stop=%s",
@@ -416,17 +417,22 @@ class _GeminiModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream via :streamGenerateContent (alt=sse).
 
         Args:
           request: Model request.
           on_text: Optional callback invoked with each text chunk as it arrives.
+          on_thinking: Optional callback for thinking chunks. Gemini's
+              streaming response surfaces thinking parts inline; this
+              wraps them so the renderer can show them as they arrive.
 
         Returns:
           response: Translated model response assembled from streamed chunks.
 
         """
+        del on_thinking  # gemini streams thinking inline as text; no separate hook
         url = f"{_API_BASE}/models/{self._model_id}:streamGenerateContent?alt=sse"
         body = _build_request(request, self.max_image_dim, self.max_image_bytes)
         client = await self._get_client()
@@ -456,15 +462,22 @@ class _GeminiModel:
 
 
 def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
-    """Recursively remove ``additionalProperties`` — Gemini rejects it."""
+    """Remove ``additionalProperties`` recursively for Gemini tool schemas."""
     if isinstance(schema, dict):
-        return {
-            k: _strip_additional_properties(v)
-            for k, v in schema.items()
-            if k != "additionalProperties"
-        }
+        schema_map = cast(MutableJSON, schema)
+        return cast(
+            MutableJSONValue,
+            {
+                k: _strip_additional_properties(v)
+                for k, v in schema_map.items()
+                if k != "additionalProperties"
+            },
+        )
     if isinstance(schema, list):
-        return [_strip_additional_properties(item) for item in schema]
+        return cast(
+            MutableJSONValue,
+            [_strip_additional_properties(item) for item in schema],
+        )
     return schema
 
 
@@ -579,24 +592,30 @@ def _build_request(
         },
     )
     if request.system:
-        body["systemInstruction"] = {
-            "parts": [{"text": request.system}],
-        }
-    if request.tools:
-        body["tools"] = [
+        body["systemInstruction"] = cast(
+            MutableJSONValue,
             {
-                "functionDeclarations": [
-                    {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": _strip_additional_properties(
-                            json_unfreeze(t.directive_schema)
-                        ),
-                    }
-                    for t in request.tools
-                ],
+                "parts": [{"text": request.system}],
             },
-        ]
+        )
+    if request.tools:
+        body["tools"] = cast(
+            MutableJSONValue,
+            [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": _strip_additional_properties(
+                                json_unfreeze(t.directive_schema)
+                            ),
+                        }
+                        for t in request.tools
+                    ],
+                },
+            ],
+        )
     return body
 
 

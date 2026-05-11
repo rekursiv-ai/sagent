@@ -590,6 +590,24 @@ class TestAnthropicModelSend:
 
 
 class TestBuildKwargsThinkingAndTools:
+    def test_haiku_does_not_support_thinking(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        assert not provider.model("claude-haiku-4-5").supports_thinking
+
+    def test_sonnet_supports_thinking(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        assert provider.model("claude-sonnet-4-6").supports_thinking
+
+    def test_haiku_omits_thinking_even_when_request_sets_it(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        m = provider.model("claude-haiku-4-5")
+        request = ModelRequest(
+            messages=[_user("think hard")],
+            thinking="adaptive",
+        )
+        kwargs = m._build_kwargs(request, _build_messages(request))
+        assert "thinking" not in kwargs
+
     def test_thinking_enabled(self) -> None:
         provider = Anthropic.from_key("sk-test")
         m = provider.model("claude-sonnet-4-6")
@@ -617,6 +635,10 @@ class TestBuildKwargsThinkingAndTools:
             def summary(self, msg: Message) -> str:
                 del msg
                 return self.name
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             def prompt(self) -> str | None:
                 return None

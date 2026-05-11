@@ -431,6 +431,7 @@ class OpenAICompatModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Stream a chat-completions SSE response.
 
@@ -442,11 +443,14 @@ class OpenAICompatModel:
         Args:
           request: Model request to send.
           on_text: Callback invoked with each text chunk as it arrives.
+          on_thinking: Reserved; OpenAI-compatible chat APIs don't
+              expose a separate thinking stream.
 
         Returns:
           response: Assembled model response after the stream closes.
 
         """
+        del on_thinking  # OpenAI-compat APIs don't expose a thinking stream
         body = self._build_body(request, stream=True)
         client = await self._get_client()
         async with client.stream(
@@ -659,18 +663,15 @@ def parse_response(
     raw_tcs = cast(list[MutableJSON], message.get("tool_calls") or [])
     for tc in raw_tcs:
         func = cast(MutableJSON, tc["function"])
-        args_str = cast(str, func.get("arguments") or "{}")
-        try:
-            parsed = json.loads(args_str)
-        except json.JSONDecodeError:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
         tc_name = cast(str, func["name"])
         tc_id = cast(str, tc["id"])
-        msg_parts.append(
-            tool_call_message(tc_id, tc_name, json_freeze(cast(MutableJSON, parsed)))
+        parsed = _parse_tool_arguments(
+            cast(str, func.get("arguments") or ""),
+            source="message",
+            tool_name=tc_name,
+            call_id=tc_id,
         )
+        msg_parts.append(tool_call_message(tc_id, tc_name, json_freeze(parsed)))
 
     usage = cast(MutableJSON, data.get("usage") or {})
     input_tokens, output_tokens, cache_read = _extract_usage(usage)
@@ -806,16 +807,14 @@ async def consume_stream(
         msg_parts.append(TextMessage("".join(text_parts), "text/plain"))
     for idx in sorted(tool_id):
         args_str = "".join(tool_args.get(idx, []))
-        args: MutableJSON = {}
-        if args_str:
-            try:
-                parsed = json.loads(args_str)
-                if isinstance(parsed, dict):
-                    args = cast(MutableJSON, parsed)
-            except json.JSONDecodeError:
-                args = {}
         tc_name = tool_name.get(idx, "")
         tc_id = tool_id[idx]
+        args = _parse_tool_arguments(
+            args_str,
+            source="delta",
+            tool_name=tc_name,
+            call_id=tc_id,
+        )
         msg_parts.append(tool_call_message(tc_id, tc_name, json_freeze(args)))
 
     input_tokens, output_tokens, cache_read = _extract_usage(usage)
@@ -851,6 +850,46 @@ async def consume_stream(
         output_cost=out_cost,
         total_cost=total_cost,
     )
+
+
+def _parse_tool_arguments(
+    args_str: str,
+    *,
+    source: str,
+    tool_name: str,
+    call_id: str,
+) -> MutableJSON:
+    """Parse OpenAI-compatible tool arguments, preserving existing fallback."""
+    if not args_str:
+        logger.warning(
+            "OpenAI-compatible tool arguments were empty: source=%s tool=%s call_id=%s",
+            source,
+            tool_name,
+            call_id,
+        )
+        return {}
+    try:
+        parsed = json.loads(args_str)
+    except json.JSONDecodeError:
+        logger.warning(
+            "OpenAI-compatible tool arguments were invalid JSON: "
+            "source=%s tool=%s call_id=%s chars=%d",
+            source,
+            tool_name,
+            call_id,
+            len(args_str),
+        )
+        return {}
+    if isinstance(parsed, dict):
+        return cast(MutableJSON, parsed)
+    logger.warning(
+        "OpenAI-compatible tool arguments were not a JSON object: "
+        "source=%s tool=%s call_id=%s",
+        source,
+        tool_name,
+        call_id,
+    )
+    return {}
 
 
 # Wire default model class last so subclasses can also use the default.

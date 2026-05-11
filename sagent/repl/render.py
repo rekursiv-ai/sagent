@@ -1,157 +1,334 @@
-"""Leaf terminal render functions: user bar, terminal title, toolbar."""
+"""``Printer`` Protocol + render observer for the v3 REPL.
+
+The agent publishes ``Event`` instances to its observer list. The REPL
+attaches a single observer (``make_render_observer``) that translates
+each event into ``Printer`` calls. State that spans multiple events
+(the streaming markdown buffer, child-event interleaving) lives on the
+observer's closure, not on the Printer.
+
+The Printer Protocol covers every formatted output the REPL produces:
+plain lines, streaming chunks, markdown, full-width user bar, dim tool
+labels, errors, thinking blocks, diffs, child gutter blocks. Concrete
+implementations live in :mod:`repl.console` (rich-backed) and on
+:class:`RecordingPrinter` (test harness).
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Protocol, cast
 
-import asyncio
-import contextlib
-import sys
+import logging
 
-from rich.cells import chop_cells
-from rich.text import Text
+from sagent.custom_types import (
+    ChildDoneEvent,
+    ChildEvent,
+    ErrorEvent,
+    Event,
+    InterruptedEvent,
+    Message,
+    StatusUpdateEvent,
+    StreamEndEvent,
+    TextChunkEvent,
+    TextMessage,
+    ThinkingEvent,
+    ToolLabelEvent,
+    ToolResultEvent,
+    UserBarEvent,
+)
+from sagent.lib.message import get_queue_id
+from sagent.repl.render_diff import find_stable_boundary
 
 
-if TYPE_CHECKING:
-    from rich.console import Console
-
-    from sagent.agent import Agent
+logger = logging.getLogger(__name__)
 
 
-def print_user_bar(
-    out: Console,
-    text: str,
-    user_msg_style: str = "on rgb(55,55,55)",
-) -> None:
-    """Render a user message as full-width dark-gray bar(s).
+class Printer(Protocol):
+    """Sink for REPL output, fully covering the v2/v3 rendering surface."""
 
-    Args:
-      out: Rich console to print to.
-      text: User message text.
-      user_msg_style: Rich style string for the bar background.
+    def write_line(self, text: str) -> None: ...
+    def write_chunk(self, text: str) -> None: ...
+    def write_markdown(self, text: str) -> None: ...
+    def write_user_bar(self, text: str) -> None: ...
+    def write_tool_label(self, text: str) -> None: ...
+    def write_tool_error(self, text: str) -> None: ...
+    def write_tool_summary(self, text: str) -> None: ...
+    def write_hint(self, text: str) -> None: ...
+    def write_thinking(self, text: str) -> None: ...
+    def write_diff(self, diff: str, file_path: str = "") -> None: ...
+    def write_interrupted(self) -> None: ...
+    def write_child_block(self, label: str, items: list[Message]) -> None: ...
+    def set_terminal_title(self, text: str) -> None: ...
+
+
+class RecordingPrinter:
+    """In-memory ``Printer`` for tests.
+
+    Each method appends to a per-method list. Tests assert on counts and
+    contents, not on rendered glyphs.
+
+    Attributes:
+      lines: ``write_line`` payloads.
+      chunks: ``write_chunk`` payloads.
+      markdowns: ``write_markdown`` payloads.
+      user_bars: ``write_user_bar`` payloads.
+      tool_labels: ``write_tool_label`` payloads.
+      tool_errors: ``write_tool_error`` payloads.
+      tool_summaries: ``write_tool_summary`` payloads.
+      hints: ``write_hint`` payloads.
+      thinkings: ``write_thinking`` payloads.
+      diffs: ``write_diff`` payloads.
+      interruptions: count of ``write_interrupted`` calls.
+      child_blocks: tuples of ``(label, items)``.
+      titles: ``set_terminal_title`` payloads.
 
     """
-    try:
-        width = int(out.width)
-    except (TypeError, ValueError):
-        width = 0
-    if width <= 2:
-        out.print(Text(f"> {text}", style="white"), style=user_msg_style)
-        return
-    for idx, raw in enumerate(text.rstrip("\n").split("\n")):
-        prefix = "> " if idx == 0 else "  "
-        content_width = width - len(prefix)
-        chunks = chop_cells(raw, content_width) or [""]
-        for j, chunk in enumerate(chunks):
-            pfx = prefix if j == 0 else "  "
-            line = Text()
-            line.append(pfx, style="white")
-            line.append(chunk, style="white")
-            pad = max(0, width - line.cell_len)
-            if pad > 0:
-                line.append(" " * pad)
-            out.print(line, style=user_msg_style)
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.chunks: list[str] = []
+        self.markdowns: list[str] = []
+        self.user_bars: list[str] = []
+        self.tool_labels: list[str] = []
+        self.tool_errors: list[str] = []
+        self.tool_summaries: list[str] = []
+        self.hints: list[str] = []
+        self.thinkings: list[str] = []
+        self.diffs: list[tuple[str, str]] = []
+        self.interruptions: int = 0
+        self.child_blocks: list[tuple[str, list[Message]]] = []
+        self.titles: list[str] = []
+
+    def write_line(self, text: str) -> None:
+        self.lines.append(text)
+
+    def write_chunk(self, text: str) -> None:
+        self.chunks.append(text)
+
+    def write_markdown(self, text: str) -> None:
+        self.markdowns.append(text)
+
+    def write_user_bar(self, text: str) -> None:
+        self.user_bars.append(text)
+
+    def write_tool_label(self, text: str) -> None:
+        self.tool_labels.append(text)
+
+    def write_tool_error(self, text: str) -> None:
+        self.tool_errors.append(text)
+
+    def write_tool_summary(self, text: str) -> None:
+        self.tool_summaries.append(text)
+
+    def write_hint(self, text: str) -> None:
+        self.hints.append(text)
+
+    def write_thinking(self, text: str) -> None:
+        self.thinkings.append(text)
+
+    def write_diff(self, diff: str, file_path: str = "") -> None:
+        self.diffs.append((diff, file_path))
+
+    def write_interrupted(self) -> None:
+        self.interruptions += 1
+
+    def write_child_block(self, label: str, items: list[Message]) -> None:
+        self.child_blocks.append((label, list(items)))
+
+    def set_terminal_title(self, text: str) -> None:
+        self.titles.append(text)
+
+    @property
+    def rendered_text(self) -> str:
+        """Concatenated markdown payloads (the committed model output)."""
+        return "".join(self.markdowns)
 
 
-def render_toolbar(
-    agent: Agent,
-    spinner: str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
-) -> str:
-    """Build the bottom toolbar string showing session-cumulative stats.
+def render_tool_result(printer: Printer, msg: Message) -> None:
+    """Render the user-facing parts of a ``multipart/x-tool-result`` Message.
 
-    Single bracketed block: ``[elapsed input↑ output↓ cw↟ cr↡ $cost]``.
-    Active runs prefix a braille spinner; the elapsed value ticks live
-    while token / cost values snap in at each model-call boundary.
+    Errors via ``write_tool_error``; diffs via ``write_diff``;
+    one-line success summaries via ``write_tool_summary``;
+    bash-lint nudges (``text/x-hint-tool-use-nudge``) via ``write_hint``.
 
     Args:
-      agent: Agent whose session totals drive the toolbar content.
-      spinner: Braille spinner character sequence.
+      printer: Printer to receive formatted output.
+      msg: Multipart tool-result message to render.
+
+    """
+    for part in cast("tuple[Message, ...]", msg.content):
+        if part.descriptor == "text/x-error":
+            printer.write_tool_error(str(part.content))
+        elif part.descriptor == "text/x-diff" and part.content:
+            printer.write_diff(str(part.content), get_queue_id(msg))
+        elif part.descriptor == "text/x-tool-summary" and part.content:
+            printer.write_tool_summary(str(part.content))
+        elif part.descriptor == "text/x-hint-tool-use-nudge" and part.content:
+            printer.write_hint(str(part.content))
+
+
+def make_render_observer(printer: Printer) -> RenderObserver:
+    """Return an ``Event``-consuming observer bound to ``printer``.
+
+    Args:
+      printer: Printer that receives formatted output.
 
     Returns:
-      toolbar: Formatted toolbar text, or empty string before the first run.
+      observer: Callable that the agent appends to ``self.observers``.
 
     """
-    elapsed = agent.total_active_elapsed_seconds
-    if elapsed <= 0 and not agent.active:
-        return ""
-    tokens = agent.total_tokens
-    cost = float(agent.total_cost_usd)
-    # Add the in-flight chars/4 estimate to output count so the bracket
-    # ticks during long single generations rather than freezing until
-    # the next ``cost_tracker.record()`` lands.
-    output_tokens = tokens.output_tokens + (
-        agent.live_model_response_tokens if agent.active else 0
-    )
-    bracket = (
-        f"[{format_elapsed(elapsed)}"
-        f" {format_count(tokens.input_tokens)}↑"
-        f" {format_count(output_tokens)}↓"
-        f" {format_count(tokens.cache_creation_tokens)}↟"
-        f" {format_count(tokens.cache_read_tokens)}↡"
-        f" ${cost:.2f}]"
-    )
-    if agent.active:
-        live_delta = asyncio.get_running_loop().time() - agent.request_start_time
-        frame = spinner[int(live_delta * 5) % len(spinner)]
-        return f"{frame} {bracket}"
-    return bracket
+    return RenderObserver(printer)
 
 
-def set_terminal_title(text: str, max_len: int = 80) -> None:
-    r"""Write an OSC 0 (icon+window title) escape to stdout.
+class RenderObserver:
+    """Translate agent ``Event`` payloads into ``Printer`` calls.
 
-    Safe under ``patch_stdout`` -- the proxy routes writes above the
-    prompt without tearing it down.  No-op when not a tty.
-
-    Args:
-      text: Title text to set.
-      max_len: Maximum character length before truncation.
-
+    Holds the streaming markdown buffer (paragraph-boundary detection)
+    and the per-child interleave buffer (one accumulator per child label,
+    flushed at stable Markdown boundaries or atomic events).
     """
-    if not sys.stderr.isatty():
-        return
-    one_line = text.replace("\n", " ").strip()
-    if len(one_line) > max_len:
-        one_line = one_line[: max_len - 1] + "…"
-    with contextlib.suppress(OSError):
-        sys.stderr.write(f"\x1b]0;{one_line}\x07")
-        sys.stderr.flush()
+
+    def __init__(self, printer: Printer) -> None:
+        self._printer = printer
+        self._stream_buf: str = ""
+        self._child_text: dict[str, str] = {}
+        self._child_items: dict[str, list[Message]] = {}
+
+    def __call__(self, event: Event) -> None:
+        try:
+            self._dispatch(event)
+        except Exception as e:  # noqa: BLE001 -- display safety net
+            self._printer.write_tool_error(
+                f"render failed for {type(event).__name__}: {type(e).__name__}: {e}",
+            )
+            logger.debug("render observer failed", exc_info=True)
+
+    def _dispatch(self, event: Event) -> None:
+        if isinstance(event, UserBarEvent):
+            self._printer.write_user_bar(event.text)
+        elif isinstance(event, TextChunkEvent):
+            self._feed_stream(event.text)
+        elif isinstance(event, ThinkingEvent):
+            self._printer.write_thinking(event.text)
+        elif isinstance(event, ToolLabelEvent):
+            self._printer.write_tool_label(event.text)
+        elif isinstance(event, ToolResultEvent):
+            render_tool_result(self._printer, event.msg)
+        elif isinstance(event, StreamEndEvent):
+            self._flush_stream()
+        elif isinstance(event, ErrorEvent):
+            self._printer.write_tool_error(event.text)
+        elif isinstance(event, InterruptedEvent):
+            self._printer.write_interrupted()
+        elif isinstance(event, StatusUpdateEvent):
+            self._printer.set_terminal_title(event.text)
+        elif isinstance(event, ChildEvent):
+            self._consume_child(event.label, event.inner)
+        elif isinstance(event, ChildDoneEvent):
+            self._flush_child(event.label)
+        # TurnCompleteEvent: rendered via TextChunkEvent + StreamEndEvent; no extra output.
+
+    def _feed_stream(self, chunk: str) -> None:
+        """Buffer streaming text; flush stable Markdown blocks."""
+        self._stream_buf += chunk
+        boundary = find_stable_boundary(self._stream_buf)
+        if boundary <= 0:
+            return
+        stable = self._stream_buf[:boundary].rstrip("\n")
+        self._stream_buf = self._stream_buf[boundary:]
+        if stable:
+            self._printer.write_markdown(stable)
+
+    def _flush_stream(self) -> None:
+        """Render any remaining streaming text and reset the buffer."""
+        remaining = self._stream_buf.rstrip("\n")
+        self._stream_buf = ""
+        if remaining:
+            self._printer.write_markdown(remaining)
+
+    def _consume_child(self, label: str, inner: Event) -> None:
+        """Buffer one child event; flush at stable boundaries or atomic events."""
+        for other in list(self._child_items):
+            if other != label:
+                self._emit_child(other)
+        if isinstance(inner, TextChunkEvent):
+            self._child_text[label] = self._child_text.get(label, "") + inner.text
+            buf = self._child_text[label]
+            boundary = find_stable_boundary(buf)
+            if boundary <= 0:
+                return
+            stable = buf[:boundary].rstrip("\n")
+            self._child_text[label] = buf[boundary:]
+            if stable:
+                self._child_items.setdefault(label, []).append(
+                    TextMessage(stable, "text/plain"),
+                )
+                self._emit_child(label)
+            return
+        atomic = _child_atomic_message(inner)
+        if atomic is None:
+            return
+        self._move_text_to_items(label)
+        self._child_items.setdefault(label, []).append(atomic)
+        self._emit_child(label)
+
+    def _flush_child(self, label: str) -> None:
+        """Force-flush a child label's buffered events."""
+        self._move_text_to_items(label)
+        self._emit_child(label)
+
+    def _move_text_to_items(self, label: str) -> None:
+        """Move accumulated streaming text into the items list."""
+        text = self._child_text.pop(label, "").rstrip("\n")
+        if text:
+            self._child_items.setdefault(label, []).append(
+                TextMessage(text, "text/plain"),
+            )
+
+    def _emit_child(self, label: str) -> None:
+        """Emit pending items for ``label``; leave streaming text untouched."""
+        items = self._child_items.pop(label, [])
+        if items:
+            self._printer.write_child_block(label, items)
 
 
-def format_elapsed(seconds: float) -> str:
-    """Format a duration as a compact string with integer-second granularity.
+def _child_atomic_message(inner: Event) -> Message | None:
+    """Translate non-streaming child events to a Message for child-block rendering.
 
     Args:
-      seconds: Elapsed time in seconds. Sub-second values floor to ``"0s"``.
+      inner: Inner event from a ``ChildEvent``.
 
     Returns:
-      formatted: E.g. ``"12s"``, ``"1m 23s"``, ``"2h 17m"``.
+      msg: Message the printer's ``write_child_block`` knows how to render,
+          or ``None`` if the event has no in-block representation.
 
     """
-    s = int(seconds)
-    if s < 60:
-        return f"{s}s"
-    if s < 3600:
-        m, sec = divmod(s, 60)
-        return f"{m}m {sec}s"
-    h, rem = divmod(s, 3600)
-    return f"{h}h {rem // 60}m"
+    if isinstance(inner, ToolLabelEvent):
+        return TextMessage(inner.text, "text/x-tool-label")
+    if isinstance(inner, ThinkingEvent):
+        return TextMessage(inner.text, "text/x-thinking")
+    if isinstance(inner, ErrorEvent):
+        return TextMessage(inner.text, "text/x-error")
+    if isinstance(inner, ToolResultEvent):
+        return inner.msg
+    return None
 
 
-def format_count(n: int) -> str:
-    """Abbreviate large token counts; sub-10K values render verbatim.
+HELP_TEXT = """\
+sagent commands
 
-    Args:
-      n: Token count.
+  /help                       this list
+  /quit                       exit
 
-    Returns:
-      formatted: E.g. ``"412"``, ``"12K"``, ``"1.8M"``.
+  /clear                      wipe context (logs preserved on disk)
+  /compact [hints]            compact history
+  /recompact [hints]          re-run the most recent compaction
 
-    """
-    if n < 10_000:
-        return str(n)
-    # Threshold lifted to 999_500 so banker's-rounded ``f"{n/1000:.0f}K"``
-    # never produces ``"1000K"`` -- step straight to the M scale instead.
-    if n < 999_500:
-        return f"{n / 1000:.0f}K"
-    return f"{n / 1_000_000:.1f}M"
+  /model    [args]            switch model
+  /provider <name>            switch provider
+  /login                      re-auth current provider
+
+  /tasks                      list running work (agents + fg + bg)
+  /break    [<label>|all]     cancel current step          (Ctrl+Z analog)
+  /abort    [<label>|all]     cancel step + queue          (Ctrl+C analog)
+                              "all" also kills background tasks\
+"""

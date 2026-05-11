@@ -78,6 +78,10 @@ class WebSearch:
             query = query[:47] + "..."
         return f"WebSearch {query!r}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental system-prompt text.
 

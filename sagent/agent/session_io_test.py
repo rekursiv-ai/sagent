@@ -200,12 +200,247 @@ class TestLoadSession:
             encoding="utf-8",
         )
 
+        original = session_file.read_text(encoding="utf-8")
+
         loaded = session_io.load_session(tmp_path, {})
 
         assert loaded is not None
         meta, messages = loaded
         assert meta["session_id"] == "s1"
         assert messages == [msg]
+        corrupt_files = list(tmp_path.glob("session.jsonl.corrupt-*"))
+        assert len(corrupt_files) == 1
+        assert corrupt_files[0].read_text(encoding="utf-8") == original
+
+    def test_clear_marker_drops_prior_messages(self, tmp_path: Path) -> None:
+        """``kind: clear`` resets the live messages list during load."""
+        session_file = tmp_path / "session.jsonl"
+        before = TextMessage("before clear", "text/x-user-message")
+        after = TextMessage("after clear", "text/x-user-message")
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"kind": "meta", "session_id": "s1"}),
+                    json.dumps({"kind": "message", **before.serialize()}),
+                    json.dumps({"kind": "clear", "_timestamp": 1}),
+                    json.dumps({"kind": "message", **after.serialize()}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [after]
+
+    def test_latest_meta_wins(self, tmp_path: Path) -> None:
+        """Multiple ``kind: meta`` lines: loader takes the latest."""
+        session_file = tmp_path / "session.jsonl"
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"kind": "meta", "session_id": "old"}),
+                    json.dumps({"kind": "meta", "session_id": "new"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+
+        assert loaded is not None
+        meta, _ = loaded
+        assert meta["session_id"] == "new"
+
+    def test_clear_barrier_drops_late_tool_result(self, tmp_path: Path) -> None:
+        """Late tool results from pre-clear calls are not live history."""
+        session_file = tmp_path / "session.jsonl"
+        call = tool_call_message("late", "grep", json_freeze({}))
+        assistant = AssistantMessage(tool_calls=[call])
+        late_result = ToolResult(
+            queue_id="late",
+            name="",
+            content=(Media("stale output", "text/plain"),),
+        )
+        after_clear = UserMessage("next")
+        session_file.write_text(
+            "\n".join(
+                [
+                    json.dumps({"kind": "meta", "session_id": "s1"}),
+                    json.dumps({"kind": "message", **assistant.serialize()}),
+                    json.dumps({"kind": "clear", "_timestamp": 1}),
+                    json.dumps({"kind": "message", **after_clear.serialize()}),
+                    json.dumps({"kind": "message", **late_result.serialize()}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [after_clear]
+        assert "stale output" in session_file.read_text(encoding="utf-8")
+
+
+class TestRepairDanglingToolCalls:
+    def test_drops_unexpected_tool_result_after_assistant(self) -> None:
+        """Tool results must match the immediately previous assistant calls."""
+        msg = AssistantMessage(
+            tool_calls=[tool_call_message("expected", "bash", json_freeze({}))],
+        )
+        repaired = session_io.repair_dangling_tool_calls(
+            [
+                UserMessage("u"),
+                msg,
+                ToolResult(
+                    queue_id="expected",
+                    name="",
+                    content=(Media("ok", "text/plain"),),
+                ),
+                ToolResult(
+                    queue_id="stale",
+                    name="",
+                    content=(Media("stale output", "text/plain"),),
+                ),
+            ]
+        )
+
+        assert [m.descriptor for m in repaired] == [
+            "text/x-user-message",
+            "multipart/x-model-message",
+            "multipart/x-tool-result",
+        ]
+        assert get_queue_id(repaired[-1]) == "expected"
+
+    def test_drops_orphan_without_clear_barrier(self) -> None:
+        repaired = session_io.repair_dangling_tool_calls(
+            [
+                UserMessage("before"),
+                ToolResult(
+                    queue_id="stale",
+                    name="",
+                    content=(Media("stale output", "text/plain"),),
+                ),
+                UserMessage("after"),
+            ]
+        )
+
+        assert [m.content for m in repaired] == ["before", "after"]
+
+    def test_drops_leading_tool_result(self) -> None:
+        repaired = session_io.repair_dangling_tool_calls(
+            [
+                ToolResult(
+                    queue_id="stale",
+                    name="",
+                    content=(Media("old output", "text/plain"),),
+                ),
+                UserMessage("next"),
+            ]
+        )
+
+        assert len(repaired) == 1
+        assert repaired[0].descriptor == "text/x-user-message"
+        assert repaired[0].content == "next"
+
+    def test_synthesizes_missing_tool_result(self) -> None:
+        repaired = session_io.repair_dangling_tool_calls(
+            [
+                UserMessage("u"),
+                AssistantMessage(
+                    tool_calls=[tool_call_message("missing", "bash", json_freeze({}))]
+                ),
+                UserMessage("next"),
+            ]
+        )
+
+        assert [m.descriptor for m in repaired] == [
+            "text/x-user-message",
+            "multipart/x-model-message",
+            "multipart/x-tool-result",
+            "text/x-user-message",
+        ]
+        assert get_queue_id(repaired[2]) == "missing"
+        assert _is_error_result(repaired[2])
+
+    def test_repair_is_idempotent(self) -> None:
+        messages = [
+            UserMessage("u"),
+            AssistantMessage(
+                tool_calls=[tool_call_message("missing", "bash", json_freeze({}))]
+            ),
+            ToolResult(
+                queue_id="stale",
+                name="",
+                content=(Media("stale output", "text/plain"),),
+            ),
+            UserMessage("next"),
+        ]
+
+        once = session_io.repair_dangling_tool_calls(messages)
+        twice = session_io.repair_dangling_tool_calls(once)
+
+        assert twice == once
+
+
+class TestAppendSession:
+    def test_append_creates_and_extends(self, tmp_path: Path) -> None:
+        """Two append calls produce one file with both messages."""
+        session_file = tmp_path / "session.jsonl"
+        m1 = TextMessage("first", "text/x-user-message")
+        m2 = TextMessage("second", "text/x-user-message")
+
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[m1],
+        )
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[m2],
+        )
+
+        loaded = session_io.load_session(tmp_path, {})
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [m1, m2]
+
+    def test_append_with_clear_barrier(self, tmp_path: Path) -> None:
+        """``clear=True`` writes a barrier; loader drops everything before."""
+        session_file = tmp_path / "session.jsonl"
+        before = TextMessage("doomed", "text/x-user-message")
+        after = TextMessage("survives", "text/x-user-message")
+
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[before],
+        )
+        session_io.append_session(
+            session_file,
+            meta={"session_id": "s1"},
+            messages_delta=[after],
+            clear=True,
+        )
+
+        # File still contains both messages -- not truncated.
+        raw = session_file.read_text(encoding="utf-8")
+        assert "doomed" in raw
+        assert "survives" in raw
+        assert '"kind": "clear"' in raw
+
+        loaded = session_io.load_session(tmp_path, {})
+        assert loaded is not None
+        _, messages = loaded
+        assert messages == [after]
 
 
 # -- Serialization edge cases -----------------------------------------

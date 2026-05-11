@@ -187,6 +187,10 @@ class PaperFetch:
         short = short_id(raw) if raw else "?"
         return f"PaperFetch {short}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return supplemental system-prompt text.
 

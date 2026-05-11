@@ -90,7 +90,7 @@ class EchoTool:
 | `PaperDetails` | Paper metadata, references, citations. | `id`; optional `operation`. |
 | `PaperAuthor` | Author search and author papers. | `query` or `id`; optional `operation="papers"`. |
 | `PaperFetch` | Download paper PDFs. | `id`. |
-| `AgentSelf` | Let an agent inspect/mutate itself. | `operation`. |
+| `AgentSelf` | Let an agent inspect/mutate itself. | Flat patch object; all fields optional. |
 | `AgentSpawn` | Run child agents. | `prompt`; optional model/tools/depth/session controls. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
@@ -145,16 +145,16 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 
 ## Agent coordination tools
 
-`AgentSelf` operations:
+`AgentSelf` accepts a single patch object. All fields are optional; omitted fields are unchanged:
 
-- `status`: update visible status.
-- `diagnostics`: inspect token/cost/model/provider state.
-- `compact`: request compaction.
-- `recompact`: redo the previous compaction with new guidance.
-- `model`: switch provider/auth/model.
-- `limits`: adjust request/response token limits.
-- `cache_ttl`: set prompt-cache TTL (`"5m"` default, `"1h"` extended) per agent. Affects Anthropic providers.
-- `clear`: clear history when explicitly requested.
+- `status`: update visible status text.
+- `diagnostics`: set `true` to include token/cost/model/provider state in the result.
+- `context`: `"compact"`, `"recompact"`, or `"clear"`.
+- `context_prompt`: guidance for compact/recompact, or reason for clear.
+- `model_id`, `provider`, `auth`, `account`: switch model/provider.
+- `max_request_tokens`, `max_response_tokens`: adjust token limits.
+- `model_options`: provider-specific settings (`thinking`, `effort`, `cache_ttl`).
+- `catalog`: `"providers"` or `"models"` for read-only discovery.
 
 `AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.
 

@@ -28,19 +28,27 @@ import time
 import uuid
 
 from sagent.custom_types import (
-    JsonMessage,
+    ChildDoneEvent,
+    ChildEvent,
+    ErrorEvent,
+    Event,
     Message,
     ModelSpec,
     MultipartMessage,
+    TextChunkEvent,
     TextMessage,
+    ThinkingEvent,
     Tool,
+    ToolLabelEvent,
+    ToolResultEvent,
     is_message,
 )
-from sagent.lib.descriptors import has_error
+from sagent.lib.descriptors import flat_text, has_error
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
-from sagent.lib.message import get_directive
+from sagent.lib.message import get_directive, response_text
 from sagent.providers import PROVIDER_NAMES, build_provider
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import (
     agent_counter_var,
     agent_label_var,
@@ -106,6 +114,7 @@ class AgentSpawn:
     tool_id: str = "application/x-tool-agentspawn"
     description: str = load_tool_description("agentspawn")
     supports_microcompaction: bool = False
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -183,7 +192,7 @@ class AgentSpawn:
                     "type": "boolean",
                     "description": (
                         "Run the child as a persistent agent via"
-                        " run_continuous(). Returns immediately with"
+                        " run_forever(). Returns immediately with"
                         " the child's label. Send messages via"
                         " AgentSend; manage via BackgroundTask."
                     ),
@@ -288,6 +297,15 @@ class AgentSpawn:
             )
         s = "s" if remaining != 1 else ""
         return f"Spawn budget: depth {depth}/{cap} -- {remaining} generation{s} of sub-spawning available."
+
+    def summary_result(self, result: Message) -> str | None:
+        """Return a one-line receipt for the child result."""
+        if not self.emit_tool_summary:
+            return None
+        text = flat_text(result).strip()
+        if not text:
+            return "completed with no output"
+        return f"{len(text.splitlines())}L"
 
     async def run(self, msg: Message) -> Message:
         """Spawn and run a child agent per the directive.
@@ -423,26 +441,35 @@ class AgentSpawn:
         msg: Message,
     ) -> Message:
         """Run a non-persistent child with contextvar isolation."""
+        del child_directive  # built locally below from directive["prompt"]
         parent_agent = current_agent_var.get()
         assert parent_agent is not None
         depth_token = max_depth_var.set(eff_max_depth)
         path_token = agent_path_var.set(child_path)
         label_token = agent_label_var.set(label)
+        agent_token = current_agent_var.set(child)
+        agent_registry[label] = child
         try:
-            on_msg = self._on_message or _make_parent_forwarder(
-                label, self._verbosity, parent_agent
+            forwarder = _build_forwarder(label, self._verbosity, parent_agent)
+            if forwarder is not None:
+                child.observers.append(forwarder)
+            user_msg = TextMessage(
+                str(get_directive(msg).get("prompt", "")),
+                "text/x-user-message",
             )
-            handle = child.run(child_directive)
-            async for event in handle:
-                if on_msg is not None:
-                    try:
-                        on_msg(event)
-                    except Exception:
-                        _logger.exception("on_message callback raised")
-            result = await handle
-            return dataclasses.replace(result, parent_id=msg.id)
+            try:
+                async for _event in child.run(user_msg):
+                    pass
+            finally:
+                if forwarder is not None and forwarder in child.observers:
+                    child.observers.remove(forwarder)
+                if forwarder is not None:
+                    forwarder.emit_done()
+            return _last_assistant_message(child.history, msg.id)
         finally:
             parent_agent.active_children.pop(label, None)
+            agent_registry.pop(label, None)
+            current_agent_var.reset(agent_token)
             agent_label_var.reset(label_token)
             agent_path_var.reset(path_token)
             max_depth_var.reset(depth_token)
@@ -454,45 +481,56 @@ class AgentSpawn:
         prompt: str,
         msg: Message,
     ) -> Message:
-        """Start a persistent child agent via ``run_continuous()``.
+        """Start a persistent child agent via ``serve_forever()``.
 
-        Registers the child in ``agent_registry`` and seeds its inbox
-        with the initial prompt. Returns immediately with the label.
+        Registers the child in ``agent_registry``, attaches the parent
+        forwarder as an observer, seeds the child's inbox with the prompt,
+        spawns ``serve_forever`` as a visible bg job under
+        ``parent.background``. Returns immediately with the label.
         """
         child._persistent = True  # noqa: SLF001 -- cross-layer flag
         child.name = label
         if self._session_root_dir is not None:
-            child._session_dir = self._session_root_dir / label  # noqa: SLF001 -- cross-layer private attr
+            child.session_dir = self._session_root_dir / label
         agent_registry[label] = child
-        agent_label_var_token = agent_label_var.set(label)
         parent_agent = current_agent_var.get()
-        on_msg = self._on_message or _make_parent_forwarder(
-            label, self._verbosity, parent_agent
+        forwarder = _build_forwarder(label, self._verbosity, parent_agent)
+        if forwarder is not None:
+            child.observers.append(forwarder)
+        bg_key = f"persistent:{label}"
+        external_queue: asyncio.Queue[Message | None] | None = (
+            asyncio.Queue() if self.on_persistent_spawn is not None else None
         )
-        external_queue: asyncio.Queue[Message | None] | None = None
-        if self.on_persistent_spawn is not None:
-            external_queue = asyncio.Queue()
 
         async def _run() -> None:
             try:
-                async for event in child.run_continuous():
-                    if on_msg is not None and event is not None:
-                        try:
-                            on_msg(event)
-                        except Exception:
-                            _logger.exception("on_message callback raised")
-                    if external_queue is not None:
-                        external_queue.put_nowait(event)
+                await child.serve_forever()
             finally:
+                if forwarder is not None and forwarder in child.observers:
+                    child.observers.remove(forwarder)
+                if forwarder is not None:
+                    forwarder.emit_done()
                 agent_registry.pop(label, None)
                 _persistent_tasks.pop(label, None)
+                if parent_agent is not None:
+                    parent_agent.background.pop(bg_key, None)
+                if external_queue is not None:
+                    external_queue.put_nowait(None)
                 if self.on_persistent_stop is not None:
                     self.on_persistent_stop(label)
 
-        child.inbox.put(prompt)
+        child.inbox.put(TextMessage(prompt, "text/x-user-message"))
         task = asyncio.create_task(_run())
         _persistent_tasks[label] = task
-        agent_label_var.reset(agent_label_var_token)
+        if parent_agent is not None:
+            parent_agent.background[bg_key] = BackgroundTaskEntry(
+                task=task,
+                tool_name="persistent-agent",
+                queue_id=label,
+                started=time.time(),
+                hidden=False,
+                kind="persistent_subagent",
+            )
         if self.on_persistent_spawn is not None and external_queue is not None:
             self.on_persistent_spawn(label, external_queue)
         return TextMessage(
@@ -649,14 +687,20 @@ class AgentSpawn:
     ) -> Path | None:
         """Per-child subdir under ``session_root_dir``, or None.
 
-        Shape: ``<session_root_dir>/<parent_session_id>/<child_uuid>/``.
-        When no root is configured, the child runs ephemerally (no
-        transcript).
+        Shape: ``<root>/<parent_session_id>/<child_uuid>/``.
+
+        Resolution order for root:
+        1. Explicit ``session_root_dir`` from factory construction.
+        2. Parent agent's ``session_dir`` (inherits logging from parent).
+        3. ``None`` → ephemeral (no transcript).
         """
-        if self._session_root_dir is None:
+        root = self._session_root_dir
+        if root is None and parent_agent is not None:
+            root = parent_agent.session_dir
+        if root is None:
             return None
         parent_id = parent_agent.session_id if parent_agent is not None else "root"
-        return self._session_root_dir / parent_id / str(uuid.uuid4())
+        return root / parent_id / str(uuid.uuid4())
 
 
 def _pick_field(
@@ -670,21 +714,14 @@ def _pick_field(
     return spec_val
 
 
-# Verbosity → forwarded descriptors.
-_VERBOSITY: dict[int, frozenset[str]] = {
+# Verbosity -> set of Event subclasses forwarded to the parent observer.
+# verbosity 0: nothing; 1: tool labels + tool results + assistant text;
+# 2: also thinking blocks. Errors are always forwarded.
+_VERBOSITY: dict[int, frozenset[type[Event]]] = {
     0: frozenset(),
-    1: frozenset({"text/x-tool-label", "multipart/x-tool-result", "text/plain"}),
-    2: frozenset(
-        {
-            "text/x-tool-label",
-            "multipart/x-tool-result",
-            "text/plain",
-            "text/x-thinking",
-        }
-    ),
+    1: frozenset({ToolLabelEvent, ToolResultEvent, TextChunkEvent}),
+    2: frozenset({ToolLabelEvent, ToolResultEvent, TextChunkEvent, ThinkingEvent}),
 }
-# Always forwarded regardless of verbosity.
-_ALWAYS_FORWARD = frozenset({"multipart/x-child-event"})
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -700,11 +737,11 @@ class ChildStats:
 
 
 class _ChildForwarder:
-    """Callable that wraps child events with a label and forwards them.
+    """Observer adapter: wraps child events as ``ChildEvent`` on parent.publish.
 
-    Holds a reference to the parent agent and reads ``._events`` lazily
-    at call time. Between parent ``run()`` calls ``._events`` is None
-    and events are silently dropped.
+    Tracks per-child stats so the parent's toolbar can render running-child
+    summaries. Errors and tool results always forward; other events follow
+    the verbosity table.
     """
 
     __slots__ = ("_forward_set", "_label", "_parent_agent", "_stats")
@@ -713,7 +750,7 @@ class _ChildForwarder:
         self,
         *,
         parent_agent: _Agent,
-        forward_set: frozenset[str],
+        forward_set: frozenset[type[Event]],
         stats: ChildStats,
         label: str,
     ) -> None:
@@ -722,72 +759,53 @@ class _ChildForwarder:
         self._stats = stats
         self._label = label
 
-    def _put(self, event: Message) -> None:
-        """Write to the parent's live queue, or no-op if between requests."""
-        q = self._parent_agent._events  # noqa: SLF001 -- cross-layer queue access
-        if q is not None:
-            q.put_nowait(event)
-
-    def __call__(self, event: Message) -> None:
-        if isinstance(event, JsonMessage) and event.descriptor == "application/x-done":
-            # Child done events are private; the parent stream gets a labeled summary.
-            self._stats.model_response_tokens = (
-                opt_int(event.content, "output_tokens") or 0
+    def __call__(self, event: Event) -> None:
+        if isinstance(event, ChildEvent):
+            self._parent_agent.publish(
+                ChildEvent(label=f"{self._label}/{event.label}", inner=event.inner)
             )
-            self._stats.done = True
-            elapsed = time.monotonic() - self._stats.start
-            done_inner = JsonMessage(
-                json_freeze(
-                    {
-                        "elapsed": elapsed,
-                        "model_response_tokens": self._stats.model_response_tokens,
-                        "cost_usd": self._stats.cost_usd,
-                    }
-                ),
-                "application/x-child-done",
-            )
-            self._put(
-                MultipartMessage(
-                    (
-                        TextMessage(
-                            self._label,
-                            "text/x-agent-label",
-                        ),
-                        done_inner,
-                    ),
-                    "multipart/x-child-event",
+            return
+        if isinstance(event, ChildDoneEvent):
+            self._parent_agent.publish(
+                ChildDoneEvent(
+                    label=f"{self._label}/{event.label}",
+                    elapsed=event.elapsed,
+                    tokens=event.tokens,
+                    cost=event.cost,
                 )
             )
-            self._parent_agent.active_children.pop(self._label, None)
             return
-        if event.descriptor == "text/plain" and isinstance(event, TextMessage):
-            self._stats.model_response_chars += len(event.content)
+        if isinstance(event, TextChunkEvent):
+            self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4
-        if event.descriptor in _ALWAYS_FORWARD:
-            self._put(event)
-            return
-        if event.descriptor not in self._forward_set:
-            if event.descriptor == "multipart/x-tool-result" and has_error(event):
-                pass  # Errors always forwarded.
-            else:
-                return
-        self._put(
-            MultipartMessage(
-                (
-                    TextMessage(self._label, "text/x-agent-label"),
-                    event,
-                ),
-                "multipart/x-child-event",
-            )
+        always_forward = isinstance(event, ErrorEvent) or (
+            isinstance(event, ToolResultEvent) and has_error(event.msg)
         )
+        if not always_forward and type(event) not in self._forward_set:
+            return
+        self._parent_agent.publish(ChildEvent(label=self._label, inner=event))
+
+    def emit_done(self) -> None:
+        """Publish a final ``ChildDoneEvent`` summary; clears parent active_children."""
+        self._stats.done = True
+        elapsed = time.monotonic() - self._stats.start
+        self._parent_agent.publish(
+            ChildDoneEvent(
+                label=self._label,
+                elapsed=elapsed,
+                tokens=self._stats.model_response_tokens,
+                cost=self._stats.cost_usd,
+            ),
+        )
+        self._parent_agent.active_children.pop(self._label, None)
 
 
-def _make_parent_forwarder(
+def _build_forwarder(
     label: str,
     verbosity: int,
-    parent_agent: _Agent | None = None,
+    parent_agent: _Agent | None,
 ) -> _ChildForwarder | None:
-    """Build a callback that wraps child events with a label and forwards them."""
+    """Construct a forwarder bound to ``parent_agent`` (or None when at root)."""
     if parent_agent is None:
         return None
     forward_set = _VERBOSITY.get(verbosity, _VERBOSITY[1])
@@ -799,6 +817,25 @@ def _make_parent_forwarder(
         stats=stats,
         label=label,
     )
+
+
+def _last_assistant_message(history: list[Message], parent_id: int) -> Message:
+    """Return the child's last assistant message as a flat ``text/plain`` reply."""
+    for m in reversed(history):
+        if m.descriptor == "multipart/x-model-message":
+            text = response_text(m)
+            if text:
+                return TextMessage(text, "text/plain", parent_id=parent_id)
+            if isinstance(m, MultipartMessage):
+                for part in m.content:
+                    if part.descriptor == "text/x-error":
+                        return TextMessage(
+                            str(part.content),
+                            "text/x-error",
+                            parent_id=parent_id,
+                        )
+            return TextMessage("", "text/plain", parent_id=parent_id)
+    return TextMessage("", "text/plain", parent_id=parent_id)
 
 
 _logger = logging.getLogger(__name__)

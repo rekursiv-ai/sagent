@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import asyncio
+
 import pytest
 
 from sagent.bin.slack import (
@@ -30,6 +32,7 @@ from sagent.custom_types import (
 )
 from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import agent_registry
 
 
@@ -39,7 +42,9 @@ from sagent.tools.core import agent_registry
 class _FakeAgent:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.inbox: Deque[str] = Deque()
+        self.inbox: Deque[Message] = Deque()
+        self.work: asyncio.Task[object] | None = None
+        self.background: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(*names: str) -> dict[str, _FakeAgent]:
@@ -266,7 +271,7 @@ class TestRouteHumanMessages:
         await adapter._route(_msg_event("check this", channel="C_LOG"))
         items = agents["Sara"].inbox.drain()
         assert len(items) == 1
-        assert "check this" in items[0]
+        assert "check this" in str(items[0].content)
 
     @pytest.mark.anyio
     async def test_route_by_agent_name_mention(self) -> None:
@@ -506,7 +511,7 @@ class TestCommands:
         result = await adapter._try_command("stop Sara", "C1", "1.0")
         assert result is True
         items = agents["Sara"].inbox.drain()
-        assert any("__quit__" in item for item in items)
+        assert any(item.descriptor == "text/x-quit" for item in items)
 
     @pytest.mark.anyio
     async def test_unknown_not_a_command(self) -> None:
@@ -604,8 +609,8 @@ class TestRouteReactions:
         await adapter._route(_reaction_event("heart"))
         items = agents["Sara"].inbox.drain()
         assert len(items) == 1
-        assert ":heart:" in items[0]
-        assert "hello world" in items[0]
+        assert ":heart:" in str(items[0].content)
+        assert "hello world" in str(items[0].content)
 
     @pytest.mark.anyio
     async def test_reaction_includes_user_name(self) -> None:
@@ -615,8 +620,8 @@ class TestRouteReactions:
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hi", "0.5")
         await adapter._route(_reaction_event("thumbsup"))
         items = agents["Sara"].inbox.drain()
-        assert "Josh" in items[0]
-        assert ":thumbsup:" in items[0]
+        assert "Josh" in str(items[0].content)
+        assert ":thumbsup:" in str(items[0].content)
 
     @pytest.mark.anyio
     async def test_reaction_uses_cached_thread_ts(self) -> None:
@@ -625,7 +630,7 @@ class TestRouteReactions:
         adapter._sent_messages[("C123", "2.0")] = ("Sara", "reply text", "1.0")
         await adapter._route(_reaction_event("heart", msg_ts="2.0"))
         items = agents["Sara"].inbox.drain()
-        assert "thread_ts=1.0" in items[0]
+        assert "thread_ts=1.0" in str(items[0].content)
 
     @pytest.mark.anyio
     async def test_reaction_ignored_when_not_cached(self) -> None:
@@ -720,8 +725,8 @@ class TestRouteReactions:
         await adapter._route(_reaction_event("heart"))
         items = agents["Sara"].inbox.drain()
         assert len(items) == 1
-        assert ":heart:" in items[0]
-        assert '""' not in items[0]
+        assert ":heart:" in str(items[0].content)
+        assert '""' not in str(items[0].content)
 
 
 # -- Log rendering --------------------------------------------------------

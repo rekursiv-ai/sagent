@@ -35,7 +35,7 @@ sagent --provider Moonshot --model kimi-k2.6
 sagent --provider DashScope --model qwen3.6-plus
 sagent --provider MiniMax --model MiniMax-M2.7
 sagent --provider SelfHosted
-sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 ```
 
 | Flag | Meaning |
@@ -43,7 +43,7 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
 | `--provider NAME` | Provider class from `sagent.providers`, such as `Anthropic` or `Google`. |
 | `--auth METHOD` | Calls `Provider.from_<METHOD>()`; default is `env`. |
 | `--account NAME` | Optional named credential slot for providers that support one. |
-| `--model ID` | Provider-specific model ID. Anthropic IDs may include `+1m` or `+200k` context tags. |
+| `--model ID` | Provider-specific model ID. Anthropic IDs may include `+1m` or `+200k`; SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
 | `--system TEXT` | Extra system prompt instructions appended to Sagent's default prompt. |
 | `--effort LEVEL` | Provider-specific reasoning effort. Anthropic accepts `low`, `medium`, `high`, `xhigh`, `max`. |
 | `--max-response-tokens N` | Limit response tokens for each model call. |
@@ -52,32 +52,30 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
 If no `from_<auth>` factory exists, Sagent treats `--auth` as a literal API key and passes it to `from_key(...)`. Prefer environment variables for shell history safety.
 
 For self-hosted HuggingFace models, `SelfHosted` defaults to
-`Qwen/Qwen3.6-27B` and treats `--model` as either a repo ID or local snapshot
-path:
+`Qwen/Qwen3.6-27B` and treats `--model` as a repo ID or local snapshot path with
+optional `+` settings:
 
 ```bash
-sagent --provider SelfHosted --model Qwen/Qwen3.6-27B
-sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+bfloat16
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 ```
 
 For short local Qwen smoke tests, use `--effort none` to disable reasoning
 traces:
 
 ```bash
-sagent --provider SelfHosted --model Qwen/Qwen3-0.6B \
-  --tools none --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
+  --effort none --max-response-tokens 32 --max-tool-call-rounds 1
 ```
 
 Add `--log-level DEBUG` or set `SAGENT_LOG_LEVEL=DEBUG` when debugging local
 model load, device placement, prompt rendering, generation, or tool-call
 parsing.
 
-When `SAGENT_SELFHOSTED_DEVICE` is unset, SelfHosted uses MPS if available,
-then CUDA if available, then the PyTorch CPU default.
-
-Set `SAGENT_SELFHOSTED_COMPILE=1` to opt into `torch.compile` for the loaded
-SelfHosted model. It is disabled by default because compile can add significant
-first-request latency and backend-specific variance.
+Supported SelfHosted options are `cpu`, `cuda`, `mps`, `auto`, `float16`,
+`bfloat16`, `float32`, and `compile`. Options can appear in any order, but each
+category can appear only once.
 
 ## Tool flags
 
@@ -89,8 +87,11 @@ sagent --tools Read Bash BackgroundTask
 `--tools` accepts exact class names exported from `sagent.tools`. The default terminal tool set is:
 
 ```text
-AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch PlayAudio Skill Wiki
+AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch PlayAudio Skill
 ```
+
+`Wiki` is available only when requested explicitly, for example
+`--tools Read Grep Wiki`.
 
 Use `--tools none` for a model-only run with no tools.
 

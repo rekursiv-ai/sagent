@@ -77,6 +77,7 @@ class Read:
     tool_id: str = "application/x-tool-read"
     description: str = load_tool_description("Read")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -163,20 +164,42 @@ class Read:
         directive = get_directive(msg)
         file_path = str(directive.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
-        offset = directive.get("offset")
-        limit = directive.get("limit")
-        last_lines = directive.get("last_lines")
-        if isinstance(last_lines, int) and last_lines > 0:
+        offset = int_val(directive.get("offset"), 0)
+        limit = int_val(directive.get("limit"), 0)
+        last_lines = int_val(directive.get("last_lines"), 0)
+        if last_lines > 0:
             suffix = f":last-{last_lines}"
-        elif isinstance(offset, int) and isinstance(limit, int):
+        elif offset > 0 and limit > 0:
             suffix = f":{offset}-{offset + limit}"
-        elif isinstance(offset, int):
+        elif offset > 0:
             suffix = f":{offset}+"
-        elif isinstance(limit, int):
+        elif limit > 0:
             suffix = f":1-{limit}"
         else:
             suffix = ""
         return f"Read {fname}{suffix}"
+
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt summarizing the read.
+
+        ``{N} lines`` for plain-text reads, ``image``/``pdf`` for
+        binary formats, ``(unchanged)`` when the file matches the
+        last-read snapshot, ``None`` for errors.
+        """
+        if not self.emit_tool_summary:
+            return None
+        if result.descriptor == "text/x-error":
+            return None
+        if result.descriptor != "text/plain":
+            # Multipart (image, PDF) or notebook -- the inner descriptor
+            # carries the format. Fall back to a generic marker.
+            return "binary"
+        text = str(result.content)
+        if text.startswith("[File unchanged"):
+            return "unchanged"
+        # Line-numbered output: count newlines in the rendered body.
+        lines = text.count("\n")
+        return f"{lines} lines"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.

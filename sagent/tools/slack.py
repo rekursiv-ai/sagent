@@ -29,6 +29,7 @@ from sagent.custom_types import Message, TextMessage, is_message
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
+from sagent.tools.core import load_tool_description
 
 
 logger = logging.getLogger(__name__)
@@ -114,15 +115,7 @@ class Slack:
 
     name: str = "Slack"
     tool_id: str = "application/x-tool-slack"
-    description: str = (
-        "Interact with Slack via the Web API. Operations:\n"
-        "  - 'send' (channel, text, thread_ts?) → post a message\n"
-        "  - 'list_channels' (limit?) → channels the bot can see\n"
-        "  - 'list_messages' (channel, limit?) → recent messages\n"
-        "  - 'read_thread' (channel, thread_ts, limit?) → thread replies\n"
-        "  - 'list_users' (limit?) → workspace users\n"
-        "  - 'create_channel' (channel_name) → create a channel"
-    )
+    description: str = load_tool_description("Slack")
     supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
@@ -165,6 +158,10 @@ class Slack:
         channel = str(directive.get("channel", ""))
         suffix = f":{channel}" if channel else ""
         return f"Slack {operation}{suffix}"
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     def prompt(self) -> str:
         """Return per-request system prompt text.

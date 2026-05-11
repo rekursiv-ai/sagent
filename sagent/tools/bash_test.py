@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
+import contextlib
+import os
+import signal
+
 import pytest
 
 from sagent.custom_types import (
@@ -18,6 +23,7 @@ from sagent.tools.bash import (
     BASH_MAX_TIMEOUT_MS,
     Bash,
     _render_bash_description,
+    _run_foreground,
 )
 from sagent.tools.core import ToolState, tool_state_context
 from sagent.tools.grep import Grep
@@ -26,6 +32,8 @@ from sagent.tools.lib.bash import Node
 
 
 bash = Bash()
+summary_bash = Bash()
+summary_bash.emit_tool_summary = True
 
 
 def _msg(directive: JSON) -> Message:
@@ -73,6 +81,32 @@ class TestBash:
         response = await bash.run(_msg(json_freeze({"command": "false"})))
         assert "[exit code: 1]" in _text(response)
 
+    @pytest.mark.anyio
+    async def test_summary_result_clean_run_reports_line_count(self) -> None:
+        """Stdout-only successful run summarises as ``{N}L`` when enabled."""
+        response = await bash.run(
+            _msg(json_freeze({"command": "printf 'a\\nb\\nc\\n'"}))
+        )
+        assert summary_bash.summary_result(response) == "3L"
+
+    @pytest.mark.anyio
+    async def test_summary_result_nonzero_exit_includes_code(self) -> None:
+        """Non-zero exit appends ``· exit {code}`` to the summary."""
+        response = await bash.run(_msg(json_freeze({"command": "false"})))
+        summary = summary_bash.summary_result(response)
+        assert summary is not None
+        assert "exit 1" in summary
+
+    @pytest.mark.anyio
+    async def test_summary_result_no_output_counts_marker_line(self) -> None:
+        """Empty stdout becomes ``(no output)`` upstream; summary counts it as 1L."""
+        response = await bash.run(_msg(json_freeze({"command": "true"})))
+        assert summary_bash.summary_result(response) == "1L"
+
+    def test_tool_summary_disabled_by_default(self) -> None:
+        assert Bash.emit_tool_summary is False
+        assert bash.summary_result(TextMessage("x", "text/plain")) is None
+
 
 class TestBashEdgeCases:
     @pytest.mark.anyio
@@ -93,6 +127,37 @@ class TestBashEdgeCases:
             _msg(json_freeze({"command": f"cd {tmp_path} && pwd"}))
         )
         assert str(tmp_path) in _text(response)
+
+    @pytest.mark.anyio
+    async def test_foreground_disconnects_stdin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured_stdin: object = None
+
+        class FakeProcess:
+            returncode = 0
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                return b"ok\n", b""
+
+        async def fake_create_subprocess_exec(
+            *args: object, **kwargs: object
+        ) -> object:
+            nonlocal captured_stdin
+            del args
+            captured_stdin = kwargs.get("stdin")
+            return FakeProcess()
+
+        monkeypatch.setattr(
+            asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+
+        result = await _run_foreground("python -m pdb", state=ToolState(), timeout_s=1)
+
+        assert result == "ok"
+        assert captured_stdin == asyncio.subprocess.DEVNULL
 
 
 class TestBashStderr:
@@ -181,3 +246,60 @@ class TestBashParseCache:
         assert call_count == 0
         # Sanity: lint actually fired (not a silent skip).
         assert "[bash-lint]" in _text(response)
+
+
+class TestCancelKillsSubprocess:
+    """Cancellation must actually terminate the bash subprocess."""
+
+    @pytest.mark.anyio
+    async def test_cancel_kills_subprocess(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        started = asyncio.Event()
+        killed_groups: list[tuple[int, signal.Signals]] = []
+
+        class FakeProcess:
+            pid = 123
+            returncode: int | None = None
+
+            async def communicate(self) -> tuple[bytes, bytes]:
+                started.set()
+                await asyncio.Event().wait()
+                return b"", b""
+
+            async def wait(self) -> int:
+                self.returncode = -signal.SIGTERM
+                return self.returncode
+
+        async def fake_create_subprocess_exec(
+            *args: object,
+            **kwargs: object,
+        ) -> FakeProcess:
+            _ = args, kwargs
+            return FakeProcess()
+
+        def fake_getpgid(pid: int) -> int:
+            return pid
+
+        def fake_killpg(pgid: int, sig: signal.Signals) -> None:
+            killed_groups.append((pgid, sig))
+
+        monkeypatch.setattr(
+            asyncio,
+            "create_subprocess_exec",
+            fake_create_subprocess_exec,
+        )
+        monkeypatch.setattr(os, "getpgid", fake_getpgid)
+        monkeypatch.setattr(os, "killpg", fake_killpg)
+
+        with tool_state_context(ToolState()):
+            run_task = asyncio.create_task(
+                bash.run(_msg(json_freeze({"command": "sleep"})))
+            )
+            await started.wait()
+            _ = run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                _ = await run_task
+
+        assert killed_groups == [(123, signal.SIGTERM)]

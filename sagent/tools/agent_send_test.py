@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import asyncio
+
 import pytest
 
 from sagent.agent import Agent
@@ -17,9 +19,11 @@ from sagent.custom_types import (
     TokenCount,
 )
 from sagent.lib.asyncio_collections import Deque
+from sagent.lib.descriptors import QUIT_SENTINEL
 from sagent.lib.json import JSON, json_freeze
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_send import AgentSend, _deliver
+from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import (
     agent_label_var,
     agent_registry,
@@ -34,9 +38,15 @@ def _msg(directive: JSON) -> Message:
 
 
 class _FakeAgent:
+    """Minimal ``AgentLike`` stub for ``agent_registry`` insertion."""
+
     def __init__(self, name: str = "fake") -> None:
         self.name = name
-        self.inbox: Deque[str] = Deque()
+        self.inbox: Deque[Message] = Deque()
+        # Required by the AgentLike protocol so agent_registry typecheck-
+        # accepts this stub. Not exercised by the tests in this module.
+        self.work: asyncio.Task[object] | None = None
+        self.background: dict[str, BackgroundTaskEntry] = {}
 
 
 def _register(name: str) -> _FakeAgent:
@@ -112,8 +122,8 @@ class TestRun:
             assert "Delivered" in str(result.content)
             drained = target.inbox.drain()
             assert len(drained) == 1
-            assert "[from agent]:" in drained[0]
-            assert "stop editing foo.py" in drained[0]
+            assert "[from agent]:" in str(drained[0].content)
+            assert "stop editing foo.py" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -150,7 +160,7 @@ class TestRun:
         try:
             await t.run(_msg(json_freeze({"to": "Agent1", "content": "hey"})))
             drained = target.inbox.drain()
-            assert "[from Agent_0]:" in drained[0]
+            assert "[from Agent_0]:" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -176,8 +186,8 @@ class TestRun:
         _deliver(target, "agent", "wake up", 60)
         drained = target.inbox.drain()
         assert len(drained) == 1
-        assert "[from agent, 60s ago]:" in drained[0]
-        assert "wake up" in drained[0]
+        assert "[from agent, 60s ago]:" in str(drained[0].content)
+        assert "wake up" in str(drained[0].content)
 
     def test_deliver_callback_dead_agent(self) -> None:
         _deliver(object(), "agent", "hello", 10)
@@ -194,7 +204,7 @@ class TestRun:
             assert result.descriptor == "text/plain"
             drained = me.inbox.drain()
             assert len(drained) == 1
-            assert "[from agent]:" in drained[0]
+            assert "[from agent]:" in str(drained[0].content)
         finally:
             agent_label_var.reset(token)
             agent_registry.clear()
@@ -225,8 +235,9 @@ class _MockModel(MockModelCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        del on_text
+        del on_text, on_thinking
         return await self.buffer(request)
 
     @staticmethod
@@ -246,7 +257,10 @@ class TestAgentRegistration:
         model = _MockModel()
         agent = Agent(model=model, system="test", name="root")
         assert "root" not in agent_registry
-        await agent.run(json_freeze({"prompt": "hi"}))
+        # Drive one message through the same loop entry the REPL uses.
+        agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+        agent.shutdown(force=False)
+        await agent.serve_forever()
         assert "root" not in agent_registry
 
     @pytest.mark.anyio
@@ -268,6 +282,10 @@ class TestAgentRegistration:
 
             def prompt(self) -> str:
                 return ""
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             async def run(self, msg: Message) -> Message:
                 del msg
@@ -302,7 +320,9 @@ class TestAgentRegistration:
             ]
         )
         agent = Agent(model=model, system="test", name="myagent", tools=[capture])
-        await agent.run(json_freeze({"prompt": "go"}))
+        agent.inbox.put(TextMessage("go", "text/x-user-message"))
+        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+        await agent.serve_forever()
         assert captured == [True]
 
 

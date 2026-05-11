@@ -75,15 +75,32 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx
 
 from sagent.agent import Agent
-from sagent.agent.agent import QUIT_SENTINEL
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     parse_agent_args,
     resolve_tools,
 )
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import Message, ModelSpec, is_message
-from sagent.lib.json import MutableJSON
+from sagent.custom_types import (
+    ChildDoneEvent,
+    ChildEvent,
+    ErrorEvent,
+    InterruptedEvent,
+    JsonMessage,
+    Message,
+    ModelSpec,
+    MultipartMessage,
+    StatusUpdateEvent,
+    TextChunkEvent,
+    TextMessage,
+    ThinkingEvent,
+    ToolLabelEvent,
+    ToolResultEvent,
+    UserBarEvent,
+    is_message,
+)
+from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.lib.json import MutableJSON, json_freeze
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
@@ -417,7 +434,9 @@ class SlackAdapter:
             owner = self._log_channel_owners[channel]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] log-channel {clean[:200]}")
-                agent_registry[owner].inbox.put(formatted)
+                agent_registry[owner].inbox.put(
+                    TextMessage(formatted, "text/x-user-message")
+                )
             return
 
         # 2. Explicit agent name at start of message.
@@ -427,7 +446,9 @@ class SlackAdapter:
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
             self._log_route(f"[{user}->{target}] mention {clean[:200]}")
-            agent_registry[target].inbox.put(formatted)
+            agent_registry[target].inbox.put(
+                TextMessage(formatted, "text/x-user-message")
+            )
             return
 
         # 3. Thread continuation.
@@ -436,7 +457,9 @@ class SlackAdapter:
             owner = self._thread_owners[thread_key]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] thread {clean[:200]}")
-                agent_registry[owner].inbox.put(formatted)
+                agent_registry[owner].inbox.put(
+                    TextMessage(formatted, "text/x-user-message")
+                )
                 return
 
         # Agent messages that don't match steps 1-3: drop.
@@ -454,7 +477,9 @@ class SlackAdapter:
         if len(agents) == 1:
             self._thread_owners[(channel, thread_ts)] = agents[0]
             self._log_route(f"[{user}->{agents[0]}] default {clean[:200]}")
-            agent_registry[agents[0]].inbox.put(formatted)
+            agent_registry[agents[0]].inbox.put(
+                TextMessage(formatted, "text/x-user-message")
+            )
             return
 
         # 6. Ambiguous or no agents.
@@ -519,7 +544,9 @@ class SlackAdapter:
             formatted = f"{source} {user} reacted with :{reaction}: to your message"
 
         self._log_route(f"[{user}->{agent_name}] reaction :{reaction}:")
-        agent_registry[agent_name].inbox.put(formatted)
+        agent_registry[agent_name].inbox.put(
+            TextMessage(formatted, "text/x-user-message")
+        )
 
     # -- Command handling --------------------------------------------------
 
@@ -627,8 +654,14 @@ class SlackAdapter:
             e: asyncio.Queue[Message | None] = events,
         ) -> None:
             try:
-                async for event in c.run_continuous():
-                    e.put_nowait(event)
+                fwd = _make_event_forwarder(e)
+                c.observers.append(fwd)
+                try:
+                    await c.serve_forever()
+                finally:
+                    if fwd in c.observers:
+                        c.observers.remove(fwd)
+                    e.put_nowait(None)
             finally:
                 agent_registry.pop(c.name, None)
 
@@ -638,7 +671,7 @@ class SlackAdapter:
     def stop_agent(self, label: str) -> None:
         agent = agent_registry.get(label)
         if agent:
-            agent.inbox.put(QUIT_SENTINEL)
+            agent.inbox.put(TextMessage("", QUIT_SENTINEL))
         self._active_agents.pop(label, None)
         _save_manifest(self._session_dir, self._active_agents)
 
@@ -759,6 +792,61 @@ async def _flush_log(
         chunk_len += line_len
     if chunk:
         await slack.send(channel_id, "\n".join(chunk))
+
+
+def _make_event_forwarder(
+    queue: asyncio.Queue[Message | None],
+) -> Callable[[object], None]:
+    """Build an agent observer that translates v3 ``Event`` payloads to messages.
+
+    Reuses the v2 ``Message`` shape so the existing ``log_tap`` /
+    ``_render_event`` chain keeps working unchanged.
+    """
+
+    def _translate(ev: object) -> Message | None:
+        if isinstance(ev, TextChunkEvent):
+            return TextMessage(ev.text, "text/plain")
+        if isinstance(ev, ThinkingEvent):
+            return TextMessage(ev.text, "text/x-thinking")
+        if isinstance(ev, ToolLabelEvent):
+            return TextMessage(ev.text, "text/x-tool-label")
+        if isinstance(ev, ToolResultEvent):
+            return ev.msg
+        if isinstance(ev, ErrorEvent):
+            return TextMessage(ev.text, "text/x-error")
+        if isinstance(ev, InterruptedEvent):
+            return TextMessage("", "text/x-interrupted")
+        if isinstance(ev, StatusUpdateEvent):
+            return TextMessage(ev.text, "text/x-status-update")
+        if isinstance(ev, UserBarEvent):
+            return TextMessage(ev.text, "text/x-user-message")
+        if isinstance(ev, ChildEvent):
+            inner = _translate(ev.inner)
+            if inner is None:
+                return None
+            return MultipartMessage(
+                (TextMessage(ev.label, "text/x-agent-label"), inner),
+                "multipart/x-child-event",
+            )
+        if isinstance(ev, ChildDoneEvent):
+            return JsonMessage(
+                json_freeze(
+                    {
+                        "elapsed": ev.elapsed,
+                        "model_response_tokens": ev.tokens,
+                        "cost_usd": ev.cost,
+                    },
+                ),
+                "application/x-child-done",
+            )
+        return None
+
+    def _fwd(ev: object) -> None:
+        msg = _translate(ev)
+        if msg is not None:
+            queue.put_nowait(msg)
+
+    return _fwd
 
 
 def _render_event(event: Message) -> str | None:
@@ -1014,7 +1102,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Shutdown.
     for agent in list(agent_registry.values()):
-        agent.inbox.put(QUIT_SENTINEL)
+        agent.inbox.put(TextMessage("", QUIT_SENTINEL))
     adapter_task.cancel()
     logger.info("Shutdown complete")
 

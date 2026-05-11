@@ -19,13 +19,30 @@ from sagent.custom_types import (
     TokenCount,
 )
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive, tool_call_message
+from sagent.lib.message import (
+    get_directive,
+    response_text,
+    tool_call_message,
+)
 from sagent.testing import MockModelCaps
 from sagent.tools.background_task import (
     BackgroundTask,
     BackgroundTaskEntry,
 )
 from sagent.tools.core import current_agent_var
+
+
+# -- v3-compat helper --------------------------------------------------
+
+
+async def _run(agent: Agent, prompt: str) -> Message:
+    """Drain ``run`` and return the last assistant text as a Message."""
+    async for _ev in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            return TextMessage(response_text(m), "text/plain")
+    return TextMessage("", "text/plain")
 
 
 # -- Factories ---------------------------------------------------------
@@ -79,8 +96,9 @@ class _MockModel(_MockCaps):
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> _ModelResponse:
-        del on_text
+        del on_text, on_thinking
         return await self.buffer(request=request)
 
 
@@ -103,6 +121,10 @@ class _MockTool:
 
     def prompt(self) -> str:
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)
@@ -128,6 +150,10 @@ class _SlowTool:
 
     def prompt(self) -> str:
         return ""
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     async def run(self, msg: Message) -> Message:
         directive = get_directive(msg)
@@ -163,7 +189,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # Placeholder was appended to messages.
         placeholders = [
             m
@@ -197,13 +223,17 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_SlowTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
-        # Wait for the background task to finish.
-        job = agent._background_tasks.get("t1")
+        await _run(agent, "go")
+        # Wait for the background task to finish (may already have).
+        job = agent.background.get("t1")
         if job is not None:
             await job.task
-        drained = agent.inbox.drain()
-        assert any("bg-result" in item for item in drained)
+        # The bg post becomes a text/x-user-message either still in
+        # the inbox (if posted after run exit) or already in history
+        # (if processed by the dispatch loop). Either is correct for
+        # the v2 spine.
+        sources = [*agent.inbox.drain(), *agent.messages]
+        assert any("bg-result" in str(item.content) for item in sources)
 
     @pytest.mark.anyio
     async def test_delay_implies_background(self) -> None:
@@ -227,7 +257,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        await agent.run(json_freeze({"prompt": "go"}))
+        await _run(agent, "go")
         # delay=0 still backgrounds (delay implies background).
         placeholders = [
             m for m in agent.messages if "Running in background" in str(m.content)
@@ -254,7 +284,7 @@ class TestBackgroundDispatch:
             model=model,
             tools=[_MockTool(), BackgroundTask()],
         )
-        result = await agent.run(json_freeze({"prompt": "go"}))
+        result = await _run(agent, "go")
         assert str(result.content) == "done"
         # No placeholders -- tool ran synchronously.
         placeholders = [
@@ -300,7 +330,7 @@ class TestBackgroundTaskTool:
             return TextMessage("", "text/plain")
 
         task = asyncio.create_task(_long_wait())
-        agent._background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="slow",
             queue_id="j1",
@@ -321,7 +351,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "Cancelled" in str(result.content)
-            assert "j1" not in agent._background_tasks
+            assert "j1" not in agent.background
             assert task.cancelling()
         finally:
             current_agent_var.reset(token)
@@ -336,7 +366,7 @@ class TestBackgroundTaskTool:
             return TextMessage("the-result", "text/plain")
 
         task = asyncio.create_task(_delayed_result())
-        agent._background_tasks["j1"] = BackgroundTaskEntry(
+        agent.background["j1"] = BackgroundTaskEntry(
             task=task,
             tool_name="echo",
             queue_id="j1",
@@ -357,7 +387,7 @@ class TestBackgroundTaskTool:
             )
             result = await tool.run(msg)
             assert "the-result" in str(result.content)
-            assert "j1" not in agent._background_tasks
+            assert "j1" not in agent.background
         finally:
             current_agent_var.reset(token)
 

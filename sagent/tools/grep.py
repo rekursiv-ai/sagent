@@ -94,6 +94,7 @@ class Grep:
     tool_id: str = "application/x-tool-grep"
     description: str = load_tool_description("Grep")
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -202,6 +203,19 @@ class Grep:
             pattern = pattern[:37] + "..."
         suffix = f" in {path}" if path != "." else ""
         return f"Grep {pattern!r}{suffix}"
+
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt: hit count."""
+        if not self.emit_tool_summary:
+            return None
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content).strip()
+        if not text or text.startswith("(no matches"):
+            return "no matches"
+        # Output is one match per line; line count == match count for
+        # files_with_matches and content modes both.
+        return f"{text.count(chr(10)) + 1} hits"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.

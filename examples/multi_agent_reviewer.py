@@ -6,7 +6,8 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.custom_types import TextMessage
+from sagent.lib.message import response_text
 from sagent.providers import Google
 from sagent.tools import AgentSpawn
 
@@ -26,17 +27,16 @@ async def main() -> None:
         ),
         tools=[reviewer],
     )
-    result = await agent.run(
-        json_freeze(
-            {
-                "prompt": (
-                    "Write a two-sentence explanation of why typed Message "
-                    "objects help agent tool dispatch."
-                ),
-            }
-        )
+    prompt = (
+        "Write a two-sentence explanation of why typed Message "
+        "objects help agent tool dispatch."
     )
-    sys.stdout.write(f"{result.content}\n")
+    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            sys.stdout.write(f"{response_text(m)}\n")
+            return
 
 
 if __name__ == "__main__":

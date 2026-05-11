@@ -17,7 +17,7 @@ from sagent.custom_types import (
     TokenCount,
 )
 from sagent.lib.json import json_freeze
-from sagent.lib.message import tool_call_message
+from sagent.lib.message import response_text, tool_call_message
 from sagent.tools import tool
 
 
@@ -87,8 +87,10 @@ class ScriptedModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Return the buffered response and optionally emit final text."""
+        del on_thinking
         response = await self.buffer(request)
         if (
             on_text is not None
@@ -115,8 +117,14 @@ async def run_example() -> str:
         max_tool_call_rounds=3,
         thinking=None,
     )
-    result = await agent.run(json_freeze({"prompt": "Echo hello."}))
-    return str(result.content)
+    async for _event in agent.run(
+        TextMessage("Echo hello.", "text/x-user-message"),
+    ):
+        pass
+    for m in reversed(agent.history):
+        if m.descriptor == "multipart/x-model-message":
+            return response_text(m)
+    return ""
 
 
 def main() -> None:

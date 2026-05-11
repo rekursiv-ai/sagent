@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
+import asyncio
 import contextlib
 import logging
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -22,15 +24,22 @@ from sagent.custom_types import Message, MultipartMessage, TextMessage
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.tools.core import (
+    TOOL_RESULT_MAX_CHARS,
     ToolState,
     get_tool_state,
     load_tool_description,
-    run_sync,
+    truncate,
 )
 from sagent.tools.lib.bash import Node, cached_parse_bash
 
 
 logger = logging.getLogger(__name__)
+
+
+# Matches ``[exit code: N]`` appended by ``Bash._run`` on non-zero exits.
+# Anchored to ``\n`` or start-of-string because ``_run`` strips the leading
+# newline when stdout was empty (e.g. ``false`` → ``"[exit code: 1]"``).
+_BASH_EXIT_RE = re.compile(r"(?:^|\n)\[exit code: (\d+)\]\s*$")
 
 
 @runtime_checkable
@@ -97,6 +106,7 @@ class Bash:
     tool_id: str = "application/x-tool-bash"
     description: str = _render_bash_description(load_tool_description("Bash"))
     supports_microcompaction: bool = True
+    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -166,6 +176,20 @@ class Bash:
             cmd = cmd[:57] + "..."
         return f"Bash {cmd}" if cmd else "Bash"
 
+    def summary_result(self, result: Message) -> str | None:
+        """One-line receipt: line count + nonzero exit code."""
+        if not self.emit_tool_summary:
+            return None
+        if result.descriptor != "text/plain":
+            return None
+        text = str(result.content)
+        exit_match = _BASH_EXIT_RE.search(text)
+        body = text[: exit_match.start()] if exit_match else text
+        lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
+        if exit_match:
+            return f"{lines}L · exit {exit_match.group(1)}"
+        return f"{lines}L"
+
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 
@@ -178,6 +202,12 @@ class Bash:
     async def run(self, msg: Message) -> Message:
         """Execute the command and return the result.
 
+        Cancellation propagates natively: ``asyncio.create_subprocess_exec``
+        starts the bash process in its own session group, and on
+        ``CancelledError`` we ``SIGTERM`` (then ``SIGKILL``) the whole
+        group before re-raising. Subprocesses cannot outlive the
+        cancelled task -- no polling, no shared abort event, no race.
+
         Args:
           msg: Incoming tool-use message containing the directive.
 
@@ -189,18 +219,23 @@ class Bash:
         command = str(directive.get("command", ""))
         timeout = int_val(directive.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
         run_in_background = bool_val(directive.get("run_in_background"), False)
-        result = await run_sync(
-            self._run,
-            command=command,
-            timeout=timeout,
-            run_in_background=run_in_background,
+        state = get_tool_state()
+        _ensure_valid_cwd(state)
+        if run_in_background:
+            text = _run_background(command, state=state)
+        else:
+            timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
+            text = await _run_foreground(command, state=state, timeout_s=timeout_s)
+        result = TextMessage(
+            truncate(text, TOOL_RESULT_MAX_CHARS),
+            "text/plain",
+            parent_id=msg.id,
         )
         if self._peer_matchers:
             nudges = self._collect_nudges(command)
             if nudges:
                 body = "\n".join(f"[bash-lint] {h}" for h in nudges)
                 banner = f"<system-reminder>\n{body}\n</system-reminder>"
-                text = cast(str, result.content)
                 return MultipartMessage(
                     (
                         TextMessage(f"{banner}\n\n{text}", "text/plain"),
@@ -221,23 +256,13 @@ class Bash:
                 nudges.append(nudge)
         return nudges
 
-    def _run(
-        self,
-        *,
-        command: str,
-        timeout: int = BASH_DEFAULT_TIMEOUT_MS,
-        run_in_background: bool = False,
-    ) -> str:
-        state = get_tool_state()
-        if not Path(state.bash_cwd).is_dir():
-            state.bash_cwd = (
-                state.start_cwd if Path(state.start_cwd).is_dir() else str(Path.home())
-            )
-        timeout = int(timeout)
-        timeout_s = max(1, min(timeout // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
-        if run_in_background:
-            return _run_background(command, state=state)
-        return _run_foreground(command, state=state, timeout_s=timeout_s)
+
+def _ensure_valid_cwd(state: ToolState) -> None:
+    """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``$HOME``) if it's gone."""
+    if not Path(state.bash_cwd).is_dir():
+        state.bash_cwd = (
+            state.start_cwd if Path(state.start_cwd).is_dir() else str(Path.home())
+        )
 
 
 def _run_background(command: str, *, state: ToolState) -> str:
@@ -245,6 +270,9 @@ def _run_background(command: str, *, state: ToolState) -> str:
     proc = subprocess.Popen(  # noqa: S603 -- trusted fixed argv, not user input
         ["/bin/bash", "-c", command],
         cwd=state.bash_cwd,
+        # Bash must not share the REPL terminal; interactive children
+        # otherwise steal prompt-toolkit keystrokes from the user.
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -255,81 +283,82 @@ def _run_background(command: str, *, state: ToolState) -> str:
     return f"(running in background, pid={proc.pid})"
 
 
-def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> str:
-    """Run a command in the foreground, draining pipes continuously."""
+async def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> str:
+    """Run a foreground bash command via :mod:`asyncio.subprocess`.
+
+    Cancellation propagation: ``asyncio.create_subprocess_exec`` returns
+    a ``Process`` whose ``communicate`` is awaitable. If the task is
+    cancelled, the ``await`` raises ``CancelledError``; we kill the
+    process group on the way out and re-raise. Timeouts use
+    :func:`asyncio.wait_for`. No polling, no shared event.
+    """
     sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
     tracked_cmd = f"trap 'echo {sentinel}=$(pwd)' EXIT\n{command}"
-    proc = subprocess.Popen(  # noqa: S603 -- trusted fixed argv, not user input
-        ["/bin/bash", "-c", tracked_cmd],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/bash",
+        "-c",
+        tracked_cmd,
+        # Commands that need input should use pipes, heredocs, or file
+        # redirects. Inheriting stdin lets tools like pytest --pdb
+        # compete with the REPL for terminal input.
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
         cwd=state.bash_cwd,
         start_new_session=True,
     )
-    stdout, stderr, reason = _communicate_with_abort(
-        proc, state=state, timeout_s=timeout_s
-    )
-    if reason is not None:
-        killed_lines = stdout.split("\n")
-        if stderr:
-            killed_lines.extend(stderr.split("\n"))
-        return _trim_bash_output(killed_lines).strip() + f"\n[{reason}]"
+    start = time.monotonic()
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout_s,
+        )
+    except TimeoutError:
+        return await _kill_and_drain(proc, start=start, reason="timeout")
+    except asyncio.CancelledError:
+        await _kill_process_group(proc)
+        raise
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
     return _process_output(proc, stdout, stderr, sentinel=sentinel, state=state)
 
 
-def _communicate_with_abort(
-    proc: subprocess.Popen[str],
-    *,
-    state: ToolState,
-    timeout_s: int,
-) -> tuple[str, str, str | None]:
-    """Drain pipes via ``communicate()``, polling for abort/timeout.
-
-    Returns:
-      stdout: Captured stdout.
-      stderr: Captured stderr.
-      reason: ``None`` on normal exit, or a human-readable reason
-          (``"interrupted after Ns"`` / ``"timeout after Ns"``).
-
-    """
-    start = time.monotonic()
-    deadline = start + timeout_s
-    while True:
-        remaining = deadline - time.monotonic()
-        if state.abort_event.is_set():
-            return _kill_and_drain(proc, start=start, reason="interrupted")
-        if remaining <= 0:
-            return _kill_and_drain(proc, start=start, reason="timeout")
-        try:
-            stdout, stderr = proc.communicate(timeout=min(0.1, remaining))
-            return stdout, stderr, None
-        except subprocess.TimeoutExpired:
-            continue
-
-
-def _kill_and_drain(
-    proc: subprocess.Popen[str],
-    *,
-    start: float,
-    reason: str,
-) -> tuple[str, str, str]:
-    """SIGTERM/SIGKILL a process group and drain remaining output."""
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGTERM then SIGKILL the process group; await reaping each step."""
+    if proc.returncode is not None:
+        return
     with _suppress_oserror():
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     try:
-        proc.wait(timeout=0.5)
-    except subprocess.TimeoutExpired:
+        _ = await asyncio.wait_for(proc.wait(), timeout=0.5)
+    except TimeoutError:
         with _suppress_oserror():
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.wait()
-    stdout, stderr = proc.communicate()
+        _ = await proc.wait()
+
+
+async def _kill_and_drain(
+    proc: asyncio.subprocess.Process,
+    *,
+    start: float,
+    reason: str,
+) -> str:
+    """Kill the process group, drain remaining output, format reason line."""
+    await _kill_process_group(proc)
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
     elapsed = time.monotonic() - start
-    return stdout, stderr, f"{reason} after {elapsed:.1f}s"
+    killed_lines = stdout.split("\n")
+    if stderr:
+        killed_lines.extend(stderr.split("\n"))
+    return (
+        _trim_bash_output(killed_lines).strip() + f"\n[{reason} after {elapsed:.1f}s]"
+    )
 
 
 def _process_output(
-    proc: subprocess.Popen[str],
+    proc: asyncio.subprocess.Process,
     stdout: str,
     stderr: str,
     *,

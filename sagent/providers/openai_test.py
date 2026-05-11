@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import logging
+
 from PIL import Image
 
 import pytest
@@ -23,6 +25,7 @@ from sagent.custom_types import (
 )
 from sagent.lib.json import json_freeze
 from sagent.lib.message import get_directive, get_tool_name
+from sagent.providers import openai_compat
 from sagent.providers.openai import OpenAI
 from sagent.providers.openai_compat import (
     build_messages,
@@ -239,6 +242,72 @@ class TestParseResponse:
         assert get_directive(tcs[0]) == json_freeze({"command": "ls"})
         assert resp.stop_reason == "model_tool_use"
 
+    def test_empty_tool_call_arguments_are_logged(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger=openai_compat.logger.name)
+        data: dict[str, Any] = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "function": {"name": "bash", "arguments": ""},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                },
+            ],
+            "usage": {},
+        }
+        resp = parse_response(
+            data, pricing=_OPENAI_DEFAULT_PRICING, reasoning_field=None
+        )
+
+        tcs = _tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze({})
+        assert "OpenAI-compatible tool arguments were empty" in caplog.text
+        assert "source=message" in caplog.text
+        assert "tool=bash" in caplog.text
+        assert "call_id=call_1" in caplog.text
+
+    def test_invalid_tool_call_arguments_are_logged(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger=openai_compat.logger.name)
+        data: dict[str, Any] = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "function": {"name": "bash", "arguments": "{"},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                },
+            ],
+            "usage": {},
+        }
+        resp = parse_response(
+            data, pricing=_OPENAI_DEFAULT_PRICING, reasoning_field=None
+        )
+
+        tcs = _tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze({})
+        assert "OpenAI-compatible tool arguments were invalid JSON" in caplog.text
+        assert "source=message" in caplog.text
+        assert "tool=bash" in caplog.text
+        assert "call_id=call_1" in caplog.text
+
 
 class TestSendMocked:
     @pytest.mark.anyio
@@ -285,6 +354,36 @@ class TestSendMocked:
         assert _text(resp) == "Hi!"
         assert resp.tokens.input_tokens == 5
         assert resp.tokens.output_tokens == 2
+
+    @pytest.mark.anyio
+    async def test_stream_empty_tool_arguments_are_logged(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger=openai_compat.logger.name)
+        provider = OpenAI.from_key("sk-test")
+        model = provider.model("gpt-4o")
+        mock_client = _stream_client(
+            [
+                'data: {"id":"chatcmpl-1","choices":[{"delta":{"tool_calls":['
+                '{"index":0,"id":"call_1","function":{"name":"bash"}}]}}]}',
+                'data: {"id":"chatcmpl-1","choices":[{"delta":{},'
+                '"finish_reason":"tool_calls"}],"usage":{}}',
+                "data: [DONE]",
+            ]
+        )
+        with patch(
+            "sagent.providers.openai_compat.httpx.AsyncClient",
+            return_value=mock_client,
+        ):
+            resp = await model.stream(request=ModelRequest(messages=[_user("hello")]))
+
+        tcs = _tool_calls(resp)
+        assert get_directive(tcs[0]) == json_freeze({})
+        assert "OpenAI-compatible tool arguments were empty" in caplog.text
+        assert "source=delta" in caplog.text
+        assert "tool=bash" in caplog.text
+        assert "call_id=call_1" in caplog.text
 
 
 # -- stream with on_text callback (line 176) --------------------------
@@ -334,6 +433,10 @@ class TestSendWithTools:
             def summary(self, msg: Message) -> str:
                 del msg
                 return self.name
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
 
             def prompt(self) -> str | None:
                 return None

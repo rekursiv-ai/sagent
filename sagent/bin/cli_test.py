@@ -17,6 +17,7 @@ from sagent.bin.cli import (
     _build_provider_model,
     _configure_logging,
     _parse_cli_args,
+    _parse_stream_json,
     _resolve_continue,
     _resolve_resume,
     _resolve_session_dir,
@@ -69,7 +70,10 @@ class TestParseCliArgs:
         )
 
         assert proc.returncode == 0, proc.stderr
-        assert "Interactive CLI agent." in proc.stdout
+        assert "CLI agent (REPL or headless)." in proc.stdout
+
+    def test_max_request_tokens(self) -> None:
+        assert _parse(["--max-request-tokens", "8192"]).max_request_tokens == 8192
 
     def test_max_response_tokens(self) -> None:
         assert _parse(["--max-response-tokens", "12"]).max_response_tokens == 12
@@ -147,10 +151,36 @@ class TestBuildProvider:
             "/opt/models/qwen3.6-27b",
             account=None,
         )
-        mock_provider.model.assert_called_once_with("/opt/models/qwen3.6-27b")
+        mock_provider.model.assert_called_once_with(None)
         assert provider is mock_provider
         assert model is mock_model
         assert auth == "/opt/models/qwen3.6-27b"
+
+    def test_selfhosted_model_options_stay_in_load_path(self) -> None:
+        args = argparse.Namespace(
+            provider="SelfHosted",
+            auth="env",
+            account=None,
+            model="Qwen/Qwen3.6-27B+bfloat16+cuda",
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with(
+            "SelfHosted",
+            "Qwen/Qwen3.6-27B+bfloat16+cuda",
+            account=None,
+        )
+        mock_provider.model.assert_called_once_with(None)
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "Qwen/Qwen3.6-27B+bfloat16+cuda"
 
     def test_selfhosted_defaults_to_env_auth(self) -> None:
         args = argparse.Namespace(
@@ -174,6 +204,29 @@ class TestBuildProvider:
         assert provider is mock_provider
         assert model is mock_model
         assert auth == "env"
+
+    def test_llamacpp_model_is_endpoint_model_not_load_path(self) -> None:
+        args = argparse.Namespace(
+            provider="LlamaCpp",
+            auth="/models/qwen.gguf",
+            account=None,
+            model="qwen3.6-27b-12gb",
+        )
+        mock_provider = MagicMock()
+        mock_model = MagicMock()
+        mock_model.model_id = "qwen3.6-27b-12gb"
+        mock_provider.model.return_value = mock_model
+        with patch(
+            "sagent.bin.cli.build_provider",
+            return_value=mock_provider,
+        ) as build:
+            provider, model, auth = _build_provider_model(args)
+
+        build.assert_called_once_with("LlamaCpp", "/models/qwen.gguf", account=None)
+        mock_provider.model.assert_called_once_with("qwen3.6-27b-12gb")
+        assert provider is mock_provider
+        assert model is mock_model
+        assert auth == "/models/qwen.gguf"
 
 
 class TestResolveSessionDir:
@@ -342,6 +395,11 @@ class TestResolveResume:
 
 
 class TestResolveTools:
+    def test_explicit_wiki_tool_still_resolves(self) -> None:
+        tools_list = resolve_tools(["Wiki"])
+
+        assert [t.name for t in tools_list] == ["Wiki"]
+
     def test_none_disables_tools(self) -> None:
         assert resolve_tools(["none"]) == []
 
@@ -373,6 +431,25 @@ class TestMain:
         ):
             mock_ant.from_env.return_value = mock_prov
             main()
+
+    def test_max_request_tokens_sets_agent_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_prov = _provider_patches(monkeypatch)
+        agent = MagicMock()
+        agent.tool_state = MagicMock()
+        agent.tool_state.additional_dirs = []
+
+        with (
+            patch("sagent.bin.cli.asyncio.run"),
+            patch("sagent.bin.cli.Agent", return_value=agent),
+            patch("sagent.providers.Anthropic") as mock_ant,
+            patch("sys.argv", ["cli.py", "--max-request-tokens", "8192"]),
+        ):
+            mock_ant.from_env.return_value = mock_prov
+            main()
+
+        assert agent.max_request_tokens == 8192
 
     def test_no_session_persistence_disables_memory(
         self, monkeypatch: pytest.MonkeyPatch
@@ -523,6 +600,41 @@ class TestAccountFlag:
             build_provider("Anthropic", "env", account="work")
         # Factory called without ``account`` - no TypeError crash.
         assert captured == {"called": True}
+
+
+class TestParseStreamJson:
+    """Pin the helper's contract so callers can rely on raise-and-catch."""
+
+    def test_joins_prompts_with_blank_lines(self) -> None:
+        raw = '{"prompt": "a"}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_blank_lines(self) -> None:
+        raw = '{"prompt": "a"}\n\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_objects_without_prompt(self) -> None:
+        raw = '{"prompt": "a"}\n{"other": "x"}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "a\n\nb"
+
+    def test_skips_non_string_prompt(self) -> None:
+        raw = '{"prompt": 42}\n{"prompt": "b"}\n'
+        assert _parse_stream_json(raw) == "b"
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert _parse_stream_json("") == ""
+
+    def test_raises_value_error_on_invalid_json(self) -> None:
+        with pytest.raises(ValueError, match="invalid JSON"):
+            _parse_stream_json("{not json}\n")
+
+    def test_raises_type_error_on_non_object_line(self) -> None:
+        with pytest.raises(TypeError, match="requires JSON objects"):
+            _parse_stream_json("[1, 2, 3]\n")
+
+    def test_raises_type_error_on_scalar(self) -> None:
+        with pytest.raises(TypeError, match="requires JSON objects"):
+            _parse_stream_json('"just a string"\n')
 
 
 if __name__ == "__main__":

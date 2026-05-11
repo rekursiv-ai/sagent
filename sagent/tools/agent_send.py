@@ -30,7 +30,9 @@ def _deliver(
     if inbox is None:
         logger.warning("Delayed message to dead agent from %s", sender)
         return
-    inbox.put(f"[from {sender}, {delay}s ago]: {content}")
+    inbox.put(
+        TextMessage(f"[from {sender}, {delay}s ago]: {content}", "text/x-user-message")
+    )
 
 
 class AgentSend:
@@ -79,6 +81,10 @@ class AgentSend:
         if len(preview) > 40:
             preview = preview[:37] + "..."
         return f"{self.name} → {to}: {preview}" if to else self.name
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     def prompt(self) -> str:
         """Return a listing of active agents available for messaging.
@@ -136,7 +142,9 @@ class AgentSend:
                 parent_id=msg.id,
             )
 
-        target.inbox.put(f"[from {sender}]: {content}")
+        target.inbox.put_left(
+            TextMessage(f"[from {sender}]: {content}", "text/x-user-message")
+        )
         return TextMessage(
             f"Delivered to {to}.",
             "text/plain",

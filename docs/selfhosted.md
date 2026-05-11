@@ -3,7 +3,13 @@
 Sagent can run HuggingFace causal LMs through the `SelfHosted` provider. The
 default public model is `Qwen/Qwen3.6-27B`, loaded through `transformers`.
 
-Install the optional local runtime dependencies:
+Install the optional local runtime dependencies from a checkout:
+
+```bash
+uv sync --extra selfhosted
+```
+
+Or install them from PyPI:
 
 ```bash
 pip install "sagent[selfhosted]"
@@ -28,7 +34,7 @@ from sagent.agent import Agent
 from sagent.lib.json import json_freeze
 from sagent.providers import SelfHosted, SelfHostedModel
 
-provider = SelfHosted.from_hf("Qwen/Qwen3.6-27B")
+provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
 model: SelfHostedModel = provider.model()
 agent = Agent(
     model=model,
@@ -39,48 +45,50 @@ result = await agent.run(json_freeze({"prompt": "Say hi."}))
 print(result.content)
 ```
 
-Run it from the CLI:
+Run Qwen 3.6 27B from the CLI:
 
 ```bash
-sagent --provider SelfHosted --model Qwen/Qwen3.6-27B
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
 ```
 
-For small local Qwen smoke tests, disable thinking and tools so the model can
-spend its short output budget on the answer:
+Test Qwen 3 0.6B on macbook:
 
 ```bash
-SAGENT_SELFHOSTED_DTYPE=float16 \
-  sagent --provider SelfHosted --model Qwen/Qwen3-0.6B \
-  --tools none --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+# To reduce memory: shorten response tokens, use shorter bare prompt, load no tools, use less effort
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 64  --max-tool-call-rounds 1 --tools none --effort none
 ```
 
-Add `--log-level DEBUG` to see load timing, selected device, prompt token
-counts, generation timing, and ignored malformed or unadvertised tool calls.
+Note that on the first turn, the model might need extra warmup time (e.g., run compile).
 
-For repeated use, configure the model once. The value can be either a
-HuggingFace repo ID or a local snapshot path:
+SelfHosted model specs are the HuggingFace repo ID or local path followed by
+`+` options in any order:
 
-```bash
-export SAGENT_SELFHOSTED_MODEL=Qwen/Qwen3.6-27B
-export SAGENT_SELFHOSTED_DEVICE=cuda
-export SAGENT_SELFHOSTED_DTYPE=bfloat16
-export SAGENT_SELFHOSTED_COMPILE=0
-sagent --provider SelfHosted
+```text
+MODEL[+DEVICE][+DTYPE][+compile]
 ```
 
-`SAGENT_SELFHOSTED_DEVICE`, `SAGENT_SELFHOSTED_DTYPE`, and
-`SAGENT_SELFHOSTED_COMPILE` are optional. When no device is set, SelfHosted uses
-MPS if available, then CUDA if available, then the PyTorch CPU default.
-Supported dtype values are `float16`, `bfloat16`, and `float32`. Compile is off
-by default; set `SAGENT_SELFHOSTED_COMPILE=1` to wrap the loaded model with
-`torch.compile`. Keep it opt-in because compile can add a large first-request
-cost and may vary by device/backend.
+Supported devices are `cpu`, `cuda`, `mps`, and `auto`. `auto` delegates
+placement to `accelerate` through `device_map="auto"` so large models can shard
+across visible GPUs. When no device option is provided, SelfHosted uses MPS if
+available, then CUDA if available, then the PyTorch CPU default.
 
-To force a local cache path, pass it in the same places:
+Supported dtypes are `float16`, `bfloat16`, and `float32`; `torch.float16`,
+`torch.bfloat16`, and `torch.float32` are accepted too. `compile` wraps the
+loaded model with `torch.compile`; it is off by default because it can add a
+large first-request cost and varies by device/backend.
+
+Each option category may appear at most once. These are invalid:
 
 ```bash
-sagent --provider SelfHosted --model /opt/models/qwen3.6-27b
-export SAGENT_SELFHOSTED_MODEL=/opt/models/qwen3.6-27b
+# Invalid
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+float16
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+mps
+```
+
+To force a local cache path, pass it as the model:
+
+```bash
+sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 ```
 
 Cloud Qwen model IDs such as `qwen3.6-plus` still route to DashScope. Use

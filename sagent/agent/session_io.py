@@ -10,6 +10,7 @@ import dataclasses
 import json
 import logging
 import re
+import time
 
 from sagent.agent.dispatch import tc_directive, tc_tool_id
 from sagent.custom_types import (
@@ -205,8 +206,12 @@ def read_jsonl(path: Path, label: str) -> list[MutableJSON]:
     return parse_jsonl(raw_text)
 
 
-def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
-    """Insert synthetic tool results for unresolved tool_calls.
+def normalize_tool_history(
+    messages: list[Message],
+    *,
+    synthesize_missing: bool,
+) -> list[Message]:
+    """Normalize tool call/result ordering in live history.
 
     Anthropic's API requires every ``tool_use`` block in an assistant
     message to be immediately followed (in the next user message) by
@@ -216,51 +221,67 @@ def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
     tool_result isn't - resuming the session fails with a 400
     ``tool_use ids were found without tool_result blocks``.
 
-    For each model response with tool calls, we inspect the
-    consecutive tool results immediately following and synthesize
-    ``[interrupted]`` results for any tool_call id that has no result.
+    Drops unexpected tool_result messages from live history. When
+    ``synthesize_missing`` is true, also inserts ``[interrupted]``
+    results for live tool calls missing a result. The append-only
+    session log remains the source for forensic recovery.
 
     Args:
       messages: Conversation history to repair.
+      synthesize_missing: Whether to insert interrupted results for
+          tool calls with no matching result.
 
     Returns:
-      repaired: New list with synthetic results injected.
+      normalized: New list with orphan results dropped and, optionally,
+          synthetic results injected.
 
     """
     out: list[Message] = []
     i = 0
     while i < len(messages):
         msg = messages[i]
-        out.append(msg)
         if msg.descriptor == "multipart/x-model-message":
+            out.append(msg)
             tc_msgs = response_tool_calls(msg)
             if tc_msgs:
+                expected = {get_queue_id(tc) for tc in tc_msgs}
                 seen: set[str] = set()
                 j = i + 1
                 while (
                     j < len(messages)
                     and messages[j].descriptor == "multipart/x-tool-result"
                 ):
-                    seen.add(get_queue_id(messages[j]))
-                    out.append(messages[j])
+                    qid = get_queue_id(messages[j])
+                    if qid in expected and qid not in seen:
+                        seen.add(qid)
+                        out.append(messages[j])
                     j += 1
-                out.extend(
-                    MultipartMessage(
-                        (
-                            TextMessage(get_queue_id(tc), "text/x-queue-id"),
-                            TextMessage("[interrupted]", "text/x-error"),
-                        ),
-                        "multipart/x-tool-result",
+                if synthesize_missing:
+                    out.extend(
+                        MultipartMessage(
+                            (
+                                TextMessage(get_queue_id(tc), "text/x-queue-id"),
+                                TextMessage("[interrupted]", "text/x-error"),
+                            ),
+                            "multipart/x-tool-result",
+                        )
+                        for tc in tc_msgs
+                        if get_queue_id(tc) not in seen
                     )
-                    for tc in tc_msgs
-                    if get_queue_id(tc) not in seen
-                )
                 i = j
             else:
                 i += 1
+        elif msg.descriptor == "multipart/x-tool-result":
+            i += 1
         else:
+            out.append(msg)
             i += 1
     return out
+
+
+def repair_dangling_tool_calls(messages: list[Message]) -> list[Message]:
+    """Repair provider-request history by normalizing tool results."""
+    return normalize_tool_history(messages, synthesize_missing=True)
 
 
 def strip_read_result(content: str) -> str:
@@ -385,33 +406,52 @@ def rebuild_tool_state_from_messages(
 # -- Session persistence (called from Agent) -------------------------------
 
 
-def save_session(
+def append_session(
     path: Path,
-    meta: Mapping[str, object],
-    messages: list[Message],
-    event_log: list[dict[str, object]],
+    *,
+    meta: Mapping[str, object] | None = None,
+    messages_delta: list[Message] | None = None,
+    events: list[dict[str, object]] | None = None,
+    clear: bool = False,
 ) -> None:
-    """Atomically write a session.jsonl file.
+    """Append delta records to ``session.jsonl``.
+
+    The session file is append-only. Multiple ``kind: meta`` lines may
+    accumulate -- the loader takes the latest. Set ``clear=True`` to
+    write a ``kind: clear`` barrier first; the loader treats this as a
+    reset, dropping all prior messages from the live history view (file
+    bytes preserved for forensics). Use ``clear=True`` whenever history
+    was wholesale-replaced (``/clear``, compaction, uncompact, or repair
+    inserting messages mid-history).
 
     Args:
-      path: Destination file path.
-      meta: Session metadata dict (written as the first line).
-      messages: Conversation messages to persist.
-      event_log: Structured event entries to append.
+      path: Destination file path; created if missing.
+      meta: Optional session metadata dict (latest meta line wins on load).
+      messages_delta: Conversation messages to append (typically the
+          tail past ``Agent._persisted_idx``).
+      events: Structured event entries to append.
+      clear: True to emit a ``kind: clear`` barrier line before any
+          other records in this batch.
 
     """
-    with atomic_write(path) as f:
-        _ = f.write(json.dumps({"kind": "meta", **meta}) + "\n")
-        for msg in messages:
-            _ = f.write(json.dumps({"kind": "message", **msg.serialize()}) + "\n")
-        for entry in event_log:
-            _ = f.write(
-                json.dumps(
-                    {"kind": "event", **entry},
-                    default=str,
-                )
-                + "\n"
-            )
+    parts: list[str] = []
+    if clear:
+        parts.append(json.dumps({"kind": "clear", "_timestamp": time.time_ns()}))
+    if meta is not None:
+        parts.append(json.dumps({"kind": "meta", **meta}))
+    parts.extend(
+        json.dumps({"kind": "message", **msg.serialize()})
+        for msg in messages_delta or ()
+    )
+    parts.extend(
+        json.dumps({"kind": "event", **entry}, default=str) for entry in events or ()
+    )
+    if not parts:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        for p in parts:
+            _ = f.write(p + "\n")
 
 
 def load_session(
@@ -441,6 +481,7 @@ def load_session(
 
     meta: MutableJSON = {}
     messages: list[Message] = []
+    corrupt_preserved = False
     try:
         with session_file.open(encoding="utf-8") as f:
             for line_num, raw_line in enumerate(f, start=1):
@@ -454,7 +495,14 @@ def load_session(
                         meta = record
                     elif kind == "message":
                         messages.append(load_message(record))
+                    elif kind == "clear":
+                        # Barrier: drop all prior messages from the live
+                        # view. Bytes remain in the file for forensics.
+                        messages = []
                 except (json.JSONDecodeError, KeyError, TypeError):
+                    if not corrupt_preserved:
+                        _preserve_corrupt_session(session_file)
+                        corrupt_preserved = True
                     logger.warning(
                         "Skipping corrupt session line %s in %s.",
                         line_num,
@@ -463,7 +511,16 @@ def load_session(
     except OSError:
         logger.warning("Could not read session file, starting fresh.")
         return None
-    return meta, messages
+    return meta, normalize_tool_history(messages, synthesize_missing=False)
+
+
+def _preserve_corrupt_session(session_file: Path) -> None:
+    """Copy corrupt session bytes aside before recovery continues."""
+    backup = session_file.with_name(f"{session_file.name}.corrupt-{time.time_ns()}")
+    try:
+        backup.write_bytes(session_file.read_bytes())
+    except OSError:
+        logger.exception("Could not preserve corrupt session file %s.", session_file)
 
 
 def _migrate_legacy_session(

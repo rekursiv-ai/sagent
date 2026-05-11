@@ -30,6 +30,8 @@ def _msg(directive: JSON) -> MultipartMessage:
 
 
 grep = Grep()
+summary_grep = Grep()
+summary_grep.emit_tool_summary = True
 
 
 def _text(r: Message) -> str:
@@ -69,6 +71,35 @@ class TestGrep:
             _msg(json_freeze({"pattern": "NOPE", "path": str(tmp_path)}))
         )
         assert "no matches" in _text(response).lower()
+
+    @pytest.mark.anyio
+    async def test_summary_result_reports_hit_count(self, tmp_path: Path) -> None:
+        """Grep.summary_result returns ``"{N} hits"`` for non-empty output."""
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        (tmp_path / "b.py").write_text("def bar(): pass\n")
+        response = await summary_grep.run(
+            _msg(json_freeze({"pattern": "def", "path": str(tmp_path)}))
+        )
+        # Default output_mode="files_with_matches" → 2 lines, one path each.
+        assert summary_grep.summary_result(response) == "2 hits"
+
+    @pytest.mark.anyio
+    async def test_summary_result_reports_no_matches(self, tmp_path: Path) -> None:
+        """Grep.summary_result returns ``"no matches"`` when empty."""
+        (tmp_path / "test.py").write_text("hello\n")
+        response = await summary_grep.run(
+            _msg(json_freeze({"pattern": "NOPE", "path": str(tmp_path)}))
+        )
+        assert summary_grep.summary_result(response) == "no matches"
+
+    @pytest.mark.anyio
+    async def test_summary_result_off_by_default(self, tmp_path: Path) -> None:
+        """Grep.summary_result returns None when the gate is off."""
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        response = await grep.run(
+            _msg(json_freeze({"pattern": "def", "path": str(tmp_path)}))
+        )
+        assert grep.summary_result(response) is None
 
     @pytest.mark.anyio
     async def test_grep_files_with_matches(self, tmp_path: Path) -> None:

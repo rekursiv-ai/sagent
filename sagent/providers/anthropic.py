@@ -198,6 +198,7 @@ class Anthropic:
             max_request_tokens=200_000,
             max_response_tokens=64_000,
             pricing=_HAIKU,
+            supports_thinking=False,
         ),
     }
 
@@ -496,7 +497,7 @@ class _AnthropicModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether this model supports thinking mode."""
-        return not self._model_id.startswith("claude-haiku")
+        return self._profile.supports_thinking
 
     @property
     def supports_effort(self) -> bool:
@@ -586,7 +587,8 @@ class _AnthropicModel:
         messages: list[anthropic.types.MessageParam],
     ) -> dict[str, object]:
         """Build kwargs for the Anthropic messages API."""
-        has_thinking = request.thinking in ("adaptive", "enabled")
+        thinking = request.thinking if self.supports_thinking else None
+        has_thinking = thinking in ("adaptive", "enabled")
         max_tok = request.max_response_tokens or self.max_response_tokens
         kwargs: dict[str, object] = {
             "model": _strip_context_tag(self._model_id),
@@ -595,17 +597,16 @@ class _AnthropicModel:
             "temperature": request.temperature,
             "system": self._provider.build_system(request.system, messages),
         }
-        if self.supports_thinking:
-            if request.thinking == "adaptive":
-                kwargs["thinking"] = {"type": "adaptive"}
-                kwargs["temperature"] = 1.0
-            elif request.thinking == "enabled":
-                kwargs["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": max_tok,
-                }
-                kwargs["max_tokens"] = max_tok * 2
-                kwargs["temperature"] = 1.0
+        if thinking == "adaptive":
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["temperature"] = 1.0
+        elif thinking == "enabled":
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": max_tok,
+            }
+            kwargs["max_tokens"] = max_tok * 2
+            kwargs["temperature"] = 1.0
         if request.tools:
             kwargs["tools"] = [
                 {
@@ -699,12 +700,14 @@ class _AnthropicModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Stream a request, calling on_text for each text chunk.
+        """Stream a request, calling on_text/on_thinking for each chunk.
 
         Args:
           request: Model request to send.
           on_text: Callback invoked with each streamed text delta.
+          on_thinking: Callback invoked with each streamed thinking delta.
 
         Returns:
           response: Parsed model response after the stream completes.
@@ -723,12 +726,12 @@ class _AnthropicModel:
             thinking=kwargs.get("thinking"),
         )
         try:
-            raw = await _stream_impl(sdk, kwargs, on_text)
+            raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.AuthenticationError:
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(request.system, messages)
-            raw = await _stream_impl(sdk, kwargs, on_text)
+            raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.BadRequestError as e:
             debug_log.trace_error(
                 "bad_request",
@@ -755,8 +758,14 @@ async def _stream_impl(
     sdk: anthropic.AsyncAnthropic,
     kwargs: dict[str, object],
     on_text: Callable[[str], None] | None,
+    on_thinking: Callable[[str], None] | None = None,
 ) -> anthropic.types.Message:
     """Run the streaming call and return the final message.
+
+    Routes ``text_delta`` events to ``on_text`` and ``thinking_delta``
+    events to ``on_thinking`` as they arrive, so the renderer can
+    surface thinking content in real time (before the response text
+    starts streaming, as Anthropic emits thinking blocks first).
 
     Returns:
       message: Final assembled ``anthropic.types.Message`` after the
@@ -772,12 +781,13 @@ async def _stream_impl(
                     loop.time() + _STREAM_IDLE_TIMEOUT,
                 )
                 delta = getattr(event, "delta", None)
-                if (
-                    delta is not None
-                    and getattr(delta, "type", "") == "text_delta"
-                    and on_text is not None
-                ):
+                if delta is None:
+                    continue
+                delta_type = getattr(delta, "type", "")
+                if delta_type == "text_delta" and on_text is not None:
                     on_text(delta.text)
+                elif delta_type == "thinking_delta" and on_thinking is not None:
+                    on_thinking(delta.thinking)
             return await s.get_final_message()
 
 

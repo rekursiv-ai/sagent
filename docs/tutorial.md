@@ -4,6 +4,14 @@ This tutorial builds a small file-analysis agent. It uses Sagent's public API, l
 
 ## 1. Install Sagent
 
+From a checkout:
+
+```bash
+uv sync
+```
+
+From PyPI:
+
 ```bash
 pip install sagent
 ```

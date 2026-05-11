@@ -19,6 +19,7 @@ from typing import Literal, get_args
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.dashscope import DashScope
 from sagent.providers.google import Google
+from sagent.providers.llamacpp import LlamaCpp
 from sagent.providers.minimax import MiniMax
 from sagent.providers.moonshot import Moonshot
 from sagent.providers.openai import OpenAI
@@ -32,6 +33,7 @@ ProviderName = Literal[
     "Anthropic",
     "DashScope",
     "Google",
+    "LlamaCpp",
     "MiniMax",
     "Moonshot",
     "OpenAI",
@@ -48,6 +50,7 @@ __all__ = [
     "Anthropic",
     "DashScope",
     "Google",
+    "LlamaCpp",
     "MiniMax",
     "Moonshot",
     "OpenAI",

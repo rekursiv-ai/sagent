@@ -8,7 +8,7 @@ Usage::
 
     from sagent.providers import SelfHosted
 
-    provider = SelfHosted.from_hf("Qwen/Qwen3.6-27B")
+    provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
     model = provider.model()              # same snapshot
     response = await model.buffer(request)
 
@@ -29,13 +29,11 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast, runtime_checkable
 
 import asyncio
-import importlib
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -116,37 +114,60 @@ class _RenderedPrompt:
     attention_mask: Tensor | None
 
 
-def _parse_dtype(name: str | None) -> torch.dtype | None:
-    """Parse a torch dtype name from environment configuration."""
-    if not name:
-        return None
-    normalized = name.removeprefix("torch.")
+@dataclass(frozen=True, kw_only=True, slots=True)
+class _ModelSpec:
+    path_or_repo: str
+    device: str | None
+    dtype: torch.dtype | None
+    compile_model: bool
+
+
+_ModelOption = Literal["device", "dtype", "compile_model"]
+
+
+def _parse_model_spec(spec: str) -> _ModelSpec:
+    """Parse a SelfHosted model spec with order-independent options."""
+    parts = spec.split("+")
+    path_or_repo = parts[0]
+    if not path_or_repo:
+        raise ValueError("SelfHosted model spec must start with a model ID or path.")
+    options: dict[_ModelOption, object] = {}
+    for option in parts[1:]:
+        key, value = _parse_model_option(option)
+        if key in options:
+            raise ValueError(f"Duplicate SelfHosted {key} option in {spec!r}.")
+        options[key] = value
+    return _ModelSpec(
+        path_or_repo=path_or_repo,
+        device=cast(str | None, options.get("device")),
+        dtype=cast("torch.dtype | None", options.get("dtype")),
+        compile_model=cast(bool, options.get("compile_model", False)),
+    )
+
+
+def _parse_model_option(option: str) -> tuple[_ModelOption, object]:
+    """Classify one SelfHosted model option."""
+    if not option:
+        raise ValueError("SelfHosted model options must not be empty.")
+    normalized = option.removeprefix("torch.")
     dtypes = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
         "float32": torch.float32,
     }
-    dtype = dtypes.get(normalized)
-    if dtype is None:
-        valid = ", ".join(sorted(dtypes))
-        raise ValueError(
-            f"Unsupported {SelfHosted.DTYPE_ENV_VAR}={name!r}; use {valid}."
-        )
-    return dtype
-
-
-def _parse_bool_env(name: str, value: str | None) -> bool:
-    """Parse a boolean environment flag."""
-    if value is None or value == "":
-        return False
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
+    devices = {"auto": "auto", "cpu": "cpu", "cuda": "cuda", "mps": "mps"}
+    compile_options = {"compile": True, "no-compile": False}
+    parsers: dict[_ModelOption, Mapping[str, object]] = {
+        "dtype": dtypes,
+        "device": devices,
+        "compile_model": compile_options,
+    }
+    for key, values in parsers.items():
+        if normalized in values:
+            return key, values[normalized]
+    valid = sorted(value for values in parsers.values() for value in values)
     raise ValueError(
-        f"Unsupported {name}={value!r}; expected one of "
-        "1/0, true/false, yes/no, on/off."
+        f"Unsupported SelfHosted model option {option!r}; use {', '.join(valid)}."
     )
 
 
@@ -176,10 +197,6 @@ class SelfHosted:
     """Self-hosted model provider backed by HuggingFace transformers."""
 
     DEFAULT_MODEL: ClassVar[str] = "Qwen/Qwen3.6-27B"
-    ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_MODEL"
-    DEVICE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_DEVICE"
-    DTYPE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_DTYPE"
-    COMPILE_ENV_VAR: ClassVar[str] = "SAGENT_SELFHOSTED_COMPILE"
     DEFAULT_MAX_REQUEST_TOKENS: ClassVar[int] = 32_768
     DEFAULT_MAX_RESPONSE_TOKENS: ClassVar[int] = 4_096
 
@@ -212,7 +229,8 @@ class SelfHosted:
         """Build a provider from a HuggingFace repo ID or local snapshot path.
 
         Args:
-          path_or_repo: HuggingFace repo ID or local HF snapshot path.
+          path_or_repo: HuggingFace repo ID or local HF snapshot path. Appended
+            ``+`` options configure device, dtype, and compilation.
           device: Target device for model tensors.
           dtype: Data type for model parameters.
           compile_model: Whether to wrap the model with ``torch.compile``.
@@ -221,53 +239,26 @@ class SelfHosted:
           provider: Configured self-hosted provider.
 
         """
-        if device is None:
-            device = os.environ.get(cls.DEVICE_ENV_VAR) or _default_device()
-        if dtype is None:
-            dtype = _parse_dtype(os.environ.get(cls.DTYPE_ENV_VAR))
-        if compile_model is None:
-            compile_model = _parse_bool_env(
-                cls.COMPILE_ENV_VAR,
-                os.environ.get(cls.COMPILE_ENV_VAR),
-            )
-        path = str(Path(path_or_repo).expanduser())
+        spec = _parse_model_spec(path_or_repo)
+        path = str(Path(spec.path_or_repo).expanduser())
         return cls.from_hf(
             path,
-            device=device,
-            dtype=dtype,
-            compile_model=compile_model,
+            device=device or spec.device or _default_device(),
+            dtype=dtype or spec.dtype,
+            compile_model=spec.compile_model
+            if compile_model is None
+            else compile_model,
         )
 
     @classmethod
     def from_env(cls) -> SelfHosted:
-        """Build a provider from environment configuration.
-
-        ``SAGENT_SELFHOSTED_MODEL`` may be a HuggingFace repo ID or local
-        snapshot path. If unset, Qwen 3.6 is used. Optional
-        ``SAGENT_SELFHOSTED_DEVICE``, ``SAGENT_SELFHOSTED_DTYPE``, and
-        ``SAGENT_SELFHOSTED_COMPILE`` values are forwarded to ``from_hf``.
-        Supported dtype values are ``float16``, ``bfloat16``, and ``float32``.
+        """Build a provider with the default SelfHosted model.
 
         Returns:
           provider: Configured self-hosted provider.
 
-        Raises:
-          ValueError: If ``SAGENT_SELFHOSTED_DTYPE`` is unsupported.
-
         """
-        path = os.environ.get(cls.ENV_VAR) or cls.DEFAULT_MODEL
-        device = os.environ.get(cls.DEVICE_ENV_VAR) or _default_device()
-        dtype = _parse_dtype(os.environ.get(cls.DTYPE_ENV_VAR))
-        compile_model = _parse_bool_env(
-            cls.COMPILE_ENV_VAR,
-            os.environ.get(cls.COMPILE_ENV_VAR),
-        )
-        return cls.from_hf(
-            path,
-            device=device,
-            dtype=dtype,
-            compile_model=compile_model,
-        )
+        return cls.from_key(cls.DEFAULT_MODEL)
 
     @property
     def native_model(self) -> nn.Module:
@@ -331,9 +322,6 @@ class SelfHosted:
             dtype,
             trust_remote_code,
         )
-        if os.environ.get("SAGENT_SELFHOSTED_DISABLE_DEEPGEMM") == "1":
-            _disable_transformers_deepgemm()
-            logger.info("DeepGEMM disabled via env; using Triton FP8 fallback")
         load_kwargs: dict[str, object] = {"trust_remote_code": trust_remote_code}
         if dtype is not None:
             load_kwargs["dtype"] = dtype
@@ -595,6 +583,8 @@ class SelfHostedModel:
             "eos_token_id": self._provider.tokenizer.eos_token_id,
             "pad_token_id": self._provider.tokenizer.eos_token_id,
         }
+        if _disable_generate_cache(str(device)):
+            generate_kwargs["use_cache"] = False
         if request.temperature > 0:
             generate_kwargs["do_sample"] = True
             generate_kwargs["temperature"] = request.temperature
@@ -661,17 +651,21 @@ class SelfHostedModel:
         self,
         request: ModelRequest,
         on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
         """Buffer the response then emit text in one shot.
 
         Args:
           request: Model request with messages and tool declarations.
           on_text: Callback invoked with each text part of the response.
+          on_thinking: Reserved; self-hosted decode is buffered, no
+              streaming thinking surface.
 
         Returns:
           response: Model response with text and/or tool-call messages.
 
         """
+        del on_thinking  # buffered decode; no per-chunk thinking
         resp = await self.buffer(request)
         if on_text is not None:
             for part in cast(tuple[Message, ...], resp.content.content):
@@ -766,29 +760,14 @@ def _generate(
         return cast(_GenerateModel, model).generate(input_ids, **generate_kwargs)
 
 
+def _disable_generate_cache(device: str) -> bool:
+    """Return whether generation should avoid KV caching."""
+    return device.startswith("mps")
+
+
 def _compile_model(model: nn.Module) -> nn.Module:
     """Wrap a model with torch.compile."""
     return cast("nn.Module", cast(Callable[[object], object], torch.compile)(model))
-
-
-def _disable_transformers_deepgemm() -> None:
-    """Force-route transformers' FP8 dispatch through the Triton fallback.
-
-    DeepGEMM's FP8 kernel ships with layout recipes only for sm_90
-    (Hopper) and sm_100 (Blackwell DC); sm_120 (consumer Blackwell, e.g.
-    RTX 5090) trips an "Unknown recipe" C++ assertion at runtime.
-    Transformers' dispatch in ``w8a8_fp8_matmul`` only catches
-    ``ImportError``, so the assertion is not recoverable from Python.
-    Setting the module's private ``_deepgemm_available`` flag to False
-    causes ``_load_deepgemm_kernel`` to raise ``ImportError`` on its
-    next call, which the dispatch catches and falls back to the
-    universal Triton FP8 kernel (slower but functional).
-    """
-    finegrained_fp8 = importlib.import_module(
-        "transformers.integrations.finegrained_fp8"
-    )
-    # Monkey-patch the module-level flag; no public knob exists upstream.
-    setattr(finegrained_fp8, "_deepgemm_available", False)  # noqa: B010
 
 
 def _module_device(model: nn.Module) -> str:

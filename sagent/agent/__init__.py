@@ -1,22 +1,19 @@
-"""Agent: Model + Tools + Prompt + Compactor behind two queues.
+"""Agent: actor-model with one foreground slot, observer fan-out, mailbox.
 
-See ``sagent/__init__.py`` for the Agent architecture, inbox zero
-loop, error policy, and contract definitions.
+Three primitives, one role each:
 
-Session persistence
--------------------
-``_save_session`` serializes ``_messages`` and metadata to
-``session.jsonl``. The request loop wraps in ``try/finally`` so
-every exit path persists. Internal mutations (status change,
-compaction, clear) save immediately.
+- ``self.inbox``: external work queue (``Deque[Message]``)
+- ``self.work``: the one foreground task (``asyncio.Task | None``)
+- ``self.observers``: synchronous fan-out callables for ``Event`` payloads
+
+See ``docs/private/agent_refactor.md`` for the design rationale.
 """
 
 from sagent.agent.agent import (
     ERROR_MAX_TOOL_CALL_ROUNDS,
-    ERROR_NO_PROMPT,
-    QUIT_SENTINEL,
+    ActivityTracker,
     Agent,
-    RunHandle,
+    PendingOp,
     SystemPrompt,
 )
 from sagent.compactor import MICROCOMPACT_KEEP_RECENT
@@ -26,12 +23,11 @@ from sagent.tools.background_task import BackgroundTaskEntry
 
 __all__ = [
     "ERROR_MAX_TOOL_CALL_ROUNDS",
-    "ERROR_NO_PROMPT",
     "MICROCOMPACT_KEEP_RECENT",
-    "QUIT_SENTINEL",
+    "ActivityTracker",
     "Agent",
     "BackgroundTaskEntry",
     "ContextBudget",
-    "RunHandle",
+    "PendingOp",
     "SystemPrompt",
 ]

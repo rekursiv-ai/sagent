@@ -36,6 +36,7 @@ TextDescriptor = Literal[
     "text/x-queue-id",
     "text/x-user-injected",
     "text/x-user-message",
+    "text/x-queued-user-message",
     "text/x-interrupted",
     "text/x-status",
     "text/x-agent-label",
@@ -43,6 +44,29 @@ TextDescriptor = Literal[
     "text/x-signal-user-input",
     "text/x-signal-status-changed",
     "text/x-diff",
+    "text/x-tool-summary",
+    "text/x-clear-request",
+    "text/x-help-request",
+    "text/x-tasks-request",
+    "text/x-quit",
+    # Inbox spine descriptors -- inbound signals.
+    "text/x-break",
+    "text/x-abort",
+    "text/x-compact-request",
+    "text/x-recompact-request",
+    "text/x-model-switch-request",
+    "text/x-login-request",
+    "text/x-status-update",
+    # Inbox spine descriptors -- internal flow.
+    "text/x-model-call",
+    "text/x-call-ended",
+    "text/x-stream-end",
+    "text/x-thinking-chunk",
+    "text/x-stream-tool-label",
+    "text/x-wait-idle",
+    "text/x-idle",
+    "text/x-compact-done",
+    "text/x-session-save-request",
 ]
 
 ImageDescriptor = Literal[
@@ -68,6 +92,11 @@ MultipartDescriptor = Literal[
     "multipart/x-tool-result",
     "multipart/x-child-event",
     "multipart/mixed",
+    # Inbox spine multipart envelopes -- carry inner Messages.
+    "multipart/x-tool-batch",
+    "multipart/x-tool-batch-result",
+    "multipart/x-background-completed",
+    "multipart/x-subagent-result",
 ]
 
 JsonDescriptor = Literal[
@@ -109,6 +138,18 @@ Descriptor = (
     | MultipartDescriptor
     | JsonDescriptor
     | ToolDescriptor
+)
+
+
+# -- Named sentinels --------------------------------------------------------
+# Descriptors that flow through dispatch as control signals (not data)
+# get a named constant here. Code comparing ``msg.descriptor`` to one
+# of these reads as the intent ("is this a quit?") rather than the
+# literal string. New sentinels go here, not at the use site.
+
+QUIT_SENTINEL: Literal["text/x-quit"] = "text/x-quit"
+QUEUED_USER_MESSAGE: Literal["text/x-queued-user-message"] = (
+    "text/x-queued-user-message"
 )
 
 

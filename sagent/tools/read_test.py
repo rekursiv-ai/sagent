@@ -62,6 +62,21 @@ class TestRead:
         assert "3\tline2" in _text(response)
 
     @pytest.mark.anyio
+    async def test_summary_result_reports_line_count(self, tmp_path: Path) -> None:
+        """``Read.summary_result`` returns ``"{N} lines"`` for plain reads."""
+        summary_read = Read()
+        summary_read.emit_tool_summary = True
+        f = tmp_path / "test.txt"
+        f.write_text("a\nb\nc\n")
+        response = await summary_read.run(_msg(json_freeze({"file_path": str(f)})))
+        # Line-numbered output: 3 source lines → 3 newlines in body.
+        assert summary_read.summary_result(response) == "3 lines"
+
+    def test_summary_result_off_by_default(self) -> None:
+        """``Read.summary_result`` returns ``None`` when the gate is off."""
+        assert read.summary_result(TextMessage("x", "text/plain")) is None
+
+    @pytest.mark.anyio
     async def test_relative_path_uses_bash_cwd(self, tmp_path: Path) -> None:
         f = tmp_path / "test.txt"
         f.write_text("cwd file\n")

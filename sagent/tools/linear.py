@@ -29,6 +29,7 @@ from sagent.custom_types import Message, TextMessage, is_message
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
+from sagent.tools.core import load_tool_description
 
 
 _API_URL = "https://api.linear.app/graphql"
@@ -166,15 +167,7 @@ class Linear:
 
     name: str = "Linear"
     tool_id: str = "application/x-tool-linear"
-    description: str = (
-        "Interact with Linear (issue tracker) via GraphQL. Operations:\n"
-        "  - 'list_issues' (team?, assignee_email?, limit?) → recent issues\n"
-        "  - 'get_issue' (id=ENG-42) → full issue + comments\n"
-        "  - 'create_issue' (team=ENG, title, description?) → new issue\n"
-        "  - 'update_issue' (id, title?, description?, state_id?)\n"
-        "  - 'add_comment' (id, body)\n"
-        "Requires LINEAR_API_KEY env var."
-    )
+    description: str = load_tool_description("Linear")
     supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
@@ -212,6 +205,10 @@ class Linear:
         ident = str(directive.get("id", ""))
         suffix = f":{ident}" if ident else ""
         return f"Linear {operation}{suffix}"
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     def prompt(self) -> str:
         """Return per-request system prompt text.

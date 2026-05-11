@@ -10,7 +10,7 @@ tasks.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import asyncio
 import dataclasses
@@ -28,13 +28,43 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class BackgroundTaskEntry:
-    """A background tool invocation tracked by the Agent."""
+    """A long-running task tracked by the Agent.
 
-    task: asyncio.Task[Message]
+    Three flavors share this dataclass:
+
+    - **Tool** (``kind="tool"``, ``hidden=False``). User-scheduled tool
+      invocations spawned via ``background: true``. Listed by the
+      ``BackgroundTask`` tool, cancellable by the model, foregroundable.
+    - **Persistent subagent** (``kind="persistent_subagent"``,
+      ``hidden=False``). Child agent running its own ``serve_forever``.
+      Shut down via ``child.shutdown(force=True)`` rather than raw cancel
+      so its driver loop exits cleanly.
+    - **Hidden infra** (``hidden=True``). REPL input pump, watchdogs,
+      daemons. Filtered out of the model-facing tool listing; survives
+      ``/abort all``; cancelled only at agent shutdown.
+
+    ``task`` is typed ``Task[Any]`` to accommodate the three flavors --
+    tool runs return ``None`` (the worker posts its result via inbox),
+    subagent runs return ``None``, hidden infra returns ``None``.
+
+    Attributes:
+      task: The asyncio task to track / cancel.
+      tool_name: Display name surfaced by ``BackgroundTask list``.
+      queue_id: Stable identifier for cancel / foreground operations.
+      started: Wall-clock seconds when the task began.
+      delay_sec: Sleep before invocation (tool only); 0 for immediate.
+      hidden: True for infra; user-invisible.
+      kind: Dispatch hint for ``abort_all_bg`` / ``shutdown(force=True)``.
+
+    """
+
+    task: asyncio.Task[Any]
     tool_name: str
     queue_id: str
     started: float
     delay_sec: float = 0.0
+    hidden: bool = False
+    kind: Literal["tool", "persistent_subagent"] = "tool"
 
 
 _BG_FIELDS: JSON = json_freeze(
@@ -121,6 +151,10 @@ class BackgroundTask:
             return f"BackgroundTask {op} {job_id}"
         return f"BackgroundTask {op}"
 
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
+
     def prompt(self) -> str:
         """Return background-task usage guidance for the system prompt.
 
@@ -163,7 +197,9 @@ class BackgroundTask:
         return TextMessage(f"Unknown operation: {op!r}", "text/x-error")
 
     def _list(self, agent: Agent) -> Message:
-        jobs = agent.background_tasks
+        # Hidden infra tasks (REPL pump, daemons) are filtered out --
+        # they're internal and not user/model-actionable.
+        jobs = {q: j for q, j in agent.background.items() if not j.hidden}
         if not jobs:
             return TextMessage("No background tasks.", "text/plain")
         lines: list[str] = []
@@ -193,9 +229,9 @@ class BackgroundTask:
     def _cancel(self, agent: Agent, job_id: str) -> Message:
         if not job_id:
             return TextMessage("cancel requires an id", "text/x-error")
-        jobs = agent.background_tasks
+        jobs = agent.background
         job = jobs.get(job_id)
-        if job is None:
+        if job is None or job.hidden:
             return TextMessage(f"No such job: {job_id}", "text/x-error")
         job.task.cancel()
         jobs.pop(job_id, None)
@@ -207,9 +243,9 @@ class BackgroundTask:
     async def _foreground(self, agent: Agent, job_id: str) -> Message:
         if not job_id:
             return TextMessage("foreground requires an id", "text/x-error")
-        jobs = agent.background_tasks
+        jobs = agent.background
         job = jobs.get(job_id)
-        if job is None:
+        if job is None or job.hidden:
             return TextMessage(f"No such job: {job_id}", "text/x-error")
         try:
             result = await job.task

@@ -32,6 +32,12 @@ from sagent.lib.message import (
     get_tool_name,
 )
 from sagent.tools.core import ToolState
+from sagent.tools.input_errors import (
+    INPUT_VALIDATION_PREFIX,
+    MULTIPLE_TOOL_INPUT_ERRORS_HINT,
+    TOOL_INPUT_RECOVERY_HINT,
+    is_tool_input_error_text,
+)
 from sagent.tools.lib.bash import (
     cached_parse_bash as _cached_parse_bash,
     is_read_only as _bash_is_read_only,
@@ -116,6 +122,23 @@ def conditional_rules_for_request(
         config=cfg,
         exclude_paths=seen,
     )
+
+
+def tool_call_label(tool: Tool | None, req: Message) -> str:
+    """Return the UI label for a tool call, using validation state if invalid."""
+    if tool is None:
+        return tc_tool_id(req)
+    validation = _validation_details(tool, tc_directive(req))
+    if validation is None:
+        return tool.summary(req)
+    missing, unexpected, _required, accepted = validation
+    if missing:
+        keys = ", ".join(f"`{k}`" for k in missing)
+        return f"Invalid {tool.name} call: missing {keys}"
+    keys = ", ".join(f"`{k}`" for k in unexpected)
+    accepts = ", ".join(f"`{k}`" for k in accepted)
+    suffix = f"; accepts {accepts}" if accepts else ""
+    return f"Invalid {tool.name} call: unexpected {keys}{suffix}"
 
 
 def is_request_read_only(req: Message, state: ToolState) -> bool:
@@ -228,11 +251,31 @@ async def _run_tool(
         if is_multipart(inner.descriptor)
         else (inner,)
     )
+    # Tools opt into the dim ``  ⎿ <summary>`` receipt line by returning
+    # non-empty text from ``summary_result``. Skip on error -- the
+    # ``text/x-error`` line already tells the story; a parallel summary
+    # would just be noise.
+    if not _has_error(parts):
+        try:
+            summary_text = tool.summary_result(inner)
+        except Exception:  # noqa: BLE001 -- summary is best-effort UX, never fail dispatch
+            logger.debug("summary_result raised for %s", tool.name, exc_info=True)
+            summary_text = None
+        if summary_text:
+            parts = (
+                *parts,
+                TextMessage(str(summary_text), "text/x-tool-summary"),
+            )
     return MultipartMessage(
         (TextMessage(qid, "text/x-queue-id"), *parts),
         "multipart/x-tool-result",
         parent_id=req.id,
     )
+
+
+def _has_error(parts: tuple[Message, ...]) -> bool:
+    """True if any part has an error descriptor."""
+    return any(p.descriptor == "text/x-error" for p in parts)
 
 
 async def _drain_stream(
@@ -280,26 +323,89 @@ def _validate_tool_input(
     the model sees exactly what's expected. We don't type-check here:
     the actual call will surface wrong types with informative errors.
     """
-    tool_name = tool.name
-    schema = tool.directive_schema
-    required = schema.get("required")
-    if not isinstance(required, (list, tuple)):
+    validation = _validation_details(tool, input_obj)
+    if validation is None:
         return None
-    req_list = list(required)
-    missing = [k for k in req_list if isinstance(k, str) and k not in input_obj]
-    if not missing:
-        return None
+    missing, unexpected, req_list, accepted = validation
     issues = [f"The required parameter `{k}` is missing" for k in missing]
+    issues.extend(f"Unexpected parameter `{k}`" for k in unexpected)
     header = (
-        f"{tool_name} failed due to the following "
+        f"{tool.name} failed due to the following "
         f"{'issues' if len(issues) > 1 else 'issue'}:"
     )
-    required_str = ", ".join(f"`{k}`" for k in req_list if isinstance(k, str))
-    return (
-        "InputValidationError: "
-        + "\n".join([header, *issues])
-        + f"\n\n{tool_name} requires: {required_str}."
+    required_str = ", ".join(f"`{k}`" for k in req_list)
+    accepted_str = ", ".join(f"`{k}`" for k in accepted)
+    parts = [INPUT_VALIDATION_PREFIX + " " + "\n".join([header, *issues])]
+    if required_str:
+        parts.append(f"{tool.name} requires: {required_str}.")
+    if unexpected and accepted_str:
+        parts.append(f"{tool.name} accepts: {accepted_str}.")
+    parts.append(TOOL_INPUT_RECOVERY_HINT)
+    return "\n\n".join(parts)
+
+
+def _validation_details(
+    tool: Tool,
+    input_obj: Mapping[str, object],
+) -> tuple[list[str], list[str], list[str], list[str]] | None:
+    schema = tool.directive_schema
+    required = schema.get("required")
+    req_list: list[str] = []
+    if isinstance(required, (list, tuple)):
+        req_list = [k for k in required if isinstance(k, str)]
+    missing = [k for k in req_list if k not in input_obj]
+    props = schema.get("properties")
+    accepted: list[str] = []
+    if isinstance(props, Mapping):
+        accepted = [str(k) for k in props]
+    unexpected: list[str] = []
+    if schema.get("additionalProperties") is False:
+        accepted_set = set(accepted)
+        unexpected = [k for k in input_obj if k not in accepted_set]
+    if not missing and not unexpected:
+        return None
+    return missing, unexpected, req_list, accepted
+
+
+def has_tool_input_error(msg: Message) -> bool:
+    """Return True when a tool result contains model-repairable input errors."""
+    if not is_multipart(msg.descriptor):
+        return False
+    parts = cast(tuple[Message, ...], msg.content)
+    return any(
+        p.descriptor == "text/x-error" and is_tool_input_error_text(str(p.content))
+        for p in parts
     )
+
+
+def add_tool_input_batch_hint(results: list[Message]) -> list[Message]:
+    """Add one aggregate recovery hint when a batch has multiple input errors."""
+    bad = [i for i, result in enumerate(results) if has_tool_input_error(result)]
+    if len(bad) < 2:
+        return results
+    out = list(results)
+    first = bad[0]
+    out[first] = _append_error_hint(out[first], MULTIPLE_TOOL_INPUT_ERRORS_HINT)
+    return out
+
+
+def _append_error_hint(msg: Message, hint: str) -> Message:
+    parts = cast(tuple[Message, ...], msg.content)
+    new_parts: list[Message] = []
+    added = False
+    for part in parts:
+        if (
+            not added
+            and part.descriptor == "text/x-error"
+            and is_tool_input_error_text(str(part.content))
+        ):
+            new_parts.append(
+                dataclasses.replace(part, content=f"{part.content}\n\n{hint}")
+            )
+            added = True
+        else:
+            new_parts.append(part)
+    return dataclasses.replace(msg, content=tuple(new_parts))
 
 
 async def _error_result(queue_id: str, parent_id: int, message: str) -> Message:

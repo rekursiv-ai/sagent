@@ -46,8 +46,10 @@ from sagent.providers.selfhosted import (
     SelfHostedModel,
     _build_chat_messages,
     _default_device,
+    _disable_generate_cache,
     _extract_tool_calls,
     _parse_deepseek_tool_call,
+    _parse_model_spec,
     _parse_qwen_tool_call,
     _RenderedPrompt,
     _tool_preamble,
@@ -72,6 +74,10 @@ class _FakeTool:
     def summary(self, msg: Message) -> str:
         del msg
         return self.name
+
+    def summary_result(self, result: Message) -> str | None:
+        del result
+        return None
 
     def prompt(self) -> str | None:
         return None
@@ -241,8 +247,8 @@ class _FakeProvider:
 
 
 class _GenerateCaptureModel:
-    def __init__(self) -> None:
-        self.weight = torch.zeros(())
+    def __init__(self, *, device: str = "cpu") -> None:
+        self.weight = torch.zeros((), device=device)
         self.kwargs: dict[str, object] = {}
         self.grad_enabled = True
 
@@ -259,9 +265,9 @@ class _GenerateCaptureModel:
 
 
 class _CaptureProvider(_FakeProvider):
-    def __init__(self) -> None:
+    def __init__(self, *, device: str = "cpu") -> None:
         super().__init__(_FakeTokenizer())
-        self.capture_model = _GenerateCaptureModel()
+        self.capture_model = _GenerateCaptureModel(device=device)
 
     @property
     @override
@@ -510,6 +516,42 @@ class TestSelfHostedProvider:
         compile_mock.assert_called_once_with(model)
         assert provider.native_model is compiled_model
 
+    def test_parse_model_spec_accepts_options_in_any_order(self) -> None:
+        left = _parse_model_spec("Qwen/Qwen3.6-27B+bfloat16+cuda")
+        right = _parse_model_spec("Qwen/Qwen3.6-27B+cuda+bfloat16")
+
+        assert left == right
+        assert left.path_or_repo == "Qwen/Qwen3.6-27B"
+        assert left.device == "cuda"
+        assert left.dtype is torch.bfloat16
+        assert not left.compile_model
+
+    def test_parse_model_spec_accepts_compile_and_torch_dtype(self) -> None:
+        spec = _parse_model_spec("Qwen/Qwen3.6-27B+torch.float16+auto+compile")
+
+        assert spec.path_or_repo == "Qwen/Qwen3.6-27B"
+        assert spec.device == "auto"
+        assert spec.dtype is torch.float16
+        assert spec.compile_model
+
+    @pytest.mark.parametrize(
+        ("spec", "match"),
+        [
+            ("+cuda+bfloat16", "must start"),
+            ("Qwen/Qwen3.6-27B+", "must not be empty"),
+            ("Qwen/Qwen3.6-27B++cuda", "must not be empty"),
+            ("Qwen/Qwen3.6-27B+gpu", "Unsupported"),
+            ("Qwen/Qwen3.6-27B+bfloat16+float16", "Duplicate"),
+            ("Qwen/Qwen3.6-27B+cuda+mps", "Duplicate"),
+            ("Qwen/Qwen3.6-27B+compile+no-compile", "Duplicate"),
+        ],
+    )
+    def test_parse_model_spec_rejects_invalid_options(
+        self, spec: str, match: str
+    ) -> None:
+        with pytest.raises(ValueError, match=match):
+            _parse_model_spec(spec)
+
     def test_from_key_loads_hf_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -562,111 +604,110 @@ class TestSelfHostedProvider:
             compile_model=False,
         )
 
-    def test_from_key_reads_device_and_dtype_env(
+    def test_from_key_reads_inline_device_and_dtype(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         provider = SelfHosted(
             model=nn.Module(),
             tokenizer=_FakeTokenizer(),
-            model_id=str(tmp_path),
+            model_id="Qwen/Qwen3.6-27B",
             max_request_tokens=128,
         )
         load = Mock(return_value=provider)
-        monkeypatch.setenv("SAGENT_SELFHOSTED_DEVICE", "mps")
-        monkeypatch.setenv("SAGENT_SELFHOSTED_DTYPE", "float16")
         monkeypatch.setattr(SelfHosted, "from_hf", load)
 
-        assert SelfHosted.from_key(str(tmp_path)) is provider
+        assert SelfHosted.from_key("Qwen/Qwen3.6-27B+cuda+bfloat16") is provider
         load.assert_called_once_with(
-            str(tmp_path),
-            device="mps",
-            dtype=torch.float16,
+            "Qwen/Qwen3.6-27B",
+            device="cuda",
+            dtype=torch.bfloat16,
             compile_model=False,
         )
 
-    def test_from_key_reads_compile_env(
+    def test_from_key_reads_inline_compile(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         provider = SelfHosted(
             model=nn.Module(),
             tokenizer=_FakeTokenizer(),
-            model_id=str(tmp_path),
+            model_id="Qwen/Qwen3.6-27B",
             max_request_tokens=128,
         )
         load = Mock(return_value=provider)
-        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "true")
         monkeypatch.setattr(SelfHosted, "from_hf", load)
         monkeypatch.setattr(
             "sagent.providers.selfhosted._default_device",
             Mock(return_value=None),
         )
 
-        assert SelfHosted.from_key(str(tmp_path)) is provider
+        assert SelfHosted.from_key("Qwen/Qwen3.6-27B+compile") is provider
         load.assert_called_once_with(
-            str(tmp_path),
+            "Qwen/Qwen3.6-27B",
             device=None,
             dtype=None,
             compile_model=True,
         )
 
-    def test_from_env_loads_configured_model(
+    def test_from_key_explicit_args_override_inline_options(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
     ) -> None:
         provider = SelfHosted(
             model=nn.Module(),
             tokenizer=_FakeTokenizer(),
-            model_id=str(tmp_path),
+            model_id="Qwen/Qwen3.6-27B",
             max_request_tokens=128,
         )
         load = Mock(return_value=provider)
-        monkeypatch.setenv("SAGENT_SELFHOSTED_MODEL", str(tmp_path))
-        monkeypatch.setenv("SAGENT_SELFHOSTED_DEVICE", "cpu")
-        monkeypatch.setenv("SAGENT_SELFHOSTED_DTYPE", "bfloat16")
         monkeypatch.setattr(SelfHosted, "from_hf", load)
 
-        assert SelfHosted.from_env() is provider
+        assert (
+            SelfHosted.from_key(
+                "Qwen/Qwen3.6-27B+cuda+bfloat16+compile",
+                device="cpu",
+                dtype=torch.float32,
+                compile_model=False,
+            )
+            is provider
+        )
         load.assert_called_once_with(
-            str(tmp_path),
+            "Qwen/Qwen3.6-27B",
             device="cpu",
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             compile_model=False,
         )
 
-    def test_from_env_defaults_to_qwen36(
+    def test_from_key_ignores_selfhosted_env_vars(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         provider = SelfHosted(
             model=nn.Module(),
             tokenizer=_FakeTokenizer(),
-            model_id=SelfHosted.DEFAULT_MODEL,
+            model_id="Qwen/Qwen3.6-27B",
             max_request_tokens=128,
         )
         load = Mock(return_value=provider)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_MODEL", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DEVICE", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DTYPE", raising=False)
+        monkeypatch.setenv("SAGENT_SELFHOSTED_DEVICE", "mps")
+        monkeypatch.setenv("SAGENT_SELFHOSTED_DTYPE", "float16")
+        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "1")
         monkeypatch.setattr(SelfHosted, "from_hf", load)
         monkeypatch.setattr(
             "sagent.providers.selfhosted._default_device",
             Mock(return_value=None),
         )
 
-        assert SelfHosted.from_env() is provider
+        assert SelfHosted.from_key("Qwen/Qwen3.6-27B") is provider
         load.assert_called_once_with(
-            SelfHosted.DEFAULT_MODEL,
+            "Qwen/Qwen3.6-27B",
             device=None,
             dtype=None,
             compile_model=False,
         )
 
-    def test_from_env_uses_default_device(
+    def test_from_env_uses_default_model_only(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -677,37 +718,9 @@ class TestSelfHostedProvider:
             max_request_tokens=128,
         )
         load = Mock(return_value=provider)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_MODEL", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DEVICE", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DTYPE", raising=False)
-        monkeypatch.setattr(SelfHosted, "from_hf", load)
-        monkeypatch.setattr(
-            "sagent.providers.selfhosted._default_device",
-            Mock(return_value="mps"),
-        )
-
-        assert SelfHosted.from_env() is provider
-        load.assert_called_once_with(
-            SelfHosted.DEFAULT_MODEL,
-            device="mps",
-            dtype=None,
-            compile_model=False,
-        )
-
-    def test_from_env_reads_compile_env(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        provider = SelfHosted(
-            model=nn.Module(),
-            tokenizer=_FakeTokenizer(),
-            model_id=SelfHosted.DEFAULT_MODEL,
-            max_request_tokens=128,
-        )
-        load = Mock(return_value=provider)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_MODEL", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DEVICE", raising=False)
-        monkeypatch.delenv("SAGENT_SELFHOSTED_DTYPE", raising=False)
+        monkeypatch.setenv("SAGENT_SELFHOSTED_MODEL", "other")
+        monkeypatch.setenv("SAGENT_SELFHOSTED_DEVICE", "mps")
+        monkeypatch.setenv("SAGENT_SELFHOSTED_DTYPE", "float16")
         monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "1")
         monkeypatch.setattr(SelfHosted, "from_hf", load)
         monkeypatch.setattr(
@@ -720,17 +733,8 @@ class TestSelfHostedProvider:
             SelfHosted.DEFAULT_MODEL,
             device=None,
             dtype=None,
-            compile_model=True,
+            compile_model=False,
         )
-
-    def test_from_env_rejects_invalid_compile_env(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("SAGENT_SELFHOSTED_COMPILE", "sometimes")
-
-        with pytest.raises(ValueError, match="SAGENT_SELFHOSTED_COMPILE"):
-            SelfHosted.from_env()
 
     def test_properties_and_model_binding(self) -> None:
         tokenizer = _FakeTokenizer()
@@ -956,6 +960,12 @@ class TestSelfHostedModel:
         await model.buffer(ModelRequest(messages=[]))
 
         assert provider.capture_model.kwargs["attention_mask"] is mask
+
+    def test_generate_cache_is_disabled_on_mps(self) -> None:
+        assert _disable_generate_cache("mps")
+        assert _disable_generate_cache("mps:0")
+        assert not _disable_generate_cache("cpu")
+        assert not _disable_generate_cache("cuda:0")
 
     @pytest.mark.anyio
     async def test_buffer_offloads_generation(

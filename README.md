@@ -97,6 +97,14 @@ Three pieces make Sagent distinctive:
 
 ## Install
 
+From a checkout:
+
+```bash
+uv sync
+```
+
+From PyPI:
+
 ```bash
 pip install sagent
 ```
@@ -119,6 +127,8 @@ printf 'Say hi in one sentence.' | \
 ```
 
 Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--no-session-persistence` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
+
+See [CLI](docs/cli.md) and [Sessions](docs/sessions.md) for the full flag set.
 
 ## Quickstart: Python
 
@@ -146,6 +156,8 @@ asyncio.run(main())
 
 `Agent.run()` accepts a JSON directive with a `prompt` key and returns a `Message`.
 
+See [API](docs/api.md), [Tutorial](docs/tutorial.md), and [Concepts](docs/concepts.md) for more detail.
+
 ## Provider setup
 
 Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints. Set the key for the provider you plan to use:
@@ -167,9 +179,41 @@ export MINIMAX_API_KEY=...
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
 | `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
-| `SelfHosted` | `SAGENT_SELFHOSTED_MODEL` | `Qwen/Qwen3.6-27B` |
+| `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
 
-See [Providers](docs/providers.md) for more detail.
+See [Providers](docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
+
+## Self-hosted models
+
+Install the local runtime extra from a checkout:
+
+```bash
+uv sync --extra selfhosted
+```
+
+Or install it from PyPI:
+
+```bash
+pip install "sagent[selfhosted]"
+```
+
+Then pass a HuggingFace repo ID or local snapshot path:
+
+```bash
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
+sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+cuda+bfloat16
+```
+
+For a small smoke test:
+
+```bash
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
+  --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+```
+
+SelfHosted options use `+` suffixes after the model name. Device, dtype, and `compile` can appear in any order, but each category can appear once.
+
+See [Self-hosted Models](docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
 
 ## Examples
 
@@ -181,7 +225,7 @@ The [`examples/`](examples/) directory contains small, runnable examples:
 - `multi_agent_reviewer.py`: spawn an isolated reviewer child.
 - `openai_compatible_provider.py`: connect an OpenAI-compatible endpoint.
 
-Start with the [tutorial](docs/tutorial.md), then use the examples as copyable patterns.
+Start with the [tutorial](docs/tutorial.md), then use the examples as copyable patterns. See [Examples](examples/) and [Tools](docs/tools.md).
 
 ## Concepts
 
