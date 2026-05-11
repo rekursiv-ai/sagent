@@ -7,9 +7,17 @@ lives in ``agent/agent_test.py``.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import override
+from typing import TYPE_CHECKING, cast, override
+
+import asyncio
 
 from prompt_toolkit.formatted_text import to_plain_text
+
+import pytest
+
+
+if TYPE_CHECKING:
+    from prompt_toolkit.key_binding import KeyPressEvent
 
 from sagent.agent.agent import Agent
 from sagent.custom_types import (
@@ -31,6 +39,7 @@ from sagent.custom_types import (
     UserBarEvent,
 )
 from sagent.lib.descriptors import QUEUED_USER_MESSAGE
+from sagent.repl.keybindings import _kb_submit
 from sagent.repl.prompt import dynamic_prompt
 from sagent.repl.render import (
     RecordingPrinter,
@@ -127,6 +136,26 @@ class TestParseSlash:
 
 
 class TestQueuedFollowUps:
+    @pytest.mark.anyio
+    async def test_enter_during_active_work_preserves_inline_input(self) -> None:
+        agent = Agent(model=_NoopModel())
+        task = asyncio.create_task(asyncio.sleep(60))
+        agent.work = task
+        buffer = _FakeBuffer("typed while bash runs")
+        event = cast("KeyPressEvent", _FakeKeyEvent(buffer))
+        try:
+            _kb_submit(agent, event)
+
+            messages = list(agent.inbox)
+            assert [(msg.descriptor, str(msg.content)) for msg in messages] == [
+                ("text/x-user-message", "typed while bash runs"),
+            ]
+            assert agent.queued_user_messages() == []
+            assert buffer.history == ["typed while bash runs"]
+            assert buffer.text == ""
+        finally:
+            task.cancel()
+
     def test_agent_lists_and_pops_latest_tab_queued_message(self) -> None:
         agent = Agent(model=_NoopModel())
         agent.inbox.put(TextMessage("inline", "text/x-user-message"))
@@ -161,6 +190,23 @@ class TestQueuedFollowUps:
         assert "second (+1 more line)" in text
         assert "Shift+Left edit last queued message" in text
         assert "control" not in text
+
+
+class _FakeBuffer:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.history: list[str] = []
+
+    def append_to_history(self) -> None:
+        self.history.append(self.text)
+
+    def reset(self) -> None:
+        self.text = ""
+
+
+class _FakeKeyEvent:
+    def __init__(self, buffer: _FakeBuffer) -> None:
+        self.current_buffer = buffer
 
 
 class _NoopModel:

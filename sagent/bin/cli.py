@@ -72,7 +72,7 @@ from sagent.custom_types import (
     ToolResultEvent,
 )
 from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import json_unfreeze
+from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.lib.message import response_text
 from sagent.prompt import build_system_dict
 from sagent.providers import build_provider
@@ -572,6 +572,24 @@ def _parse_stream_json(raw: str) -> str:
     return "\n\n".join(prompts)
 
 
+def _event_to_json_record(event: object) -> MutableJSON | None:
+    if isinstance(event, TextChunkEvent):
+        return {"descriptor": "text/plain", "content": event.text}
+    if isinstance(event, ThinkingEvent):
+        return {"descriptor": "text/x-thinking", "content": event.text}
+    if isinstance(event, ToolLabelEvent):
+        return {"descriptor": "text/x-tool-label", "content": event.text}
+    if isinstance(event, ToolResultEvent):
+        return event.msg.serialize()
+    if isinstance(event, ErrorEvent):
+        return {"descriptor": "text/x-error", "content": event.text}
+    if isinstance(event, InterruptedEvent):
+        return {"descriptor": "text/x-interrupted", "content": ""}
+    if isinstance(event, StatusUpdateEvent):
+        return {"descriptor": "text/x-status-update", "content": event.text}
+    return None
+
+
 async def _run_headless(
     agent: Agent,
     *,
@@ -629,10 +647,10 @@ async def _run_headless(
     user_msg = TextMessage(prompt, "text/x-user-message")
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
-            descriptor, content = _event_to_jsonable(event)
-            if descriptor is None:
+            record = _event_to_json_record(event)
+            if record is None:
                 continue
-            json.dump({"descriptor": descriptor, "content": content}, sys.stdout)
+            json.dump(record, sys.stdout)
             sys.stdout.write("\n")
     else:
         async for _event in agent.run(user_msg):
@@ -647,25 +665,6 @@ async def _run_headless(
     else:
         sys.stdout.write(result_text)
         sys.stdout.write("\n")
-
-
-def _event_to_jsonable(event: object) -> tuple[str | None, str]:
-    """Translate one ``Event`` into a stream-json (descriptor, content) pair."""
-    if isinstance(event, TextChunkEvent):
-        return "text/plain", event.text
-    if isinstance(event, ThinkingEvent):
-        return "text/x-thinking", event.text
-    if isinstance(event, ToolLabelEvent):
-        return "text/x-tool-label", event.text
-    if isinstance(event, ToolResultEvent):
-        return "multipart/x-tool-result", str(event.msg.content)
-    if isinstance(event, ErrorEvent):
-        return "text/x-error", event.text
-    if isinstance(event, InterruptedEvent):
-        return "text/x-interrupted", ""
-    if isinstance(event, StatusUpdateEvent):
-        return "text/x-status-update", event.text
-    return None, ""
 
 
 def _last_assistant_text(history: Sequence[Message]) -> str:
