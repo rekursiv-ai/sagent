@@ -777,10 +777,28 @@ class StreamEndEvent:
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
-class ErrorEvent:
-    """A user-visible error; render as a red dim line."""
+class RecoverableErrorEvent:
+    """A transient error that recovered; log + continue.
 
-    text: str
+    Examples: 5xx that retried successfully, rate limit that backed off,
+    stream interrupt that restarted, recompact load failure.
+    """
+
+    msg: Message
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class IrrecoverableErrorEvent:
+    """A terminal error; the agent halts and waits for user input.
+
+    Examples: retries exhausted, OAuth permanently dead, compaction
+    failure at MAX threshold, model refusal.
+
+    The agent keeps its mailbox alive — the user can retry, switch
+    models, log in, or quit. The renderer shows a halt banner.
+    """
+
+    msg: Message
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -825,7 +843,8 @@ type Event = (
     | ToolLabelEvent
     | ToolResultEvent
     | StreamEndEvent
-    | ErrorEvent
+    | RecoverableErrorEvent
+    | IrrecoverableErrorEvent
     | InterruptedEvent
     | StatusUpdateEvent
     | TurnCompleteEvent

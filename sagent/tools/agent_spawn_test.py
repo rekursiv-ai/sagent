@@ -17,11 +17,11 @@ import pytest
 from sagent.custom_types import (
     ChildDoneEvent,
     ChildEvent,
-    ErrorEvent,
     Event,
     JsonMessage,
     Message,
     MultipartMessage,
+    RecoverableErrorEvent,
     TextChunkEvent,
     TextMessage,
     ThinkingEvent,
@@ -92,7 +92,7 @@ class TestChildForwarder:
 
     def test_error_always_forwarded(self) -> None:
         parent, fwd = self._build(verbosity=0)
-        fwd(ErrorEvent("boom"))
+        fwd(RecoverableErrorEvent(msg=TextMessage("boom", "text/x-error")))
         assert any(isinstance(e, ChildEvent) for e in parent.published)
 
     def test_error_tool_result_always_forwarded(self) -> None:

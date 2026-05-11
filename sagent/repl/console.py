@@ -26,7 +26,7 @@ from sagent.repl.format import (
     print_user_bar,
     set_terminal_title,
 )
-from sagent.repl.render import render_tool_result
+from sagent.repl.render import render_error, render_tool_result
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
 
@@ -80,8 +80,18 @@ class ConsolePrinter:
             self.console.print(Text(f"  {line}", style="dim"))
 
     def write_tool_error(self, text: str) -> None:
-        """Render red, indented tool-error line."""
-        self.console.print(Text(f"    ✗ {text.strip()}", style="dim red"))
+        """Render red, indented tool-error (multi-line aware).
+
+        First line gets the ``✗`` glyph; subsequent lines align with the
+        message column so structured traces stay readable.
+        """
+        body = text.rstrip("\n")
+        if not body:
+            return
+        lines = body.splitlines() or [body]
+        self.console.print(Text(f"    ✗ {lines[0]}", style="dim red"))
+        for line in lines[1:]:
+            self.console.print(Text(f"      {line}", style="dim red"))
 
     def write_tool_summary(self, text: str) -> None:
         """Render the dim ``  ⎿ <summary>`` receipt line for a tool result.
@@ -99,6 +109,14 @@ class ConsolePrinter:
     def write_interrupted(self) -> None:
         """Render the dim ``[interrupted]`` line for cancelled work."""
         self.console.print(Text("[interrupted]", style="dim"))
+
+    def write_halt(self, text: str) -> None:
+        """Render a full-width red banner signaling agent-level halt."""
+        width = max(20, self.console.width)
+        bar = "─" * width
+        self.console.print(Text(bar, style="red"))
+        self.console.print(Text(text, style="bold red"))
+        self.console.print(Text(bar, style="red"))
 
     def write_child_block(self, label: str, items: list[Message]) -> None:
         r"""Render a child agent's labeled block.
@@ -264,6 +282,8 @@ def _render_child_item(printer: ConsolePrinter, item: Message) -> None:
         printer.write_thinking(item.content)
     elif desc == "text/x-error" and isinstance(item, TextMessage):
         printer.write_tool_error(item.content)
+    elif desc == "multipart/x-error" and isinstance(item, MultipartMessage):
+        render_error(printer, item)
     elif desc == "text/x-hint-tool-use-nudge" and isinstance(item, TextMessage):
         printer.write_hint(item.content)
     elif desc == "multipart/x-tool-result" and isinstance(item, MultipartMessage):

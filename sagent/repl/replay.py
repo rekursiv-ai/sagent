@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, cast
 from sagent.agent.dispatch import tc_tool_id, tool_call_label
 from sagent.lib.descriptors import is_thinking, is_user_message
 from sagent.lib.message import thinking_text
-from sagent.repl.render import render_tool_result
+from sagent.repl.render import render_error, render_tool_result
 
 
 if TYPE_CHECKING:
@@ -30,12 +30,16 @@ if TYPE_CHECKING:
     from sagent.repl.render import Printer
 
 
-def replay_messages(agent: Agent, printer: Printer) -> None:
+def replay_messages(
+    agent: Agent, printer: Printer, *, show_exception_stack: bool = True
+) -> None:
     """Render persisted messages into scrollback.
 
     Args:
       agent: Agent whose ``history`` to replay.
       printer: Printer that receives all replayed output.
+      show_exception_stack: Whether to render structured stack traces for
+        error Messages that carry them.
 
     """
     messages = agent.history
@@ -68,6 +72,8 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                     printer.write_tool_label(tool_call_label(tool, p))
         elif msg.descriptor == "multipart/x-tool-result":
             render_tool_result(printer, msg)
+        elif msg.descriptor in ("multipart/x-error", "text/x-error"):
+            render_error(printer, msg, show_stack=show_exception_stack)
     cost = float(agent.total_cost_usd)
     cost_str = f" · ${cost:.2f}" if cost > 0 else ""
     printer.write_line(f"── resumed · {len(messages)} messages{cost_str} ──")

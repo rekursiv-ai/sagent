@@ -63,12 +63,15 @@ async def run_repl(
     agent: Agent,
     *,
     history: Path | None = None,
+    show_exception_stack: bool = True,
 ) -> None:
     """Drive ``agent`` interactively until the user types ``/quit``.
 
     Args:
       agent: The agent to drive.
       history: Path to the input-history file. ``None`` -> ``~/.sagent_history``.
+      show_exception_stack: When True, render structured stack traces for
+        error Messages that include them. Defaults to True.
 
     """
     history_path = history or _DEFAULT_HISTORY
@@ -94,13 +97,15 @@ async def run_repl(
             style=style,
         )
         printer = ConsolePrinter(console)
-        agent.observers.append(make_render_observer(printer))
+        agent.observers.append(
+            make_render_observer(printer, show_exception_stack=show_exception_stack),
+        )
         pump_task = spawn_repl_pump(
             agent,
             PromptToolkitInputSource(session, agent=agent, console=console),
             printer=printer,
         )
-        replay_messages(agent, printer)
+        replay_messages(agent, printer, show_exception_stack=show_exception_stack)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:

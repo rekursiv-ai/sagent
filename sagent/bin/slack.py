@@ -84,12 +84,13 @@ from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
     ChildDoneEvent,
     ChildEvent,
-    ErrorEvent,
     InterruptedEvent,
+    IrrecoverableErrorEvent,
     JsonMessage,
     Message,
     ModelSpec,
     MultipartMessage,
+    RecoverableErrorEvent,
     StatusUpdateEvent,
     TextChunkEvent,
     TextMessage,
@@ -817,8 +818,8 @@ def _make_event_forwarder(
             return TextMessage(ev.text, "text/x-tool-label")
         if isinstance(ev, ToolResultEvent):
             return ev.msg
-        if isinstance(ev, ErrorEvent):
-            return TextMessage(ev.text, "text/x-error")
+        if isinstance(ev, (RecoverableErrorEvent, IrrecoverableErrorEvent)):
+            return ev.msg
         if isinstance(ev, InterruptedEvent):
             return TextMessage("", "text/x-interrupted")
         if isinstance(ev, StatusUpdateEvent):
@@ -864,6 +865,15 @@ def _render_event(event: Message) -> str | None:
 
     if desc == "text/x-error":
         return f"✗ {str(event.content).strip()}"
+
+    if desc == "multipart/x-error":
+        parts = cast(tuple[Message, ...], event.content)
+        text = ""
+        for p in parts:
+            if p.descriptor == "text/x-error":
+                text = str(p.content).strip()
+                break
+        return f"✗ {text}" if text else None
 
     if desc in ("text/x-user-injected", "text/x-signal-user-input"):
         text = str(event.content).strip()

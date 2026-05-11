@@ -13,6 +13,7 @@ import pytest
 
 from sagent.agent.retry import send_with_retry
 from sagent.custom_types import (
+    Message,
     ModelRequest,
     ModelResponse,
     MultipartMessage,
@@ -108,7 +109,7 @@ async def test_statusless_openai_stream_api_error_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = _StatuslessOpenAIStreamModel()
-    events: list[dict[str, object]] = []
+    retries: list[Message] = []
 
     async def no_sleep(delay: float) -> None:
         del delay
@@ -118,9 +119,6 @@ async def test_statusless_openai_stream_api_error_retries(
     def on_text(chunk: str) -> None:
         chunks.append(chunk)
 
-    def log_event(event: str, **payload: object) -> None:
-        events.append({"event": event, **payload})
-
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
 
     response = await send_with_retry(
@@ -129,14 +127,15 @@ async def test_statusless_openai_stream_api_error_retries(
         on_text=on_text,
         max_attempts=2,
         persistent_retry=False,
-        log_event=log_event,
+        publish_recoverable=retries.append,
     )
 
     assert response_text(response.content) == "ok"
     assert chunks[-1] == "ok"
     assert "retrying" in chunks[0]
     assert model.stream_calls == 2
-    assert [event["event"] for event in events] == ["retry"]
+    assert len(retries) == 1
+    assert retries[0].descriptor == "multipart/x-error"
 
 
 if __name__ == "__main__":

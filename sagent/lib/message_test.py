@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import NoReturn, cast
+
 from sagent.custom_types import (
     JsonMessage,
     Message,
@@ -10,6 +13,7 @@ from sagent.custom_types import (
 )
 from sagent.lib.json import json_freeze
 from sagent.lib.message import (
+    build_error_message,
     get_directive,
     get_queue_id,
     get_tool_name,
@@ -112,6 +116,92 @@ def test_response_tool_calls_multipart():
     tc = MultipartMessage((_plain("tc"),), "multipart/x-tool-call")
     msg = _model_msg(_plain("text"), tc)
     assert response_tool_calls(msg) == [tc]
+
+
+# -- build_error_message ---------------------------------------------------
+
+
+def test_build_error_message_flat():
+    msg = build_error_message("oops")
+    assert isinstance(msg, TextMessage)
+    assert msg.descriptor == "text/x-error"
+    assert msg.content == "oops"
+
+
+def _raise_value_error() -> NoReturn:
+    raise ValueError("bad input")
+
+
+def _raise_runtime_error() -> NoReturn:
+    raise RuntimeError("boom")
+
+
+def _raise_value_root() -> NoReturn:
+    raise ValueError("root")
+
+
+def _raise_chained_runtime() -> NoReturn:
+    try:
+        _raise_value_root()
+    except ValueError as inner:
+        raise RuntimeError("wrapper") from inner
+
+
+def test_build_error_message_with_exception():
+    try:
+        _raise_value_error()
+    except ValueError as e:
+        msg = build_error_message("validation failed", e)
+    assert isinstance(msg, MultipartMessage)
+    assert msg.descriptor == "multipart/x-error"
+    assert len(msg.content) == 2
+    text_part, trace_part = msg.content
+    assert isinstance(text_part, TextMessage)
+    assert text_part.descriptor == "text/x-error"
+    assert text_part.content == "validation failed"
+    assert isinstance(trace_part, JsonMessage)
+    assert trace_part.descriptor == "application/x-stack-trace"
+    trace = cast(Mapping[str, object], trace_part.content)
+    assert trace["type"] == "ValueError"
+    assert "bad input" in cast(str, trace["message"])
+    frames = cast(list[Mapping[str, object]], trace["frames"])
+    assert len(frames) >= 1
+    assert "test_build_error_message_with_exception" in {
+        cast(str, f["function"]) for f in frames
+    }
+    assert trace["cause"] is None
+    assert trace["context"] is None
+
+
+def test_build_error_message_chained_cause():
+    try:
+        _raise_chained_runtime()
+    except RuntimeError as e:
+        msg = build_error_message("outer", e)
+    assert isinstance(msg, MultipartMessage)
+    trace_part = msg.content[1]
+    assert isinstance(trace_part, JsonMessage)
+    trace = cast(Mapping[str, object], trace_part.content)
+    assert trace["type"] == "RuntimeError"
+    cause = cast(Mapping[str, object], trace["cause"])
+    assert cause["type"] == "ValueError"
+    assert "root" in cast(str, cause["message"])
+
+
+def test_build_error_message_round_trips_serialization():
+    try:
+        _raise_runtime_error()
+    except RuntimeError as e:
+        msg = build_error_message("oops", e)
+    serialized = msg.serialize()
+    restored = MultipartMessage.deserialize(serialized)
+    assert isinstance(restored, MultipartMessage)
+    assert restored.descriptor == "multipart/x-error"
+    text_part, trace_part = restored.content
+    assert text_part.content == "oops"
+    assert isinstance(trace_part, JsonMessage)
+    trace = cast(Mapping[str, object], trace_part.content)
+    assert trace["type"] == "RuntimeError"
 
 
 if __name__ == "__main__":

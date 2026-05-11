@@ -35,11 +35,12 @@ else:
 
 from sagent.custom_exceptions import StreamInterruptedError
 from sagent.custom_types import (
+    Message,
     Model,
     ModelRequest,
     ModelResponse,
 )
-from sagent.lib.message import response_text
+from sagent.lib.message import build_error_message, response_text
 
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ async def send_with_retry(
     on_thinking: Callable[[str], None] | None = None,
     max_attempts: int,
     persistent_retry: bool,
-    log_event: Callable[..., None],
+    publish_recoverable: Callable[[Message], None],
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
 ) -> ModelResponse:
     """Send with backoff, error classification, stream fallback.
@@ -181,7 +182,9 @@ async def send_with_retry(
           stream and the renderer would render thinking twice).
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
-      log_event: Structured event logger.
+      publish_recoverable: Callback for transient errors that recovered;
+          each retry attempt invokes it with a ``multipart/x-error`` Message
+          carrying the underlying exception and a structured stack trace.
       on_discarded_response: Called with the response from a completed
           request that will be retried (e.g. StreamInterruptedError).
           The API billed for these tokens; this callback lets the
@@ -232,13 +235,12 @@ async def send_with_retry(
         except StreamInterruptedError as e:
             stream_interrupts += 1
             prior_emitted = "".join(chunks) if live is not None else prior_emitted
-            log_event(
-                "stream_interrupt_retry",
-                attempt=attempt,
-                interrupt_count=stream_interrupts,
-                has_text=bool(
-                    response_text(e.response.content).strip(),
-                ),
+            publish_recoverable(
+                build_error_message(
+                    f"stream interrupted (attempt {attempt}, "
+                    f"{stream_interrupts} interrupts so far)",
+                    exc=e,
+                )
             )
             if stream_interrupts > _MAX_STREAM_INTERRUPT_RETRIES:
                 logger.warning(
@@ -256,7 +258,9 @@ async def send_with_retry(
             continue
         except Exception as e:
             if model.is_context_overflow(e):
-                log_event("context_overflow", attempt=attempt)
+                publish_recoverable(
+                    build_error_message(f"context overflow (attempt {attempt})", exc=e)
+                )
                 raise
             if not is_retryable(e, model):
                 raise
@@ -300,13 +304,12 @@ async def send_with_retry(
                 if (on_text is not None and stream_failures >= _STREAM_FALLBACK_AFTER)
                 else ""
             )
-            log_event(
-                "retry",
-                attempt=attempt,
-                error=str(e),
-                stream=use_stream,
-                stream_failures=stream_failures,
-                delay=round(delay, 1),
+            publish_recoverable(
+                build_error_message(
+                    f"retry attempt {attempt}, waiting {delay:.1f}s"
+                    f"{fallback}: {type(e).__name__}: {e}",
+                    exc=e,
+                )
             )
             logger.warning(
                 "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs%s.",

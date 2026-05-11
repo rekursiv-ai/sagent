@@ -57,12 +57,13 @@ from sagent import providers, sessions, tools
 from sagent.agent import Agent
 from sagent.compactor import SummaryCompactor
 from sagent.custom_types import (
-    ErrorEvent,
     InterruptedEvent,
+    IrrecoverableErrorEvent,
     Message,
     Model,
     ModelSpec,
     Provider,
+    RecoverableErrorEvent,
     StatusUpdateEvent,
     TextChunkEvent,
     TextMessage,
@@ -89,6 +90,7 @@ DEFAULT_TOOLS = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
+    "BackgroundTask",
     "Bash",
     "Read",
     "Write",
@@ -301,6 +303,15 @@ def parse_agent_args(
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Automatic compaction (default: on; --no-compact to disable).",
+    )
+    parser.add_argument(
+        "--show-exception-trace",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Render structured stack traces inline with error events"
+            " (default: on; --no-show-exception-trace to suppress)."
+        ),
     )
     parser.add_argument(
         "--effort",
@@ -581,8 +592,14 @@ def _event_to_json_record(event: object) -> MutableJSON | None:
         return {"descriptor": "text/x-tool-label", "content": event.text}
     if isinstance(event, ToolResultEvent):
         return event.msg.serialize()
-    if isinstance(event, ErrorEvent):
-        return {"descriptor": "text/x-error", "content": event.text}
+    if isinstance(event, RecoverableErrorEvent):
+        record = event.msg.serialize()
+        record["severity"] = "recoverable"
+        return record
+    if isinstance(event, IrrecoverableErrorEvent):
+        record = event.msg.serialize()
+        record["severity"] = "irrecoverable"
+        return record
     if isinstance(event, InterruptedEvent):
         return {"descriptor": "text/x-interrupted", "content": ""}
     if isinstance(event, StatusUpdateEvent):
@@ -778,7 +795,16 @@ def main() -> None:
             sys.stderr.write(
                 "Note: --output-format is ignored in interactive REPL mode.\n"
             )
-        asyncio.run(_with_signals(agent, run_repl(agent, history=args.history)))
+        asyncio.run(
+            _with_signals(
+                agent,
+                run_repl(
+                    agent,
+                    history=args.history,
+                    show_exception_stack=args.show_exception_trace,
+                ),
+            ),
+        )
     else:
         asyncio.run(
             _with_signals(

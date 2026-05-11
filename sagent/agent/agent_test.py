@@ -20,25 +20,26 @@ import contextlib
 import pytest
 
 from sagent.agent import Agent, PendingOp
-from sagent.agent.agent import _MAX_UNSAVED_EVENTS
+from sagent.agent.agent import wrap_errors_for_llm
 from sagent.agent.cohort import Cohort, CohortMember
 from sagent.custom_types import (
     Compactor,
-    ErrorEvent,
     Event,
+    IrrecoverableErrorEvent,
     Message,
     Model,
     ModelRequest,
     ModelResponse,
     MultipartMessage,
     Pricing,
+    RecoverableErrorEvent,
     TextMessage,
     TokenCount,
     Tool,
 )
-from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.lib.descriptors import QUIT_SENTINEL, flat_text
 from sagent.lib.json import json_freeze
-from sagent.lib.message import tool_call_message
+from sagent.lib.message import build_error_message, tool_call_message
 
 
 pytestmark = pytest.mark.anyio
@@ -162,7 +163,7 @@ class TestLifecycle:
 
         def observe(event: Event) -> None:
             events.append(event)
-            if isinstance(event, ErrorEvent):
+            if isinstance(event, (RecoverableErrorEvent, IrrecoverableErrorEvent)):
                 error_seen.set()
 
         agent.observers.append(observe)
@@ -188,10 +189,11 @@ class TestLifecycle:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
-        errs = [event for event in events if isinstance(event, ErrorEvent)]
+        errs = [event for event in events if isinstance(event, IrrecoverableErrorEvent)]
         assert len(errs) == 1
-        assert "turn failed" in errs[0].text
-        assert "RuntimeError" in errs[0].text
+        err_text = flat_text(errs[0].msg, include_errors=True)
+        assert "turn failed" in err_text
+        assert "RuntimeError" in err_text
 
 
 class TestForeground:
@@ -627,30 +629,7 @@ class TestCohortEmitsToInbox:
 
 
 class TestErrorEventPublication:
-    """save/compaction/recompact failures must publish ErrorEvent."""
-
-    def test_save_failure_publishes_error_event(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        agent = _build_agent(_MockModel())
-        agent.session_dir = tmp_path
-        agent._event_log = [{"ts": 0.0} for _ in range(_MAX_UNSAVED_EVENTS + 1)]
-        events: list[Event] = []
-        agent.observers.append(events.append)
-
-        def boom(*, clear: bool = False) -> None:
-            del clear
-            raise OSError("disk full")
-
-        monkeypatch.setattr(agent, "save_session", boom)
-        agent.log_event("trigger")
-
-        errs = [e for e in events if isinstance(e, ErrorEvent)]
-        assert len(errs) == 1
-        assert "event log save failed" in errs[0].text
-        assert "OSError" in errs[0].text
+    """compaction/recompact failures must publish error events."""
 
     async def test_compaction_failure_publishes_error_event(self) -> None:
         agent = _build_agent(_MockModel())
@@ -675,10 +654,11 @@ class TestErrorEventPublication:
         ok = await agent._do_compact("")
 
         assert ok is False
-        errs = [e for e in events if isinstance(e, ErrorEvent)]
+        errs = [e for e in events if isinstance(e, RecoverableErrorEvent)]
         assert len(errs) == 1
-        assert "compaction failed" in errs[0].text
-        assert "RuntimeError" in errs[0].text
+        err_text = flat_text(errs[0].msg, include_errors=True)
+        assert "compaction failed" in err_text
+        assert "RuntimeError" in err_text
 
     async def test_recompact_load_failure_publishes_error_event(
         self,
@@ -703,10 +683,11 @@ class TestErrorEventPublication:
         )
         await agent._do_recompact("")
 
-        errs = [e for e in events if isinstance(e, ErrorEvent)]
+        errs = [e for e in events if isinstance(e, RecoverableErrorEvent)]
         assert len(errs) == 1
-        assert "recompact transcript load failed" in errs[0].text
-        assert "KeyError" in errs[0].text
+        err_text = flat_text(errs[0].msg, include_errors=True)
+        assert "recompact transcript load failed" in err_text
+        assert "KeyError" in err_text
 
 
 class TestPublish:
@@ -726,13 +707,58 @@ class TestPublish:
 
         agent.observers.extend([bad, good])
         with caplog.at_level("WARNING", logger="sagent.agent.agent"):
-            agent.publish(ErrorEvent(text="hi"))
+            agent.publish(RecoverableErrorEvent(msg=TextMessage("hi", "text/x-error")))
         # ``good`` still saw the event (fan-out continued past ``bad``).
         assert len(events) == 1
         # Warning is one-liner; no ERROR-level traceback dump.
         records = [r for r in caplog.records if r.levelname == "WARNING"]
         assert any("RuntimeError" in r.getMessage() for r in records)
         assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+class TestWrapErrorsForLlm:
+    """``wrap_errors_for_llm`` is the provider-bound shape transform."""
+
+    def test_multipart_x_error_flattens_to_user_message(self) -> None:
+        err = build_error_message(
+            "turn failed: HTTPStatusError: 503",
+            exc=RuntimeError("simulated"),
+        )
+        assert err.descriptor == "multipart/x-error"
+        flat = wrap_errors_for_llm(err)
+        assert isinstance(flat, TextMessage)
+        assert flat.descriptor == "text/x-user-message"
+        assert "turn failed" in flat.content
+        assert "503" in flat.content
+
+    def test_tool_result_wraps_text_x_error(self) -> None:
+        tr = MultipartMessage(
+            (
+                TextMessage("qid_1", "text/x-queue-id"),
+                TextMessage("boom", "text/x-error"),
+            ),
+            "multipart/x-tool-result",
+        )
+        wrapped = wrap_errors_for_llm(tr)
+        assert isinstance(wrapped, MultipartMessage)
+        err_part = next(p for p in wrapped.content if p.descriptor == "text/x-error")
+        assert isinstance(err_part, TextMessage)
+        assert err_part.content == "<tool_use_error>boom</tool_use_error>"
+
+    def test_passthrough_for_unrelated_descriptors(self) -> None:
+        msg = TextMessage("hi", "text/x-user-message")
+        assert wrap_errors_for_llm(msg) is msg
+
+
+class TestHaltSemanticsOnIrrecoverable:
+    """``IrrecoverableErrorEvent`` arms ``inbox.block_until_user``."""
+
+    def test_publish_irrecoverable_blocks_drain_until_user(self) -> None:
+        agent = _build_agent(_MockModel())
+        msg = build_error_message("dead", exc=RuntimeError("x"))
+        agent.publish_irrecoverable_error(msg)
+        # ``block_until_user`` is armed via the private ``_user_block`` flag.
+        assert agent.inbox._user_block is True
 
 
 if __name__ == "__main__":
