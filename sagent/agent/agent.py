@@ -681,6 +681,16 @@ class Agent:
                 cur = asyncio.current_task()
                 if cur is not None:
                     _ = cur.uncancel()
+            except Exception as e:
+                # Provider/model exceptions are scoped to the active turn. Keep
+                # the mailbox alive so the user can retry, switch models, or quit.
+                logger.exception("turn failed")
+                self.publish(ErrorEvent(f"turn failed: {type(e).__name__}: {e}"))
+                self.log_event(
+                    "turn_failed",
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
 
     # -- Public strategy methods --------------------------------------
 
