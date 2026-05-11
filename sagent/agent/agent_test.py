@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import asyncio
 import contextlib
@@ -135,6 +135,52 @@ class TestLifecycle:
         await asyncio.sleep(0)
         _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
         await asyncio.wait_for(task, timeout=1.0)
+
+    async def test_serve_forever_publishes_error_and_continues(self) -> None:
+        class _CrashingModel(_MockModel):
+            @override
+            async def stream(
+                self,
+                request: ModelRequest,
+                on_text: Callable[[str], None] | None = None,
+                on_thinking: Callable[[str], None] | None = None,
+            ) -> ModelResponse:
+                del request, on_text, on_thinking
+                raise RuntimeError("provider exploded")
+
+        agent = _build_agent(_CrashingModel())
+        events: list[Event] = []
+        error_seen = asyncio.Event()
+
+        def observe(event: Event) -> None:
+            events.append(event)
+            if isinstance(event, ErrorEvent):
+                error_seen.set()
+
+        agent.observers.append(observe)
+        task = asyncio.create_task(agent.serve_forever())
+        done_wait = asyncio.create_task(error_seen.wait())
+        try:
+            _ = agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+            done, _ = await asyncio.wait(
+                {task, done_wait},
+                timeout=1.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            assert done_wait in done
+            assert not task.done()
+            _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+            await asyncio.wait_for(task, timeout=1.0)
+        finally:
+            done_wait.cancel()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+        errs = [event for event in events if isinstance(event, ErrorEvent)]
+        assert len(errs) == 1
+        assert "turn failed" in errs[0].text
+        assert "RuntimeError" in errs[0].text
 
 
 class TestForeground:
