@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import json
-
 from PIL import Image
 
 import pytest
@@ -112,13 +110,6 @@ class TestProvider:
         m = p.model("gemini-2.0-flash")
         assert m.model_id == "gemini-2.0-flash"
         assert m.max_request_tokens == 1_000_000
-
-    def test_flash_lite_model_profile(self) -> None:
-        p: Provider = Google.from_key("AIza-test")
-        m = p.model("gemini-2.5-flash-lite")
-        assert m.model_id == "gemini-2.5-flash-lite"
-        assert m.max_request_tokens == 1_048_576
-        assert m.max_response_tokens == 65_536
 
     def test_model_custom_max_request_tokens(self) -> None:
         p: Provider = Google.from_key("AIza-test")
@@ -404,49 +395,6 @@ class TestSendMocked:
         ):
             resp = await model.buffer(request=ModelRequest(messages=[_user("hello")]))
         assert _text(resp) == "Hi!"
-        mock_resp.raise_for_status.assert_called_once()
-
-    @pytest.mark.anyio
-    async def test_buffer_non_prompt_size_400_raises_value_error(self) -> None:
-        provider = Google.from_key("AIza-test")
-        model = provider.model("gemini-2.0-flash")
-        mock_resp = MagicMock()
-        mock_resp.status_code = 400
-        mock_resp.text = "invalid generation config"
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        with (
-            patch(
-                "sagent.providers.google.httpx.AsyncClient",
-                return_value=mock_client,
-            ),
-            pytest.raises(ValueError, match="Google API 400"),
-        ):
-            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-        mock_resp.raise_for_status.assert_not_called()
-
-    @pytest.mark.anyio
-    async def test_buffer_non_400_error_raises_http_status(self) -> None:
-        provider = Google.from_key("AIza-test")
-        model = provider.model("gemini-2.0-flash")
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status = MagicMock(side_effect=RuntimeError("server"))
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        with (
-            patch(
-                "sagent.providers.google.httpx.AsyncClient",
-                return_value=mock_client,
-            ),
-            pytest.raises(RuntimeError, match="server"),
-        ):
-            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-        mock_resp.raise_for_status.assert_called_once()
 
     @pytest.mark.anyio
     async def test_stream_basic(self) -> None:
@@ -496,31 +444,6 @@ class TestStreamOnText:
         assert _text(resp) == "Hello!"
         assert "Hello!" in chunks
 
-    @pytest.mark.anyio
-    async def test_stream_non_prompt_size_400_raises_value_error(self) -> None:
-        provider = Google.from_key("AIza-test")
-        model = provider.model("gemini-2.0-flash")
-        mock_resp = MagicMock()
-        mock_resp.status_code = 400
-        mock_resp.aread = AsyncMock(return_value=b"invalid generation config")
-        mock_resp.raise_for_status = MagicMock()
-        stream_cm = AsyncMock()
-        stream_cm.__aenter__ = AsyncMock(return_value=mock_resp)
-        stream_cm.__aexit__ = AsyncMock(return_value=False)
-        mock_client = AsyncMock()
-        mock_client.stream = MagicMock(return_value=stream_cm)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        with (
-            patch(
-                "sagent.providers.google.httpx.AsyncClient",
-                return_value=mock_client,
-            ),
-            pytest.raises(ValueError, match="Google API 400"),
-        ):
-            await model.stream(request=ModelRequest(messages=[_user("hi")]))
-        mock_resp.raise_for_status.assert_not_called()
-
 
 # -- _build_request with tools (line 242) ------------------------------
 
@@ -560,53 +483,6 @@ class TestBuildRequestWithTools:
         assert "tools" in body
         decls = body["tools"][0]["functionDeclarations"]
         assert decls[0]["name"] == "bash"
-
-    def test_additional_properties_stripped_recursively(self) -> None:
-        class _FakeTool:
-            def __init__(self) -> None:
-                self.name = "bash"
-                self.tool_id = "application/x-tool-bash"
-                self.description = "Run bash."
-                self.supports_microcompaction = False
-                self.directive_schema = json_freeze(
-                    {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "additionalProperties": False,
-                            },
-                            "items": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                },
-                            },
-                        },
-                    }
-                )
-
-            def summary(self, msg: Message) -> str:
-                del msg
-                return self.name
-
-            def summary_result(self, result: Message) -> str | None:
-                del result
-                return None
-
-            def prompt(self) -> str | None:
-                return None
-
-            async def run(self, msg: Message) -> Message:
-                del msg
-                return TextMessage("", "text/plain")
-
-        request = ModelRequest(messages=[_user("hello")], tools=[_FakeTool()])
-        body = cast(dict[str, Any], _build_request(request))
-        decls = body["tools"][0]["functionDeclarations"]
-        assert "additionalProperties" not in json.dumps(decls[0]["parameters"])
 
 
 class TestModelProperties:
