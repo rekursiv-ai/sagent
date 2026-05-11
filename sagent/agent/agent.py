@@ -71,15 +71,16 @@ from sagent.custom_exceptions import ModelTerminationError
 from sagent.custom_types import (
     Compactor,
     ContextBudget,
-    ErrorEvent,
     Event,
     InterruptedEvent,
+    IrrecoverableErrorEvent,
     Message,
     Model,
     ModelRequest,
     ModelResponse,
     ModelSpec,
     MultipartMessage,
+    RecoverableErrorEvent,
     StatusUpdateEvent,
     StreamEndEvent,
     TextChunkEvent,
@@ -96,10 +97,12 @@ from sagent.custom_types import (
 from sagent.lib.compaction import write_pre_compact_transcript
 from sagent.lib.descriptors import (
     QUIT_SENTINEL,
+    flat_text,
     has_error,
 )
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
 from sagent.lib.message import (
+    build_error_message,
     get_queue_id,
     get_tool_name,
     response_tool_calls,
@@ -150,8 +153,6 @@ _TRUNCATION_NUDGE = (
     "what you were doing. Pick up mid-thought if that is where the cut "
     "happened. Break remaining work into smaller pieces."
 )
-
-_MAX_UNSAVED_EVENTS = 1000
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -291,7 +292,6 @@ class Agent:
         self._yield_queue: asyncio.Queue[Event | object] | None = None
         self._session_id = str(uuid.uuid4())[:8]
         self._status: str = ""
-        self._event_log: list[dict[str, object]] = []
         self._persisted_idx: int = 0
         # Lifecycle bookkeeping for ``last_run_*`` deltas. Set at
         # ``_open_cost_lifecycle``, cleared at ``_close_cost_lifecycle``.
@@ -664,6 +664,35 @@ class Agent:
                 )
                 logger.debug("observer traceback", exc_info=True)
 
+    def publish_recoverable_error(self, msg: Message) -> None:
+        """Append a recoverable error Message to history; publish + continue.
+
+        Used for transient failures that the system recovered from
+        (retries succeeded, compaction below threshold, etc.).
+
+        Args:
+          msg: ``multipart/x-error`` Message.
+
+        """
+        self.history.append(msg)
+        self.publish(RecoverableErrorEvent(msg))
+
+    def publish_irrecoverable_error(self, msg: Message) -> None:
+        """Append a terminal error Message to history; publish + halt.
+
+        Halts the round loop via ``inbox.block_until_user()`` so the next
+        ``drain()`` blocks past non-user arrivals (cohort emissions,
+        background completions, peer messages) until a NEW user-source
+        item lands. User input clears the halt; the agent resumes.
+
+        Args:
+          msg: ``multipart/x-error`` Message.
+
+        """
+        self.history.append(msg)
+        self.inbox.block_until_user()
+        self.publish(IrrecoverableErrorEvent(msg))
+
     def _emit_yielded(self, event: Event) -> None:
         r"""Emit one consumer-facing event (UserBar / ToolResult / TurnComplete /
         InterruptedEvent).
@@ -720,7 +749,7 @@ class Agent:
           3. Spawn a round-body task as ``self.work``; await it. The
              round body internally handles cancellation (/halt semantics
              and the bare-cancel ``InterruptedEvent`` path).
-          4. Catch other exceptions; publish ``ErrorEvent`` and continue.
+          4. Catch other exceptions; publish ``IrrecoverableErrorEvent`` and continue.
         """
         while not self._shutting_down:
             items = await self.inbox.drain()
@@ -757,20 +786,16 @@ class Agent:
                 _ = cur.uncancel()
         except (AssertionError, TypeError, AttributeError, NameError):
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- operational errors caught here are heterogeneous; bug-class exceptions re-raised above
             # Operational errors (provider failures, retries exhausted,
             # budget caps, model refusal) are scoped to the active turn.
             # Keep the mailbox alive so the user can retry, switch models,
-            # or quit. Bug-class exceptions are re-raised above.
-            logger.exception(
-                "turn failed on %s: %s", self.model.model_id, type(e).__name__
+            # or quit. Bug-class exceptions are re-raised above. The
+            # traceback persists inside the published error Message.
+            self.publish_irrecoverable_error(
+                build_error_message(f"turn failed: {type(e).__name__}: {e}", exc=e)
             )
-            self.publish(ErrorEvent(f"turn failed: {type(e).__name__}: {e}"))
-            self.log_event(
-                "turn_failed",
-                error_type=type(e).__name__,
-                error=str(e),
-            )
+
         finally:
             if self.work is task:
                 self.work = None
@@ -862,7 +887,7 @@ class Agent:
     # -- Persistence (auto-called from strategy methods) --------------
 
     def save_session(self, *, clear: bool = False) -> None:
-        """Append meta + new history + events to ``session_dir/session.jsonl``.
+        """Append meta + new history to ``session_dir/session.jsonl``.
 
         Args:
           clear: When True, write a barrier line and re-persist the entire
@@ -877,47 +902,9 @@ class Agent:
             path,
             meta=self._build_session_meta().serialize(),
             messages_delta=delta,
-            events=self._event_log,
             clear=clear,
         )
         self._persisted_idx = len(self.history)
-        self._event_log.clear()
-
-    def log_event(self, event: str, **data: object) -> None:
-        """Record a structured event for ``session.jsonl``.
-
-        Args:
-          event: Event name.
-          **data: Arbitrary key/value payload.
-
-        """
-        entry = {
-            "ts": time.time(),
-            "session": self.session_id,
-            "agent": self.name,
-            "event": event,
-            **data,
-        }
-        self._event_log.append(entry)
-        if len(self._event_log) > _MAX_UNSAVED_EVENTS:
-            if self.session_dir is not None:
-                try:
-                    self.save_session()
-                except OSError as save_err:
-                    self.publish(
-                        ErrorEvent(
-                            text=(
-                                f"event log save failed: "
-                                f"{type(save_err).__name__}: {save_err}; "
-                                f"truncating in memory"
-                            ),
-                        ),
-                    )
-                    logger.debug("event log save failed", exc_info=True)
-                    self._event_log = self._event_log[-_MAX_UNSAVED_EVENTS:]
-            else:
-                self._event_log = self._event_log[-_MAX_UNSAVED_EVENTS:]
-        logger.debug("%s: %s", event, data)
 
     # -- Round body ---------------------------------------------------
 
@@ -1122,7 +1109,7 @@ class Agent:
                     on_thinking=_on_thinking,
                     max_attempts=self.max_attempts,
                     persistent_retry=self.persistent_retry,
-                    log_event=self.log_event,
+                    publish_recoverable=self.publish_recoverable_error,
                     on_discarded_response=self._record_response,
                 )
                 break
@@ -1237,13 +1224,6 @@ class Agent:
         the inbox tagged ``tools``.
         """
         self.tool_state.bash_parse_cache.clear()
-        for call in calls:
-            self.log_event(
-                "tool_call",
-                tool=tc_tool_id(call),
-                tool_id=get_queue_id(call),
-                input=tc_directive(call),
-            )
 
         cohort: Cohort | None = None  # bound below; captured by _on_emit
 
@@ -1317,13 +1297,6 @@ class Agent:
     ) -> list[Message]:
         """Postprocess + budget + batch-hint a cohort's settled results."""
         finalized = self._postprocess_results(calls, cohort_results)
-        for r in finalized:
-            self.log_event(
-                "tool_result",
-                tool_id=get_queue_id(r),
-                is_error=has_error(r),
-                content_len=len(text_from_msg(r)),
-            )
         tool_names = {get_queue_id(c): tc_tool_id(c) for c in calls}
         budgeted = enforce_message_budget(
             finalized,
@@ -1696,7 +1669,7 @@ class Agent:
                     write_pre_compact_transcript(transcript_path, self.history)
             prior_pointers = list(self.compaction_state.summary_pointers)
             result = await self.compactor.compact(
-                messages=self.history,
+                messages=[wrap_errors_for_llm(m) for m in self.history],
                 model=self.model,
                 transcript_path=transcript_path,
                 custom_instructions=args or None,
@@ -1707,16 +1680,23 @@ class Agent:
         except Exception as e:  # noqa: BLE001 -- compactor errors are heterogeneous
             if count_failures:
                 self.compaction_state.compact_failures += 1
-            self.publish(
-                ErrorEvent(
-                    text=(
-                        f"compaction failed "
-                        f"({self.compaction_state.compact_failures}/"
-                        f"{MAX_COMPACT_FAILURES}): "
-                        f"{type(e).__name__}: {e}"
-                    ),
-                ),
+                counter = (
+                    f" ({self.compaction_state.compact_failures}"
+                    f"/{MAX_COMPACT_FAILURES})"
+                )
+            else:
+                counter = ""
+            msg = build_error_message(
+                f"compaction failed{counter}: {type(e).__name__}: {e}",
+                exc=e,
             )
+            if (
+                count_failures
+                and self.compaction_state.compact_failures >= MAX_COMPACT_FAILURES
+            ):
+                self.publish_irrecoverable_error(msg)
+            else:
+                self.publish_recoverable_error(msg)
             logger.debug("compaction failed", exc_info=True)
             return False
         finally:
@@ -1754,10 +1734,11 @@ class Agent:
             raw_text = path.read_text(encoding="utf-8")
             loaded = [load_message(rec) for rec in parse_jsonl(raw_text)]
         except (OSError, KeyError, AssertionError, TypeError) as e:
-            self.publish(
-                ErrorEvent(
-                    text=f"recompact transcript load failed: {type(e).__name__}: {e}",
-                ),
+            self.publish_recoverable_error(
+                build_error_message(
+                    f"recompact transcript load failed: {type(e).__name__}: {e}",
+                    exc=e,
+                )
             )
             logger.debug("recompact transcript load failed", exc_info=True)
             return
@@ -1976,7 +1957,23 @@ def _thinking_parts(response_msg: Message) -> list[str]:
 
 
 def wrap_errors_for_llm(tr: Message) -> Message:
-    """Wrap ``text/x-error`` parts in ``<tool_use_error>`` for the LLM transcript."""
+    """Transform a Message into LLM-bound shape for serialization.
+
+    Two cases:
+
+    - ``multipart/x-tool-result``: wrap any ``text/x-error`` parts in
+      ``<tool_use_error>`` so the LLM can recognise the framing.
+    - ``multipart/x-error``: flatten to a ``text/x-user-message`` carrying
+      just the human-facing error string. The structured ``application/
+      x-stack-trace`` sibling stays in ``self.history`` for replay and
+      forensic persistence but is stripped at the provider boundary so
+      retry storms don't drown the model in JSON traceback noise.
+
+    All other messages pass through unchanged.
+    """
+    if tr.descriptor == "multipart/x-error":
+        text = flat_text(tr, include_errors=True)
+        return TextMessage(f"[Error: {text}]", "text/x-user-message")
     if tr.descriptor != "multipart/x-tool-result":
         return tr
     parts = cast("tuple[Message, ...]", tr.content)

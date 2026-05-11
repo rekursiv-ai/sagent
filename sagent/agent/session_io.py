@@ -482,7 +482,6 @@ def append_session(
     *,
     meta: Mapping[str, object] | None = None,
     messages_delta: list[Message] | None = None,
-    events: list[dict[str, object]] | None = None,
     clear: bool = False,
 ) -> None:
     """Append delta records to ``session.jsonl``.
@@ -500,7 +499,6 @@ def append_session(
       meta: Optional session metadata dict (latest meta line wins on load).
       messages_delta: Conversation messages to append (typically the
           tail past ``Agent._persisted_idx``).
-      events: Structured event entries to append.
       clear: True to emit a ``kind: clear`` barrier line before any
           other records in this batch.
 
@@ -513,9 +511,6 @@ def append_session(
     parts.extend(
         json.dumps({"kind": "message", **msg.serialize()})
         for msg in messages_delta or ()
-    )
-    parts.extend(
-        json.dumps({"kind": "event", **entry}, default=str) for entry in events or ()
     )
     if not parts:
         return
@@ -659,12 +654,6 @@ def _migrate_legacy_session(
                     **msg.serialize(),
                 }
                 _ = f.write(json.dumps(record) + "\n")
-        if legacy_events.exists():
-            for entry in read_jsonl(
-                legacy_events,
-                "events.jsonl",
-            ):
-                _ = f.write(json.dumps({"kind": "event", **entry}) + "\n")
     for old in (legacy_msgs, legacy_events, legacy_state):
         if old.exists():
             old.rename(old.with_suffix(old.suffix + ".bak"))

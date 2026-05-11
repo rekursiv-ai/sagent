@@ -90,6 +90,7 @@ MultipartDescriptor = Literal[
     "multipart/x-tool-call",
     "multipart/x-tool-result",
     "multipart/x-child-event",
+    "multipart/x-error",
     "multipart/mixed",
     # Inbox spine multipart envelopes -- carry inner Messages.
     "multipart/x-tool-batch",
@@ -103,6 +104,7 @@ JsonDescriptor = Literal[
     "application/x-done",
     "application/x-child-done",
     "application/x-thinking-structured",
+    "application/x-stack-trace",
     "application/x-file-stat",
     "application/x-bash-state",
 ]

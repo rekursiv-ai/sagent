@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import cast
 
 import dataclasses
+import traceback
 
 from sagent.custom_types import (
     JsonMessage,
@@ -14,7 +15,7 @@ from sagent.custom_types import (
     TextMessage,
 )
 from sagent.lib.descriptors import is_multipart, is_user_message
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.json import JSON, MutableJSON, MutableJSONValue, json_freeze
 
 
 def tool_call_message(
@@ -147,6 +148,92 @@ def response_tool_calls(msg: Message) -> list[Message]:
         return []
     parts = cast(tuple[Message, ...], msg.content)
     return [p for p in parts if p.descriptor == "multipart/x-tool-call"]
+
+
+_MAX_CAUSE_DEPTH: int = 5
+
+
+def _exc_to_trace_dict(
+    the: traceback.TracebackException,
+    *,
+    seen: set[int] | None = None,
+    depth: int = 0,
+) -> MutableJSON:
+    """Build a mutable JSON dict for a ``TracebackException`` (recursive).
+
+    Guards against cycles via ``id(the)``-tracked ``seen`` set and against
+    pathological chains via ``_MAX_CAUSE_DEPTH``.
+    """
+    if seen is None:
+        seen = set()
+    frames: MutableJSONValue = [
+        cast(
+            "MutableJSONValue",
+            {
+                "file": fs.filename,
+                "line": fs.lineno if fs.lineno is not None else 0,
+                "function": fs.name,
+                "code": (fs.line or "").strip(),
+            },
+        )
+        for fs in the.stack
+    ]
+    type_name = the.exc_type.__name__ if the.exc_type else "Exception"
+    seen.add(id(the))
+
+    def _recurse(
+        child: traceback.TracebackException | None,
+    ) -> MutableJSON | None:
+        if child is None or id(child) in seen or depth + 1 >= _MAX_CAUSE_DEPTH:
+            return None
+        return _exc_to_trace_dict(child, seen=seen, depth=depth + 1)
+
+    return {
+        "type": type_name,
+        "message": "".join(the.format_exception_only()).strip(),
+        "frames": frames,
+        "cause": _recurse(the.__cause__),
+        "context": _recurse(the.__context__),
+    }
+
+
+def _exc_to_trace_json(the: traceback.TracebackException) -> JSON:
+    """Serialize a ``TracebackException`` (incl. chained) to frozen JSON."""
+    return json_freeze(_exc_to_trace_dict(the))
+
+
+def build_error_message(user_msg: str, exc: BaseException | None = None) -> Message:
+    """Build an error Message; ``multipart/x-error`` when ``exc`` is given.
+
+    Safe to call from inside an exception handler: if traceback extraction
+    fails (cycles, recursion limit, pathological exceptions), falls back
+    to a flat ``text/x-error`` so the caller never loses the event.
+
+    Args:
+      user_msg: Short user-facing error description.
+      exc: Optional exception; when present, the returned Message
+        includes a structured ``application/x-stack-trace`` part.
+
+    Returns:
+      message: ``text/x-error`` (flat) when ``exc`` is None or trace
+        extraction fails, otherwise ``multipart/x-error`` carrying both
+        the text and a structured traceback.
+
+    """
+    if exc is None:
+        return TextMessage(user_msg, "text/x-error")
+    try:
+        the = traceback.TracebackException.from_exception(exc)
+        trace = _exc_to_trace_json(the)
+    except (RecursionError, RuntimeError, AttributeError, TypeError, ValueError):
+        return TextMessage(user_msg, "text/x-error")
+    return MultipartMessage(
+        (
+            TextMessage(user_msg, "text/x-error"),
+            JsonMessage(trace, "application/x-stack-trace"),
+        ),
+        "multipart/x-error",
+    )
 
 
 def append_to_first_user_message(

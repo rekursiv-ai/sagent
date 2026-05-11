@@ -22,12 +22,13 @@ if TYPE_CHECKING:
 from sagent.agent.agent import Agent
 from sagent.custom_types import (
     ChildEvent,
-    ErrorEvent,
     InterruptedEvent,
+    IrrecoverableErrorEvent,
     ModelRequest,
     ModelResponse,
     MultipartMessage,
     Pricing,
+    RecoverableErrorEvent,
     StatusUpdateEvent,
     StreamEndEvent,
     TextChunkEvent,
@@ -301,11 +302,19 @@ class TestRenderObserver:
         obs(ToolResultEvent(msg))
         assert printer.tool_errors == ["boom"]
 
-    def test_error(self) -> None:
+    def test_recoverable_error(self) -> None:
         printer = RecordingPrinter()
         obs = make_render_observer(printer)
-        obs(ErrorEvent("nope"))
+        obs(RecoverableErrorEvent(msg=TextMessage("nope", "text/x-error")))
         assert printer.tool_errors == ["nope"]
+        assert printer.halts == []
+
+    def test_irrecoverable_error_renders_halt_banner(self) -> None:
+        printer = RecordingPrinter()
+        obs = make_render_observer(printer)
+        obs(IrrecoverableErrorEvent(msg=TextMessage("dead", "text/x-error")))
+        assert printer.tool_errors == ["dead"]
+        assert len(printer.halts) == 1
 
     def test_interrupted(self) -> None:
         printer = RecordingPrinter()

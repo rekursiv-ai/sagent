@@ -30,11 +30,12 @@ import uuid
 from sagent.custom_types import (
     ChildDoneEvent,
     ChildEvent,
-    ErrorEvent,
     Event,
+    IrrecoverableErrorEvent,
     Message,
     ModelSpec,
     MultipartMessage,
+    RecoverableErrorEvent,
     TextChunkEvent,
     TextMessage,
     ThinkingEvent,
@@ -781,9 +782,9 @@ class _ChildForwarder:
         if isinstance(event, TextChunkEvent):
             self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4
-        always_forward = isinstance(event, ErrorEvent) or (
-            isinstance(event, ToolResultEvent) and has_error(event.msg)
-        )
+        always_forward = isinstance(
+            event, (RecoverableErrorEvent, IrrecoverableErrorEvent)
+        ) or (isinstance(event, ToolResultEvent) and has_error(event.msg))
         if not always_forward and type(event) not in self._forward_set:
             return
         self._parent_agent.publish(ChildEvent(label=self._label, inner=event))
