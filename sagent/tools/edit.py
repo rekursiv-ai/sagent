@@ -38,6 +38,7 @@ from sagent.tools.core import (
     run_sync,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.lib.state_parts import file_stat_part
 
 
 # Simple ``s/OLD/NEW/[g]`` - no escaped delimiters, no alternate
@@ -240,13 +241,14 @@ class Edit:
         offset = text[:idx].count("\n") if idx >= 0 else 0
         diff = make_diff(old_string, new_string, offset)
 
-        return MultipartMessage(
-            (
-                TextMessage(confirmation, "text/plain"),
-                TextMessage(diff, "text/x-diff"),
-            ),
-            "multipart/x-tool-result",
-        )
+        parts: list[Message] = [
+            TextMessage(confirmation, "text/plain"),
+            TextMessage(diff, "text/x-diff"),
+        ]
+        stat = file_stat_part(file_path)
+        if stat is not None:
+            parts.append(stat)
+        return MultipartMessage(tuple(parts), "multipart/x-tool-result")
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a hint if the command is a simple ``sed -i 's/X/Y/g' FILE``.

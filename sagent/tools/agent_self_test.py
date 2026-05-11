@@ -464,6 +464,7 @@ class _LimitAgent:
         self._next_op: PendingOp | None = None
         self.session_id: str = "test1234"
         self.session_dir: Path | None = None
+        self.tool_state = ToolState()
 
     @property
     def budget(self) -> ContextBudget:

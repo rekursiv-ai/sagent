@@ -31,6 +31,7 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, cached_parse_bash
+from sagent.tools.lib.state_parts import bash_state_part
 
 
 logger = logging.getLogger(__name__)
@@ -180,9 +181,9 @@ class Bash:
         """One-line receipt: line count + nonzero exit code."""
         if not self.emit_tool_summary:
             return None
-        if result.descriptor != "text/plain":
+        text = _first_text(result)
+        if text is None:
             return None
-        text = str(result.content)
         exit_match = _BASH_EXIT_RE.search(text)
         body = text[: exit_match.start()] if exit_match else text
         lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
@@ -226,11 +227,12 @@ class Bash:
         else:
             timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
             text = await _run_foreground(command, state=state, timeout_s=timeout_s)
-        result = TextMessage(
+        text_part = TextMessage(
             truncate(text, TOOL_RESULT_MAX_CHARS),
             "text/plain",
             parent_id=msg.id,
         )
+        cwd_part = bash_state_part(state)
         if self._peer_matchers:
             nudges = self._collect_nudges(command)
             if nudges:
@@ -240,10 +242,13 @@ class Bash:
                     (
                         TextMessage(f"{banner}\n\n{text}", "text/plain"),
                         *(TextMessage(h, "text/x-hint-tool-use-nudge") for h in nudges),
+                        cwd_part,
                     ),
                     "multipart/mixed",
                 )
-        return result
+        return MultipartMessage(
+            (text_part, cwd_part), "multipart/mixed", parent_id=msg.id
+        )
 
     def _collect_nudges(self, command: str) -> list[str]:
         trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
@@ -255,6 +260,17 @@ class Bash:
             if nudge:
                 nudges.append(nudge)
         return nudges
+
+
+def _first_text(result: Message) -> str | None:
+    """Return the first ``text/plain`` content from a tool result Message."""
+    if result.descriptor == "text/plain":
+        return str(result.content)
+    if isinstance(result, MultipartMessage):
+        for p in result.content:
+            if isinstance(p, TextMessage) and p.descriptor == "text/plain":
+                return p.content
+    return None
 
 
 def _ensure_valid_cwd(state: ToolState) -> None:

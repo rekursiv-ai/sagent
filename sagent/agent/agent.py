@@ -1814,7 +1814,9 @@ class Agent:
             num_tool_call_rounds=self.activity.num_tool_call_rounds,
             compact_count=self.compaction_state.compact_count,
             summary_pointers=self.compaction_state.summary_pointers,
-            bash_cwd=self.tool_state.bash_cwd,
+            # bash_cwd intentionally omitted on new sessions — history's
+            # x-bash-state parts carry it. Loader still reads meta.bash_cwd
+            # for pre-bash-state sessions.
             total_active_elapsed_seconds=self.activity.elapsed_seconds,
         )
 
@@ -1840,7 +1842,10 @@ class Agent:
         repair_inserted = len(repaired) > len(messages)
         self.history = repaired
         self._persisted_idx = len(messages)
-        rebuild_tool_state_from_messages(self.history, self.tool_state)
+        # Apply SessionMeta first so its bash_cwd seeds back-compat
+        # (sessions with no x-bash-state parts in history). The rebuild
+        # below then overrides when history actually has bash-state —
+        # per-event truth wins over the snapshot.
         if meta:
             m = SessionMeta.deserialize(meta)
             self._session_id = m.session_id or self.session_id
@@ -1864,6 +1869,7 @@ class Agent:
                 restored = restore_model(m)
                 if restored is not None:
                     self.model, self.model_spec = restored
+        rebuild_tool_state_from_messages(self.history, self.tool_state)
         self.cost_tracker.last_response_time = time.time()
         logger.info(
             "Resumed session %s (%d messages)",
