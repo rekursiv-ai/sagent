@@ -347,6 +347,16 @@ class OpenAICompatModel:
         msg = str(error).lower()
         return "context_length_exceeded" in msg or "maximum context length" in msg
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """No provider-specific transient cases beyond status codes.
+
+        Chat-completions-compatible endpoints raise ``httpx.HTTPStatusError``
+        with an HTTP status code; the shared status-code path in
+        ``retry.py`` covers them.
+        """
+        del error
+        return False
+
     @property
     def _endpoint(self) -> str:
         return f"{self._provider.base_url.rstrip('/')}/chat/completions"

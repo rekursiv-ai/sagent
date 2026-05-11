@@ -14,7 +14,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import asyncio
@@ -388,6 +388,10 @@ _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
 # the agent's overflow-recovery loop engage.
 _PROMPT_TOO_LONG_STATUS = frozenset({400, 413})
 
+# Statusless Anthropic errors with ``body["type"]`` in this set are
+# transient retryables that the shared status-code classifier misses.
+_RETRYABLE_BODY_TYPES = frozenset({"rate_limit_error", "server_error"})
+
 
 def _is_prompt_too_long_text(msg: str) -> bool:
     """True if the error body text describes a context-window overflow."""
@@ -613,6 +617,21 @@ class _AnthropicModel:
         if getattr(error, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
             return False
         return _is_prompt_too_long_text(str(error))
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """Statusless Anthropic errors that still declare retryability.
+
+        The SDK sometimes raises errors without an HTTP status code while
+        the body's ``"type"`` field marks the failure as transient
+        (``"rate_limit_error"``, ``"server_error"``). Status-coded
+        variants are handled by ``retry.py``'s shared classifier.
+        """
+        body = getattr(error, "body", None)
+        if not isinstance(body, Mapping):
+            return False
+        body_map = cast(Mapping[object, object], body)
+        error_type = body_map.get("type")
+        return isinstance(error_type, str) and error_type in _RETRYABLE_BODY_TYPES
 
     def _build_kwargs(
         self,

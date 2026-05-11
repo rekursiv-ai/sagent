@@ -247,6 +247,10 @@ class _NoopModel:
         del error
         return False
 
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False
+
 
 class TestRenderObserver:
     def test_user_bar(self) -> None:
