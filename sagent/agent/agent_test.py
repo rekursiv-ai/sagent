@@ -21,6 +21,7 @@ import pytest
 
 from sagent.agent import Agent, PendingOp
 from sagent.agent.agent import _MAX_UNSAVED_EVENTS
+from sagent.agent.cohort import Cohort, CohortMember
 from sagent.custom_types import (
     Compactor,
     ErrorEvent,
@@ -33,8 +34,11 @@ from sagent.custom_types import (
     Pricing,
     TextMessage,
     TokenCount,
+    Tool,
 )
-from sagent.lib.descriptors import QUEUED_USER_MESSAGE, QUIT_SENTINEL
+from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.lib.json import json_freeze
+from sagent.lib.message import tool_call_message
 
 
 pytestmark = pytest.mark.anyio
@@ -133,7 +137,7 @@ class TestLifecycle:
         agent = _build_agent(_MockModel())
         task = asyncio.create_task(agent.serve_forever())
         await asyncio.sleep(0)
-        _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
         await asyncio.wait_for(task, timeout=1.0)
 
     async def test_serve_forever_publishes_error_and_continues(self) -> None:
@@ -161,7 +165,10 @@ class TestLifecycle:
         task = asyncio.create_task(agent.serve_forever())
         done_wait = asyncio.create_task(error_seen.wait())
         try:
-            _ = agent.inbox.put(TextMessage("hi", "text/x-user-message"))
+            agent.inbox.send(
+                TextMessage("hi", "text/x-user-message"),
+                source="user",
+            )
             done, _ = await asyncio.wait(
                 {task, done_wait},
                 timeout=1.0,
@@ -169,7 +176,7 @@ class TestLifecycle:
             )
             assert done_wait in done
             assert not task.done()
-            _ = agent.inbox.put(TextMessage("", QUIT_SENTINEL))
+            agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
             await asyncio.wait_for(task, timeout=1.0)
         finally:
             done_wait.cancel()
@@ -229,16 +236,6 @@ class TestRun:
         descriptors = [m.descriptor for m in agent.history]
         assert descriptors == ["text/x-user-message", "multipart/x-model-message"]
 
-    async def test_queued_follow_up_normalizes_before_history(self) -> None:
-        model = _MockModel()
-        model.responses.append(_model_response("hi back"))
-        agent = _build_agent(model)
-
-        async for _ev in agent.run(TextMessage("hi", QUEUED_USER_MESSAGE)):
-            pass
-
-        assert agent.history[0].descriptor == "text/x-user-message"
-
 
 class TestPendingOp:
     async def test_clear_op_wipes_history(self) -> None:
@@ -283,6 +280,346 @@ class TestCancellation:
             await consumer
         kinds = [type(e).__name__ for e in events]
         assert "InterruptedEvent" in kinds
+
+
+class TestHaltSemantics:
+    """``halt()`` arms the round body to requeue items + block_until_user."""
+
+    @pytest.mark.real_sleep
+    async def test_halt_during_model_call_requeues_and_blocks(self) -> None:
+        model = _MockModel()
+        hang = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def _hang(*args: object, **kwargs: object) -> ModelResponse:
+            del args, kwargs
+            entered.set()
+            await hang.wait()
+            return _model_response()
+
+        model.stream = _hang  # ty: ignore[invalid-assignment]
+        model.buffer = _hang  # ty: ignore[invalid-assignment]
+        agent = _build_agent(model)
+        loop_task = asyncio.create_task(agent.serve_forever())
+        agent.inbox.send(
+            TextMessage("fix bug", "text/x-user-message"),
+            source="user",
+        )
+        await entered.wait()
+        agent.halt()
+        # Wait for the round body to finish unwinding the cancellation.
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if agent.work is None:
+                break
+        # After halt, the round body has requeued the user item at the
+        # front and armed ``block_until_user``. A peer-source arrival
+        # should accumulate without waking the drain.
+        agent.inbox.send(
+            TextMessage("peer ping", "text/x-user-message"),
+            source="Agent_X",
+        )
+        await asyncio.sleep(0.02)
+        sources = [item.source for item in agent.inbox]
+        assert sources[0] == "user"
+        assert sources[1] == "Agent_X"
+        # Cleanup.
+        agent.shutdown(force=True)
+        hang.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(loop_task, timeout=1.0)
+
+
+class TestKillTool:
+    """``kill_tool`` / ``kill_all_tools`` cancel cohort + bg tasks by qid."""
+
+    @pytest.mark.real_sleep
+    async def test_kill_tool_finds_member_in_active_cohort(self) -> None:
+        agent = _build_agent(_MockModel())
+        hang = asyncio.Event()
+
+        async def _hang() -> Message:
+            await hang.wait()
+            return TextMessage("never", "text/plain")
+
+        def _noop_promote(_: CohortMember) -> None:
+            return
+
+        emissions: list[list[Message]] = []
+        cohort = Cohort(
+            on_emit=emissions.append,
+            on_promote_to_bg=_noop_promote,
+        )
+        agent._active_cohorts.append(cohort)
+        member = CohortMember(
+            tool_use_id="qid_1",
+            tool_name="Bash",
+            task=asyncio.create_task(_hang()),
+        )
+        cohort.add_member(member)
+        try:
+            assert agent.kill_tool("qid_1") is True
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                if member.task.done():
+                    break
+            assert member.task.cancelled() or member.task.done()
+        finally:
+            hang.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await member.task
+
+    @pytest.mark.real_sleep
+    async def test_kill_all_tools_returns_count(self) -> None:
+        agent = _build_agent(_MockModel())
+        hang = asyncio.Event()
+
+        async def _hang() -> Message:
+            await hang.wait()
+            return TextMessage("never", "text/plain")
+
+        def _noop_emit(_: list[Message]) -> None:
+            return
+
+        def _noop_promote(_: CohortMember) -> None:
+            return
+
+        cohort = Cohort(
+            on_emit=_noop_emit,
+            on_promote_to_bg=_noop_promote,
+        )
+        agent._active_cohorts.append(cohort)
+        members = [
+            CohortMember(
+                tool_use_id=f"qid_{i}",
+                tool_name="Bash",
+                task=asyncio.create_task(_hang()),
+            )
+            for i in range(2)
+        ]
+        for m in members:
+            cohort.add_member(m)
+        try:
+            count = agent.kill_all_tools()
+            assert count == 2
+        finally:
+            hang.set()
+            for m in members:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await m.task
+
+    def test_kill_tool_returns_false_on_unknown_qid(self) -> None:
+        agent = _build_agent(_MockModel())
+        assert agent.kill_tool("nope") is False
+
+
+class TestCohortEmitsToInbox:
+    """Cohort completion sends a ``multipart/x-tool-batch-result`` to inbox."""
+
+    async def test_cohort_bundle_drains_into_history(self) -> None:
+        # Two-response sequence: first emits a tool call; second is final.
+        tc = tool_call_message("t1", "Echo", json_freeze({"text": "hi"}))
+        model = _MockModel()
+        model.responses = [
+            ModelResponse(
+                content=MultipartMessage(
+                    (TextMessage("", "text/plain"), tc),
+                    "multipart/x-model-message",
+                ),
+                stop_reason="model_tool_use",
+                tokens=TokenCount(input_tokens=10, output_tokens=5),
+            ),
+            _model_response("done"),
+        ]
+
+        class _EchoTool:
+            name = "Echo"
+            tool_id = "application/x-tool-echo"
+            description = ""
+            directive_schema: object = json_freeze(
+                {"type": "object", "properties": {"text": {"type": "string"}}},
+            )
+            supports_microcompaction = False
+
+            def summary(self, msg: Message) -> str:
+                del msg
+                return "Echo"
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
+            def prompt(self) -> str:
+                return ""
+
+            async def run(self, msg: Message) -> Message:
+                del msg
+                return TextMessage("echo-result", "text/plain")
+
+        agent = Agent(
+            model=cast(Model, model),
+            tools=[cast(Tool, _EchoTool())],
+        )
+        events: list[Event] = [
+            ev async for ev in agent.run(TextMessage("go", "text/x-user-message"))
+        ]
+        # Round 2 should have unpacked the cohort bundle into history with
+        # the underlying multipart/x-tool-result paired with the tool_use.
+        # Either shape is acceptable: a synthetic empty user-msg may have
+        # been added for the second round (only-tool-results case) or
+        # omitted. Both satisfy the API contract.
+        kinds = [m.descriptor for m in agent.history]
+        assert kinds in (
+            [
+                "text/x-user-message",
+                "multipart/x-model-message",
+                "multipart/x-tool-result",
+                "text/x-user-message",
+                "multipart/x-model-message",
+            ],
+            [
+                "text/x-user-message",
+                "multipart/x-model-message",
+                "multipart/x-tool-result",
+                "multipart/x-model-message",
+            ],
+        )
+        names = [type(e).__name__ for e in events]
+        assert "ToolResultEvent" in names
+        assert names[-1] == "TurnCompleteEvent"
+
+    async def test_post_drain_inbox_items_get_picked_up(self) -> None:
+        # Regression: between ``serve_forever``'s ``await drain()`` and
+        # ``_round_body`` actually running, a cohort's done-callback can
+        # fire (the ``await asyncio.create_task(...)`` yields). The
+        # bundle lands in the inbox AFTER drain captured ``items`` --
+        # if the round body doesn't ``drain_nowait`` at the top, the
+        # bundle stays parked and the next model call hits an unpaired
+        # ``tool_use`` -> 400 from Anthropic.
+        #
+        # Directly exercise the race: prime history with an assistant
+        # tool_use, place a matching tool-result bundle in the inbox,
+        # and call ``_round_body(items=[])``. The model will be invoked
+        # iff merge unpacked the bundle into history.
+        model = _MockModel()
+        model.responses = [_model_response("done")]
+        agent = _build_agent(model)
+
+        tc = tool_call_message("t1", "Echo", json_freeze({}))
+        agent.history.append(
+            MultipartMessage(
+                (TextMessage("", "text/plain"), tc),
+                "multipart/x-model-message",
+            )
+        )
+        tool_result = MultipartMessage(
+            (
+                TextMessage("t1", "text/x-queue-id"),
+                TextMessage("echo-result", "text/plain"),
+            ),
+            "multipart/x-tool-result",
+        )
+        bundle = MultipartMessage(
+            (tool_result,),
+            "multipart/x-tool-batch-result",
+        )
+        agent.inbox.send(bundle, source="tools")
+
+        # Round body with items=[]: the fix must drain_nowait and pull
+        # the bundle in. Without it, the bundle stays in the inbox and
+        # the model is called with a dangling tool_use.
+        await agent._round_body([])
+
+        descriptors = [m.descriptor for m in agent.history]
+        # Tool_use assistant message must be immediately followed by the
+        # tool_result so the Anthropic adapter pairs them in one user
+        # message; the model response lands at the end.
+        assert descriptors[0] == "multipart/x-model-message"
+        assert descriptors[1] == "multipart/x-tool-result"
+        assert descriptors[-1] == "multipart/x-model-message"
+
+    @pytest.mark.real_sleep
+    async def test_post_drain_cohort_emit_is_picked_up(self) -> None:
+        # Regression: a cohort done-callback that fires AFTER serve_forever's
+        # drain returned but BEFORE the round body starts must not strand
+        # its tool-result bundle in the inbox -- otherwise the next model
+        # call sees a dangling tool_use and Anthropic rejects with 400.
+        tc = tool_call_message("t1", "Slow", json_freeze({}))
+        model = _MockModel()
+        model.responses = [
+            ModelResponse(
+                content=MultipartMessage(
+                    (TextMessage("", "text/plain"), tc),
+                    "multipart/x-model-message",
+                ),
+                stop_reason="model_tool_use",
+                tokens=TokenCount(input_tokens=10, output_tokens=5),
+            ),
+            _model_response("done"),
+        ]
+
+        gate = asyncio.Event()
+
+        class _SlowTool:
+            name = "Slow"
+            tool_id = "application/x-tool-slow"
+            description = ""
+            directive_schema: object = json_freeze(
+                {"type": "object", "properties": {}},
+            )
+            supports_microcompaction = False
+
+            def summary(self, msg: Message) -> str:
+                del msg
+                return "Slow"
+
+            def summary_result(self, result: Message) -> str | None:
+                del result
+                return None
+
+            def prompt(self) -> str:
+                return ""
+
+            async def run(self, msg: Message) -> Message:
+                del msg
+                await gate.wait()
+                return TextMessage("slow-result", "text/plain")
+
+        agent = Agent(
+            model=cast(Model, model),
+            tools=[cast(Tool, _SlowTool())],
+        )
+        loop_task = asyncio.create_task(agent.serve_forever())
+        agent.inbox.send(
+            TextMessage("go", "text/x-user-message"),
+            source="user",
+        )
+        # Wait for round 1 to spawn the cohort and return.
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if agent._active_cohorts and agent.work is None:
+                break
+        assert agent._active_cohorts, "cohort never spawned"
+        # Release the slow tool so its task completes. The done-callback
+        # will fire, the cohort emits, and its bundle goes into the inbox
+        # while serve_forever is mid-`await drain()`.
+        gate.set()
+        # Wait for the second round to consume the bundle and the model
+        # to return "done" -- without the post-drain drain_nowait fix,
+        # this hangs / errors because the bundle is parked in the inbox.
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if any(m.descriptor == "multipart/x-tool-result" for m in agent.history):
+                break
+        # History must contain the tool_result immediately after the
+        # assistant message bearing the tool_use.
+        descriptors = [m.descriptor for m in agent.history]
+        assert "multipart/x-tool-result" in descriptors
+        tu_idx = descriptors.index("multipart/x-model-message")
+        assert descriptors[tu_idx + 1] == "multipart/x-tool-result"
+        agent.shutdown(force=True)
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(loop_task, timeout=1.0)
 
 
 class TestErrorEventPublication:

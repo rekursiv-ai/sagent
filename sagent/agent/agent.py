@@ -1,21 +1,21 @@
 """Agent: actor-model with one foreground slot, observer fan-out, mailbox.
 
-Three primitives, one role each (see ``docs/private/agent_refactor.md``):
+Three primitives, one role each (see ``docs/private/agent_refactor.md``
+and ``docs/private/execution_model.md``):
 
-- **Mailbox** (``self.inbox``): external work to do later. Deque of ``Message``.
-- **Foreground slot** (``self.work``): the one in-flight strategy task.
-  Cancel via ``self.work.cancel()`` (sync, foreign-task safe).
+- **Mailbox** (``self.inbox``): external work to do later. ``Inbox`` of
+  source-tagged messages with bulk-drain semantics.
+- **Foreground slot** (``self.work``): the one in-flight strategy task
+  (a round body, compaction, or clear). Cancel via ``self.work.cancel()``
+  (sync, foreign-task safe).
 - **Observers** (``self.observers``): synchronous fan-out callables that
   receive ``Event`` values for rendering and forwarding.
 
-Strategy methods (``run``, ``compact``, ``recompact``, ``clear``) follow a
-public/private pair pattern: the public method calls
-``_start_foreground(coro)`` to cancel-and-claim the slot; the private
-``_do_*`` helper assumes the caller already runs as ``self.work``.
-
-The single-driver invariant (one designated task per agent calls public
-strategy methods) is what makes the cancel-and-claim handshake race-free
-without a lock. See §2.2 of the design doc.
+One round = one drain + one model call + (maybe) one cohort spawn. The
+round loop never directly awaits tools; cohorts run fire-and-forget and
+emit their consolidated ``multipart/x-tool-batch-result`` back to the
+inbox when ready (or via ``force_close``-induced decay-to-background).
+See ``execution_model.md`` §1.
 """
 
 from __future__ import annotations
@@ -28,11 +28,13 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
+import functools
 import itertools
 import logging
 import time
 import uuid
 
+from sagent.agent.cohort import Cohort, CohortMember
 from sagent.agent.compaction import (
     CompactionState,
     estimate_total_tokens,
@@ -43,10 +45,16 @@ from sagent.agent.dispatch import (
     add_tool_input_batch_hint,
     conditional_rules_for_request,
     invoke_tool,
-    is_request_read_only,
     tc_directive,
     tc_tool_id,
     tool_call_label,
+)
+from sagent.agent.inbox import (
+    QUIT_SOURCE,
+    TOOLS_SOURCE,
+    USER_SOURCE,
+    Inbox,
+    InboxItem,
 )
 from sagent.agent.retry import send_with_retry
 from sagent.agent.session_io import (
@@ -85,10 +93,8 @@ from sagent.custom_types import (
     UserBarEvent,
     reset_id_counter,
 )
-from sagent.lib.asyncio_collections import Deque
 from sagent.lib.compaction import write_pre_compact_transcript
 from sagent.lib.descriptors import (
-    QUEUED_USER_MESSAGE,
     QUIT_SENTINEL,
     has_error,
 )
@@ -150,7 +156,7 @@ _MAX_UNSAVED_EVENTS = 1000
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class PendingOp:
-    """One queued strategy mutation set by a tool, drained at top of run iteration."""
+    """One queued strategy mutation set by a tool, drained at top of next round."""
 
     kind: Literal["compact", "recompact", "clear"]
     args: str = ""
@@ -255,7 +261,7 @@ class Agent:
         self._track_changed_files = track_changed_files
         self.cost_tracker = CostTracker()
         self._max_budget_usd = max_budget_usd
-        self.inbox: Deque[Message] = Deque()
+        self.inbox: Inbox = Inbox()
         self.history: list[Message] = []
         self.tool_state = ToolState()
         self.activity = ActivityTracker()
@@ -268,8 +274,21 @@ class Agent:
         self.work: asyncio.Task[object] | None = None
         self.background: dict[str, BackgroundTaskEntry] = {}
         self.active_children: dict[str, object] = {}
+        # Cohorts spawned by past rounds that haven't yet emitted their
+        # consolidated tool-result bundle. Force-closed at the top of the
+        # next round when their results haven't naturally landed yet.
+        self._active_cohorts: list[Cohort] = []
         self._next_op: PendingOp | None = None
         self._shutting_down: bool = False
+        # When True, the round body's ``except CancelledError`` performs
+        # /halt semantics (expunge zombie response, requeue items, set
+        # ``block_until_user``). Plain ``cancel()`` does not set this.
+        self._halt_requested: bool = False
+        # Optional yield-queue for the consumer-facing event subset
+        # (UserBarEvent, ToolResultEvent, TurnCompleteEvent,
+        # InterruptedEvent). Set only while ``run()`` is driving rounds;
+        # outside ``run()`` those events go to ``self.publish``.
+        self._yield_queue: asyncio.Queue[Event | object] | None = None
         self._session_id = str(uuid.uuid4())[:8]
         self._status: str = ""
         self._event_log: list[dict[str, object]] = []
@@ -529,8 +548,10 @@ class Agent:
         the caller. The caller's own ``await`` observes the cancel as a
         ``CancelledError`` raised at its await point.
 
-        Race-free under the single-driver invariant (only one designated task
-        per agent calls public strategy methods); see §2.2 of the design doc.
+        Used by the public strategy methods (``compact``, ``recompact``,
+        ``clear``) to claim the foreground slot. The round loop also writes
+        to ``self.work`` directly when running a round body so /halt and
+        /kill can address them by the same handle.
 
         Args:
           coro: Strategy work to run as the foreground task.
@@ -552,74 +573,74 @@ class Agent:
                 self.work = None
 
     def cancel(self) -> None:
-        """Cancel the current foreground task. Sync; safe from any task."""
+        """Cancel the current foreground task. Sync; safe from any task.
+
+        Does NOT set halt semantics. The round body treats a bare cancel
+        as a plain interrupt (publish ``InterruptedEvent``, account
+        partial cost) and propagates.
+        """
         if self.work is not None and not self.work.done():
             _ = self.work.cancel()
 
-    def abort(self) -> None:
-        """Cancel the foreground step AND drop typed-ahead user input."""
+    def halt(self) -> None:
+        """``/halt``: cancel + arm halt semantics in the round body.
+
+        Sets ``_halt_requested``; the round body's ``except CancelledError``
+        will expunge any zombie response, cancel the just-spawned cohort,
+        ``requeue_front`` drained items, and ``block_until_user``.
+
+        Composes freely with :meth:`kill_tool` / :meth:`kill_all_tools`.
+        """
+        self._halt_requested = True
         self.cancel()
-        kept = [m for m in self.inbox.drain() if m.descriptor == QUIT_SENTINEL]
-        for m in kept:
-            _ = self.inbox.put(m)
 
-    def queued_user_messages(self) -> list[Message]:
-        """Return queued editable user follow-ups in FIFO order."""
-        return [m for m in self.inbox if m.descriptor == QUEUED_USER_MESSAGE]
+    def kill_tool(self, qid: str) -> bool:
+        """``/kill <qid>``: cancel one outstanding tool task by queue-id.
 
-    def pop_latest_queued_user_message(self) -> Message | None:
-        """Pop the newest editable user follow-up, preserving other inbox items."""
-        items = self.inbox.drain()
-        popped: Message | None = None
-        for idx in range(len(items) - 1, -1, -1):
-            if items[idx].descriptor == QUEUED_USER_MESSAGE:
-                popped = items.pop(idx)
-                break
-        for item in items:
-            _ = self.inbox.put(item)
-        return popped
-
-    def enqueue_user(self, text: str) -> None:
-        r"""Queue a typed user follow-up at the inbox front, coalescing prior entry.
-
-        REPL ``Enter`` while ``self.work`` is active calls this. Coalesce: if a
-        queued user entry already exists, its content is merged with ``text``
-        (``"\\n\\n"`` separator) so multiple Enters become one merged next turn
-        instead of N redundant turns. Priority: the merged entry is put_left so
-        the user wins over any peer ``AgentSend`` or bg-tool completion that
-        arrived during the active turn.
+        Searches active cohorts and ``self.background``. Cohort members
+        produce a ``[Cancelled by user]`` ``tool_result`` via the cohort's
+        natural emission; bg tasks produce a ``[Background tool cancelled:
+        ...]`` inbox message via the existing ``_bg_worker`` /
+        ``_on_promoted_done`` paths.
 
         Args:
-          text: New user-typed content. Whitespace-only is ignored.
+          qid: Queue id of the task to cancel.
+
+        Returns:
+          killed: True if a matching task was found and cancelled.
 
         """
-        if not text.strip():
-            return
-        items = self.inbox.drain()
-        existing: str | None = None
-        kept: list[Message] = []
-        for item in items:
-            if item.descriptor == QUEUED_USER_MESSAGE and existing is None:
-                existing = str(item.content)
-            else:
-                kept.append(item)
-        merged = f"{existing}\n\n{text}" if existing is not None else text
-        _ = self.inbox.put_left(TextMessage(merged, QUEUED_USER_MESSAGE))
-        for item in kept:
-            _ = self.inbox.put(item)
+        for cohort in self._active_cohorts:
+            for member in cohort.members:
+                if member.tool_use_id == qid and not member.task.done():
+                    _ = member.task.cancel()
+                    return True
+        job = self.background.get(qid)
+        if job is not None and not job.task.done() and not job.hidden:
+            _ = job.task.cancel()
+            return True
+        return False
 
-    def abort_all_bg(self) -> None:
-        """Like ``abort``, plus terminate every visible background job."""
-        self.abort()
-        for qid, job in list(self.background.items()):
+    def kill_all_tools(self) -> int:
+        """``/kill all``: cancel every outstanding tool task.
+
+        Returns:
+          count: Number of tasks cancelled.
+
+        """
+        count = 0
+        for cohort in list(self._active_cohorts):
+            for member in cohort.members:
+                if not member.task.done():
+                    _ = member.task.cancel()
+                    count += 1
+        for job in list(self.background.values()):
             if job.hidden:
                 continue
-            if job.kind == "persistent_subagent":
-                child = agent_registry.get(qid.removeprefix("persistent:"))
-                if isinstance(child, Agent):
-                    child.shutdown(force=True)
-            else:
+            if not job.task.done():
                 _ = job.task.cancel()
+                count += 1
+        return count
 
     def shutdown(self, *, force: bool = False) -> None:
         """End ``serve_forever`` cleanly.
@@ -640,7 +661,7 @@ class Agent:
                         child.shutdown(force=True)
                 else:
                     _ = job.task.cancel()
-        _ = self.inbox.put_left(TextMessage("", QUIT_SENTINEL))
+        self.inbox.send(TextMessage("", QUIT_SENTINEL), source=QUIT_SOURCE)
 
     # -- Observer fan-out ---------------------------------------------
 
@@ -663,6 +684,23 @@ class Agent:
                 )
                 logger.debug("observer traceback", exc_info=True)
 
+    def _emit_yielded(self, event: Event) -> None:
+        r"""Emit one consumer-facing event (UserBar / ToolResult / TurnComplete /
+        InterruptedEvent).
+
+        When ``run()`` is driving rounds, the event is pushed onto its
+        yield queue so the consumer's ``async for`` sees it. Otherwise
+        the event falls back to ``publish()`` so ``serve_forever``-style
+        observers still see it. This split mirrors v2's ``run()`` shape
+        where structural turn events were ``yield``\ ed (not published)
+        and avoids double-counting in tools that wire both an observer
+        and an ``async for`` consumer.
+        """
+        if self._yield_queue is not None:
+            self._yield_queue.put_nowait(event)
+        else:
+            self.publish(event)
+
     # -- Persistent driver loop ---------------------------------------
 
     async def serve_forever(self) -> None:
@@ -670,10 +708,9 @@ class Agent:
 
         Sets up the per-agent ContextVars (``current_agent_var``,
         ``cost_root_var``, ``agent_label_var``, ``tool_state_var``) and
-        installs the agent in ``agent_registry``. Pops one message at a
-        time from ``self.inbox`` and runs ``self.run(msg)``, publishing
-        every yielded ``Event`` to observers. Returns on QUIT_SENTINEL or
-        ``shutdown``.
+        installs the agent in ``agent_registry``. Drains ``self.inbox``
+        in bulk and runs one round body per drain (spec §1). Returns on
+        QUIT_SENTINEL or ``shutdown``.
         """
         agent_token = current_agent_var.set(self)
         cost_state = self._open_cost_lifecycle()
@@ -685,7 +722,7 @@ class Agent:
         self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
         try:
             with tool_state_context(self.tool_state):
-                await self._serve_loop()
+                await self._round_loop()
         finally:
             self._close_cost_lifecycle(cost_state)
             if not self._persistent:
@@ -694,66 +731,113 @@ class Agent:
             agent_counter_var.reset(counter_token)
             current_agent_var.reset(agent_token)
 
-    async def _serve_loop(self) -> None:
-        """Bare driver loop (ContextVars already installed)."""
+    async def _round_loop(self) -> None:
+        """Round loop body (ContextVars already installed).
+
+        Each iteration:
+          1. Block on ``inbox.drain()``.
+          2. If shutdown or QUIT_SENTINEL: return.
+          3. Spawn a round-body task as ``self.work``; await it. The
+             round body internally handles cancellation (/halt semantics
+             and the bare-cancel ``InterruptedEvent`` path).
+          4. Catch other exceptions; publish ``ErrorEvent`` and continue.
+        """
         while not self._shutting_down:
-            msg = await self.inbox.get()
-            # ``_shutting_down`` is the source of truth, not sentinel position.
-            # A peer ``AgentSend`` racing with ``shutdown`` could put_left ahead
-            # of QUIT, so re-check the flag before starting any new turn.
-            if self._shutting_down or msg.descriptor == QUIT_SENTINEL:
+            items = await self.inbox.drain()
+            if self._shutting_down:
                 return
-            try:
-                async for event in self.run(msg):
-                    self.publish(event)
-            except asyncio.CancelledError:
-                # Per-message cancel (Ctrl+C while a turn ran) survives into
-                # the next inbox pop. uncancel() so the next ``inbox.get()``
-                # doesn't immediately re-raise.
-                cur = asyncio.current_task()
-                if cur is not None:
-                    _ = cur.uncancel()
-            except Exception as e:
-                # Provider/model exceptions are scoped to the active turn. Keep
-                # the mailbox alive so the user can retry, switch models, or quit.
-                logger.exception("turn failed")
-                self.publish(ErrorEvent(f"turn failed: {type(e).__name__}: {e}"))
-                self.log_event(
-                    "turn_failed",
-                    error_type=type(e).__name__,
-                    error=str(e),
-                )
+            quit_idx = next(
+                (
+                    idx
+                    for idx, item in enumerate(items)
+                    if item.msg.descriptor == QUIT_SENTINEL
+                ),
+                None,
+            )
+            if quit_idx is not None:
+                items = items[:quit_idx]
+                if items:
+                    await self._run_round(items)
+                return
+            await self._run_round(items)
+
+    async def _run_round(self, items: list[InboxItem]) -> None:
+        """Spawn ``_round_body(items)`` as ``self.work`` and await it."""
+        task = asyncio.create_task(self._round_body(items))
+        self.work = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            # ``_round_body`` handles its own cancel paths; if a
+            # propagating CancelledError reaches us it means the
+            # cancellation came from outside the round and we should
+            # uncancel so the next ``inbox.drain()`` is fresh.
+            cur = asyncio.current_task()
+            if cur is not None:
+                _ = cur.uncancel()
+        except (AssertionError, TypeError, AttributeError, NameError):
+            raise
+        except Exception as e:
+            # Operational errors (provider failures, retries exhausted,
+            # budget caps, model refusal) are scoped to the active turn.
+            # Keep the mailbox alive so the user can retry, switch models,
+            # or quit. Bug-class exceptions are re-raised above.
+            logger.exception(
+                "turn failed on %s: %s", self.model.model_id, type(e).__name__
+            )
+            self.publish(ErrorEvent(f"turn failed: {type(e).__name__}: {e}"))
+            self.log_event(
+                "turn_failed",
+                error_type=type(e).__name__,
+                error=str(e),
+            )
+        finally:
+            if self.work is task:
+                self.work = None
 
     # -- Public strategy methods --------------------------------------
 
     async def run(self, msg: Message) -> AsyncGenerator[Event, None]:
-        """Process one inbound message into a full turn (or many).
+        """Process one inbound message; drive rounds until the agent is idle.
 
-        ``run`` is an async generator. Internally it spawns an
-        ``_do_run`` driver as ``self.work`` (the foreground task) and
-        bridges its yielded events through a queue. Cancelling
-        ``self.work`` cancels the driver; the caller's iteration
-        observes CancelledError at its next ``await``.
+        Convenience entrypoint used by tests and non-``serve_forever``
+        callers. Sends ``msg`` into the inbox tagged as ``user`` and
+        spins rounds until there's no inbox work, no active cohorts,
+        and no pending op.
 
         Args:
           msg: Inbound message (typically ``text/x-user-message``).
 
         Yields:
-          event: Observer-shaped events for this turn.
+          event: Observer-shaped events emitted across one or more rounds.
 
         """
         cost_state = self._open_cost_lifecycle()
         events: asyncio.Queue[Event | object] = asyncio.Queue()
         DONE = _SENTINEL_DONE
+        prior_queue = self._yield_queue
+        self._yield_queue = events
+        self.inbox.send(msg, source=USER_SOURCE)
 
         async def _driver() -> None:
             try:
-                async for ev in self._do_run(msg):
-                    events.put_nowait(ev)
+                while True:
+                    if (
+                        len(self.inbox) == 0
+                        and not self._active_cohorts
+                        and self._next_op is None
+                    ):
+                        return
+                    if len(self.inbox) == 0:
+                        # Active cohort outstanding: block until it emits.
+                        round_items = await self.inbox.drain()
+                    else:
+                        round_items = self.inbox.drain_nowait()
+                    await self._run_round(round_items)
             finally:
                 events.put_nowait(DONE)
 
-        drive_task = asyncio.create_task(self._start_foreground(_driver()))
+        drive_task = asyncio.create_task(_driver())
         try:
             while True:
                 ev = await events.get()
@@ -763,12 +847,12 @@ class Agent:
             await drive_task
         except asyncio.CancelledError:
             self.cancel()
+            _ = drive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await drive_task
             raise
         finally:
-            if not drive_task.done():
-                self.cancel()
+            self._yield_queue = prior_queue
             self._close_cost_lifecycle(cost_state)
 
     async def compact(self, args: str = "") -> None:
@@ -855,39 +939,38 @@ class Agent:
                 self._event_log = self._event_log[-_MAX_UNSAVED_EVENTS:]
         logger.debug("%s: %s", event, data)
 
-    # -- Internal turn loop -------------------------------------------
+    # -- Round body ---------------------------------------------------
 
-    async def _do_run(self, msg: Message) -> AsyncGenerator[Event, None]:
-        """The real turn loop. Runs as ``self.work`` via ``_start_foreground``."""
-        msg = _normalize_queued_user_message(msg)
-        self.history.append(msg)
-        yield UserBarEvent(_user_text(msg))
-        try:
-            async for event in self._turn_loop():
-                yield event
-        except asyncio.CancelledError:
-            yield InterruptedEvent()
-            self._account_cancelled()
-            raise
-        finally:
-            self.save_session()
+    async def _round_body(self, items: list[InboxItem]) -> None:
+        """One round per spec §1: drain → merge → model call → maybe cohort.
 
-    async def _turn_loop(self) -> AsyncGenerator[Event, None]:
-        """Inner turn loop: drain pending op, compact, call model, dispatch tools."""
-        while True:
-            if self._next_op is not None:
-                op = self._next_op
-                self._next_op = None
-                if op.kind == "compact":
-                    _ = await self._do_compact(op.args)
-                elif op.kind == "recompact":
-                    await self._do_recompact(op.args)
-                else:
-                    self._do_clear_sync()
-                    return
-            cap = self.max_tool_call_rounds
-            if cap is not None and self.activity.num_tool_call_rounds >= cap:
-                synthetic = MultipartMessage(
+        At the top: force-close any unsettled prior cohorts (their
+        bundles must join this request -- every ``tool_use`` in history
+        needs a paired ``tool_result``); drain post-emission arrivals;
+        run the pending op (``compact`` / ``recompact`` / ``clear``);
+        compact if needed. Then merge items, call the model, and on
+        tool calls spawn a cohort fire-and-forget. ``/halt`` rolls back
+        merge + zombie response and arms ``block_until_user``.
+        """
+        for cohort in list(self._active_cohorts):
+            if not cohort.emitted:
+                cohort.force_close()
+        items = items + self.inbox.drain_nowait()
+
+        if self._next_op is not None:
+            op, self._next_op = self._next_op, None
+            if op.kind == "compact":
+                _ = await self._do_compact(op.args)
+            elif op.kind == "recompact":
+                await self._do_recompact(op.args)
+            else:
+                self._do_clear_sync()
+                return
+
+        cap = self.max_tool_call_rounds
+        if cap is not None and self.activity.num_tool_call_rounds >= cap:
+            self.history.append(
+                MultipartMessage(
                     (
                         TextMessage(
                             f"Tool-call-round limit reached ({cap} rounds). "
@@ -896,27 +979,108 @@ class Agent:
                         ),
                     ),
                     "multipart/x-model-message",
-                )
-                self.history.append(synthetic)
-                yield TurnCompleteEvent()
-                return
-            await self._maybe_compact()
-            response = await self._call_model()
-            self.history.append(response.content)
-            self._guard_stop_reason(response)
-            tools = response_tool_calls(response.content)
-            if not tools:
+                ),
+            )
+            self._emit_yielded(TurnCompleteEvent())
+            return
+
+        # Compact BEFORE merge so the merge-rollback index stays valid
+        # if /halt fires later in this round.
+        await self._maybe_compact()
+        merge_start_idx = len(self.history)
+        if not self._merge_items_into_history(items):
+            return
+
+        response: ModelResponse | None = None
+        try:
+            while True:
+                response = await self._call_model()
+                self.history.append(response.content)
+                self._guard_stop_reason(response)
+                tools = response_tool_calls(response.content)
+                if tools:
+                    self.activity.num_tool_call_rounds += 1
+                    _ = self._spawn_cohort(tools)
+                    break
                 if self._is_truncated_no_tools(response) and (
                     self._post_truncation_nudge()
                 ):
+                    response = None  # consumed; clear so /halt doesn't expunge
                     continue
-                yield TurnCompleteEvent()
+                self._emit_yielded(TurnCompleteEvent())
+                break
+        except asyncio.CancelledError:
+            if self._halt_requested:
+                self._halt_requested = False
+                # ``_spawn_cohort`` runs synchronously after the response
+                # commit; a CancelledError that left ``response`` set
+                # provably arrived before the cohort spawn, so no cohort
+                # cleanup is needed here.
+                if (
+                    response is not None
+                    and self.history
+                    and self.history[-1] is response.content
+                ):
+                    _ = self.history.pop()
+                del self.history[merge_start_idx:]
+                self.inbox.requeue_front(items)
+                self.inbox.block_until_user()
+                self._emit_yielded(InterruptedEvent())
+                self._account_cancelled()
                 return
-            self.activity.num_tool_call_rounds += 1
-            results = await self._dispatch_tools(tools)
-            self.history.extend(results)
-            for r in results:
-                yield ToolResultEvent(r)
+            self._emit_yielded(InterruptedEvent())
+            self._account_cancelled()
+            raise
+        finally:
+            self.save_session()
+
+    def _merge_items_into_history(self, items: list[InboxItem]) -> bool:
+        """Drain ``items`` into history; publish ``UserBarEvent`` for user content.
+
+        Cohort bundles (``multipart/x-tool-batch-result``, source
+        ``tools``) are unpacked into individual ``multipart/x-tool-result``
+        history entries so each pairs with its ``tool_use`` parent.
+        User / peer / bg items merge into one ``text/x-user-message``
+        per spec §3 (single-item verbatim; multi-item tagged).
+
+        Returns True iff the model should be called this round.
+        """
+        added_tool_results = False
+        user_pieces: list[str] = []
+        bg_pieces: list[str] = []
+        peer_pieces: list[tuple[str, str]] = []
+        for item in items:
+            msg = item.msg
+            if msg.descriptor == QUIT_SENTINEL or item.source == QUIT_SOURCE:
+                continue
+            if (
+                item.source == TOOLS_SOURCE
+                and msg.descriptor == "multipart/x-tool-batch-result"
+            ):
+                for part in cast("tuple[Message, ...]", msg.content):
+                    if part.descriptor == "multipart/x-tool-result":
+                        self.history.append(part)
+                        self._emit_yielded(ToolResultEvent(part))
+                        added_tool_results = True
+                continue
+            text = _user_text(msg)
+            if not text and msg.descriptor != "text/x-user-message":
+                continue
+            if item.source == USER_SOURCE:
+                user_pieces.append(text)
+            elif item.source.startswith("bg_"):
+                bg_pieces.append(text)
+            else:
+                peer_pieces.append((item.source, text))
+
+        if user_pieces:
+            self._emit_yielded(UserBarEvent(user_pieces[-1]))
+
+        bundle = _format_user_bundle(user_pieces, peer_pieces, bg_pieces)
+        if bundle is not None:
+            self.history.append(TextMessage(bundle, "text/x-user-message"))
+            return True
+        return added_tool_results
 
     # -- Model call ---------------------------------------------------
 
@@ -1069,57 +1233,19 @@ class Agent:
         )
         return True
 
-    # -- Tool dispatch ------------------------------------------------
+    # -- Cohort spawn -------------------------------------------------
 
-    async def _dispatch_tools(self, calls: list[Message]) -> list[Message]:
-        """Run foreground tools (read-only batched), spawn background tools.
+    def _spawn_cohort(self, calls: list[Message]) -> Cohort:
+        """Build a cohort over ``calls``; fire-and-forget; register in active list.
 
-        Publishes ``ToolLabelEvent`` events synchronously before dispatch and,
-        on cancellation, synthesizes ``[interrupted]`` results, extends
-        history (preserving Anthropic's tool_use/tool_result pairing),
-        publishes ``ToolResultEvent`` events for each, and re-raises.
-
-        Args:
-          calls: Tool-use messages from the model.
-
-        Returns:
-          results: One result message per call, in the same order.
-
-        """
-        fg: list[Message] = []
-        bg: list[Message] = []
-        for call in calls:
-            tool = self.tools_map.get(tc_tool_id(call))
-            self.publish(ToolLabelEvent(tool_call_label(tool, call)))
-            directive = tc_directive(call)
-            is_bg = bool_val(directive.get("background"), False) or (
-                int_val(directive.get("delay"), 0) > 0
-            )
-            (bg if is_bg else fg).append(call)
-        bg_results = [self._spawn_bg(call) for call in bg]
-        try:
-            fg_results = await self._dispatch_foreground(fg) if fg else []
-        except asyncio.CancelledError:
-            partials = [_interrupted_result(c) for c in fg]
-            ordered = _reorder_by_call(calls, [*partials, *bg_results])
-            self.history.extend(ordered)
-            for r in ordered:
-                self.publish(ToolResultEvent(r))
-            raise
-        return _reorder_by_call(calls, [*fg_results, *bg_results])
-
-    async def _dispatch_foreground(
-        self,
-        calls: list[Message],
-    ) -> list[Message]:
-        """Read-only-batched, serialized otherwise.
-
-        Args:
-          calls: Foreground tool calls.
-
-        Returns:
-          results: One ``multipart/x-tool-result`` per call.
-
+        Every call becomes a Cohort member in emission order. Bg calls
+        (``background:true`` directive, or ``delay>0``) are added with
+        ``bg=True`` -- the cohort emits a ``[Running in background:
+        <tool>]`` placeholder for them and doesn't wait. Read / Edit /
+        Write are chained via :meth:`_file_op_in_chain`; everything else
+        fans out. The cohort's ``on_emit`` runs :meth:`_finalize_results`
+        on the bundle and sends a ``multipart/x-tool-batch-result`` to
+        the inbox tagged ``tools``.
         """
         self.tool_state.bash_parse_cache.clear()
         for call in calls:
@@ -1129,20 +1255,79 @@ class Agent:
                 tool_id=get_queue_id(call),
                 input=tc_directive(call),
             )
-        safe = [is_request_read_only(c, self.tool_state) for c in calls]
-        batches = _partition_batches(safe)
-        results: dict[int, Message] = {}
-        for batch in batches:
-            if len(batch) == 1:
-                idx = batch[0]
-                results[idx] = await self._invoke_tool_safe(calls[idx])
-            else:
-                done = await asyncio.gather(
-                    *(self._invoke_tool_safe(calls[i]) for i in batch),
+
+        cohort: Cohort | None = None  # bound below; captured by _on_emit
+
+        def _on_emit(results: list[Message]) -> None:
+            if cohort is not None:
+                with contextlib.suppress(ValueError):
+                    self._active_cohorts.remove(cohort)
+            try:
+                final = self._finalize_results(calls, results)
+            except Exception:
+                logger.exception("cohort finalize raised; emitting error bundle")
+                final = [
+                    MultipartMessage(
+                        (
+                            TextMessage(get_queue_id(c), "text/x-queue-id"),
+                            TextMessage("cohort finalize failed", "text/x-error"),
+                        ),
+                        "multipart/x-tool-result",
+                        parent_id=c.id,
+                    )
+                    for c in calls
+                ]
+            self.inbox.send(
+                MultipartMessage(tuple(final), "multipart/x-tool-batch-result"),
+                source=TOOLS_SOURCE,
+            )
+
+        cohort = Cohort(on_emit=_on_emit, on_promote_to_bg=self._promote_to_bg)
+        self._active_cohorts.append(cohort)
+
+        # Tool labels render in the model's emission order alongside its reasoning.
+        for call in calls:
+            tool = self.tools_map.get(tc_tool_id(call))
+            self.publish(ToolLabelEvent(tool_call_label(tool, call)))
+
+        prev: asyncio.Task[Message] | None = None
+        has_fg = False
+        for call in calls:
+            qid = get_queue_id(call)
+            name = get_tool_name(call)
+            directive = tc_directive(call)
+            is_bg = bool_val(directive.get("background"), False) or (
+                int_val(directive.get("delay"), 0) > 0
+            )
+            if is_bg:
+                _ = self._spawn_bg(call)  # creates task, registers post-completion
+                task = self.background[qid].task
+                cohort.add_member(
+                    CohortMember(tool_use_id=qid, tool_name=name, task=task),
+                    bg=True,
                 )
-                results.update(zip(batch, done, strict=True))
-        ordered = [results[i] for i in range(len(calls))]
-        finalized = self._postprocess_results(calls, ordered)
+            else:
+                has_fg = True
+                if _is_file_op(call):
+                    task = asyncio.create_task(self._file_op_in_chain(prev, call))
+                    prev = task
+                else:
+                    task = asyncio.create_task(self._invoke_tool_safe(call))
+                cohort.add_member(
+                    CohortMember(tool_use_id=qid, tool_name=name, task=task),
+                )
+
+        if not has_fg:
+            cohort.force_close()  # no fg to wait for; emit placeholders now
+        return cohort
+
+    def _finalize_results(
+        self,
+        calls: list[Message],
+        cohort_results: list[Message],
+    ) -> list[Message]:
+        """Postprocess + budget + batch-hint a cohort's settled results."""
+        finalized = self._postprocess_results(calls, cohort_results)
         for r in finalized:
             self.log_event(
                 "tool_result",
@@ -1158,36 +1343,120 @@ class Agent:
         )
         return add_tool_input_batch_hint(budgeted)
 
+    async def _file_op_in_chain(
+        self,
+        prev: asyncio.Task[Message] | None,
+        call: Message,
+    ) -> Message:
+        """Run ``call`` after ``prev`` settles (file ops in emission order).
+
+        Failures or cancellations of ``prev`` do not block ``call`` --
+        the chain provides ordering, not dependency. But if *this* task
+        is itself being cancelled (e.g. ``/kill <qid>``), propagate.
+        """
+        if prev is not None:
+            try:
+                await prev
+            except asyncio.CancelledError:
+                cur = asyncio.current_task()
+                if cur is not None and cur.cancelling():
+                    raise
+            except Exception:  # noqa: BLE001 -- prev's failure is its problem
+                logger.debug("prev file-op raised", exc_info=True)
+        return await self._invoke_tool_safe(call)
+
+    def _promote_to_bg(self, member: CohortMember) -> None:
+        """Move a cohort member's task into ``self.background`` on decay.
+
+        Called by ``Cohort.force_close`` for members still running when
+        the cohort was interrupted. The task continues; its eventual
+        result lands in the inbox via the shared
+        :meth:`_post_bg_completion` done-callback.
+        """
+        qid = member.tool_use_id
+        self.background[qid] = BackgroundTaskEntry(
+            task=member.task,
+            tool_name=member.tool_name,
+            queue_id=qid,
+            started=time.time(),
+            kind="tool",
+        )
+        member.task.add_done_callback(
+            functools.partial(self._post_bg_completion, qid, member.tool_name),
+        )
+
+    def _post_bg_completion(
+        self,
+        qid: str,
+        tool_name: str,
+        task: asyncio.Task[Message],
+    ) -> None:
+        """Done-callback for any bg task; post completion to the inbox.
+
+        Shared by :meth:`_spawn_bg` (explicitly-backgrounded tools) and
+        :meth:`_promote_to_bg` (cohort-decay promotions). Pops the
+        ``background`` entry first; if already gone, the
+        ``BackgroundTask.foreground`` op already consumed the task and
+        we skip the inbox send to avoid duplication.
+        """
+        if self.background.pop(qid, None) is None:
+            return
+        source = f"bg_{qid}"
+        if task.cancelled():
+            text = f"[Background tool cancelled: {tool_name} ({qid})]"
+        elif (exc := task.exception()) is not None:
+            text = (
+                f"[Background tool failed: {tool_name} ({qid})]\n\n"
+                f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            result = task.result()
+            framing = "failed" if has_error(result) else "completed"
+            text = (
+                f"[Background tool {framing}: {tool_name} ({qid})]"
+                f"\n\n{text_from_msg(result)}"
+            )
+        self.inbox.send(TextMessage(text, "text/x-user-message"), source=source)
+
     async def _invoke_tool_safe(self, call: Message) -> Message:
         """Run one tool call; convert any exception to a structured error result.
 
-        Streaming tools post intermediate yields onto a local queue;
-        we drain them into ``TextChunkEvent`` observer events so the REPL
-        sees live progress (matching v2's inbox-passthrough behavior).
+        Streaming tools yield intermediate events onto a queue; a sibling
+        drainer task publishes them as ``TextChunkEvent`` in real time so
+        the REPL sees live progress, not a batch at tool completion.
         """
         events: asyncio.Queue[Message | None] = asyncio.Queue()
+        drainer = asyncio.create_task(self._drain_tool_events(events))
         try:
-            result = await invoke_tool(self.tools_map, call, events)
-        except Exception as e:  # noqa: BLE001 -- dispatch safety net
-            logger.debug("Tool %s raised", get_tool_name(call), exc_info=True)
-            result = MultipartMessage(
-                (
-                    TextMessage(get_queue_id(call), "text/x-queue-id"),
-                    TextMessage(f"{type(e).__name__}: {e}", "text/x-error"),
-                ),
-                "multipart/x-tool-result",
-                parent_id=call.id,
-            )
-        while True:
             try:
-                event = events.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+                result = await invoke_tool(self.tools_map, call, events)
+            except Exception as e:  # noqa: BLE001 -- dispatch safety net
+                logger.debug("Tool %s raised", get_tool_name(call), exc_info=True)
+                result = MultipartMessage(
+                    (
+                        TextMessage(get_queue_id(call), "text/x-queue-id"),
+                        TextMessage(f"{type(e).__name__}: {e}", "text/x-error"),
+                    ),
+                    "multipart/x-tool-result",
+                    parent_id=call.id,
+                )
+            return result
+        finally:
+            events.put_nowait(None)  # sentinel: drainer exits cleanly
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.shield(drainer)
+
+    async def _drain_tool_events(
+        self,
+        events: asyncio.Queue[Message | None],
+    ) -> None:
+        """Forward intermediate streaming-tool yields as ``TextChunkEvent``."""
+        while True:
+            event = await events.get()
             if event is None:
-                continue
+                return
             if isinstance(event, TextMessage) and event.descriptor == "text/plain":
                 self.publish(TextChunkEvent(event.content))
-        return result
 
     def _postprocess_results(
         self,
@@ -1197,13 +1466,21 @@ class Agent:
         """Inject empty-output marker, persist oversized, append conditional rules."""
         seen_rules: set[Path] = set()
         out = list(results)
-        for i, (call, r) in enumerate(zip(calls, results, strict=True)):
+        # Build a qid->call map so we tolerate cohort results arriving
+        # in a different order from ``calls`` (e.g. a Cancelled member
+        # that emitted instantly).
+        by_qid = {get_queue_id(c): c for c in calls}
+        for i, r in enumerate(results):
+            qid = get_queue_id(r)
+            call = by_qid.get(qid)
+            if call is None:
+                continue
             text = text_from_msg(r)
             content = inject_empty_marker(get_tool_name(call), text)
             r_parts = cast("tuple[Message, ...]", r.content)
             if not has_error(r):
                 preview = persist_result(
-                    get_queue_id(r),
+                    qid,
                     tc_tool_id(call),
                     content,
                     self.replacement_state,
@@ -1230,11 +1507,25 @@ class Agent:
         return out
 
     def _spawn_bg(self, call: Message) -> Message:
-        """Spawn a background worker for ``call``; return the inbox placeholder."""
+        """Spawn a background worker for ``call``; return the inbox placeholder.
+
+        The task runs :meth:`_invoke_tool_safe` (optionally preceded by a
+        sleep). Completion routes through :meth:`_post_bg_completion`, the
+        same done-callback used by cohort-decay promotions — one inbox-send
+        path, one bg-cleanup path.
+        """
         qid = get_queue_id(call)
         tool_name = get_tool_name(call)
         delay = int_val(tc_directive(call).get("delay"), 0)
-        task = asyncio.create_task(self._bg_worker(call, delay))
+        if delay > 0:
+
+            async def _delayed() -> Message:
+                await asyncio.sleep(delay)
+                return await self._invoke_tool_safe(call)
+
+            task = asyncio.create_task(_delayed())
+        else:
+            task = asyncio.create_task(self._invoke_tool_safe(call))
         self.background[qid] = BackgroundTaskEntry(
             task=task,
             tool_name=tool_name,
@@ -1242,6 +1533,9 @@ class Agent:
             started=time.time(),
             delay_sec=delay,
             kind="tool",
+        )
+        task.add_done_callback(
+            functools.partial(self._post_bg_completion, qid, tool_name),
         )
         return MultipartMessage(
             (
@@ -1254,40 +1548,6 @@ class Agent:
             "multipart/x-tool-result",
             parent_id=call.id,
         )
-
-    async def _bg_worker(self, call: Message, delay_sec: float) -> None:
-        """Sleep, dispatch, post completion as a user message back into the inbox."""
-        qid = get_queue_id(call)
-        tool_name = get_tool_name(call)
-        try:
-            if delay_sec > 0:
-                await asyncio.sleep(delay_sec)
-            result = await self._invoke_tool_safe(call)
-            text = text_from_msg(result)
-            _ = self.inbox.put(
-                TextMessage(
-                    f"[Background tool completed: {tool_name} ({qid})]\n\n{text}",
-                    "text/x-user-message",
-                ),
-            )
-        except asyncio.CancelledError:
-            _ = self.inbox.put(
-                TextMessage(
-                    f"[Background tool cancelled: {tool_name} ({qid})]",
-                    "text/x-user-message",
-                ),
-            )
-            raise
-        except Exception as e:  # noqa: BLE001 -- bg worker safety net
-            _ = self.inbox.put(
-                TextMessage(
-                    f"[Background tool failed: {tool_name} ({qid})]\n\n"
-                    f"{type(e).__name__}: {e}",
-                    "text/x-user-message",
-                ),
-            )
-        finally:
-            _ = self.background.pop(qid, None)
 
     # -- Cost accounting ----------------------------------------------
 
@@ -1648,13 +1908,6 @@ def _validate_budget(budget: ContextBudget, model: Model) -> None:
         )
 
 
-def _normalize_queued_user_message(msg: Message) -> Message:
-    """Convert REPL queue markers to ordinary user messages before history."""
-    if isinstance(msg, TextMessage) and msg.descriptor == QUEUED_USER_MESSAGE:
-        return dataclasses.replace(msg, descriptor="text/x-user-message")
-    return msg
-
-
 def _user_text(msg: Message) -> str:
     """Extract a renderable user-message body from ``msg``."""
     if isinstance(msg, TextMessage):
@@ -1666,33 +1919,40 @@ def _user_text(msg: Message) -> str:
     return ""
 
 
-def _interrupted_result(call: Message) -> Message:
-    """Synthetic ``[interrupted]`` result for a foreground tool that didn't complete."""
-    return MultipartMessage(
-        (
-            TextMessage(get_queue_id(call), "text/x-queue-id"),
-            TextMessage("[interrupted]", "text/x-error"),
-        ),
-        "multipart/x-tool-result",
-        parent_id=call.id,
-    )
+def _format_user_bundle(
+    user_pieces: list[str],
+    peer_pieces: list[tuple[str, str]],
+    bg_pieces: list[str],
+) -> str | None:
+    """Build the merged user-message body per spec §3.
+
+    Single-item user-only: verbatim. Otherwise each part tagged
+    ``[user]`` / ``[from <peer>]``; bg pieces append verbatim
+    (already framed with ``[Background tool ...]``).
+    """
+    total = len(user_pieces) + len(peer_pieces) + len(bg_pieces)
+    if total == 0:
+        return None
+    if total == 1 and user_pieces:
+        return user_pieces[0]
+    parts: list[str] = [f"[user] {t}" for t in user_pieces]
+    parts.extend(f"[from {src}] {t}" for src, t in peer_pieces)
+    parts.extend(bg_pieces)
+    return "\n\n".join(parts)
 
 
-def _reorder_by_call(calls: list[Message], results: list[Message]) -> list[Message]:
-    """Order ``results`` to match the call ordering using queue-id."""
-    by_qid = {get_queue_id(r): r for r in results}
-    return [by_qid[get_queue_id(c)] for c in calls]
+_FILE_OP_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "application/x-tool-read",
+        "application/x-tool-edit",
+        "application/x-tool-write",
+    },
+)
 
 
-def _partition_batches(safe: list[bool]) -> list[list[int]]:
-    """Group consecutive safe indices; emit each unsafe index alone."""
-    batches: list[list[int]] = []
-    for i, is_safe in enumerate(safe):
-        if batches and is_safe and safe[batches[-1][0]]:
-            batches[-1].append(i)
-        else:
-            batches.append([i])
-    return batches
+def _is_file_op(call: Message) -> bool:
+    """Return True iff ``call`` targets a Read / Edit / Write tool."""
+    return tc_tool_id(call) in _FILE_OP_TOOL_IDS
 
 
 def _text_parts(response_msg: Message) -> list[str]:

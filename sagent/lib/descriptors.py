@@ -36,7 +36,6 @@ TextDescriptor = Literal[
     "text/x-queue-id",
     "text/x-user-injected",
     "text/x-user-message",
-    "text/x-queued-user-message",
     "text/x-interrupted",
     "text/x-status",
     "text/x-agent-label",
@@ -148,9 +147,6 @@ Descriptor = (
 # literal string. New sentinels go here, not at the use site.
 
 QUIT_SENTINEL: Literal["text/x-quit"] = "text/x-quit"
-QUEUED_USER_MESSAGE: Literal["text/x-queued-user-message"] = (
-    "text/x-queued-user-message"
-)
 
 
 # -- Runtime frozensets (derived from Literals) ----------------------------
@@ -169,36 +165,6 @@ ALL_DESCRIPTORS: frozenset[str] = (
     | MULTIPART_DESCRIPTORS
     | JSON_DESCRIPTORS
     | KNOWN_TOOL_DESCRIPTORS
-)
-
-# Tools that never mutate external state and can run in parallel.
-# Bash is conditionally safe - see ``is_request_read_only`` in dispatch,
-# which consults ``tool_bash.is_read_only`` on the command string.
-READ_ONLY_TOOLS: frozenset[str] = frozenset(
-    {
-        "application/x-tool-read",
-        "application/x-tool-grep",
-        "application/x-tool-glob",
-        "application/x-tool-list",
-        "application/x-tool-websearch",
-        "application/x-tool-webfetch",
-        "application/x-tool-papersearch",
-        "application/x-tool-paperdetails",
-        "application/x-tool-paperauthor",
-        "application/x-tool-paperfetch",
-        "application/x-tool-playaudio",
-        "application/x-tool-contextdiagnostics",
-        "application/x-tool-skill",
-        "application/x-tool-wiki",
-        # Strictly a lie - the Agent tool spawns a subagent that runs
-        # full RW tools. But we classify it as RO here so sibling
-        # Agent calls from one model request batch into ``asyncio.gather``,
-        # enabling map-reduce. File-level races inside each subagent
-        # are handled by ``get_file_write_lock`` in tools/core.py.
-        "application/x-tool-agentspawn",
-        "application/x-tool-agentsend",
-        "application/x-tool-backgroundtask",
-    },
 )
 
 # File-op tools whose ``file_path`` input triggers conditional-rule

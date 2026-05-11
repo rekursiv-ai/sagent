@@ -498,6 +498,104 @@ class TestRaiseIfPromptTooLong:
         )
         _raise_if_prompt_too_long(e)
 
+    def test_exceeds_model_context_window_message(self) -> None:
+        """``Request size exceeds model context window`` is the new 4xx body
+        text Anthropic returns; the older ``too long`` matchers miss it.
+        """
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic.BadRequestError(
+            "Request size exceeds model context window",
+            response=httpx.Response(400, request=req),
+            body=None,
+        )
+        with pytest.raises(PromptTooLongError):
+            _raise_if_prompt_too_long(e)
+
+    def test_request_too_large_error_413(self) -> None:
+        """413 ``RequestTooLargeError`` (sibling of ``BadRequestError``) for
+        context overflow also normalizes to ``PromptTooLongError``.
+        """
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic._exceptions.RequestTooLargeError(
+            "Request size exceeds model context window",
+            response=httpx.Response(413, request=req),
+            body=None,
+        )
+        with pytest.raises(PromptTooLongError):
+            _raise_if_prompt_too_long(e)
+
+
+# ------------------------------------------------------------------
+# is_context_overflow
+# ------------------------------------------------------------------
+
+
+class TestIsContextOverflow:
+    def test_prompt_too_long_error(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        assert model.is_context_overflow(PromptTooLongError("too long"))
+
+    def test_bad_request_too_long(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic.BadRequestError(
+            "prompt is too long",
+            response=httpx.Response(400, request=req),
+            body=None,
+        )
+        assert model.is_context_overflow(e)
+
+    def test_bad_request_exceeds_context_window(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic.BadRequestError(
+            "Request size exceeds model context window",
+            response=httpx.Response(400, request=req),
+            body=None,
+        )
+        assert model.is_context_overflow(e)
+
+    def test_request_too_large_413(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic._exceptions.RequestTooLargeError(
+            "Request size exceeds model context window",
+            response=httpx.Response(413, request=req),
+            body=None,
+        )
+        assert model.is_context_overflow(e)
+
+    def test_unrelated_bad_request(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic.BadRequestError(
+            "invalid model parameter",
+            response=httpx.Response(400, request=req),
+            body=None,
+        )
+        assert not model.is_context_overflow(e)
+
+    def test_rate_limit_error(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        e = anthropic.RateLimitError(
+            "too many requests",
+            response=httpx.Response(429, request=req),
+            body=None,
+        )
+        assert not model.is_context_overflow(e)
+
+    def test_generic_exception(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        assert not model.is_context_overflow(RuntimeError("context boom"))
+
 
 # ------------------------------------------------------------------
 # _build_kwargs
@@ -812,6 +910,80 @@ class TestStreamNonPromptTooLongError:
             await m.stream(
                 request=ModelRequest(messages=[_user("hi")]),
             )
+
+
+# ------------------------------------------------------------------
+# estimate_text_token_count: per-model multiplier
+# ------------------------------------------------------------------
+
+
+class TestEstimateTextTokenCount:
+    def test_opus_4_7_uses_2_83(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-opus-4-7")
+        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 2.83)
+
+    def test_opus_4_7_1m_inherits_opus_4_7_ratio(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-opus-4-7+1m")
+        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 2.83)
+
+    def test_sonnet_4_6_uses_3_66(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 3.66)
+
+    def test_haiku_4_5_uses_4_83(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-haiku-4-5")
+        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 4.83)
+
+
+# ------------------------------------------------------------------
+# buffer/stream: 413 RequestTooLargeError normalizes to PromptTooLongError
+# ------------------------------------------------------------------
+
+
+class TestSend413NormalizesToPromptTooLong:
+    @pytest.mark.anyio
+    async def test_buffer_413_normalizes(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        model = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        mock_sdk = AsyncMock()
+        mock_sdk.messages.create = AsyncMock(
+            side_effect=anthropic._exceptions.RequestTooLargeError(
+                "Request size exceeds model context window",
+                response=httpx.Response(413, request=req),
+                body=None,
+            ),
+        )
+        with (
+            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
+            pytest.raises(PromptTooLongError),
+        ):
+            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
+
+    @pytest.mark.anyio
+    async def test_stream_413_normalizes(self) -> None:
+        provider = Anthropic.from_key("sk-test")
+        m = provider.model("claude-sonnet-4-6")
+        req = httpx.Request("POST", "https://api.anthropic.com")
+        exc = anthropic._exceptions.RequestTooLargeError(
+            "Request size exceeds model context window",
+            response=httpx.Response(413, request=req),
+            body=None,
+        )
+        mock_stream = AsyncMock()
+        mock_stream.__aenter__ = AsyncMock(side_effect=exc)
+        mock_stream.__aexit__ = AsyncMock(return_value=False)
+        mock_sdk = AsyncMock()
+        mock_sdk.messages.stream = MagicMock(return_value=mock_stream)
+        with (
+            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
+            pytest.raises(PromptTooLongError),
+        ):
+            await m.stream(request=ModelRequest(messages=[_user("hi")]))
 
 
 # ------------------------------------------------------------------

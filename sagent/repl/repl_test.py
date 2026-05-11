@@ -38,7 +38,6 @@ from sagent.custom_types import (
     TurnCompleteEvent,
     UserBarEvent,
 )
-from sagent.lib.descriptors import QUEUED_USER_MESSAGE
 from sagent.repl.keybindings import _kb_submit
 from sagent.repl.prompt import dynamic_prompt
 from sagent.repl.render import (
@@ -46,10 +45,6 @@ from sagent.repl.render import (
     make_render_observer,
 )
 from sagent.repl.slash import (
-    Abort,
-    AbortAll,
-    Break,
-    BreakAll,
     Clear,
     Compact,
     Help,
@@ -95,21 +90,16 @@ class TestParseSlash:
         assert isinstance(result, ModelSwitch)
         assert result.args == "--provider Google"
 
-    def test_break_all(self) -> None:
-        assert isinstance(parse_slash("/break all"), BreakAll)
+    def test_break_no_longer_recognized(self) -> None:
+        result = parse_slash("/break all")
+        assert result is not None
+        # /break and /abort were removed; surface as Unknown.
+        assert type(result).__name__ == "Unknown"
 
-    def test_break_target(self) -> None:
-        result = parse_slash("/break Agent_0")
-        assert isinstance(result, Break)
-        assert result.target == "Agent_0"
-
-    def test_abort_all(self) -> None:
-        assert isinstance(parse_slash("/abort all"), AbortAll)
-
-    def test_abort_target(self) -> None:
-        result = parse_slash("/abort Agent_0")
-        assert isinstance(result, Abort)
-        assert result.target == "Agent_0"
+    def test_abort_no_longer_recognized(self) -> None:
+        result = parse_slash("/abort foo")
+        assert result is not None
+        assert type(result).__name__ == "Unknown"
 
     def test_login(self) -> None:
         assert isinstance(parse_slash("/login"), Login)
@@ -135,9 +125,9 @@ class TestParseSlash:
         assert parse_slash("   \n") is None
 
 
-class TestQueuedFollowUps:
+class TestEnterWhileActive:
     @pytest.mark.anyio
-    async def test_enter_during_active_work_preserves_inline_input(self) -> None:
+    async def test_enter_during_active_work_queues_to_inbox(self) -> None:
         agent = Agent(model=_NoopModel())
         task = asyncio.create_task(asyncio.sleep(60))
         agent.work = task
@@ -146,50 +136,59 @@ class TestQueuedFollowUps:
         try:
             _kb_submit(agent, event)
 
-            messages = list(agent.inbox)
-            assert [(msg.descriptor, str(msg.content)) for msg in messages] == [
+            messages = [(i.msg.descriptor, str(i.msg.content)) for i in agent.inbox]
+            assert messages == [
                 ("text/x-user-message", "typed while bash runs"),
             ]
-            assert agent.queued_user_messages() == []
             assert buffer.history == ["typed while bash runs"]
             assert buffer.text == ""
         finally:
             task.cancel()
 
-    def test_agent_lists_and_pops_latest_tab_queued_message(self) -> None:
+    @pytest.mark.anyio
+    async def test_dynamic_prompt_shows_most_recent_user_message(self) -> None:
+        # Single dim-line preview of the most recent queued user message
+        # while the agent is busy. Non-user items (quit, peer) don't
+        # surface; older user messages don't surface (preview is tail-only).
         agent = Agent(model=_NoopModel())
-        agent.inbox.put(TextMessage("inline", "text/x-user-message"))
-        agent.inbox.put(TextMessage("first", QUEUED_USER_MESSAGE))
-        agent.inbox.put(TextMessage("control", "text/x-quit"))
-        agent.inbox.put(TextMessage("second", QUEUED_USER_MESSAGE))
+        agent.inbox.send(TextMessage("first", "text/x-user-message"), source="user")
+        agent.inbox.send(TextMessage("control", "text/x-quit"), source="quit")
+        agent.inbox.send(
+            TextMessage("second\nline", "text/x-user-message"), source="user"
+        )
+        # Mark agent as busy so the preview activates.
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[None] = loop.create_future()
 
-        assert [str(m.content) for m in agent.queued_user_messages()] == [
-            "first",
-            "second",
-        ]
-        popped = agent.pop_latest_queued_user_message()
+        async def _hang() -> None:
+            await fut
 
-        assert popped is not None
-        assert str(popped.content) == "second"
-        assert [(m.descriptor, str(m.content)) for m in agent.inbox] == [
-            ("text/x-user-message", "inline"),
-            (QUEUED_USER_MESSAGE, "first"),
-            ("text/x-quit", "control"),
-        ]
+        agent.work = asyncio.create_task(_hang())
+        try:
+            text = to_plain_text(dynamic_prompt(agent))
+        finally:
+            fut.set_result(None)
+            await agent.work
 
-    def test_dynamic_prompt_renders_only_tab_queued_follow_ups(self) -> None:
-        agent = Agent(model=_NoopModel())
-        agent.inbox.put(TextMessage("inline", "text/x-user-message"))
-        agent.inbox.put(TextMessage("control", "text/x-quit"))
-        agent.inbox.put(TextMessage("second\nline", QUEUED_USER_MESSAGE))
-
-        text = to_plain_text(dynamic_prompt(agent))
-
-        assert "Queued follow-up inputs" in text
-        assert "inline" not in text
+        assert "Queued follow-up inputs" not in text
+        assert "first" not in text
         assert "second (+1 more line)" in text
-        assert "Shift+Left edit last queued message" in text
         assert "control" not in text
+
+    def test_dynamic_prompt_idle_suppresses_preview(self) -> None:
+        # Idle agent: even with a user message in the inbox, the preview
+        # is suppressed -- the message is about to be consumed, surfacing
+        # it as "queued" would be misleading.
+        agent = Agent(model=_NoopModel())
+        agent.inbox.send(TextMessage("hello", "text/x-user-message"), source="user")
+        text = to_plain_text(dynamic_prompt(agent))
+        assert "hello" not in text
+        assert text.strip() == ">"
+
+    def test_dynamic_prompt_empty_inbox(self) -> None:
+        agent = Agent(model=_NoopModel())
+        text = to_plain_text(dynamic_prompt(agent))
+        assert text.strip() == ">"
 
 
 class _FakeBuffer:

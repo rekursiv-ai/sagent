@@ -1,4 +1,4 @@
-"""Tool dispatch helpers: read-only classification, invocation, validation."""
+"""Tool dispatch helpers: invocation, input validation, conditional rules."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from sagent.custom_types import (
 )
 from sagent.lib.descriptors import (
     FILE_OP_TOOLS,
-    READ_ONLY_TOOLS,
     is_multipart,
 )
 from sagent.lib.json import JSON
@@ -37,10 +36,6 @@ from sagent.tools.input_errors import (
     MULTIPLE_TOOL_INPUT_ERRORS_HINT,
     TOOL_INPUT_RECOVERY_HINT,
     is_tool_input_error_text,
-)
-from sagent.tools.lib.bash import (
-    cached_parse_bash as _cached_parse_bash,
-    is_read_only as _bash_is_read_only,
 )
 
 
@@ -139,32 +134,6 @@ def tool_call_label(tool: Tool | None, req: Message) -> str:
     accepts = ", ".join(f"`{k}`" for k in accepted)
     suffix = f"; accepts {accepts}" if accepts else ""
     return f"Invalid {tool.name} call: unexpected {keys}{suffix}"
-
-
-def is_request_read_only(req: Message, state: ToolState) -> bool:
-    """Return True iff this tool call is safe to run concurrently.
-
-    Bash classifications use ``state.bash_parse_cache`` so the parse is
-    shared with the Bash tool's matcher dispatch later in the request.
-
-    Args:
-      req: Tool-call message.
-      state: Agent's mutable tool state.
-
-    Returns:
-      read_only: Whether the call is side-effect-free.
-
-    """
-    tool_id = tc_tool_id(req)
-    if tool_id in READ_ONLY_TOOLS:
-        return True
-    if tool_id == "application/x-tool-bash":
-        directive = tc_directive(req)
-        cmd = directive.get("command")
-        if isinstance(cmd, str):
-            trees = _cached_parse_bash(cmd, state.bash_parse_cache)
-            return trees is not None and _bash_is_read_only(trees)
-    return False
 
 
 def invoke_tool(

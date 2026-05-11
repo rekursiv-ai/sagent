@@ -14,6 +14,7 @@ import asyncio
 
 import pytest
 
+from sagent.agent.inbox import Inbox
 from sagent.bin.slack import (
     SlackAdapter,
     _AgentSlack,
@@ -30,7 +31,6 @@ from sagent.custom_types import (
     MultipartMessage,
     TextMessage,
 )
-from sagent.lib.asyncio_collections import Deque
 from sagent.lib.json import JSON
 from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import agent_registry
@@ -42,7 +42,7 @@ from sagent.tools.core import agent_registry
 class _FakeAgent:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.inbox: Deque[Message] = Deque()
+        self.inbox: Inbox = Inbox()
         self.work: asyncio.Task[object] | None = None
         self.background: dict[str, BackgroundTaskEntry] = {}
 
@@ -245,7 +245,7 @@ class TestRouteHumanMessages:
         adapter, _ = _make_adapter()
         agents = _register("Sara")
         await adapter._route(_msg_event("hi", user="UBOT"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_ignores_non_message_types(self) -> None:
@@ -254,14 +254,14 @@ class TestRouteHumanMessages:
         ev = _msg_event("hi")
         ev["type"] = "reaction_added"
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_ignores_message_subtypes(self) -> None:
         adapter, _ = _make_adapter()
         agents = _register("Sara")
         await adapter._route(_msg_event("hi", subtype="channel_join"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_route_to_log_channel_owner(self) -> None:
@@ -269,7 +269,7 @@ class TestRouteHumanMessages:
         agents = _register("Sara")
         adapter._log_channel_owners["C_LOG"] = "Sara"
         await adapter._route(_msg_event("check this", channel="C_LOG"))
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert len(items) == 1
         assert "check this" in str(items[0].content)
 
@@ -278,8 +278,8 @@ class TestRouteHumanMessages:
         adapter, _ = _make_adapter()
         agents = _register("Sara", "Bob")
         await adapter._route(_msg_event("Sara do the thing"))
-        assert not agents["Sara"].inbox.empty()
-        assert agents["Bob"].inbox.empty()
+        assert len(agents["Sara"].inbox) > 0
+        assert len(agents["Bob"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_agent_mention_sets_thread_owner(self) -> None:
@@ -294,15 +294,15 @@ class TestRouteHumanMessages:
         agents = _register("Sara", "Bob")
         adapter._thread_owners[("C123", "1.0")] = "Sara"
         await adapter._route(_msg_event("follow up", thread_ts="1.0", ts="2.0"))
-        assert not agents["Sara"].inbox.empty()
-        assert agents["Bob"].inbox.empty()
+        assert len(agents["Sara"].inbox) > 0
+        assert len(agents["Bob"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_single_agent_default(self) -> None:
         adapter, _ = _make_adapter()
         agents = _register("Sara")
         await adapter._route(_msg_event("do something"))
-        assert not agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) > 0
 
     @pytest.mark.anyio
     async def test_single_agent_default_sets_thread_owner(self) -> None:
@@ -316,8 +316,8 @@ class TestRouteHumanMessages:
         adapter, spy = _make_adapter()
         agents = _register("Sara", "Bob")
         await adapter._route(_msg_event("do something"))
-        assert agents["Sara"].inbox.empty()
-        assert agents["Bob"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
+        assert len(agents["Bob"].inbox) == 0
         assert len(spy.sent) == 1
         assert "Bob" in spy.last_text
         assert "Sara" in spy.last_text
@@ -348,8 +348,8 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert not agents["Bob"].inbox.empty()
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Bob"].inbox) > 0
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_agent_message_no_self_routing(self) -> None:
@@ -363,7 +363,7 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_agent_thread_continuation_skips_self(self) -> None:
@@ -380,7 +380,7 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_agent_thread_continuation_routes_to_owner(self) -> None:
@@ -397,7 +397,7 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert not agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) > 0
 
     @pytest.mark.anyio
     async def test_agent_log_channel_skips_self(self) -> None:
@@ -413,7 +413,7 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_foreign_bot_ignored(self) -> None:
@@ -427,7 +427,7 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_agent_unroutable_message_dropped(self) -> None:
@@ -441,8 +441,8 @@ class TestRouteAgentMessages:
             user="",
         )
         await adapter._route(ev)
-        assert agents["Sara"].inbox.empty()
-        assert agents["Bob"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
+        assert len(agents["Bob"].inbox) == 0
         assert len(spy.sent) == 0
 
     @pytest.mark.anyio
@@ -510,7 +510,7 @@ class TestCommands:
         agents = _register("Sara")
         result = await adapter._try_command("stop Sara", "C1", "1.0")
         assert result is True
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert any(item.descriptor == "text/x-quit" for item in items)
 
     @pytest.mark.anyio
@@ -566,7 +566,7 @@ class TestRouteCommandIntegration:
         agents = _register("help")
         adapter, spy = _make_adapter()
         await adapter._route(_msg_event("help me with this"))
-        assert not agents["help"].inbox.empty()
+        assert len(agents["help"].inbox) > 0
         assert len(spy.sent) == 0
 
 
@@ -607,7 +607,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hello world", "0.5")
         await adapter._route(_reaction_event("heart"))
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert len(items) == 1
         assert ":heart:" in str(items[0].content)
         assert "hello world" in str(items[0].content)
@@ -619,7 +619,7 @@ class TestRouteReactions:
         adapter._user_names["UHUMAN"] = "Josh"
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hi", "0.5")
         await adapter._route(_reaction_event("thumbsup"))
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert "Josh" in str(items[0].content)
         assert ":thumbsup:" in str(items[0].content)
 
@@ -629,7 +629,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "2.0")] = ("Sara", "reply text", "1.0")
         await adapter._route(_reaction_event("heart", msg_ts="2.0"))
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert "thread_ts=1.0" in str(items[0].content)
 
     @pytest.mark.anyio
@@ -637,7 +637,7 @@ class TestRouteReactions:
         adapter, _ = _make_adapter()
         agents = _register("Sara")
         await adapter._route(_reaction_event("heart"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_reaction_ignored_for_non_message_item(self) -> None:
@@ -645,7 +645,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hi", "1.0")
         await adapter._route(_reaction_event("heart", item_type="file"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_reaction_ignored_when_agent_stopped(self) -> None:
@@ -661,7 +661,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hi", "1.0")
         await adapter._route(_reaction_event("heart", user="UBOT"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_reaction_to_non_bot_message_ignored(self) -> None:
@@ -669,7 +669,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "hi", "1.0")
         await adapter._route(_reaction_event("heart", item_user="UOTHER"))
-        assert agents["Sara"].inbox.empty()
+        assert len(agents["Sara"].inbox) == 0
 
     @pytest.mark.anyio
     async def test_reaction_missing_fields_ignored(self) -> None:
@@ -723,7 +723,7 @@ class TestRouteReactions:
         agents = _register("Sara")
         adapter._sent_messages[("C123", "1.0")] = ("Sara", "", "1.0")
         await adapter._route(_reaction_event("heart"))
-        items = agents["Sara"].inbox.drain()
+        items = [i.msg for i in agents["Sara"].inbox.drain_nowait()]
         assert len(items) == 1
         assert ":heart:" in str(items[0].content)
         assert '""' not in str(items[0].content)

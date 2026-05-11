@@ -654,11 +654,17 @@ class TestToolDispatch:
 
 
 class TestParallelDispatch:
-    """Verify agent batches read-only tool calls into a single gather."""
+    """Verify the parallel-by-default dispatch contract.
+
+    Per ``docs/private/execution_model.md``: tool calls in one model
+    response run in parallel; Read / Edit / Write are sequenced among
+    themselves in emission order as a defensive implementation choice.
+    """
 
     @pytest.mark.anyio
     @pytest.mark.real_sleep
-    async def test_read_only_tools_run_concurrently(self) -> None:
+    async def test_reads_serialize_in_emission_order(self) -> None:
+        # Read is a file-op tool; the implementation sequences file ops.
         tool = _SleepTool("Read", sleep_s=0.02)
         model = _MockModel(
             responses=[
@@ -676,23 +682,25 @@ class TestParallelDispatch:
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
         await _run(agent, "go")
-        # Structural check: every tool started before any tool finished
-        # -- proves the gather actually ran them concurrently. No
-        # wall-clock bound: under parallel-test load (xdist -n 4) the
-        # dispatch overhead alone can spike past any tight threshold.
         assert len(tool.starts) == 3
-        assert max(tool.starts) < min(tool.ends)
+        # Each Read starts only after the previous Read finishes.
+        assert tool.starts[1] >= tool.ends[0]
+        assert tool.starts[2] >= tool.ends[1]
 
     @pytest.mark.anyio
     @pytest.mark.real_sleep
-    async def test_bash_safe_commands_run_concurrently(self) -> None:
+    async def test_bash_commands_run_concurrently_regardless_of_safety(
+        self,
+    ) -> None:
+        # Bash is not a file-op tool; no RO classification anymore.  All
+        # Bash calls in one round fan out via ``asyncio.create_task``.
         tool = _SleepTool("Bash", sleep_s=0.02)
         model = _MockModel(
             responses=[
                 ModelResponse(
                     tool_calls=[
                         tool_call_message(
-                            "t1", "Bash", json_freeze({"command": "git status"})
+                            "t1", "Bash", json_freeze({"command": "rm foo"})
                         ),
                         tool_call_message(
                             "t2", "Bash", json_freeze({"command": "ls -la"})
@@ -710,41 +718,12 @@ class TestParallelDispatch:
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
         await _run(agent, "go")
-        # Structural concurrency check (see sibling test for rationale).
         assert max(tool.starts) < min(tool.ends)
 
     @pytest.mark.anyio
     @pytest.mark.real_sleep
-    async def test_bash_unsafe_commands_serialize(self) -> None:
-        tool = _SleepTool("Bash", sleep_s=0.02)
-        model = _MockModel(
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        tool_call_message(
-                            "t1", "Bash", json_freeze({"command": "rm foo"})
-                        ),
-                        tool_call_message(
-                            "t2", "Bash", json_freeze({"command": "rm bar"})
-                        ),
-                    ],
-                    stop_reason="model_tool_use",
-                    input_tokens=10,
-                    output_tokens=5,
-                ),
-                ModelResponse(text="done", input_tokens=20, output_tokens=10),
-            ],
-        )
-        agent = Agent(name="t", description="t", model=model, tools=[tool])
-        t0 = time.monotonic()
-        await _run(agent, "go")
-        elapsed = time.monotonic() - t0
-        assert elapsed >= 0.035, f"expected serial dispatch, took {elapsed:.3f}s"
-        assert tool.starts[1] >= tool.ends[0]
-
-    @pytest.mark.anyio
-    @pytest.mark.real_sleep
-    async def test_safe_unsafe_boundary_splits_batches(self) -> None:
+    async def test_non_file_ops_run_in_parallel_with_file_ops(self) -> None:
+        # Non-file-op tools fan out while the file-op chain runs serially.
         tool = _SleepTool("Bash", sleep_s=0.02)
         model = _MockModel(
             responses=[
@@ -754,12 +733,6 @@ class TestParallelDispatch:
                         tool_call_message(
                             "t2", "Bash", json_freeze({"command": "pwd"})
                         ),
-                        tool_call_message(
-                            "t3", "Bash", json_freeze({"command": "rm x"})
-                        ),
-                        tool_call_message(
-                            "t4", "Bash", json_freeze({"command": "git log"})
-                        ),
                     ],
                     stop_reason="model_tool_use",
                     input_tokens=10,
@@ -770,9 +743,8 @@ class TestParallelDispatch:
         )
         agent = Agent(name="t", description="t", model=model, tools=[tool])
         await _run(agent, "go")
-        assert tool.starts[1] - tool.starts[0] < 0.05
-        assert tool.starts[2] >= tool.ends[1] - 0.01
-        assert tool.starts[3] >= tool.ends[2] - 0.01
+        # Two Bash tasks both start before either finishes (parallel).
+        assert max(tool.starts) < min(tool.ends)
 
 
 # -- Serial file mutation dispatch ------------------------------------

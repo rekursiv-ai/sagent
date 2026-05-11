@@ -23,13 +23,11 @@ import time
 from sagent.custom_types import TextMessage
 from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
-    Abort,
-    AbortAll,
-    Break,
-    BreakAll,
     Clear,
     Compact,
+    Halt,
     Help,
+    Kill,
     Login,
     ModelSwitch,
     Quit,
@@ -156,40 +154,30 @@ async def _dispatch(
     if isinstance(action, Quit):
         agent.shutdown(force=False)
         return True
-    if isinstance(action, Abort):
+    if isinstance(action, Halt):
         if action.target in ("", agent.name):
-            agent.abort()
+            agent.halt()
         else:
             other = agent_registry.get(action.target)
             if isinstance(other, type(agent)):
-                other.abort()
+                other.halt()
             elif printer is not None:
-                printer.write_tool_error(f"[/abort] unknown agent: {action.target}")
+                printer.write_tool_error(f"[/halt] unknown agent: {action.target}")
         return False
-    if isinstance(action, AbortAll):
-        agent.abort_all_bg()
-        for label, other in list(agent_registry.items()):
-            if other is agent or not isinstance(other, type(agent)):
-                continue
-            other.abort_all_bg()
-            del label  # silence ruff
-        return False
-    if isinstance(action, Break):
-        if action.target in ("", agent.name):
-            agent.cancel()
+    if isinstance(action, Kill):
+        if action.target == "all":
+            count = agent.kill_all_tools()
+            if printer is not None:
+                printer.write_line(f"[/kill] cancelled {count} task(s)")
         else:
-            other = agent_registry.get(action.target)
-            if isinstance(other, type(agent)):
-                other.cancel()
-            elif printer is not None:
-                printer.write_tool_error(f"[/break] unknown agent: {action.target}")
-        return False
-    if isinstance(action, BreakAll):
-        agent.cancel()
-        for other in list(agent_registry.values()):
-            if other is agent or not isinstance(other, type(agent)):
-                continue
-            other.cancel()
+            ok = agent.kill_tool(action.target)
+            if printer is not None:
+                if ok:
+                    printer.write_line(f"[/kill] cancelled {action.target}")
+                else:
+                    printer.write_tool_error(
+                        f"[/kill] no such task: {action.target}",
+                    )
         return False
     if isinstance(action, Clear):
         await agent.clear()
@@ -223,7 +211,10 @@ async def _dispatch(
             printer.write_line(_run_repl.format_tasks(agent))
         return False
     if isinstance(action, Text):
-        _ = agent.inbox.put(TextMessage(action.content, "text/x-user-message"))
+        agent.inbox.send(
+            TextMessage(action.content, "text/x-user-message"),
+            source="user",
+        )
         return False
     # Remaining variant: Unknown -- surface the parse error.
     if printer is not None:
