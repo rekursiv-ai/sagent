@@ -15,15 +15,14 @@ Not included: ingest/update/query - those are LLM-driven via skills.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import logging
 import re
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
@@ -34,7 +33,6 @@ from sagent.tools.prompt_text import escape_prompt_text
 
 
 logger = logging.getLogger(__name__)
-
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]*)\]\]")
@@ -49,10 +47,11 @@ def find_root(start: str | Path) -> Path | None:
     """Walk from ``start`` upward, looking for ``SCHEMA.md``.
 
     Args:
-      start: Directory to begin the upward search from.
+      start: Path (file or directory) at which to begin the upward search.
 
     Returns:
-      root: Directory containing ``SCHEMA.md``, or None.
+      root: Directory containing ``SCHEMA.md`` (or ``wiki/SCHEMA.md``),
+        or ``None`` if no wiki is found before reaching the filesystem root.
 
     """
     p = Path(start).resolve()
@@ -67,6 +66,7 @@ def find_root(start: str | Path) -> Path | None:
 
 
 def _pages_dir(root: Path) -> Path:
+    """Return the ``pages/`` directory under a wiki root."""
     return root / "pages"
 
 
@@ -74,10 +74,10 @@ def list_pages(root: Path) -> list[str]:
     """Return all page slugs under ``<root>/pages/`` (flat).
 
     Args:
-      root: Wiki root directory.
+      root: Wiki root directory (as returned by ``find_root``).
 
     Returns:
-      slugs: Sorted list of page slugs.
+      slugs: Sorted list of page slugs (filenames without the ``.md`` suffix).
 
     """
     pd = _pages_dir(root)
@@ -87,6 +87,15 @@ def list_pages(root: Path) -> list[str]:
 
 
 def valid_slug(slug: str) -> bool:
+    """Return whether ``slug`` matches the wiki's slug grammar.
+
+    Args:
+      slug: Candidate page slug.
+
+    Returns:
+      is_valid: True iff ``slug`` is lowercase alphanumeric with hyphens.
+
+    """
     return _SLUG_RE.fullmatch(slug) is not None
 
 
@@ -95,10 +104,11 @@ def read_page(root: Path, slug: str) -> str | None:
 
     Args:
       root: Wiki root directory.
-      slug: Page slug (filename stem).
+      slug: Page slug (validated against the wiki's slug grammar).
 
     Returns:
-      content: Page markdown text, or None if not found.
+      text: Page markdown contents, or ``None`` if the slug is invalid,
+        the file is missing, or it can't be decoded as UTF-8.
 
     """
     if not valid_slug(slug):
@@ -113,12 +123,14 @@ def read_page(root: Path, slug: str) -> str | None:
 
 
 def _iter_page_files(root: Path) -> Iterable[Path]:
+    """Yield page files under ``<root>/pages/`` in sorted order."""
     pd = _pages_dir(root)
     if pd.exists():
         yield from sorted(pd.glob("*.md"))
 
 
 def _parse_frontmatter_keys(text: str) -> set[str]:
+    """Extract the set of top-level keys from a page's YAML frontmatter."""
     m = _FRONTMATTER_RE.match(text)
     if m is None:
         return set()
@@ -140,7 +152,8 @@ def lint(root: Path) -> dict[str, list[str]]:
       root: Wiki root directory.
 
     Returns:
-      errors: Dict mapping category name to list of error strings.
+      errors: Mapping with ``broken_links`` and ``missing_frontmatter``
+        keys, each listing human-readable error lines.
 
     """
     errors: dict[str, list[str]] = {
@@ -200,112 +213,133 @@ class Wiki:
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label for this wiki operation.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short label for this Wiki operation.
 
         Args:
-          msg: Tool call message.
+          args: Directive with ``operation`` and optional ``slug``.
 
         Returns:
-          label: "Wiki <operation>:<slug>".
+          label: ``Wiki <op>[:<slug>]`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        operation = str(directive.get("operation", ""))
-        slug = str(directive.get("slug", ""))
+        operation = str(args.get("operation", ""))
+        slug = str(args.get("slug", ""))
         suffix = f":{slug}" if slug else ""
         return f"Wiki {operation}{suffix}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for Wiki.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return per-request system prompt text.
+        """Return no supplemental system-prompt text for Wiki.
 
         Returns:
-          prompt: Always empty for this tool.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
-        """Dispatch the requested wiki operation.
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Dispatch a Wiki operation (locate, list, read_page, read_index, lint).
 
         Args:
-          msg: Tool call message with ``operation`` and optional ``slug``/``cwd``.
+          args: Directive with ``operation`` and optional ``slug`` / ``cwd``.
 
         Returns:
-          result: Operation result or error message.
+          result: Operation output, or an error when the operation is
+              unknown or no wiki is found.
 
         """
-        directive = get_directive(msg)
-        operation = str(directive.get("operation", ""))
-        slug = str(directive.get("slug", ""))
-        cwd = str(directive.get("cwd", ""))
+        operation = str(args.get("operation", ""))
+        slug = str(args.get("slug", ""))
+        cwd = str(args.get("cwd", ""))
         return await run_sync(
             self._run,
-            parent_id=msg.id,
             operation=operation,
             slug=slug,
             cwd=cwd,
         )
 
-    def _run(self, *, operation: str, slug: str = "", cwd: str = "") -> str | Message:
+    def _run(
+        self, *, operation: str, slug: str = "", cwd: str = ""
+    ) -> str | ToolResult:
+        """Locate the wiki root and route to the operation handler."""
         if operation not in _OPERATIONS:
-            return TextMessage(
-                f"Unknown operation {operation!r}. Valid: {', '.join(_OPERATIONS)}",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Unknown operation {operation!r}. Valid: {', '.join(_OPERATIONS)}"
+                ),
+                is_error=True,
             )
         start = cwd or get_tool_state().bash_cwd
         root = find_root(start)
         if root is None:
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     "No wiki found (walked up from "
                     f"{start} looking for SCHEMA.md or wiki/SCHEMA.md)."
                 ),
-                "text/x-error",
+                is_error=True,
             )
-        dispatch = {
-            "locate": lambda: str(root),
-            "list": lambda: "\n".join(list_pages(root)) or "(no pages)",
-            "read_page": lambda: _read_page_op(root, slug),
-            "read_index": lambda: _read_index_op(root),
-            "lint": lambda: _lint_op(root),
-        }
-        return dispatch[operation]()
+        if operation == "locate":
+            return str(root)
+        if operation == "list":
+            return "\n".join(list_pages(root)) or "(no pages)"
+        if operation == "read_page":
+            return _read_page_op(root, slug)
+        if operation == "read_index":
+            return _read_index_op(root)
+        return _lint_op(root)
 
 
-def _read_page_op(root: Path, slug: str) -> str | Message:
+def _read_page_op(root: Path, slug: str) -> str | ToolResult:
+    """Handle the ``read_page`` operation: read a page by slug."""
     if not slug:
-        return TextMessage(
-            tool_input_error_text(
+        return ToolResult(
+            call_id="",
+            content=tool_input_error_text(
                 "Wiki",
                 "operation='read_page' requires `slug`.",
                 required=("slug",),
             ),
-            "text/x-error",
+            is_error=True,
         )
     if not valid_slug(slug):
-        return TextMessage(f"Invalid page slug: {slug!r}", "text/x-error")
+        return ToolResult(
+            call_id="", content=f"Invalid page slug: {slug!r}", is_error=True
+        )
     content = read_page(root, slug)
     if content is None:
-        return TextMessage(f"No such page: {slug}", "text/x-error")
+        return ToolResult(call_id="", content=f"No such page: {slug}", is_error=True)
     return escape_prompt_text(content)
 
 
-def _read_index_op(root: Path) -> str | Message:
+def _read_index_op(root: Path) -> str | ToolResult:
+    """Handle the ``read_index`` operation: read ``index.md`` if present."""
     idx = root / "index.md"
     if not idx.exists():
         return "(no index.md)"
     try:
         return escape_prompt_text(idx.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as e:
-        return TextMessage(f"Read error: {e}", "text/x-error")
+        return ToolResult(call_id="", content=f"Read error: {e}", is_error=True)
 
 
 def _lint_op(root: Path) -> str:
+    """Handle the ``lint`` operation and render a human-readable report."""
     result = lint(root)
     broken = result["broken_links"]
     missing = result["missing_frontmatter"]

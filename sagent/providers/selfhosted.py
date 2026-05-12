@@ -38,28 +38,19 @@ import re
 import time
 import uuid
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolCall,
+    UserMessage,
+)
 from sagent.custom_types import (
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
     Pricing,
-    TextMessage,
     TokenCount,
     Tool,
 )
-from sagent.lib.json import (
-    MutableJSON,
-    MutableJSONValue,
-    json_freeze,
-    json_unfreeze,
-)
-from sagent.lib.message import (
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    tool_call_message,
-)
+from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 
@@ -82,11 +73,12 @@ else:
     torch = lazy_import("torch")
     image_lib = lazy_import("sagent.lib.image")
 
-
 logger = logging.getLogger(__name__)
 
 
 class _Tokenizer(Protocol):
+    """Minimal HF tokenizer surface used by ``SelfHosted``."""
+
     eos_token_id: int
 
     def apply_chat_template(self, messages: object, **kwargs: object) -> object: ...
@@ -95,27 +87,37 @@ class _Tokenizer(Protocol):
 
 
 class _GenerateModel(Protocol):
+    """Minimal HF generate surface used by ``SelfHosted``."""
+
     def generate(self, input_ids: Tensor, **kwargs: object) -> Tensor: ...
 
 
 @runtime_checkable
 class _HasInputIds(Protocol):
+    """Object with an ``input_ids`` attribute (HF batch encoding)."""
+
     input_ids: object
 
 
 @runtime_checkable
 class _HasData(Protocol):
+    """Object with a ``data`` mapping (HF BatchEncoding)."""
+
     data: object
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class _RenderedPrompt:
+    """Tokenized chat-template output with optional attention mask."""
+
     input_ids: Tensor
     attention_mask: Tensor | None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class _ModelSpec:
+    """Parsed ``path+option+option`` self-hosted model spec."""
+
     path_or_repo: str
     device: str | None
     dtype: torch.dtype | None
@@ -428,6 +430,8 @@ class SelfHosted:
 
 
 class _ProviderLike(Protocol):
+    """Provider surface ``SelfHostedModel`` reads from."""
+
     @property
     def hosted_max_request_tokens(self) -> int: ...
     @property
@@ -513,6 +517,7 @@ class SelfHostedModel:
 
     @property
     def pricing(self) -> Pricing:
+        """Per-million-token pricing (zero for self-hosted models)."""
         return Pricing()
 
     def estimate_image_token_count(self, data: bytes) -> int:
@@ -612,7 +617,7 @@ class SelfHostedModel:
             new_tokens,
             skip_special_tokens=True,
         )
-        tool_msgs, cleaned_text = _extract_tool_calls(
+        tool_calls, cleaned_text = _extract_tool_calls(
             text,
             allowed_tools={t.name for t in request.tools or []},
         )
@@ -627,19 +632,14 @@ class SelfHostedModel:
             self.model_id,
             output_tokens,
             finish_reason,
-            len(tool_msgs),
+            len(tool_calls),
             elapsed_sec,
             output_tokens / elapsed_sec if elapsed_sec > 0 else 0.0,
         )
-        msg_parts: list[Message] = []
-        if cleaned_text.strip():
-            msg_parts.append(TextMessage(cleaned_text, "text/plain"))
-        msg_parts.extend(tool_msgs)
-        has_tool_use = bool(tool_msgs)
         return ModelResponse(
-            content=MultipartMessage(
-                tuple(msg_parts),
-                "multipart/x-model-message",
+            message=AssistantMessage(
+                text=cleaned_text,
+                tool_calls=tuple(tool_calls),
             ),
             tokens=TokenCount(
                 input_tokens=int(input_ids.shape[-1]),
@@ -648,7 +648,7 @@ class SelfHostedModel:
             stop_reason=normalize_stop_reason(
                 finish_reason,
                 kind="openai",  # use OpenAI vocab - same stop/length semantics
-                has_tool_use=has_tool_use,
+                has_tool_use=bool(tool_calls),
             ),
         )
 
@@ -658,24 +658,11 @@ class SelfHostedModel:
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Buffer the response then emit text in one shot.
-
-        Args:
-          request: Model request with messages and tool declarations.
-          on_text: Callback invoked with each text part of the response.
-          on_thinking: Reserved; self-hosted decode is buffered, no
-              streaming thinking surface.
-
-        Returns:
-          response: Model response with text and/or tool-call messages.
-
-        """
+        """Buffer the response then emit text in one shot."""
         del on_thinking  # buffered decode; no per-chunk thinking
         resp = await self.buffer(request)
-        if on_text is not None:
-            for part in cast(tuple[Message, ...], resp.content.content):
-                if part.descriptor == "text/plain":
-                    on_text(cast(str, part.content))
+        if on_text is not None and resp.message.text:
+            on_text(resp.message.text)
         return resp
 
     def _render(self, request: ModelRequest) -> Tensor:
@@ -816,80 +803,68 @@ def _attention_mask(rendered: object) -> object | None:
     return getattr(rendered, "attention_mask", None)
 
 
-# -- chat-template helpers --------------------------------------------
-
-
 def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
-    """Translate internal Message list to HF chat-template format."""
+    """Translate history entries to HF chat-template format."""
     ids = IdRemapper("call_")
     messages: list[MutableJSON] = []
     if request.system:
         messages.append({"role": "system", "content": request.system})
-    for msg in request.messages:
-        if msg.descriptor == "text/x-user-message":
-            messages.append({"role": "user", "content": cast(str, msg.content)})
-        elif msg.descriptor == "multipart/x-user-message":
-            text = "\n".join(
-                str(p.content)
-                for p in cast(tuple[Message, ...], msg.content)
-                if p.descriptor == "text/plain"
-            )
-            messages.append({"role": "user", "content": text})
-        elif msg.descriptor == "multipart/x-model-message":
-            parts_mm = cast(tuple[Message, ...], msg.content)
-            text_parts = [
-                str(p.content) for p in parts_mm if p.descriptor == "text/plain"
+    for entry in request.messages:
+        if isinstance(entry, UserMessage):
+            messages.append({"role": "user", "content": entry.text})
+        elif isinstance(entry, AssistantMessage):
+            tool_calls_hf: list[MutableJSON] = [
+                cast(
+                    MutableJSON,
+                    {
+                        "id": ids.map(tc.id),
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(dict(tc.args)),
+                        },
+                    },
+                )
+                for tc in entry.tool_calls
             ]
-            tool_calls_hf: list[MutableJSON] = []
-            for p in parts_mm:
-                if p.descriptor == "multipart/x-tool-call":
-                    directive = get_directive(p)
-                    tool_calls_hf.append(
-                        {
-                            "id": ids.map(get_queue_id(p)),
-                            "type": "function",
-                            "function": {
-                                "name": get_tool_name(p),
-                                "arguments": json.dumps(json_unfreeze(directive)),
-                            },
-                        }
-                    )
-            entry: MutableJSON = {
+            asst_entry: MutableJSON = {
                 "role": "assistant",
-                "content": "\n".join(text_parts),
+                "content": entry.text,
             }
             if tool_calls_hf:
-                entry["tool_calls"] = cast(MutableJSONValue, tool_calls_hf)
-            messages.append(entry)
-        elif msg.descriptor == "multipart/x-tool-result":
-            parts_tr = cast(tuple[Message, ...], msg.content)
-            text = "\n".join(
-                str(p.content)
-                for p in parts_tr
-                if p.descriptor in ("text/plain", "text/x-error")
-            )
+                asst_entry["tool_calls"] = cast(MutableJSONValue, tool_calls_hf)
+            messages.append(asst_entry)
+        else:
+            content = entry.content
+            if entry.is_error and content:
+                content = f"[Error] {content}"
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": ids.map(get_queue_id(msg)),
-                    "content": text,
+                    "tool_call_id": ids.map(entry.call_id),
+                    "content": content,
                 }
             )
     return messages
 
 
 def _tool_schema(tool: Tool) -> MutableJSON:
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": json_unfreeze(tool.directive_schema),
+    """Wire-shape a ``Tool`` as the HF chat-template ``tools`` schema entry."""
+    return cast(
+        MutableJSON,
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": json_unfreeze(tool.directive_schema),
+            },
         },
-    }
+    )
 
 
 def _tool_preamble(tools: list[Tool]) -> str:
+    """Format tool schemas as a system-preamble for templates lacking ``tools``."""
     schemas = [_tool_schema(t) for t in tools]
     return (
         "You have access to the following tools. To call a tool, emit "
@@ -898,7 +873,6 @@ def _tool_preamble(tools: list[Tool]) -> str:
     )
 
 
-# -- tool-call parsing -------------------------------------------------
 #
 # Qwen3: ``<tool_call>{"name": "...", "arguments": {...}}</tool_call>``
 # DSV3 / Kimi-K2: ``<｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜>`` with
@@ -921,11 +895,18 @@ def _extract_tool_calls(
     text: str,
     *,
     allowed_tools: set[str] | None = None,
-) -> tuple[list[Message], str]:
-    """Return (tool_call_messages, remaining_text)."""
-    calls: list[Message] = []
+) -> tuple[list[ToolCall], str]:
+    """Strip Qwen/DeepSeek tool-call blocks out of ``text``.
+
+    Returns:
+      tool_calls: Parsed tool calls extracted from the response text.
+      remaining_text: Response text with the tool-call blocks removed.
+
+    """
+    calls: list[ToolCall] = []
 
     def qwen_repl(match: re.Match[str]) -> str:
+        """Consume one Qwen tool-call block, recording the call when valid."""
         tc = _parse_qwen_tool_call(match.group(1))
         if tc is None:
             logger.warning("SelfHosted preserved malformed Qwen tool call.")
@@ -933,7 +914,7 @@ def _extract_tool_calls(
         if not _tool_allowed(tc, allowed_tools):
             logger.warning(
                 "SelfHosted preserved unadvertised tool call tool=%s.",
-                get_tool_name(tc),
+                tc.name,
             )
             return match.group(0)
         calls.append(tc)
@@ -942,7 +923,8 @@ def _extract_tool_calls(
     cleaned = _QWEN_TOOL_CALL.sub(qwen_repl, text)
 
     def deepseek_repl(block: re.Match[str]) -> str:
-        block_calls: list[Message] = []
+        """Consume one DeepSeek tool-call block, recording its calls when valid."""
+        block_calls: list[ToolCall] = []
         for inner in _DS_ONE.finditer(block.group(1)):
             tc = _parse_deepseek_tool_call(inner.group(1))
             if tc is None:
@@ -951,7 +933,7 @@ def _extract_tool_calls(
             if not _tool_allowed(tc, allowed_tools):
                 logger.warning(
                     "SelfHosted preserved unadvertised tool call tool=%s.",
-                    get_tool_name(tc),
+                    tc.name,
                 )
                 return block.group(0)
             block_calls.append(tc)
@@ -965,14 +947,15 @@ def _extract_tool_calls(
     return calls, cleaned.strip()
 
 
-def _tool_allowed(tool_call: Message, allowed_tools: set[str] | None) -> bool:
+def _tool_allowed(tc: ToolCall, allowed_tools: set[str] | None) -> bool:
     """Return whether a parsed tool call was advertised to the model."""
-    return allowed_tools is None or get_tool_name(tool_call).lower() in {
+    return allowed_tools is None or tc.name.lower() in {
         tool.lower() for tool in allowed_tools
     }
 
 
-def _parse_qwen_tool_call(raw: str) -> Message | None:
+def _parse_qwen_tool_call(raw: str) -> ToolCall | None:
+    """Parse a Qwen-format ``<tool_call>`` body into a ``ToolCall``."""
     try:
         payload = json.loads(raw.strip())
     except json.JSONDecodeError:
@@ -984,17 +967,15 @@ def _parse_qwen_tool_call(raw: str) -> Message | None:
     raw_args = payload_d.get("arguments") or {}
     if not isinstance(name, str) or not name or not isinstance(raw_args, dict):
         return None
-    tc_id = str(uuid.uuid4())[:12]
-    return tool_call_message(tc_id, name, json_freeze(cast(MutableJSON, raw_args)))
+    return ToolCall(
+        id=str(uuid.uuid4())[:12],
+        name=name,
+        args=cast(Mapping[str, object], cast(MutableJSON, raw_args)),
+    )
 
 
-def _parse_deepseek_tool_call(raw: str) -> Message | None:
-    r"""DeepSeek/Kimi format: ``function\n{name}\n```json\n{args}\n``` ``.
-
-    Best-effort: strip leading tag text, find the first JSON object
-    with a ``name`` field, and an ``arguments`` sibling or the first
-    code-fenced block.
-    """
+def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
+    r"""DeepSeek/Kimi format: ``function\n{name}\n```json\n{args}\n``` ``."""
     text = raw.strip()
     name_match = re.search(r"function\s*\n\s*([A-Za-z0-9_]+)", text)
     json_match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
@@ -1006,6 +987,8 @@ def _parse_deepseek_tool_call(raw: str) -> Message | None:
         return None
     if not isinstance(args, dict):
         return None
-    tc_name = name_match.group(1)
-    tc_id = str(uuid.uuid4())[:12]
-    return tool_call_message(tc_id, tc_name, json_freeze(cast(MutableJSON, args)))
+    return ToolCall(
+        id=str(uuid.uuid4())[:12],
+        name=name_match.group(1),
+        args=cast(Mapping[str, object], cast(MutableJSON, args)),
+    )

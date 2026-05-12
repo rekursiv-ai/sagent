@@ -55,7 +55,6 @@ class ModelLimits:
     max_response_tokens: int
 
 
-# -- Google (API) -----------------------------------------------------
 # Source: https://ai.google.dev/api/models#method:-models.list
 # Returns inputTokenLimit and outputTokenLimit per model.
 
@@ -88,7 +87,6 @@ async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
         return out
 
 
-# -- OpenAI (scrape per-model doc page) --------------------------------
 # Source: https://developers.openai.com/api/docs/models/<model>
 # Each page SSR-renders "N context window" and "N max output tokens".
 
@@ -136,7 +134,6 @@ def _parse_openai_page(html: str) -> ModelLimits | None:
     return None
 
 
-# -- Anthropic (API) ---------------------------------------------------
 # Source: GET /v1/models/{model_id}
 # Returns max_tokens (max output) and max_input_tokens.
 
@@ -185,10 +182,8 @@ async def fetch_anthropic(
     return out
 
 
-# -- Comparison --------------------------------------------------------
-
-
 def _num(s: str) -> int:
+    """Parse a comma- or underscore-grouped integer literal."""
     return int(s.replace(",", "").replace("_", ""))
 
 
@@ -241,9 +236,6 @@ def compare(
     if not errors:
         _out(f"  {provider_name}: all {len(known)} models OK")
     return errors
-
-
-# -- Main --------------------------------------------------------------
 
 
 async def main() -> int:

@@ -49,7 +49,7 @@ should prefer the API-key path (``OpenAI.from_key``).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import (
     IO,
@@ -88,28 +88,21 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    TextMessage,
     TokenCount,
     Tool,
 )
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import (
-    MutableJSON,
-    json_freeze,
-    json_unfreeze,
-)
-from sagent.lib.message import (
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    tool_call_message,
-)
+from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -598,9 +591,6 @@ class OpenAISubscription(OpenAI):
         atomic_write_bytes(p, json.dumps(existing).encode(), file_mode=0o600)
 
 
-# -- Model backend -----------------------------------------------------
-
-
 class _OpenAISubModel(_OpenAIModel):
     """OpenAI Responses API model -- subscription billing."""
 
@@ -608,6 +598,7 @@ class _OpenAISubModel(_OpenAIModel):
 
     @override
     def _is_effort_model(self, model_id: str) -> bool:
+        """True for OpenAI reasoning models that accept ``reasoning_effort``."""
         return any(model_id.startswith(p) for p in _EFFORT_PREFIXES)
 
     @property
@@ -721,14 +712,13 @@ class _OpenAISubModel(_OpenAIModel):
             raise
 
 
-# -- Request building --------------------------------------------------
-
-
 def _build_tools(tools: list[Tool]) -> list[oai_responses.FunctionToolParam]:
+    """Translate each ``Tool`` into a Responses API function-tool param."""
     return [_build_tool(t) for t in tools]
 
 
 def _build_tool(tool: Tool) -> oai_responses.FunctionToolParam:
+    """Wire-shape a single ``Tool`` for the Responses API."""
     return {
         "type": "function",
         "name": tool.name,
@@ -741,76 +731,54 @@ def _build_tool(tool: Tool) -> oai_responses.FunctionToolParam:
 
 
 def _build_input(request: ModelRequest) -> oai_responses.ResponseInputParam:
-    """Convert a ModelRequest to Responses API input items."""
+    """Convert history entries to Responses API input items."""
     ids = IdRemapper("fc_")
     items: oai_responses.ResponseInputParam = []
-    for msg in request.messages:
-        if msg.descriptor == "text/x-user-message":
-            items.append({"role": "user", "content": cast(str, msg.content)})
-        elif msg.descriptor == "multipart/x-user-message":
-            items.append(_build_user_item(msg))
-        elif msg.descriptor == "multipart/x-model-message":
-            _build_assistant_items(msg, items, ids)
-        elif msg.descriptor == "multipart/x-tool-result":
-            items.append(_build_tool_result_item(msg, ids))
+    for entry in request.messages:
+        if isinstance(entry, UserMessage):
+            items.append({"role": "user", "content": entry.text})
+        elif isinstance(entry, AssistantMessage):
+            _build_assistant_items(entry, items, ids)
+        else:
+            items.append(_build_tool_result_item(entry, ids))
     return items
 
 
-def _build_user_item(msg: Message) -> oai_responses.EasyInputMessageParam:
-    content_parts = cast(tuple[Message, ...], msg.content)
-    text_parts = [
-        cast(str, p.content) for p in content_parts if p.descriptor == "text/plain"
-    ]
-    return {"role": "user", "content": "\n".join(text_parts)}
-
-
 def _build_assistant_items(
-    msg: Message,
+    entry: AssistantMessage,
     items: oai_responses.ResponseInputParam,
     ids: IdRemapper,
 ) -> None:
-    """Expand a model message into assistant text and function_call items."""
-    parts = cast(tuple[Message, ...], msg.content)
-    text_parts: list[str] = []
-    for part in parts:
-        if part.descriptor == "text/plain":
-            text_parts.append(cast(str, part.content))
-        elif part.descriptor == "multipart/x-tool-call":
-            if text_parts:
-                items.append({"role": "assistant", "content": "\n".join(text_parts)})
-                text_parts.clear()
-            directive = get_directive(part)
-            native_id = ids.map(get_queue_id(part))
-            items.append(
-                {
-                    "type": "function_call",
-                    "id": native_id,
-                    "call_id": native_id,
-                    "name": get_tool_name(part),
-                    "arguments": json.dumps(json_unfreeze(directive)),
-                }
-            )
-    if text_parts:
-        items.append({"role": "assistant", "content": "\n".join(text_parts)})
+    """Expand an AssistantMessage into assistant + function_call items."""
+    if entry.text:
+        items.append({"role": "assistant", "content": entry.text})
+    for tc in entry.tool_calls:
+        native_id = ids.map(tc.id)
+        items.append(
+            {
+                "type": "function_call",
+                "id": native_id,
+                "call_id": native_id,
+                "name": tc.name,
+                "arguments": json.dumps(dict(tc.args)),
+            }
+        )
 
 
 def _build_tool_result_item(
-    msg: Message,
+    entry: ToolResult,
     ids: IdRemapper,
 ) -> FunctionCallOutput:
-    native_id = ids.map(get_queue_id(msg))
-    parts = cast(tuple[Message, ...], msg.content)
-    text = "\n".join(
-        str(p.content) for p in parts if p.descriptor in ("text/plain", "text/x-error")
-    )
+    """Wire-shape a ``ToolResult`` as a Responses API function_call_output."""
+    native_id = ids.map(entry.call_id)
+    output = entry.content
+    if entry.is_error and output:
+        output = f"[Error] {output}"
     return {
         "type": "function_call_output",
         "call_id": native_id,
-        "output": text,
+        "output": output,
     }
-
-
-# -- Response parsing --------------------------------------------------
 
 
 async def _consume_stream(
@@ -821,7 +789,7 @@ async def _consume_stream(
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
     text_parts: list[str] = []
-    tool_calls: list[Message] = []
+    tool_calls: list[ToolCall] = []
     tool_args: dict[str, list[str]] = {}
     input_tokens = 0
     output_tokens = 0
@@ -850,7 +818,13 @@ async def _consume_stream(
                     tool_name=tc_name,
                     call_id=tc_id,
                 )
-                tool_calls.append(tool_call_message(tc_id, tc_name, json_freeze(args)))
+                tool_calls.append(
+                    ToolCall(
+                        id=tc_id,
+                        name=tc_name,
+                        args=cast(Mapping[str, object], args),
+                    )
+                )
         elif isinstance(event, oai_responses.ResponseCompletedEvent):
             resp = event.response
             message_id = resp.id
@@ -861,14 +835,6 @@ async def _consume_stream(
                     cache_read = resp.usage.input_tokens_details.cached_tokens
             finish_reason = resp.status
 
-    msg_parts: list[Message] = []
-    if message_id:
-        msg_parts.append(TextMessage(message_id, "text/x-queue-id"))
-    if text_parts:
-        msg_parts.append(TextMessage("".join(text_parts), "text/plain"))
-    msg_parts.extend(tool_calls)
-
-    has_tool_use = bool(tool_calls)
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
     in_cost, out_cost, total_cost = compute_cost(
@@ -878,9 +844,9 @@ async def _consume_stream(
         cache_read=cache_read,
     )
     return ModelResponse(
-        content=MultipartMessage(
-            tuple(msg_parts),
-            "multipart/x-model-message",
+        message=AssistantMessage(
+            text="".join(text_parts),
+            tool_calls=tuple(tool_calls),
         ),
         tokens=TokenCount(
             input_tokens=input_tokens,
@@ -890,7 +856,7 @@ async def _consume_stream(
         stop_reason=normalize_stop_reason(
             raw_reason,
             kind="openai",
-            has_tool_use=has_tool_use,
+            has_tool_use=bool(tool_calls),
         ),
         message_id=message_id,
         request_id=message_id,
@@ -995,9 +961,6 @@ def _parse_tool_arguments(
     if delta is not None:
         return delta
     return {}
-
-
-# -- JWT helpers -------------------------------------------------------
 
 
 def _jwt_payload(token: str) -> MutableJSON:

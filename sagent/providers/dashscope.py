@@ -48,6 +48,7 @@ class _DashScopeModel(OpenAICompatModel):
 
     @override
     def _is_effort_model(self, model_id: str) -> bool:
+        """True for Qwen3/QwQ/QvQ models that accept ``enable_thinking``."""
         # Qwen3 / QwQ / QvQ accept enable_thinking; we translate
         # ``effort`` into that flag via _transform_body.
         return any(model_id.startswith(p) for p in _THINKING_PREFIXES)
@@ -58,6 +59,7 @@ class _DashScopeModel(OpenAICompatModel):
         body: MutableJSON,
         request: ModelRequest,
     ) -> MutableJSON:
+        """Map OpenAI-style ``reasoning_effort`` to DashScope's ``enable_thinking``."""
         # DashScope rejects ``reasoning_effort``; map to ``enable_thinking``.
         effort = body.pop("reasoning_effort", None)
         if effort is not None:

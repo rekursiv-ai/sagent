@@ -1,142 +1,197 @@
-"""Tests for debug_log."""
+"""Tests for ``lib.debug_log``: JSONL trace + wire-message summarization."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import json
 
-from sagent.lib import debug_log
+from sagent.lib.debug_log import (
+    log_path,
+    role_sequence,
+    summarize_messages,
+    trace,
+    trace_error,
+)
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 
-class TestTrace:
-    def test_writes_when_debug_enabled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        log = tmp_path / "debug.log"
-        monkeypatch.setenv("SAGENT_DEBUG", "1")
-        monkeypatch.setenv("SAGENT_DEBUG_LOG", str(log))
-        debug_log.trace("test_event", key="val")
-        lines = log.read_text().splitlines()
-        assert len(lines) == 1
-        rec = json.loads(lines[0])
-        assert rec["event"] == "test_event"
-        assert rec["key"] == "val"
-
-    def test_noop_when_debug_disabled(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        log = tmp_path / "debug.log"
-        monkeypatch.delenv("SAGENT_DEBUG", raising=False)
-        monkeypatch.setenv("SAGENT_DEBUG_LOG", str(log))
-        debug_log.trace("should_not_appear")
-        assert not log.exists()
+def _read_records(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
-class TestTraceError:
-    def test_always_writes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        log = tmp_path / "debug.log"
-        monkeypatch.setenv("SAGENT_DEBUG_LOG", str(log))
-        debug_log.trace_error("err_event", code=42)
-        rec = json.loads(log.read_text())
-        assert rec["event"] == "err_event"
-        assert rec["code"] == 42
+def test_log_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SAGENT_DEBUG_LOG", raising=False)
+    p = log_path()
+    assert p.name == "debug.log"
+    assert p.parent.name == ".sagent"
 
 
-class TestWrite:
-    def test_swallows_exceptions(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SAGENT_DEBUG_LOG", "/proc/0/impossible")
-        debug_log._write("boom", {"x": 1})
+def test_log_path_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "custom.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    assert log_path() == target
 
 
-class TestSummarizeMessages:
-    def test_non_dict(self) -> None:
-        result = debug_log.summarize_messages([42, "hello"])
-        assert result[0] == {"role": "?", "raw": "42"}
-        assert result[1]["role"] == "?"
-        assert cast(str, result[1]["raw"]).startswith("'hello'")
-
-    def test_str_content(self) -> None:
-        result = debug_log.summarize_messages([{"role": "user", "content": "hi there"}])
-        assert result == [{"role": "user", "text": "hi there"}]
-
-    def test_list_content(self) -> None:
-        msgs = [{"role": "assistant", "content": [{"type": "text", "text": "yo"}]}]
-        result = debug_log.summarize_messages(msgs)
-        assert result[0]["role"] == "assistant"
-        assert result[0]["blocks"] == [{"type": "text", "preview": "yo"}]
-
-    def test_other_content(self) -> None:
-        result = debug_log.summarize_messages([{"role": "system", "content": None}])
-        assert result == [{"role": "system", "content": None}]
+def test_trace_gated_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "debug.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    monkeypatch.delenv("SAGENT_DEBUG", raising=False)
+    trace("event", x=1)
+    assert not target.exists()
 
 
-class TestRoleSequence:
-    def test_mixed(self) -> None:
-        msgs: list[object] = [
-            {"role": "user"},
-            {"role": "assistant"},
-            99,
-            {"role": 123},
+def test_trace_writes_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "debug.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    monkeypatch.setenv("SAGENT_DEBUG", "1")
+    trace("hello", x=1, y="z")
+    records = _read_records(target)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["event"] == "hello"
+    assert rec["x"] == 1
+    assert rec["y"] == "z"
+    assert "ts" in rec
+
+
+def test_trace_error_always_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "debug.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    monkeypatch.delenv("SAGENT_DEBUG", raising=False)
+    trace_error("boom", code=400)
+    records = _read_records(target)
+    assert len(records) == 1
+    assert records[0]["event"] == "boom"
+    assert records[0]["code"] == 400
+
+
+def test_trace_does_not_raise_on_unserializable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "debug.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    monkeypatch.setenv("SAGENT_DEBUG", "1")
+    # ``object()`` triggers default=str fallback rather than blowing up.
+    trace("e", obj=object())
+    assert target.exists()
+
+
+def test_summarize_messages_text_string() -> None:
+    out = summarize_messages([{"role": "user", "content": "hello world"}])
+    assert out == [{"role": "user", "text": "hello world"}]
+
+
+def test_summarize_messages_text_truncates() -> None:
+    long = "a" * 500
+    out = summarize_messages([{"role": "user", "content": long}])
+    assert isinstance(out[0]["text"], str)
+    assert len(out[0]["text"]) == 200  # _MAX_PREVIEW
+
+
+def test_summarize_messages_block_text() -> None:
+    out = summarize_messages(
+        [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    )
+    assert out == [{"role": "user", "blocks": [{"type": "text", "preview": "hi"}]}]
+
+
+def test_summarize_messages_block_tool_use() -> None:
+    out = summarize_messages(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "id": "abc"},
+                ],
+            }
         ]
-        assert debug_log.role_sequence(msgs) == ["user", "assistant", "?", "?"]
+    )
+    assert out[0]["blocks"] == [{"type": "tool_use", "name": "Bash", "id": "abc"}]
 
 
-class TestSummarizeBlock:
-    def test_non_mapping(self) -> None:
-        assert debug_log._summarize_block("not a dict") == {"type": "?"}
+def test_summarize_messages_block_tool_result_string() -> None:
+    out = summarize_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "content": "ok", "is_error": False},
+                ],
+            }
+        ]
+    )
+    block = out[0]["blocks"]
+    assert isinstance(block, list)
+    assert block[0] == {
+        "type": "tool_result",
+        "preview": "ok",
+        "is_error": False,
+    }
 
-    def test_text(self) -> None:
-        b: dict[str, object] = {"type": "text", "text": "hello world"}
-        assert debug_log._summarize_block(b) == {
-            "type": "text",
-            "preview": "hello world",
-        }
 
-    def test_text_non_str(self) -> None:
-        b: dict[str, object] = {"type": "text", "text": 12_345}
-        assert debug_log._summarize_block(b) == {"type": "text", "preview": "12345"}
+def test_summarize_messages_block_tool_result_complex() -> None:
+    out = summarize_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": [{"x": 1}],
+                        "is_error": True,
+                    }
+                ],
+            }
+        ]
+    )
+    block = out[0]["blocks"]
+    assert isinstance(block, list)
+    entry = cast("dict[str, object]", block[0])
+    assert entry["is_error"] is True
+    assert isinstance(entry["preview"], str)
 
-    def test_tool_use(self) -> None:
-        b: dict[str, object] = {"type": "tool_use", "name": "grep", "id": "abc"}
-        assert debug_log._summarize_block(b) == {
-            "type": "tool_use",
-            "name": "grep",
-            "id": "abc",
-        }
 
-    def test_tool_result_str(self) -> None:
-        b: dict[str, object] = {
-            "type": "tool_result",
-            "content": "ok",
-            "is_error": False,
-        }
-        assert debug_log._summarize_block(b) == {
-            "type": "tool_result",
-            "preview": "ok",
-            "is_error": False,
-        }
+def test_summarize_messages_block_unknown_type() -> None:
+    out = summarize_messages([{"role": "u", "content": [{"type": "weird", "x": 1}]}])
+    assert out[0]["blocks"] == [{"type": "weird"}]
 
-    def test_tool_result_non_str(self) -> None:
-        b: dict[str, object] = {
-            "type": "tool_result",
-            "content": {"k": "v"},
-            "is_error": True,
-        }
-        result = debug_log._summarize_block(b)
-        assert result["type"] == "tool_result"
-        assert result["is_error"] is True
-        assert json.loads(cast(str, result["preview"])) == {"k": "v"}
 
-    def test_unknown_type(self) -> None:
-        assert debug_log._summarize_block({"type": "image"}) == {"type": "image"}
+def test_summarize_messages_block_not_dict() -> None:
+    out = summarize_messages([{"role": "u", "content": ["not-a-dict"]}])
+    assert out[0]["blocks"] == [{"type": "?"}]
+
+
+def test_summarize_messages_other_content() -> None:
+    out = summarize_messages([{"role": "u", "content": 42}])
+    assert out == [{"role": "u", "content": None}]
+
+
+def test_summarize_messages_non_mapping() -> None:
+    out = summarize_messages(["not a dict"])
+    assert out[0]["role"] == "?"
+    raw = out[0]["raw"]
+    assert isinstance(raw, str)
+
+
+def test_role_sequence_extracts() -> None:
+    msgs = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+        "junk",
+        {"content": "no role"},
+        {"role": 123, "content": "bad role type"},
+    ]
+    assert role_sequence(msgs) == ["user", "assistant", "?", "?", "?"]
 
 
 if __name__ == "__main__":

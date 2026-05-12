@@ -15,13 +15,21 @@ class ModelProfile:
     """Per-model metadata: token limits, pricing, tokenization density."""
 
     max_request_tokens: int
+    """Context window size (max input tokens)."""
+
     max_response_tokens: int
+    """Maximum tokens allowed in a response."""
+
     pricing: Pricing = Pricing()  # noqa: RUF009 -- frozen dataclass, no mutable default risk
+    """Per-token price schedule."""
+
     supports_thinking: bool = True
+    """Whether the model supports thinking/reasoning mode."""
+
     chars_per_token: float = 4.0
-    """Estimator divisor: ``int(len(text) / chars_per_token)``. Default
+    """Estimator divisor for ``int(len(text) / chars_per_token)``. Default
     4.0 matches legacy behavior; override per model when the tokenizer
-    diverges (e.g. opus-4-7 measures 2.83 on mixed code+JSON content)."""
+    diverges (e.g. opus-4-7 measures 2.83 on mixed code+JSON)."""
 
 
 def compute_cost(

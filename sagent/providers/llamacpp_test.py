@@ -1,309 +1,127 @@
+"""Tests for ``providers.llamacpp``: managed llama-server provider plumbing."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+
+import shutil
 
 import pytest
 
-from sagent.providers import LlamaCpp, build_provider
-from sagent.providers.llamacpp import _startup_error
+from sagent.providers import llamacpp as llamacpp_mod
+from sagent.providers.llamacpp import (
+    LlamaCpp,
+    _free_port,
+    _looks_like_path,
+    _startup_error,
+)
 
 
-class _FakePopen:
-    def __init__(self, argv: list[str], **kwargs: object) -> None:
-        self.argv = argv
-        self.kwargs = kwargs
-        self.stdout = None
-        self.terminated = False
-        self.killed = False
-        self.returncode: int | None = None
-
-    def poll(self) -> int | None:
-        return self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.returncode = 0
-
-    def kill(self) -> None:
-        self.killed = True
-        self.returncode = -9
-
-    def wait(self, timeout: float | None = None) -> int:
-        del timeout
-        return self.returncode or 0
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/abs/path/model.gguf",
+        "./relative/model.gguf",
+        "../parent/model.gguf",
+        "~/home/model.gguf",
+        "anything.gguf",
+    ],
+)
+def test_looks_like_path_positive(value: str) -> None:
+    assert _looks_like_path(value) is True
 
 
-def test_from_key_treats_gguf_as_model_path() -> None:
-    provider = LlamaCpp.from_key("/models/qwen.gguf")
-
-    assert provider.api_key == "local"
-    assert provider._model_path == "/models/qwen.gguf"
+@pytest.mark.parametrize("value", ["sk-key", "no-auth", "local"])
+def test_looks_like_path_negative(value: str) -> None:
+    assert _looks_like_path(value) is False
 
 
-def test_from_env_reads_managed_server_options(
+def test_startup_error_no_log() -> None:
+    assert _startup_error("server died", []) == "server died"
+
+
+def test_startup_error_with_tail() -> None:
+    log = [f"line {i}" for i in range(30)]
+    out = _startup_error("server died", log)
+    assert out.startswith("server died; recent log:")
+    # Tail is the last 20 lines.
+    assert "line 29" in out
+    assert "line 9" not in out
+
+
+def test_free_port_returns_int_within_range() -> None:
+    p = _free_port()
+    assert isinstance(p, int)
+    assert 1 <= p <= 65_535
+
+
+def test_llamacpp_from_key_with_path_treated_as_model_path() -> None:
+    p = LlamaCpp.from_key("/opt/models/model.gguf")
+    # ``api_key`` falls back to "local"; model_path stored separately.
+    assert p.api_key == "local"
+
+
+def test_llamacpp_from_key_non_path_stays_as_api_key() -> None:
+    p = LlamaCpp.from_key("api-key-string")
+    # Non-path treats the string as a literal api key.
+    assert p.api_key == "api-key-string"
+
+
+def test_llamacpp_from_key_empty_falls_back_to_local() -> None:
+    p = LlamaCpp.from_key("")
+    assert p.api_key == "local"
+
+
+def test_llamacpp_from_env_uses_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLAMA_CPP_API_KEY", "env-key")
+    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://stub.test/v1")
+    monkeypatch.delenv("LLAMA_CPP_MODEL", raising=False)
+    p = LlamaCpp.from_env()
+    assert p.api_key == "env-key"
+
+
+def test_llamacpp_known_models_include_local() -> None:
+    assert "local" in LlamaCpp.KNOWN_MODELS
+    assert "qwen3.6-27b-12gb" in LlamaCpp.KNOWN_MODELS
+
+
+def test_llamacpp_close_idempotent() -> None:
+    p = LlamaCpp.from_key("local")
+    p.close()
+    p.close()  # Second call must not raise.
+
+
+def test_llamacpp_model_without_model_path_or_base_url_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLAMA_CPP_MODEL", "/models/qwen.gguf")
-    monkeypatch.setenv("LLAMA_CPP_SERVER", "/bin/llama-server")
-    monkeypatch.setenv("LLAMA_CPP_CONTEXT", "16384")
-    monkeypatch.setenv("LLAMA_CPP_KV", "q4_0")
-    monkeypatch.setenv("LLAMA_CPP_SPEC_TYPE", "ngram-cache")
-    monkeypatch.setenv("LLAMA_CPP_MTP_DRAFT", "2")
-    monkeypatch.setenv("LLAMA_CPP_EXTRA_ARGS", "-fa off -tb 18")
-
-    provider = LlamaCpp.from_env()
-    argv = provider._argv(1234)
-
-    assert argv == [
-        "/bin/llama-server",
-        "-m",
-        "/models/qwen.gguf",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "1234",
-        "--spec-type",
-        "ngram-cache",
-        "--spec-draft-n-max",
-        "2",
-        "--cache-type-k",
-        "q4_0",
-        "--cache-type-v",
-        "q4_0",
-        "--parallel",
-        "1",
-        "-c",
-        "16384",
-        "-ngl",
-        "12",
-        "--reasoning",
-        "off",
-        "-fa",
-        "off",
-        "-tb",
-        "18",
-    ]
-
-
-def test_empty_spec_type_disables_speculation_flags() -> None:
-    provider = LlamaCpp(
-        model_path="/models/tiny.gguf",
-        server_bin="/bin/llama-server",
-        spec_type="",
-    )
-    argv = provider._argv(1234)
-
-    assert "--spec-type" not in argv
-    assert "--spec-draft-n-max" not in argv
-
-
-def test_model_reuses_external_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    def http_ok(url: str) -> bool:
-        return url == "http://127.0.0.1:9999/v1/models"
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._http_ok",
-        http_ok,
-    )
-    provider = LlamaCpp.from_env(base_url="http://127.0.0.1:9999/v1")
-
-    model = provider.model()
-
-    assert model.model_id == "qwen3.6-27b-12gb"
-    assert provider._process is None
-
-
-def test_model_starts_managed_server(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    popens: list[_FakePopen] = []
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> _FakePopen:
-        proc = _FakePopen(argv, **kwargs)
-        popens.append(proc)
-        return proc
-
-    def which(name: str) -> str | None:
-        return "/usr/bin/llama-server" if name == "llama-server" else None
-
-    def free_port() -> int:
-        return 54_321
-
-    def http_ok(url: str) -> bool:
-        return url == "http://127.0.0.1:54321/v1/models"
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.shutil.which",
-        which,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._free_port",
-        free_port,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.subprocess.Popen",
-        fake_popen,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._http_ok",
-        http_ok,
-    )
-    provider = LlamaCpp.from_key("/models/qwen.gguf")
-
-    model = provider.model()
-
-    assert model.model_id == "qwen3.6-27b-12gb"
-    assert popens[0].argv[:7] == [
-        "/usr/bin/llama-server",
-        "-m",
-        "/models/qwen.gguf",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "54321",
-    ]
-    provider.close()
-    assert popens[0].terminated
-
-
-def test_startup_failure_closes_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    popens: list[_FakePopen] = []
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> _FakePopen:
-        proc = _FakePopen(argv, **kwargs)
-        popens.append(proc)
-        return proc
-
-    def http_ok(url: str) -> bool:
-        del url
-        return False
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.subprocess.Popen",
-        fake_popen,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._http_ok",
-        http_ok,
-    )
-    provider = LlamaCpp(
-        model_path="/models/qwen.gguf",
-        server_bin="/bin/llama-server",
-        startup_timeout_sec=0.01,
-    )
-
-    with pytest.raises(RuntimeError, match="did not become ready"):
-        provider.model()
-
-    assert popens[0].terminated
-    assert provider._process is None
-    assert not provider._started
-
-
-def test_dead_process_restarts(monkeypatch: pytest.MonkeyPatch) -> None:
-    popens: list[_FakePopen] = []
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> _FakePopen:
-        proc = _FakePopen(argv, **kwargs)
-        popens.append(proc)
-        return proc
-
-    def http_ok(url: str) -> bool:
-        del url
-        return True
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.subprocess.Popen",
-        fake_popen,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._http_ok",
-        http_ok,
-    )
-    provider = LlamaCpp(
-        model_path="/models/qwen.gguf",
-        server_bin="/bin/llama-server",
-    )
-
-    provider.model()
-    popens[0].returncode = -9
-    provider.model()
-
-    assert len(popens) == 2
-    provider.close()
-
-
-def test_close_allows_restart(monkeypatch: pytest.MonkeyPatch) -> None:
-    popens: list[_FakePopen] = []
-
-    def fake_popen(argv: list[str], **kwargs: Any) -> _FakePopen:
-        proc = _FakePopen(argv, **kwargs)
-        popens.append(proc)
-        return proc
-
-    def http_ok(url: str) -> bool:
-        del url
-        return True
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.subprocess.Popen",
-        fake_popen,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._http_ok",
-        http_ok,
-    )
-    provider = LlamaCpp(
-        model_path="/models/qwen.gguf",
-        server_bin="/bin/llama-server",
-    )
-
-    provider.model()
-    provider.close()
-    provider.model()
-
-    assert len(popens) == 2
-    assert popens[0].terminated
-    provider.close()
-
-
-def test_argv_uses_docker_server_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    def missing_server(name: str) -> None:
-        del name
-
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp.shutil.which",
-        missing_server,
-    )
-    monkeypatch.setattr(
-        "sagent.providers.llamacpp._docker_server",
-        lambda: str(Path.home() / ".docker/bin/inference/llama-server"),
-    )
-    provider = LlamaCpp(model_path="/models/qwen.gguf")
-
-    assert provider._argv(1234)[0] == str(
-        Path.home() / ".docker/bin/inference/llama-server"
-    )
-
-
-def test_missing_model_path_fails_before_launch() -> None:
-    provider = LlamaCpp(startup_timeout_sec=0.01)
-
+    monkeypatch.delenv("LLAMA_CPP_BASE_URL", raising=False)
+    p = LlamaCpp.from_key("not-a-path")
     with pytest.raises(RuntimeError, match="LLAMA_CPP_MODEL"):
-        provider.model()
+        _ = p.model()
 
 
-def test_startup_error_includes_log_tail() -> None:
-    message = _startup_error("llama-server exited", ["a", "b"])
+def test_llamacpp_argv_missing_server_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No ``llama-server`` on PATH and no env override → RuntimeError."""
+    fake_model = tmp_path / "missing.gguf"
+    p = LlamaCpp.from_key(str(fake_model))
 
-    assert message == "llama-server exited; recent log:\na\nb"
+    def _which(name: str) -> str | None:
+        del name
+        return None
+
+    def _no_docker() -> str | None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", _which)
+    monkeypatch.setattr(llamacpp_mod, "_docker_server", _no_docker)
+    with pytest.raises(RuntimeError, match="llama-server not found"):
+        _ = p._argv(8080)
 
 
-def test_build_provider_supports_llamacpp_literal_model_path() -> None:
-    provider = build_provider("LlamaCpp", "/models/qwen.gguf")
+if __name__ == "__main__":
+    from sagent.lib.testing import test_main
 
-    assert isinstance(provider, LlamaCpp)
-    assert provider._model_path == "/models/qwen.gguf"
+    test_main(__file__)

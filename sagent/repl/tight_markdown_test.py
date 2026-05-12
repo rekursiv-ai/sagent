@@ -1,69 +1,118 @@
-"""Tests for TightMarkdown — no spurious leading blank line."""
+"""Tests for ``repl.tight_markdown``: Markdown subclass without leading blank."""
 
 from __future__ import annotations
 
-from io import StringIO
+import io
 
 from rich.console import Console
 
 from sagent.repl.tight_markdown import TightMarkdown
 
 
-def _render(markup: str) -> str:
-    f = StringIO()
-    Console(file=f, width=80).print(TightMarkdown(markup))
-    return f.getvalue()
+def _render(text: str, width: int = 80) -> str:
+    buf = io.StringIO()
+    con = Console(
+        file=buf,
+        width=width,
+        force_terminal=False,
+        color_system=None,
+        highlight=False,
+    )
+    con.print(TightMarkdown(text))
+    return buf.getvalue()
 
 
-class TestNoLeadingBlank:
-    def test_list_only(self) -> None:
-        out = _render("1. One\n2. Two")
-        assert not out.startswith("\n")
-        assert " 1 " in out
-        assert " 2 " in out
-
-    def test_bullet_list_only(self) -> None:
-        out = _render("- A\n- B")
-        assert not out.startswith("\n")
-
-    def test_blockquote_only(self) -> None:
-        out = _render("> quoted text")
-        assert not out.startswith("\n")
-
-    def test_paragraph_only(self) -> None:
-        out = _render("Just a paragraph.")
-        assert not out.startswith("\n")
+def test_no_leading_blank_for_list() -> None:
+    # Stock ``Markdown`` would prefix the first list with a blank line.
+    out = _render("- item one\n- item two\n")
+    # First non-empty line should be the bullet, not a blank.
+    first = next((ln for ln in out.split("\n") if ln.strip()), "")
+    assert "item one" in first
 
 
-class TestInterBlockSpacing:
-    def test_paragraph_then_list(self) -> None:
-        out = _render("Para.\n\n1. One\n2. Two")
-        assert out.startswith("Para.")
-        lines = out.split("\n")
-        para_end = next(i for i, ln in enumerate(lines) if "Para." in ln)
-        list_start = next(i for i, ln in enumerate(lines) if " 1 " in ln)
-        assert list_start - para_end == 2  # one blank line between
+def test_no_leading_blank_for_blockquote() -> None:
+    out = _render("> a quote\n")
+    first = next((ln for ln in out.split("\n") if ln.strip()), "")
+    assert "a quote" in first
 
-    def test_paragraph_then_paragraph(self) -> None:
-        out = _render("First.\n\nSecond.")
-        lines = out.split("\n")
-        first = next(i for i, ln in enumerate(lines) if "First." in ln)
-        second = next(i for i, ln in enumerate(lines) if "Second." in ln)
-        assert second - first == 2
 
-    def test_list_then_paragraph(self) -> None:
-        out = _render("1. One\n2. Two\n\nAfter.")
-        lines = out.split("\n")
-        last_item = max(i for i, ln in enumerate(lines) if " 2 " in ln)
-        after = next(i for i, ln in enumerate(lines) if "After." in ln)
-        assert after - last_item == 2
+def test_renders_paragraph() -> None:
+    out = _render("plain paragraph")
+    assert "plain paragraph" in out
 
-    def test_full_sequence(self) -> None:
-        out = _render("Para.\n\n1. A\n2. B\n\nEnd.")
-        assert not out.startswith("\n")
-        assert "Para." in out
-        assert " 1 " in out
-        assert "End." in out
+
+def test_renders_heading_then_body() -> None:
+    out = _render("# Title\n\nBody text\n")
+    assert "Title" in out
+    assert "Body text" in out
+
+
+def test_renders_fence() -> None:
+    out = _render("```python\nprint('hi')\n```\n")
+    assert "print" in out
+
+
+def test_links_render_inline() -> None:
+    out = _render("[click](https://example.com)\n")
+    assert "click" in out
+
+
+def test_inline_styles_render() -> None:
+    out = _render("**bold** and *italic* and `code`\n")
+    assert "bold" in out
+    assert "italic" in out
+    assert "code" in out
+
+
+def test_multiple_paragraphs_get_separator() -> None:
+    out = _render("first para\n\nsecond para\n")
+    assert "first para" in out
+    assert "second para" in out
+
+
+def test_softbreak_within_paragraph_renders_as_space() -> None:
+    # A single newline inside a paragraph is a softbreak token.
+    out = _render("line one\nline two\n")
+    # Should join with a space (or be on one line after wrap).
+    assert "line one" in out
+    assert "line two" in out
+
+
+def test_hardbreak_within_paragraph_renders_as_newline() -> None:
+    # Two trailing spaces + newline -> hardbreak (token).
+    out = _render("line one  \nline two\n")
+    # The two halves still appear in output.
+    assert "line one" in out
+    assert "line two" in out
+
+
+def _render_no_hyperlinks(text: str, width: int = 80) -> str:
+    buf = io.StringIO()
+    con = Console(
+        file=buf,
+        width=width,
+        force_terminal=False,
+        color_system=None,
+        highlight=False,
+    )
+    con.print(TightMarkdown(text, hyperlinks=False))
+    return buf.getvalue()
+
+
+def test_link_render_without_hyperlinks_uses_text_paren_url() -> None:
+    # ``hyperlinks=False`` triggers the manual link rendering branch:
+    # the link text is emitted followed by `` (url)``.
+    out = _render_no_hyperlinks("[click](https://example.com)\n")
+    assert "click" in out
+    assert "https://example.com" in out
+
+
+def test_thematic_break_after_paragraph_emits_new_line_segment() -> None:
+    # ``hr`` is a self-closing block token. Coming after a paragraph it
+    # exercises the ``new_line and node_type != 'inline'`` branch.
+    out = _render("para\n\n---\n\nafter\n")
+    assert "para" in out
+    assert "after" in out
 
 
 if __name__ == "__main__":

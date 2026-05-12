@@ -1,98 +1,67 @@
-"""Tests for ``CostTracker`` -- the single cost store."""
+"""Tests for ``agent.cost_tracker``: per-session cost accounting."""
 
 from __future__ import annotations
 
 import pytest
 
 from sagent.agent.cost_tracker import CostTracker
-from sagent.custom_types import (
-    Message,
-    ModelResponse,
-    MultipartMessage,
-    TokenCount,
-)
+from sagent.agent.runtime import AssistantMessage
+from sagent.custom_types import ModelResponse, TokenCount
 
 
-def _empty_message() -> Message:
-    return MultipartMessage((), "multipart/x-model-message")
-
-
-def _response(
-    *,
-    input_tokens: int,
-    output_tokens: int,
-    total_cost: float,
-) -> ModelResponse:
+def _make_response(*, total_cost: float = 0.0, **tokens: int) -> ModelResponse:
+    """Build a ``ModelResponse`` with explicit token counts + cost."""
     return ModelResponse(
-        content=_empty_message(),
-        tokens=TokenCount(input_tokens=input_tokens, output_tokens=output_tokens),
+        message=AssistantMessage(text="x"),
+        tokens=TokenCount(**tokens),
         total_cost=total_cost,
     )
 
 
-class TestRecord:
-    def test_accumulates_tokens_and_cost(self) -> None:
-        tracker = CostTracker()
-        tracker.record(
-            _response(input_tokens=10, output_tokens=5, total_cost=0.10),
-            model_id="m",
-        )
-        tracker.record(
-            _response(input_tokens=20, output_tokens=8, total_cost=0.20),
-            model_id="m",
-        )
-        assert tracker.total.input_tokens == 30
-        assert tracker.total.output_tokens == 13
-        assert tracker.total_cost_usd == pytest.approx(0.30)
-
-    def test_per_model_call_counts(self) -> None:
-        tracker = CostTracker()
-        tracker.record(
-            _response(input_tokens=1, output_tokens=1, total_cost=0.0),
-            model_id="m1",
-        )
-        tracker.record(
-            _response(input_tokens=1, output_tokens=1, total_cost=0.0),
-            model_id="m1",
-        )
-        tracker.record(
-            _response(input_tokens=1, output_tokens=1, total_cost=0.0),
-            model_id="m2",
-        )
-        assert tracker.calls_by_model == {"m1": 2, "m2": 1}
-
-    def test_last_request_overwrites_per_call(self) -> None:
-        tracker = CostTracker()
-        tracker.record(
-            _response(input_tokens=10, output_tokens=5, total_cost=0.10),
-            model_id="m",
-        )
-        tracker.record(
-            _response(input_tokens=20, output_tokens=8, total_cost=0.20),
-            model_id="m",
-        )
-        # last_request reflects only the most recent call, not the sum.
-        assert tracker.last_request.input_tokens == 20
-        assert tracker.last_request.output_tokens == 8
+def test_cost_tracker_defaults() -> None:
+    t = CostTracker()
+    assert t.total_cost_usd == 0.0
+    assert isinstance(t.total, TokenCount)
+    assert isinstance(t.last_request, TokenCount)
+    assert t.calls_by_model == {}
 
 
-class TestRestore:
-    def test_overwrites_cumulative_totals(self) -> None:
-        """``restore`` is the disk-resume hook: overwrites totals from a
-        persisted session before any new ``record`` calls are layered.
-        """
-        tracker = CostTracker()
-        tracker.record(
-            _response(input_tokens=999, output_tokens=999, total_cost=99.0),
-            model_id="m",
-        )
-        tracker.restore(
-            total_cost_usd=1.50,
-            total=TokenCount(input_tokens=100, output_tokens=50),
-        )
-        assert tracker.total_cost_usd == pytest.approx(1.50)
-        assert tracker.total.input_tokens == 100
-        assert tracker.total.output_tokens == 50
+def test_cost_tracker_record_accumulates_cost() -> None:
+    t = CostTracker()
+    t.record(_make_response(total_cost=0.10), model_id="m1")
+    t.record(_make_response(total_cost=0.25), model_id="m1")
+    assert t.total_cost_usd == pytest.approx(0.35)
+
+
+def test_cost_tracker_record_counts_calls_per_model() -> None:
+    t = CostTracker()
+    t.record(_make_response(), model_id="a")
+    t.record(_make_response(), model_id="a")
+    t.record(_make_response(), model_id="b")
+    assert t.calls_by_model == {"a": 2, "b": 1}
+
+
+def test_cost_tracker_record_updates_last_request() -> None:
+    t = CostTracker()
+    r = _make_response(total_cost=0.5)
+    t.record(r, model_id="m")
+    assert t.last_request is r.tokens
+
+
+def test_cost_tracker_record_updates_last_response_time() -> None:
+    t = CostTracker()
+    before = t.last_response_time
+    t.record(_make_response(), model_id="m")
+    assert t.last_response_time >= before
+
+
+def test_cost_tracker_restore_overwrites_totals() -> None:
+    t = CostTracker()
+    t.record(_make_response(total_cost=0.10), model_id="m")
+    persisted_total = TokenCount()
+    t.restore(total_cost_usd=99.0, total=persisted_total)
+    assert t.total_cost_usd == 99.0
+    assert t.total is persisted_total
 
 
 if __name__ == "__main__":

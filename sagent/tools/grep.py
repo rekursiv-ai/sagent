@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -13,9 +13,8 @@ import shutil
 import subprocess
 import sys
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
@@ -29,7 +28,6 @@ from sagent.tools.lib.bash import (
 
 
 logger = logging.getLogger(__name__)
-
 
 # File type extensions for grep --type filter.
 _TYPE_GLOBS: dict[str, list[str]] = {
@@ -52,7 +50,6 @@ _TYPE_GLOBS: dict[str, list[str]] = {
 
 # Try ripgrep first, fall back to Python.
 _RG_PATH = shutil.which("rg")
-
 
 # Short grep flags whose semantics we know how to express via the
 # Grep tool's schema. Bundled forms (``-rln``) are split char-by-char
@@ -186,31 +183,37 @@ class Grep:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Parsed tool directive mapping.
 
         Returns:
-          label: Human-readable summary with pattern and path.
+          label: Compact one-line label for renderer display.
 
         """
-        directive = get_directive(msg)
-        pattern = str(directive.get("pattern", ""))
-        path = str(directive.get("path", "")) or "."
+        pattern = str(args.get("pattern", ""))
+        path = str(args.get("path", "")) or "."
         if len(pattern) > 40:
             pattern = pattern[:37] + "..."
         suffix = f" in {path}" if path != "." else ""
         return f"Grep {pattern!r}{suffix}"
 
-    def summary_result(self, result: Message) -> str | None:
-        """One-line receipt: hit count."""
-        if not self.emit_tool_summary:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Return a one-line receipt with the hit count.
+
+        Args:
+          result: The completed ``ToolResult``.
+
+        Returns:
+          receipt: Hit-count receipt, or ``None`` when summaries are
+            disabled or the result is an error.
+
+        """
+        if not self.emit_tool_summary or result.is_error:
             return None
-        if result.descriptor != "text/plain":
-            return None
-        text = str(result.content).strip()
+        text = result.content.strip()
         if not text or text.startswith("(no matches"):
             return "no matches"
         # Output is one match per line; line count == match count for
@@ -221,22 +224,22 @@ class Grep:
         """Return supplemental prompt text for this tool.
 
         Returns:
-          prompt: Always empty.
+          text: Supplemental prompt text; empty for Grep.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Search for a regex pattern in files and return matches.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Parsed tool directive mapping.
 
         Returns:
-          result: Tool result Message with matching lines or filenames.
+          result: ``ToolResult`` carrying matches (or counts/filenames)
+            per ``output_mode``.
 
         """
-        directive = get_directive(msg)
         # Extract known params explicitly; everything else flows through
         # as **kwargs (-B/-A/-C/-i/glob/type/pcre/exclude/context).
         known = {
@@ -248,19 +251,16 @@ class Grep:
             "offset",
             "multiline",
         }
-        kwargs: dict[str, object] = {
-            k: v for k, v in directive.items() if k not in known
-        }
+        kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
         return await run_sync(
             self._run,
-            parent_id=msg.id,
-            pattern=str(directive.get("pattern", "")),
-            path=str(directive.get("path", ".")),
-            output_mode=str(directive.get("output_mode", "files_with_matches")),
-            keep_first=int_val(directive.get("keep_first"), 250),
-            keep_last=int_val(directive.get("keep_last"), 0),
-            offset=int_val(directive.get("offset"), 0),
-            multiline=bool_val(directive.get("multiline"), False),
+            pattern=str(args.get("pattern", "")),
+            path=str(args.get("path", ".")),
+            output_mode=str(args.get("output_mode", "files_with_matches")),
+            keep_first=int_val(args.get("keep_first"), 250),
+            keep_last=int_val(args.get("keep_last"), 0),
+            offset=int_val(args.get("offset"), 0),
+            multiline=bool_val(args.get("multiline"), False),
             **kwargs,
         )
 
@@ -275,7 +275,8 @@ class Grep:
         offset: int = 0,
         multiline: bool = False,
         **kwargs: object,  # Non-identifier params: -B, -A, -C, -i, glob, type
-    ) -> str | TextMessage:
+    ) -> str | ToolResult:
+        """Dispatch the grep search to ripgrep or the Python fallback."""
         glob_filter = _kw_str(kwargs, "glob", "glob_filter")
         file_type = _kw_str(kwargs, "type", "file_type")
         exclude = _kw_str(kwargs, "exclude")
@@ -336,10 +337,10 @@ class Grep:
         - ``cat FILE | grep PATTERN`` (pipeline)
 
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bash command-trees from the Bash directive.
 
         Returns:
-          nudge: Suggested Grep invocation, or ``None`` if no match.
+          nudge: Suggestion text when the shape is replaceable, else ``None``.
 
         """
         single = _match_single_grep(trees)
@@ -359,6 +360,7 @@ class Grep:
 def _kw_str(
     kwargs: dict[str, object], key: str, *fallbacks: str, default: str = ""
 ) -> str:
+    """Coerce the first non-None kwargs entry among aliases to a string."""
     for k in (key, *fallbacks):
         v = kwargs.get(k)
         if v is not None:
@@ -369,6 +371,7 @@ def _kw_str(
 def _kw_int(
     kwargs: dict[str, object], key: str, *fallbacks: str, default: int = 0
 ) -> int:
+    """Coerce the first non-None kwargs entry among aliases to an int."""
     for k in (key, *fallbacks):
         v = kwargs.get(k)
         if v is not None:
@@ -379,6 +382,7 @@ def _kw_int(
 def _kw_bool(
     kwargs: dict[str, object], key: str, *fallbacks: str, default: bool = False
 ) -> bool:
+    """Coerce the first non-None kwargs entry among aliases to a bool."""
     for k in (key, *fallbacks):
         v = kwargs.get(k)
         if v is not None:
@@ -577,7 +581,7 @@ def _grep_rg(
     show_line_numbers: bool,
     multiline: bool,
     offset: int,
-) -> str | TextMessage:
+) -> str | ToolResult:
     """Grep using ripgrep."""
     if offset > 0 and (context_before > 0 or context_after > 0):
         logger.warning("grep: offset ignored when context lines are requested")
@@ -605,9 +609,10 @@ def _grep_rg(
     )
     if result.returncode >= 2:
         err = result.stderr.strip() or "unknown"
-        return TextMessage(
-            f"ripgrep error (exit {result.returncode}): {err}",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=f"ripgrep error (exit {result.returncode}): {err}",
+            is_error=True,
         )
     lines = result.stdout.strip().split("\n")
     if keep_last > 0:
@@ -710,6 +715,7 @@ class _GrepState:
 
     @property
     def full(self) -> bool:
+        """Whether ``len(matches)`` has reached ``max_results``."""
         return len(self.matches) >= self.max_results
 
     def _skip(self) -> bool:
@@ -720,7 +726,14 @@ class _GrepState:
         return False
 
     def process_multiline(self, pat: re.Pattern[str], text: str, filepath: str) -> None:
-        """Accumulate matches for one file in multiline mode."""
+        """Accumulate matches for one file in multiline mode.
+
+        Args:
+          pat: Compiled regex applied to the full file body.
+          text: File contents (entire text used for cross-line matches).
+          filepath: Path string used in result lines.
+
+        """
         found = list(pat.finditer(text))
         if not found:
             return
@@ -748,7 +761,14 @@ class _GrepState:
         lines: list[str],
         filepath: str,
     ) -> None:
-        """Accumulate matches for one file in line-by-line mode."""
+        """Accumulate matches for one file in line-by-line mode.
+
+        Args:
+          pat: Compiled regex applied per-line.
+          lines: Pre-split file contents (one entry per line).
+          filepath: Path string used in result lines.
+
+        """
         file_match_count = 0
         for i, line in enumerate(lines):
             if not pat.search(line):
@@ -787,7 +807,16 @@ class _GrepState:
             self.matches.append(f"{filepath}:{i + 1}:{line}")
 
     def format(self, *, keep_last: int) -> str:
-        """Return final output string."""
+        """Return final output string.
+
+        Args:
+          keep_last: Keep only the trailing ``keep_last`` lines/entries
+              (``0`` disables truncation).
+
+        Returns:
+          text: Newline-joined output, or ``(no matches)`` when empty.
+
+        """
         if self.output_mode == "count":
             items = list(self.file_counts.items())
             if keep_last > 0:

@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import argparse
 import asyncio
@@ -75,33 +75,23 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx
 
 from sagent.agent import Agent
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ModelResponseError,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
+)
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     parse_agent_args,
     resolve_tools,
 )
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import (
-    ChildDoneEvent,
-    ChildEvent,
-    InterruptedEvent,
-    IrrecoverableErrorEvent,
-    JsonMessage,
-    Message,
-    ModelSpec,
-    MultipartMessage,
-    RecoverableErrorEvent,
-    StatusUpdateEvent,
-    TextChunkEvent,
-    TextMessage,
-    ThinkingEvent,
-    ToolLabelEvent,
-    ToolResultEvent,
-    UserBarEvent,
-    is_message,
-)
-from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import MutableJSON, json_freeze
+from sagent.custom_types import ModelSpec
+from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
@@ -113,7 +103,6 @@ if TYPE_CHECKING:
 
     from sagent.custom_types import Model
 
-
 logger = logging.getLogger(__name__)
 
 _AGENT_TOOL_NAMES = [
@@ -121,10 +110,8 @@ _AGENT_TOOL_NAMES = [
 ]
 
 
-# -- Slack helpers ---------------------------------------------------------
-
-
 def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
+    """Pull the inner ``event`` dict from a Socket Mode envelope."""
     if not isinstance(payload, dict):
         return None
     ev = payload.get("event")
@@ -134,12 +121,14 @@ def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
 
 
 def _strip_mention(text: str, self_user_id: str) -> str:
+    """Remove the bot's ``<@U...>`` mention from text."""
     if not self_user_id:
         return text.strip()
     return text.replace(f"<@{self_user_id}>", "").strip()
 
 
 def _extract_agent_mention(text: str) -> str | None:
+    """Return the agent label that ``text`` opens with, or ``None``."""
     for word in text.split():
         clean = word.rstrip(",:;.!?")
         if not clean:
@@ -154,14 +143,13 @@ def _extract_agent_mention(text: str) -> str | None:
     return None
 
 
-# -- Session persistence ---------------------------------------------------
-
-
 def _manifest_path(session_dir: Path) -> Path:
+    """Return the manifest.json path inside a session directory."""
     return session_dir / "manifest.json"
 
 
 def _new_session_dir(root: Path) -> Path:
+    """Create a timestamped session directory under ``root``."""
     name = _time.strftime("%Y%m%d_%H%M%S")
     d = root / name
     d.mkdir(parents=True, exist_ok=True)
@@ -169,6 +157,7 @@ def _new_session_dir(root: Path) -> Path:
 
 
 def _latest_session_dir(root: Path) -> Path | None:
+    """Return the most recently modified session directory under ``root``."""
     if not root.is_dir():
         return None
     candidates = sorted(
@@ -183,14 +172,16 @@ def _save_manifest(
     session_dir: Path,
     agents: dict[str, dict[str, str]],
 ) -> None:
+    """Persist ``{label: {persona, system}}`` to ``manifest.json``."""
     session_dir.mkdir(parents=True, exist_ok=True)
-    _manifest_path(session_dir).write_text(
+    _ = _manifest_path(session_dir).write_text(
         json.dumps(agents, indent=2),
         encoding="utf-8",
     )
 
 
 def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
+    """Load ``{label: {persona, system}}`` from ``manifest.json``."""
     path = _manifest_path(session_dir)
     if not path.exists():
         return {}
@@ -204,10 +195,17 @@ def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
     return result
 
 
-# -- Persona loading -------------------------------------------------------
-
-
 def load_persona(persona_dir: Path, persona_name: str) -> str:
+    """Load a persona markdown file, falling back to ``default.md``.
+
+    Args:
+      persona_dir: Directory containing persona ``.md`` files.
+      persona_name: Stem name of the persona file to load.
+
+    Returns:
+      persona_text: Persona content, or a synthesised fallback string.
+
+    """
     path = persona_dir / f"{persona_name}.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
@@ -218,12 +216,10 @@ def load_persona(persona_dir: Path, persona_name: str) -> str:
 
 
 def _list_personas(persona_dir: Path) -> list[str]:
+    """List available persona names (stems of ``.md`` files)."""
     if not persona_dir.is_dir():
         return []
     return sorted(p.stem for p in persona_dir.glob("*.md"))
-
-
-# -- Agent-aware Slack tool ------------------------------------------------
 
 
 class _AgentSlack(Slack):
@@ -231,6 +227,7 @@ class _AgentSlack(Slack):
 
     @override
     def prompt(self) -> str:
+        """Return tool-prompt text listing peer agents this one can @-mention."""
         others = sorted(k for k in agent_registry if k != self._username)
         if not others:
             return ""
@@ -239,9 +236,6 @@ class _AgentSlack(Slack):
             f"Active agents you can message by @-mentioning at the start"
             f" of your Slack message: {names}"
         )
-
-
-# -- Slack adapter ---------------------------------------------------------
 
 
 class SlackAdapter:
@@ -293,10 +287,12 @@ class SlackAdapter:
 
     @property
     def bot_user_id(self) -> str:
+        """Return the bot's Slack user ID."""
         return self._self_user_id
 
     @property
     def bot_token(self) -> str:
+        """Return the Slack bot token."""
         return self._bot_token
 
     async def _resolve_user(self, user_id: str) -> str:
@@ -329,6 +325,7 @@ class SlackAdapter:
             task.add_done_callback(self._bg_tasks.discard)
 
     async def start(self) -> None:
+        """Connect to Socket Mode and listen for events until cancelled."""
         auth_test = cast(Callable[[], Awaitable[object]], self._web.auth_test)
         auth = cast(MutableJSON, await auth_test())
         self._self_user_id = str(auth.get("user_id", ""))
@@ -353,13 +350,12 @@ class SlackAdapter:
             return
         # Create it.
         result = await self._slack.create_channel(name)
-        if is_message(result):
+        if isinstance(result, ToolResult):
             logger.warning("Could not create/find #%s: %s", name, result.content)
             self._router_log_channel = ""
             return
-        result_str = str(result)
-        if result_str.startswith("id="):
-            self._router_log_channel = result_str[3:]
+        if result.startswith("id="):
+            self._router_log_channel = result[3:]
             logger.info(
                 "Created router log channel: #%s (%s)", name, self._router_log_channel
             )
@@ -371,6 +367,7 @@ class SlackAdapter:
         client: AsyncBaseSocketModeClient,
         req: SocketModeRequest,
     ) -> None:
+        """Ack the Socket Mode request and dispatch the event to ``_route``."""
         await client.send_socket_mode_response(
             SocketModeResponse(envelope_id=req.envelope_id),
         )
@@ -386,6 +383,7 @@ class SlackAdapter:
             logger.exception("Error routing event: %s", event.get("type"))
 
     async def _route(self, event: MutableJSON) -> None:
+        """Route one Slack event to its target agent or to a command handler."""
         if event.get("user") == self._self_user_id:
             return
 
@@ -435,9 +433,8 @@ class SlackAdapter:
             owner = self._log_channel_owners[channel]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] log-channel {clean[:200]}")
-                agent_registry[owner].inbox.send(
-                    TextMessage(formatted, "text/x-user-message"),
-                    source=f"slack:{user}",
+                agent_registry[owner].runtime.inbox.push_back(
+                    UserMessage(text=formatted),
                 )
             return
 
@@ -448,9 +445,8 @@ class SlackAdapter:
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
             self._log_route(f"[{user}->{target}] mention {clean[:200]}")
-            agent_registry[target].inbox.send(
-                TextMessage(formatted, "text/x-user-message"),
-                source=f"slack:{user}",
+            agent_registry[target].runtime.inbox.push_back(
+                UserMessage(text=formatted),
             )
             return
 
@@ -460,9 +456,8 @@ class SlackAdapter:
             owner = self._thread_owners[thread_key]
             if owner in agent_registry and owner != sender_agent:
                 self._log_route(f"[{user}->{owner}] thread {clean[:200]}")
-                agent_registry[owner].inbox.send(
-                    TextMessage(formatted, "text/x-user-message"),
-                    source=f"slack:{user}",
+                agent_registry[owner].runtime.inbox.push_back(
+                    UserMessage(text=formatted),
                 )
                 return
 
@@ -481,9 +476,8 @@ class SlackAdapter:
         if len(agents) == 1:
             self._thread_owners[(channel, thread_ts)] = agents[0]
             self._log_route(f"[{user}->{agents[0]}] default {clean[:200]}")
-            agent_registry[agents[0]].inbox.send(
-                TextMessage(formatted, "text/x-user-message"),
-                source=f"slack:{user}",
+            agent_registry[agents[0]].runtime.inbox.push_back(
+                UserMessage(text=formatted),
             )
             return
 
@@ -549,9 +543,8 @@ class SlackAdapter:
             formatted = f"{source} {user} reacted with :{reaction}: to your message"
 
         self._log_route(f"[{user}->{agent_name}] reaction :{reaction}:")
-        agent_registry[agent_name].inbox.send(
-            TextMessage(formatted, "text/x-user-message"),
-            source=f"slack:{user}",
+        agent_registry[agent_name].runtime.inbox.push_back(
+            UserMessage(text=formatted),
         )
 
     # -- Command handling --------------------------------------------------
@@ -562,6 +555,7 @@ class SlackAdapter:
         channel: str,
         thread_ts: str,
     ) -> bool:
+        """Dispatch ``text`` as a slash-free command; return True if handled."""
         parts = text.split()
         if not parts:
             return False
@@ -632,6 +626,13 @@ class SlackAdapter:
         label: str,
         system_text: str,
     ) -> None:
+        """Create a persistent child agent under ``label`` with the given persona.
+
+        Args:
+          label: Unique agent name registered in ``agent_registry``.
+          system_text: System prompt that defines the agent's identity.
+
+        """
         base_tools = resolve_tools(_AGENT_TOOL_NAMES)
         tools = [*base_tools, _AgentSlack(token=self._bot_token, username=label)]
         child = Agent(
@@ -653,36 +654,35 @@ class SlackAdapter:
         self._active_agents[label] = {"persona": "custom", "system": system_text}
         _save_manifest(self._session_dir, self._active_agents)
 
-        events: asyncio.Queue[Message | None] = asyncio.Queue()
+        log_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        async def _run_child(
-            c: Agent = child,
-            e: asyncio.Queue[Message | None] = events,
-        ) -> None:
+        async def _run_child(c: Agent = child) -> None:
             try:
-                fwd = _make_event_forwarder(e)
-                c.observers.append(fwd)
+                fwd = _make_log_forwarder(log_queue)
+                c.runtime.observers.append(fwd)
                 try:
                     await c.serve_forever()
                 finally:
-                    if fwd in c.observers:
-                        c.observers.remove(fwd)
-                    e.put_nowait(None)
+                    if fwd in c.runtime.observers:
+                        c.runtime.observers.remove(fwd)
+                    log_queue.put_nowait(None)
             finally:
-                agent_registry.pop(c.name, None)
+                _ = agent_registry.pop(c.name, None)
 
         self._tasks.append(asyncio.create_task(_run_child()))
-        self._tasks.append(asyncio.create_task(log_tap(events, label, self)))
+        self._tasks.append(asyncio.create_task(log_tap(log_queue, label, self)))
 
     def stop_agent(self, label: str) -> None:
+        """Shut down the agent registered under ``label`` and persist manifest."""
         agent = agent_registry.get(label)
-        if agent:
-            agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
-        self._active_agents.pop(label, None)
+        if agent is not None and isinstance(agent, Agent):
+            agent.shutdown()
+        _ = self._active_agents.pop(label, None)
         _save_manifest(self._session_dir, self._active_agents)
 
     async def _reply(self, channel: str, thread_ts: str, text: str) -> None:
-        await self._slack.send(channel, text, thread_ts)
+        """Post ``text`` into ``channel`` (threaded on ``thread_ts``)."""
+        _ = await self._slack.send(channel, text, thread_ts)
 
     # -- Log channel management --------------------------------------------
 
@@ -691,12 +691,22 @@ class SlackAdapter:
         agent_name: str,
         source_channel: str = "",
     ) -> str | None:
+        """Create or find the per-agent log channel and sync its membership.
+
+        Args:
+          agent_name: Agent label used to derive the channel name.
+          source_channel: Channel ID whose members are synced into the log channel.
+
+        Returns:
+          channel_id: Slack channel ID, or ``None`` on failure.
+
+        """
         ch_name = f"{self._log_prefix}{agent_name}-log".lower()
         if ch_name in self._log_channels:
             return self._log_channels[ch_name]
         slack = Slack(token=self._bot_token)
         result = await slack.create_channel(ch_name)
-        if is_message(result):
+        if isinstance(result, ToolResult):
             cid = await self._find_channel(ch_name)
             if cid:
                 self._log_channels[ch_name] = cid
@@ -708,9 +718,8 @@ class SlackAdapter:
                 result.content,
             )
             return None
-        result_str = str(result)
-        if result_str.startswith("id="):
-            cid = result_str[3:]
+        if result.startswith("id="):
+            cid = result[3:]
             self._log_channels[ch_name] = cid
             self._log_channel_owners[cid] = agent_name
             if source_channel:
@@ -723,6 +732,7 @@ class SlackAdapter:
         source_channel: str,
         target_channel: str,
     ) -> None:
+        """Invite every non-bot member of ``source_channel`` into ``target_channel``."""
         members = await self._list_members(source_channel)
         for uid in members:
             if uid == self._self_user_id:
@@ -730,6 +740,7 @@ class SlackAdapter:
             await self._invite(target_channel, uid)
 
     async def _list_members(self, channel: str) -> list[str]:
+        """Return user IDs of members in ``channel``, or ``[]`` on failure."""
         url = "https://slack.com/api/conversations.members"
         headers = {"Authorization": f"Bearer {self._bot_token}"}
         params = {"channel": channel, "limit": 1000}
@@ -744,33 +755,33 @@ class SlackAdapter:
         return [str(m) for m in members]
 
     async def _invite(self, channel: str, user: str) -> None:
+        """Invite ``user`` to ``channel`` via the Slack web API."""
         url = "https://slack.com/api/conversations.invite"
         headers = {
             "Authorization": f"Bearer {self._bot_token}",
             "Content-Type": "application/json; charset=utf-8",
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            await client.post(
+            _ = await client.post(
                 url,
                 headers=headers,
                 content=json.dumps({"channel": channel, "users": user}),
             )
 
     async def _find_channel(self, name: str) -> str | None:
+        """Look up a Slack channel ID by its bare name."""
         slack = Slack(token=self._bot_token)
         result = await slack._list_channels(1000)  # noqa: SLF001 -- no public channel-list API on Slack wrapper
-        if is_message(result):
+        if isinstance(result, ToolResult):
             return None
-        for line in str(result).splitlines():
+        for line in result.splitlines():
             if f"#{name}" in line:
                 return line.split()[0]
         return None
 
 
-# -- Log tap ---------------------------------------------------------------
-
-
 def _extract_channel_from_text(text: str) -> str:
+    """Return the ``channel=<id>`` token value from ``text``, or ``""``."""
     for part in text.split():
         if part.startswith("channel="):
             return part[8:].rstrip("]")
@@ -791,173 +802,114 @@ async def _flush_log(
     for line in buffer:
         line_len = len(line) + 1  # +1 for newline join
         if chunk and chunk_len + line_len > _SLACK_MSG_LIMIT:
-            await slack.send(channel_id, "\n".join(chunk))
+            _ = await slack.send(channel_id, "\n".join(chunk))
             chunk = []
             chunk_len = 0
         chunk.append(line)
         chunk_len += line_len
     if chunk:
-        await slack.send(channel_id, "\n".join(chunk))
+        _ = await slack.send(channel_id, "\n".join(chunk))
 
 
-def _make_event_forwarder(
-    queue: asyncio.Queue[Message | None],
-) -> Callable[[object], None]:
-    """Build an agent observer that translates v3 ``Event`` payloads to messages.
+def _make_log_forwarder(
+    queue: asyncio.Queue[str | None],
+) -> Callable[[RuntimeEvent], None]:
+    """Build an observer that renders ``RuntimeEvent`` payloads to log lines."""
 
-    Reuses the v2 ``Message`` shape so the existing ``log_tap`` /
-    ``_render_event`` chain keeps working unchanged.
-    """
-
-    def _translate(ev: object) -> Message | None:
-        if isinstance(ev, TextChunkEvent):
-            return TextMessage(ev.text, "text/plain")
-        if isinstance(ev, ThinkingEvent):
-            return TextMessage(ev.text, "text/x-thinking")
-        if isinstance(ev, ToolLabelEvent):
-            return TextMessage(ev.text, "text/x-tool-label")
-        if isinstance(ev, ToolResultEvent):
-            return ev.msg
-        if isinstance(ev, (RecoverableErrorEvent, IrrecoverableErrorEvent)):
-            return ev.msg
-        if isinstance(ev, InterruptedEvent):
-            return TextMessage("", "text/x-interrupted")
-        if isinstance(ev, StatusUpdateEvent):
-            return TextMessage(ev.text, "text/x-status-update")
-        if isinstance(ev, UserBarEvent):
-            return TextMessage(ev.text, "text/x-user-message")
-        if isinstance(ev, ChildEvent):
-            inner = _translate(ev.inner)
-            if inner is None:
-                return None
-            return MultipartMessage(
-                (TextMessage(ev.label, "text/x-agent-label"), inner),
-                "multipart/x-child-event",
-            )
-        if isinstance(ev, ChildDoneEvent):
-            return JsonMessage(
-                json_freeze(
-                    {
-                        "elapsed": ev.elapsed,
-                        "model_response_tokens": ev.tokens,
-                        "cost_usd": ev.cost,
-                    },
-                ),
-                "application/x-child-done",
-            )
-        return None
-
-    def _fwd(ev: object) -> None:
-        msg = _translate(ev)
-        if msg is not None:
-            queue.put_nowait(msg)
+    def _fwd(ev: RuntimeEvent) -> None:
+        rendered = _render_event(ev)
+        if rendered is not None:
+            queue.put_nowait(rendered)
 
     return _fwd
 
 
-def _render_event(event: Message) -> str | None:
-    """Convert an agent event to log-friendly text, or None to skip."""
-    desc = event.descriptor
-
-    if desc == "text/plain":
-        text = str(event.content).strip()
-        return text or None
-
-    if desc == "text/x-error":
-        return f"✗ {str(event.content).strip()}"
-
-    if desc == "multipart/x-error":
-        parts = cast(tuple[Message, ...], event.content)
-        text = ""
-        for p in parts:
-            if p.descriptor == "text/x-error":
-                text = str(p.content).strip()
-                break
-        return f"✗ {text}" if text else None
-
-    if desc in ("text/x-user-injected", "text/x-signal-user-input"):
-        text = str(event.content).strip()
+def _render_event(event: RuntimeEvent) -> str | None:
+    """Convert a ``RuntimeEvent`` to a log-friendly line, or ``None`` to skip."""
+    if isinstance(event, UserMessage):
+        text = event.text.strip()
         return f"━━ input ━━\n{text}" if text else None
 
-    if desc == "text/x-tool-label":
-        return f"  {str(event.content).strip()}"
+    if isinstance(event, AssistantMessage):
+        text = event.text.strip()
+        return text or None
 
-    if desc == "multipart/x-tool-result":
-        parts = cast(tuple[Message, ...], event.content)
-        lines: list[str] = []
-        for p in parts:
-            if p.descriptor == "text/x-error":
-                lines.append(f"  ✗ {str(p.content).strip()}")
-            elif p.descriptor == "text/x-hint-tool-use-nudge" and p.content:
-                lines.append(f"  hint: {str(p.content).strip()}")
-            elif p.descriptor == "text/x-diff" and p.content:
-                diff = str(p.content).strip()
-                if diff:
-                    lines.append(f"```diff\n{diff}\n```")
-            elif p.descriptor.startswith("text/") and p.content:
-                text = str(p.content).strip()
-                if text:
-                    if len(text) > 2000:
-                        text = text[:2000] + "…"
-                    lines.append(f"  → {text}")
-        return "\n".join(lines) if lines else None
-
-    if desc == "text/x-interrupted":
-        return "[interrupted]"
-
-    if desc == "multipart/x-child-event":
-        parts = cast(tuple[Message, ...], event.content)
-        if len(parts) < 2:
-            return None
-        label = str(parts[0].content)
-        inner = parts[1]
-        inner_rendered = _render_event(inner)
-        if inner_rendered:
-            pfx = f"[{label}]"
-            return "\n".join(f"  {pfx} {ln}" for ln in inner_rendered.splitlines())
-        return None
-
-    if desc == "text/x-thinking":
-        text = str(event.content).strip()
+    if isinstance(event, ModelResponseThinking):
+        text = event.text.strip()
         if not text:
             return None
         if len(text) > 2000:
             text = text[:2000] + "…"
         return f"💭 {text}"
 
-    # Skip status changes and done signals.
-    if desc in (
-        "text/x-signal-status-changed",
-        "application/x-done",
-    ):
-        return None
+    if isinstance(event, ToolLabel):
+        return f"  {event.text.strip()}"
 
-    # Fallback: any other text/* descriptor.
-    if desc.startswith("text/"):
-        text = str(event.content).strip()
-        return text or None
+    if isinstance(event, ToolResult):
+        if event.is_error:
+            return f"  ✗ {event.content.strip()}"
+        lines: list[str] = []
+        if event.diff.strip():
+            lines.append(f"```diff\n{event.diff.strip()}\n```")
+        if event.hint.strip():
+            lines.append(f"  hint: {event.hint.strip()}")
+        if event.summary.strip():
+            lines.append(f"  → {event.summary.strip()}")
+        if not lines and event.content.strip():
+            text = event.content.strip()
+            if len(text) > 2000:
+                text = text[:2000] + "…"
+            lines.append(f"  → {text}")
+        return "\n".join(lines) if lines else None
 
+    if isinstance(event, ModelResponseError):
+        return f"✗ {type(event.exception).__name__}: {event.exception}"
+
+    # Streaming chunks (ModelResponsePartial) are intentionally skipped --
+    # the final AssistantMessage carries the full text and avoids log spam.
     return None
 
 
+class LogChannelAdapter(Protocol):
+    """Minimal adapter surface required by :func:`log_tap`."""
+
+    @property
+    def bot_token(self) -> str:
+        """Slack bot token used to construct outgoing Slack clients."""
+        ...
+
+    async def ensure_log_channel(
+        self,
+        agent_name: str,
+        source_channel: str = "",
+    ) -> str | None:
+        """Create or find the per-agent log channel and return its ID."""
+        ...
+
+
 async def log_tap(
-    events: asyncio.Queue[Message | None],
+    events: asyncio.Queue[str | None],
     agent_name: str,
-    adapter: SlackAdapter,
+    adapter: LogChannelAdapter,
 ) -> None:
+    """Forward rendered log lines from ``events`` to the agent's log channel.
+
+    Args:
+      events: Queue producing rendered lines; ``None`` flushes the buffer.
+      agent_name: Owning agent label, used to resolve the log channel.
+      adapter: Adapter that creates/finds the per-agent log channel.
+
+    """
     channel_id: str | None = None
     slack: Slack | None = None
     source_channel: str = ""
     buffer: list[str] = []
     while True:
-        event = await events.get()
-        if event is None:
+        rendered = await events.get()
+        if rendered is None:
             if buffer and channel_id and slack:
                 await _flush_log(buffer, channel_id, slack)
             buffer.clear()
-            continue
-        rendered = _render_event(event)
-        if rendered is None:
             continue
         if not source_channel:
             source_channel = _extract_channel_from_text(rendered)
@@ -972,9 +924,6 @@ async def log_tap(
         buffer.append(rendered)
 
 
-# -- Wiring ----------------------------------------------------------------
-
-
 def parse_slack_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
@@ -983,45 +932,53 @@ def parse_slack_args(
 
     These flags cover Slack tokens, persona, logging, session, and agent-model
     configuration for the service entry point.
+
+    Args:
+      parser: Argparse parser to extend in place.
+      argv: Optional argument list; defaults to ``sys.argv[1:]``.
+
+    Returns:
+      parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
+
     """
-    parser.add_argument(
+    _ = parser.add_argument(
         "--app-token",
         default="",
         help="Slack app token (xapp-...). Default: $SLACK_APP_TOKEN.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--bot-token",
         default="",
         help="Slack bot token (xoxb-...). Default: $SLACK_BOT_TOKEN.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--persona-dir",
         default=str(Path(__file__).resolve().parent.parent / "assets" / "slack"),
         help="Directory of persona .md files.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--log-prefix",
         default="",
         help="Prefix for log channel names (e.g. 'agent-' -> #agent-sara-log).",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--router-log-channel",
         dest="router_log_channel",
         default="router-log",
         help="Channel name for router decision logs (default: router-log). Created if needed.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--cwd",
         default=None,
         help="Working directory.",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--session-dir",
         dest="session_dir",
         default=str(Path.home() / ".sagent" / "slack"),
         help="Directory for session persistence (default: ~/.sagent/slack).",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--continue",
         dest="resume",
         action="store_true",
@@ -1032,6 +989,7 @@ def parse_slack_args(
 
 
 def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
+    """Return ``(app_token, bot_token)`` from CLI flags or env, exiting on miss."""
     app = args.app_token or os.environ.get("SLACK_APP_TOKEN", "")
     bot = args.bot_token or os.environ.get("SLACK_BOT_TOKEN", "")
     missing: list[str] = []
@@ -1040,12 +998,13 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
     if not bot:
         missing.append("bot token (--bot-token or $SLACK_BOT_TOKEN)")
     if missing:
-        sys.stderr.write(f"Missing: {', '.join(missing)}\n")
+        _ = sys.stderr.write(f"Missing: {', '.join(missing)}\n")
         sys.exit(1)
     return app, bot
 
 
 async def _run(args: argparse.Namespace) -> None:
+    """Wire up the adapter and any resumed agents, then serve until shutdown."""
     if args.cwd:
         os.chdir(args.cwd)
 
@@ -1061,17 +1020,18 @@ async def _run(args: argparse.Namespace) -> None:
     compactor = SummaryCompactor() if args.compact else None
     persona_dir = Path(args.persona_dir)
 
-    sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
-    sys.stderr.write(f"[personas] {persona_dir}\n")
+    _ = sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
+    _ = sys.stderr.write(f"[personas] {persona_dir}\n")
 
     session_root = Path(args.session_dir)
     session_root.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-time sync mkdir is negligible
     if args.resume:
-        session_dir = _latest_session_dir(session_root)
-        if session_dir is None:
-            sys.stderr.write("No previous session found.\n")
+        candidate = _latest_session_dir(session_root)
+        if candidate is None:
+            _ = sys.stderr.write("No previous session found.\n")
             sys.exit(1)
-        sys.stderr.write(f"[continue] {session_dir.name}\n")
+        session_dir = candidate
+        _ = sys.stderr.write(f"[continue] {session_dir.name}\n")
     else:
         session_dir = _new_session_dir(session_root)
 
@@ -1097,7 +1057,7 @@ async def _run(args: argparse.Namespace) -> None:
             saved_system = info.get("system", "")
             persona_name = info.get("persona", "default")
             system_text = saved_system or load_persona(persona_dir, persona_name)
-            sys.stderr.write(f"[resume] {label} (persona={persona_name})\n")
+            _ = sys.stderr.write(f"[resume] {label} (persona={persona_name})\n")
             await adapter.spawn_agent(label, system_text)
 
     stop = asyncio.Event()
@@ -1117,12 +1077,14 @@ async def _run(args: argparse.Namespace) -> None:
 
     # Shutdown.
     for agent in list(agent_registry.values()):
-        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
-    adapter_task.cancel()
+        if isinstance(agent, Agent):
+            agent.shutdown()
+    _ = adapter_task.cancel()
     logger.info("Shutdown complete")
 
 
 def main() -> None:
+    """Parse args and run the Slack service event loop."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -1136,7 +1098,7 @@ def main() -> None:
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
-        sys.stderr.write("\n[interrupted]\n")
+        _ = sys.stderr.write("\n[interrupted]\n")
 
 
 if __name__ == "__main__":

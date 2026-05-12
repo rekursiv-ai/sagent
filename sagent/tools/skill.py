@@ -15,19 +15,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import dataclasses
 import logging
 import re
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import (
+    HistoryEntry,
+    ToolResult,
+    UserMessage,
+)
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import (
-    append_to_first_user_message,
-    get_directive,
-)
 from sagent.tools.core import (
     ToolState,
     get_tool_state,
@@ -44,10 +46,19 @@ class SkillInfo:
     """A discovered skill (name, description, and full body)."""
 
     name: str
+    """Skill name; matched against the model's ``Skill`` invocation."""
+
     description: str
+    """One-line trigger description surfaced in the system-prompt listing."""
+
     body: str
+    """Full ``SKILL.md`` body returned when the skill is invoked."""
+
     source: str
+    """Discovery tier (``project`` / ``user`` / ``import``)."""
+
     path: Path
+    """Absolute path to the source ``SKILL.md``."""
 
 
 _USER_SKILL_ROOTS: tuple[Path, ...] = (Path.home() / ".sagent" / "skills",)
@@ -70,11 +81,11 @@ def discover(
     directories.
 
     Args:
-      cwd: Working directory to start discovery from.
-      import_roots: Optional read-only roots: ``"agents"``.
+      cwd: Working directory to scan from.
+      import_roots: Names of additional read-only skill roots to include.
 
     Returns:
-      skills: Deduplicated list of discovered skills.
+      skills: Deduplicated list of discovered skills, project-first.
 
     """
     project_roots = [
@@ -118,10 +129,10 @@ def format_listing(skills: list[SkillInfo]) -> str:
     """Format skills into a system prompt section (names + descriptions).
 
     Args:
-      skills: List of discovered skills.
+      skills: Discovered skills to render.
 
     Returns:
-      listing: Markdown-formatted skill listing, or empty string.
+      text: Markdown-formatted section, or empty string when no skills.
 
     """
     if not skills:
@@ -172,21 +183,29 @@ class Skill:
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label showing the skill name.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short label for this skill invocation.
 
         Args:
-          msg: Tool call message.
+          args: Directive carrying the ``skill`` name.
 
         Returns:
-          label: "Skill <name>".
+          label: ``Skill <name>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        skill = str(directive.get("skill", ""))
+        skill = str(args.get("skill", ""))
         return f"Skill {skill}" if skill else "Skill"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for Skill.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
@@ -194,7 +213,8 @@ class Skill:
         """Return a per-request listing of discoverable skills.
 
         Returns:
-          listing: Formatted skill listing for the system prompt.
+          contribution: ``# Skills`` markdown section listing available
+              skills, or empty string when none are discovered.
 
         """
         return format_listing(_discover_for_state(get_tool_state()))
@@ -203,7 +223,7 @@ class Skill:
 
     async def post_compact_restore(
         self,
-        messages: list[Message],
+        history: list[HistoryEntry],
         tool_state: ToolState,
         *,
         budget_chars: int = 100_000,
@@ -211,9 +231,10 @@ class Skill:
         """Re-attach previously invoked skill bodies after compaction.
 
         Args:
-          messages: Conversation messages to modify in place.
-          tool_state: Current tool state with invoked skill names.
-          budget_chars: Maximum total characters for re-attached skills.
+          history: Post-compaction history; mutated in place.
+          tool_state: Active tool state; ``invoked_skills`` selects which
+              bodies to restore.
+          budget_chars: Character budget cap across all reattached bodies.
 
         """
         invoked = tool_state.invoked_skills
@@ -238,44 +259,56 @@ class Skill:
             parts.append(
                 f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
             )
-        if parts:
-            text = (
-                "Previously invoked skills (re-attached post-compaction):\n\n"
-                + "\n\n".join(parts)
-            )
-            append_to_first_user_message(messages, text)
+        if not parts:
+            return
+        text = (
+            "Previously invoked skills (re-attached post-compaction):\n\n"
+            + "\n\n".join(parts)
+        )
+        _prepend_to_first_user(history, text)
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Load and return the named skill's SKILL.md body.
 
         Args:
-          msg: Tool call message with ``skill`` and optional ``args``.
+          args: Directive with ``skill`` name and optional ``args``.
 
         Returns:
-          result: Skill body wrapped in XML tags, or error.
+          result: Skill body wrapped in a ``<skill>`` tag, or an error
+              listing valid names when the requested skill is unknown.
 
         """
-        directive = get_directive(msg)
-        skill = str(directive.get("skill", ""))
-        args = str(directive.get("args", ""))
+        skill = str(args.get("skill", ""))
+        skill_args = str(args.get("args", ""))
         cwd = get_tool_state().bash_cwd
         skills = discover(cwd)
         match = next((s for s in skills if s.name == skill), None)
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
-            return TextMessage(
-                f"Unknown skill: {skill!r}. Available: {names}",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"Unknown skill: {skill!r}. Available: {names}",
+                is_error=True,
             )
         get_tool_state().invoked_skills.add(match.name)
         preface = f"<skill name='{match.name}' source='{match.source}'>\n"
         body = escape_prompt_text(match.body)
-        if args:
-            body += f"\n\nArguments: {escape_prompt_text(args)}"
-        return TextMessage(f"{preface}{body}\n</skill>", "text/plain")
+        if skill_args:
+            body += f"\n\nArguments: {escape_prompt_text(skill_args)}"
+        return ToolResult(call_id="", content=f"{preface}{body}\n</skill>")
+
+
+def _prepend_to_first_user(history: list[HistoryEntry], text: str) -> None:
+    """Prepend ``text`` to the first ``UserMessage`` in history."""
+    for i, entry in enumerate(history):
+        if isinstance(entry, UserMessage):
+            new_text = text + "\n\n" + entry.text if entry.text else text
+            history[i] = dataclasses.replace(entry, text=new_text)
+            return
 
 
 def _first_nonempty_line(text: str) -> str:
+    """First non-blank, non-heading line in ``text`` (empty string when none)."""
     for line in text.splitlines():
         s = line.strip()
         if s and not s.startswith("#"):
@@ -308,6 +341,7 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
 
 
 def _scan_roots(roots: list[Path], source: str) -> list[SkillInfo]:
+    """Collect every loadable ``<name>/SKILL.md`` under each root."""
     out: list[SkillInfo] = []
     for root in roots:
         if not root.exists() or not root.is_dir():

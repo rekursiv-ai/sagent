@@ -1,319 +1,306 @@
-"""Tests for sagent.sessions."""
+"""Tests for ``sessions``: project layout, listing, and resume picker."""
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
 
-import io
+import json
 import os
 import time
 
-import pytest
-
-from sagent import sessions
-
-
-class TestSlug:
-    def test_basic(self) -> None:
-        # Uses the resolved path, so absolute/relative roundtrip.
-        s = sessions.cwd_slug("/a/b/c")
-        assert s.startswith("-")
-        assert "/" not in s
-        assert " " not in s
-
-    def test_non_alnum_replaced(self) -> None:
-        s = sessions.cwd_slug("/foo bar/baz-qux")
-        for ch in s:
-            assert ch.isalnum() or ch == "-"
-
-    def test_stable(self) -> None:
-        assert sessions.cwd_slug("/x") == sessions.cwd_slug("/x")
-
-    def test_long_path_hashed(self) -> None:
-        long_path = "/" + ("a" * 300)
-        s = sessions.cwd_slug(long_path)
-        assert len(s) <= sessions._MAX_SLUG_LEN + 20  # slug + hash suffix
+from sagent.sessions import (
+    SessionInfo,
+    cwd_slug,
+    existing_scope_dir,
+    latest_session,
+    list_all_sessions,
+    list_sessions,
+    new_session_dir,
+    parse_jsonl,
+    pick_session,
+    project_dir,
+    session_dir_for_scope,
+)
 
 
-class TestProjectDir:
-    def test_under_sagent_home(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.project_dir("/some/where", projects_dir=pdir)
-        assert d.is_relative_to(pdir)
+def _write_session(
+    dir_path: Path,
+    *,
+    session_id: str = "abc",
+    model_id: str = "claude-x",
+    user_text: str = "hello",
+    status: str = "",
+) -> Path:
+    """Write a tiny v4 session.jsonl into ``dir_path``."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    file = dir_path / "session.jsonl"
+    records = [
+        {
+            "kind": "meta",
+            "session_id": session_id,
+            "model_id": model_id,
+            "status": status,
+        },
+        {"kind": "history", "type": "user", "text": user_text},
+    ]
+    file.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return file
 
 
-class TestSessionListing:
-    def test_empty_when_no_project_dir(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        assert sessions.list_sessions("/nonexistent", projects_dir=pdir) == []
-        assert sessions.latest_session("/nonexistent", projects_dir=pdir) is None
-
-    def test_new_session_dir_creates(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/some/cwd", projects_dir=pdir)
-        assert d.exists()
-        assert d.is_dir()
-
-    def test_peek_session_parses_meta_and_messages(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d / "session.jsonl").write_text(
-            '{"kind":"meta","session_id":"abcd","model_id":"m"}\n'
-            '{"kind":"message","descriptor":"text/x-user-message","content":"hello world"}\n'
-            '{"kind":"message","descriptor":"multipart/x-model-message","content":[]}\n',
-        )
-        info = sessions._peek_session(d)
-        assert info is not None
-        assert info.session_id == "abcd"
-        assert info.model_id == "m"
-        assert info.message_count == 2
-        assert info.status == "hello world"
-
-    def test_peek_session_descriptor_user_message(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d / "session.jsonl").write_text(
-            '{"kind":"meta","session_id":"abcd","model_id":"m"}\n'
-            '{"kind":"message","descriptor":"text/x-user-message","content":"hello from descriptor"}\n'
-            '{"kind":"message","descriptor":"multipart/x-model-message","content":[]}\n',
-        )
-        info = sessions._peek_session(d)
-        assert info is not None
-        assert info.message_count == 2
-        assert info.status == "hello from descriptor"
-
-    def test_peek_session_prefers_meta_status(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d / "session.jsonl").write_text(
-            '{"kind":"meta","session_id":"a","status":"Refactoring tests"}\n'
-            '{"kind":"message","descriptor":"text/x-user-message","content":"original prompt"}\n',
-        )
-        info = sessions._peek_session(d)
-        assert info is not None
-        assert info.status == "Refactoring tests"
-
-    def test_list_sorted_newest_first(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d1 = sessions.new_session_dir("/x", projects_dir=pdir)
-        d2 = sessions.new_session_dir("/x", projects_dir=pdir)
-        f1 = d1 / "session.jsonl"
-        f2 = d2 / "session.jsonl"
-        f1.write_text('{"kind":"meta"}\n')
-        f2.write_text('{"kind":"meta"}\n')
-        # Make d2 newer.
-        os.utime(f1, (1000.0, 1000.0))
-        os.utime(f2, (2000.0, 2000.0))
-        out = sessions.list_sessions("/x", projects_dir=pdir)
-        assert len(out) == 2
-        assert out[0].path == d2
+def test_cwd_slug_replaces_separators(tmp_path: Path) -> None:
+    slug = cwd_slug(tmp_path)
+    assert "/" not in slug
+    assert all(c.isalnum() or c == "-" for c in slug)
 
 
-class TestSessionDirForScope:
-    def test_creates_dir_under_base(self, tmp_path: Path) -> None:
-        d = sessions.session_dir_for_scope("my-scope", base=tmp_path)
-        assert d.exists()
-        assert d.parent.name == "my-scope"
-        assert d.parent.parent == tmp_path
-
-    def test_base_param_uses_given_dir(self, tmp_path: Path) -> None:
-        d = sessions.session_dir_for_scope("s1", base=tmp_path)
-        assert d.parent == tmp_path / "s1"
+def test_cwd_slug_is_deterministic(tmp_path: Path) -> None:
+    assert cwd_slug(tmp_path) == cwd_slug(tmp_path)
 
 
-class TestExistingScopeDir:
-    def test_returns_none_when_missing(self, tmp_path: Path) -> None:
-        assert sessions.existing_scope_dir("nope", base=tmp_path) is None
-
-    def test_returns_none_when_no_children(self, tmp_path: Path) -> None:
-        (tmp_path / "empty").mkdir()
-        assert sessions.existing_scope_dir("empty", base=tmp_path) is None
-
-    def test_returns_most_recent(self, tmp_path: Path) -> None:
-        scope = tmp_path / "sc"
-        old = scope / "old"
-        new = scope / "new"
-        old.mkdir(parents=True)
-        new.mkdir(parents=True)
-        os.utime(old, (1000.0, 1000.0))
-        os.utime(new, (2000.0, 2000.0))
-        assert sessions.existing_scope_dir("sc", base=tmp_path) == new
+def test_cwd_slug_long_path_truncates_with_stable_hash() -> None:
+    """Slugs exceeding the cap are truncated + stably suffixed."""
+    long_path = Path("/" + "x" * 300)
+    s1 = cwd_slug(long_path)
+    s2 = cwd_slug(long_path)
+    assert s1 == s2
+    # Suffix appended.
+    assert "-" in s1
+    # Truncation observed (input > 300 chars; output much shorter).
+    assert len(s1) < 300
 
 
-class TestIterJsonl:
-    def test_skips_malformed_and_blank(self) -> None:
-        lines = ["", '{"a":1}', "NOT JSON", '{"b":2}', "  "]
-        result = list(sessions._iter_jsonl(lines))
-        assert result == [{"a": 1}, {"b": 2}]
+def test_project_dir_under_projects_root(tmp_path: Path) -> None:
+    pdir = project_dir(tmp_path, projects_dir=tmp_path / "root")
+    assert pdir.parent == tmp_path / "root"
+    assert pdir.name == cwd_slug(tmp_path)
 
 
-class TestPeekSessionEdgeCases:
-    def test_missing_session_file(self, tmp_path: Path) -> None:
-        d = tmp_path / "no-file"
-        d.mkdir()
-        assert sessions._peek_session(d) is None
-
-    def test_stat_oserror(self, tmp_path: Path) -> None:
-        d = tmp_path / "s"
-        d.mkdir()
-        f = d / "session.jsonl"
-        f.write_text("")
-        original_stat = Path.stat
-
-        def _stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
-            nonlocal calls
-            if self == f:
-                calls += 1
-                if calls > 1:
-                    raise OSError("boom")
-            return original_stat(self, follow_symlinks=follow_symlinks)
-
-        calls = 0
-        with patch.object(Path, "stat", _stat):
-            assert sessions._peek_session(d) is None
-
-    def test_open_oserror(self, tmp_path: Path) -> None:
-        d = tmp_path / "s"
-        d.mkdir()
-        f = d / "session.jsonl"
-        f.write_text('{"kind":"meta"}\n')
-        f.chmod(0o000)
-        try:
-            assert sessions._peek_session(d) is None
-        finally:
-            f.chmod(0o644)
-
-    def test_meta_and_message_parsing(self, tmp_path: Path) -> None:
-        d = tmp_path / "s"
-        d.mkdir()
-        (d / "session.jsonl").write_text(
-            '{"kind":"meta","model_id":"gpt","session_id":"sid","title":"T"}\n'
-            '{"kind":"message","descriptor":"multipart/x-model-message","content":[]}\n'
-            '{"kind":"message","descriptor":"text/x-user-message","content":"hi"}\n'
-        )
-        info = sessions._peek_session(d)
-        assert info is not None
-        assert info.model_id == "gpt"
-        assert info.session_id == "sid"
-        assert info.status == "T"
-        assert info.message_count == 2
+def test_new_session_dir_creates_and_returns(tmp_path: Path) -> None:
+    sdir = new_session_dir(tmp_path, projects_dir=tmp_path / "root")
+    assert sdir.is_dir()
+    assert sdir.parent == project_dir(tmp_path, projects_dir=tmp_path / "root")
 
 
-class TestListSessionsNonDir:
-    def test_skips_non_dir_children(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d / "session.jsonl").write_text('{"kind":"meta"}\n')
-        # Place a plain file sibling next to the session dir.
-        (d.parent / "stray.txt").write_text("junk")
-        out = sessions.list_sessions("/x", projects_dir=pdir)
-        assert len(out) == 1
+def test_session_dir_for_scope_creates_scoped_dir(tmp_path: Path) -> None:
+    sdir = session_dir_for_scope("slack-T123", base=tmp_path)
+    assert sdir.is_dir()
+    assert sdir.parent == tmp_path / "slack-T123"
 
 
-class TestFormatRelativeTime:
-    def test_hours(self) -> None:
-        ts = time.time() - 7200
-        assert sessions._format_relative_time(ts) == "2h ago"
-
-    def test_days(self) -> None:
-        ts = time.time() - 172_800
-        assert sessions._format_relative_time(ts) == "2d ago"
+def test_existing_scope_dir_none_when_scope_missing(tmp_path: Path) -> None:
+    assert existing_scope_dir("nonexistent", base=tmp_path) is None
 
 
-class TestPicker:
-    def test_empty_returns_none(self) -> None:
-        assert sessions.pick_session([]) is None
-
-    def test_default_pick_first(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d / "session.jsonl").write_text('{"kind":"meta","session_id":"a"}\n')
-        all_ = sessions.list_sessions("/x", projects_dir=pdir)
-        assert all_
-        out = io.StringIO()
-        choice = sessions.pick_session(
-            all_, stream_in=io.StringIO("\n"), stream_out=out
-        )
-        assert choice is all_[0]
-        assert "Resume which?" in out.getvalue()
-
-    def test_index_choice(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d1 = sessions.new_session_dir("/x", projects_dir=pdir)
-        d2 = sessions.new_session_dir("/x", projects_dir=pdir)
-        (d1 / "session.jsonl").write_text('{"kind":"meta","session_id":"a"}\n')
-        (d2 / "session.jsonl").write_text('{"kind":"meta","session_id":"b"}\n')
-        all_ = sessions.list_sessions("/x", projects_dir=pdir)
-        assert len(all_) == 2
-        choice = sessions.pick_session(
-            all_,
-            stream_in=io.StringIO("2\n"),
-            stream_out=io.StringIO(),
-        )
-        assert choice is all_[1]
-
-    def test_out_of_range_returns_none(self) -> None:
-        s = sessions.SessionInfo(
-            path=Path("/x"),
-            session_id="a",
-            mtime=0.0,
-            status="",
-            message_count=0,
-            model_id="",
-        )
-        choice = sessions.pick_session(
-            [s], stream_in=io.StringIO("99\n"), stream_out=io.StringIO()
-        )
-        assert choice is None
-
-    def test_non_integer_input_returns_none(self) -> None:
-        s = sessions.SessionInfo(
-            path=Path("/x"),
-            session_id="a",
-            mtime=0.0,
-            status="",
-            message_count=0,
-            model_id="",
-        )
-        choice = sessions.pick_session(
-            [s], stream_in=io.StringIO("abc\n"), stream_out=io.StringIO()
-        )
-        assert choice is None
-
-    def test_eof_returns_none(self) -> None:
-        s = sessions.SessionInfo(
-            path=Path("/x"),
-            session_id="a",
-            mtime=0.0,
-            status="",
-            message_count=0,
-            model_id="",
-        )
-        sin = io.StringIO("")  # readline returns "" on EOF
-        choice = sessions.pick_session([s], stream_in=sin, stream_out=io.StringIO())
-        # Empty readline → default to sessions[0]
-        assert choice is s
+def test_existing_scope_dir_none_when_scope_dir_has_no_children(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "scope-X").mkdir()
+    assert existing_scope_dir("scope-X", base=tmp_path) is None
 
 
-class TestListAllSessions:
-    def test_scans_all_projects(self, tmp_path: Path) -> None:
-        pdir = tmp_path / "projects"
-        d1 = sessions.new_session_dir("/proj-a", projects_dir=pdir)
-        d2 = sessions.new_session_dir("/proj-b", projects_dir=pdir)
-        f1 = d1 / "session.jsonl"
-        f2 = d2 / "session.jsonl"
-        f1.write_text('{"kind":"meta","session_id":"s1"}\n')
-        f2.write_text('{"kind":"meta","session_id":"s2"}\n')
-        os.utime(f1, (1000.0, 1000.0))
-        os.utime(f2, (2000.0, 2000.0))
-        out = sessions.list_all_sessions(projects_dir=pdir)
-        assert len(out) == 2
-        assert out[0].session_id == "s2"  # newest first
+def test_existing_scope_dir_returns_most_recent(tmp_path: Path) -> None:
+    """``existing_scope_dir`` selects by mtime."""
+    scope = "scope-Y"
+    old = tmp_path / scope / "old"
+    new = tmp_path / scope / "new"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    # Force ordering.
+    os.utime(old, (1, 1))
+    os.utime(new, (1_000_000, 1_000_000))
+    selected = existing_scope_dir(scope, base=tmp_path)
+    assert selected == new
 
-    def test_empty_when_no_projects_dir(self, tmp_path: Path) -> None:
-        assert sessions.list_all_sessions(projects_dir=tmp_path / "nonexistent") == []
+
+def test_parse_jsonl_skips_blank_and_malformed_lines() -> None:
+    text = '{"a": 1}\n\n{not json}\n{"b": 2}\n'
+    records = parse_jsonl(text)
+    assert records == [{"a": 1}, {"b": 2}]
+
+
+def test_parse_jsonl_skips_non_dict_values() -> None:
+    """Top-level JSON that isn't a dict is dropped."""
+    text = '[1, 2]\n42\n{"k": "v"}\n'
+    records = parse_jsonl(text)
+    assert records == [{"k": "v"}]
+
+
+def test_parse_jsonl_empty_string() -> None:
+    assert parse_jsonl("") == []
+
+
+def test_list_sessions_empty_when_project_dir_missing(tmp_path: Path) -> None:
+    assert list_sessions(tmp_path, projects_dir=tmp_path / "missing") == []
+
+
+def test_list_sessions_returns_newest_first(tmp_path: Path) -> None:
+    """Sessions sorted by mtime descending."""
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    a = pdir / "a"
+    b = pdir / "b"
+    _write_session(a, session_id="A", user_text="alpha")
+    _write_session(b, session_id="B", user_text="beta")
+    # Force ordering: b is newer than a.
+    (a / "session.jsonl").touch()
+    time.sleep(0.01)
+    (b / "session.jsonl").touch()
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert len(sessions) == 2
+    assert sessions[0].session_id == "B"
+    assert sessions[1].session_id == "A"
+
+
+def test_list_sessions_skips_files_at_project_root(tmp_path: Path) -> None:
+    """Stray files (not session dirs) under the project root are ignored."""
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    pdir.mkdir(parents=True)
+    (pdir / "stray.txt").write_text("ignore me", encoding="utf-8")
+    _write_session(pdir / "valid")
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert len(sessions) == 1
+
+
+def test_list_sessions_skips_session_dir_without_jsonl(tmp_path: Path) -> None:
+    """An empty session dir without ``session.jsonl`` is excluded."""
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    (pdir / "no-jsonl").mkdir(parents=True)
+    _write_session(pdir / "valid")
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert len(sessions) == 1
+
+
+def test_latest_session_none_when_no_sessions(tmp_path: Path) -> None:
+    assert latest_session(tmp_path, projects_dir=tmp_path / "p") is None
+
+
+def test_latest_session_returns_top(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    _write_session(pdir / "only", session_id="O", user_text="hi")
+    latest = latest_session(tmp_path, projects_dir=projects)
+    assert latest is not None
+    assert latest.session_id == "O"
+
+
+def test_list_all_sessions_returns_empty_when_root_missing(tmp_path: Path) -> None:
+    assert list_all_sessions(projects_dir=tmp_path / "missing") == []
+
+
+def test_list_all_sessions_aggregates_across_projects(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    _write_session(projects / "p1" / "s1", session_id="A")
+    _write_session(projects / "p2" / "s2", session_id="B")
+    # Stray non-dir at root + non-dir inside project: both ignored.
+    (projects / "stray.txt").write_text("x", encoding="utf-8")
+    (projects / "p1" / "stray.txt").write_text("x", encoding="utf-8")
+    sessions = list_all_sessions(projects_dir=projects)
+    assert {s.session_id for s in sessions} == {"A", "B"}
+
+
+def test_session_info_extracts_meta_and_first_user_text(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    _write_session(
+        pdir / "s",
+        session_id="sid",
+        model_id="claude-3-5",
+        user_text="first user prompt",
+        status="",
+    )
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert sessions[0].session_id == "sid"
+    assert sessions[0].model_id == "claude-3-5"
+    assert sessions[0].status == "first user prompt"
+    assert sessions[0].message_count == 1
+
+
+def test_session_info_explicit_status_overrides_first_user(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    _write_session(
+        pdir / "s",
+        session_id="sid",
+        status="custom status",
+        user_text="some text",
+    )
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert sessions[0].status == "custom status"
+
+
+def test_session_info_handles_corrupt_session_jsonl(tmp_path: Path) -> None:
+    """Garbled JSONL produces a SessionInfo with empty fields, not a crash."""
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    sdir = pdir / "s"
+    sdir.mkdir(parents=True)
+    (sdir / "session.jsonl").write_text("not json\n", encoding="utf-8")
+    sessions = list_sessions(tmp_path, projects_dir=projects)
+    assert len(sessions) == 1
+    assert sessions[0].model_id == ""
+    assert sessions[0].message_count == 0
+
+
+def _info(idx: int) -> SessionInfo:
+    """Build a tiny ``SessionInfo`` for picker tests."""
+    return SessionInfo(
+        path=Path(f"/tmp/s{idx}"),  # noqa: S108 -- in-memory placeholder
+        session_id=f"sid-{idx}",
+        mtime=float(idx),
+        status=f"msg{idx}",
+        message_count=idx,
+        model_id="m",
+    )
+
+
+def test_pick_session_empty_returns_none() -> None:
+    assert pick_session([]) is None
+
+
+def test_pick_session_blank_input_picks_first() -> None:
+    """Pressing Enter selects the default (most recent)."""
+    sessions = [_info(1), _info(2)]
+    sin = StringIO("\n")
+    sout = StringIO()
+    selected = pick_session(sessions, stream_in=sin, stream_out=sout)
+    assert selected is sessions[0]
+
+
+def test_pick_session_numeric_input_selects() -> None:
+    sessions = [_info(1), _info(2), _info(3)]
+    selected = pick_session(sessions, stream_in=StringIO("2\n"), stream_out=StringIO())
+    assert selected is sessions[1]
+
+
+def test_pick_session_out_of_range_returns_none() -> None:
+    sessions = [_info(1)]
+    selected = pick_session(sessions, stream_in=StringIO("99\n"), stream_out=StringIO())
+    assert selected is None
+
+
+def test_pick_session_non_numeric_returns_none() -> None:
+    sessions = [_info(1)]
+    selected = pick_session(
+        sessions, stream_in=StringIO("nope\n"), stream_out=StringIO()
+    )
+    assert selected is None
+
+
+def test_pick_session_writes_a_menu(tmp_path: Path) -> None:
+    """Each session renders a numbered entry."""
+    del tmp_path
+    sessions = [_info(1), _info(2)]
+    sout = StringIO()
+    _ = pick_session(sessions, stream_in=StringIO("\n"), stream_out=sout)
+    out = sout.getvalue()
+    assert "[ 1]" in out
+    assert "[ 2]" in out
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

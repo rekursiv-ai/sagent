@@ -1,644 +1,707 @@
-"""Tests for sagent.tools.core."""
+"""Tests for ``tools.core``: tool framework, state, sandbox."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 import asyncio
+import os
 import time
 
 import pytest
 
-from sagent import tools
-from sagent.custom_types import (
-    JsonMessage,
-    MessageBase,
-    MultipartMessage,
-)
-from sagent.lib.json import JSON, json_freeze
-from sagent.tools import core
+from sagent.agent.runtime import ToolResult
+from sagent.testing import with_fake_agent
 from sagent.tools.core import (
-    _MISSING_TOOL_DESCRIPTION,
     TOOL_RESULT_MAX_CHARS,
+    ReadCacheEntry,
     ToolState,
-    _build_schema,
-    _type_to_schema,
+    _ToolImpl,
     changed_files_context,
+    get_file_write_lock,
     get_tool_state,
     has_been_read,
     load_tool_description,
     mark_read,
+    opt_int,
     opt_str,
     read_asset,
+    recipe_dict,
+    recipe_list,
+    resolve_recipe,
+    resolve_tool_path,
     run_sync,
+    set_recipe,
+    to_result,
     tool,
     tool_state_context,
     truncate,
 )
 
 
-# -- _type_to_schema ---------------------------------------------------
+def _schema_property(schema: object, name: str) -> Mapping[str, object]:
+    """Return ``schema['properties'][name]`` as a typed Mapping."""
+    schema_m: Mapping[str, object] = _as_mapping(schema)
+    props = _as_mapping(schema_m["properties"])
+    return _as_mapping(props[name])
 
 
-class TestTypeToSchema:
-    def test_str(self) -> None:
-        assert _type_to_schema(str) == {"type": "string"}
+def _as_mapping(value: object) -> Mapping[str, object]:
+    """Narrow an object to ``Mapping[str, object]`` or fail.
 
-    def test_int(self) -> None:
-        assert _type_to_schema(int) == {"type": "integer"}
-
-    def test_float(self) -> None:
-        assert _type_to_schema(float) == {"type": "number"}
-
-    def test_bool(self) -> None:
-        assert _type_to_schema(bool) == {"type": "boolean"}
-
-    def test_list_of_str(self) -> None:
-        assert _type_to_schema(list[str]) == {
-            "type": "array",
-            "items": {"type": "string"},
-        }
-
-    def test_bare_list_falls_back_to_string(self) -> None:
-        # ``list`` (unparameterized) has no get_origin → string fallback.
-        # ``list[X]`` is the supported parameterized form.
-        assert _type_to_schema(list) == {"type": "string"}
-
-    def test_dict(self) -> None:
-        assert _type_to_schema(dict[str, int]) == {"type": "object"}
-
-    def test_unknown(self) -> None:
-        # Unknown types fall back to string.
-        assert _type_to_schema(complex) == {"type": "string"}
+    ``isinstance(v, Mapping)`` narrows to ``Mapping[Unknown, object]``
+    in ty/basedpyright; cast at this single boundary so callers see
+    the precise typed form.
+    """
+    assert isinstance(value, Mapping)
+    return cast(Mapping[str, object], value)
 
 
-# -- _build_schema -----------------------------------------------------
+def test_truncate_short_passthrough() -> None:
+    assert truncate("abc", 10) == "abc"
 
 
-class TestBuildSchema:
-    def test_basic(self) -> None:
-        def fn(query: str, limit: int = 10) -> str:
-            del query, limit
-            return ""
-
-        s = _build_schema(fn, {"query": str, "limit": int})
-        assert s == {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        }
-
-    def test_annotated_description(self) -> None:
-        def fn(q: Annotated[str, "the query"]) -> str:
-            del q
-            return ""
-
-        s = cast(dict[str, Any], _build_schema(fn, {"q": Annotated[str, "the query"]}))
-        assert s["properties"]["q"] == {
-            "type": "string",
-            "description": "the query",
-        }
-
-    def test_no_required_omits_field(self) -> None:
-        def fn(x: int = 0) -> str:
-            del x
-            return ""
-
-        s = cast("dict[str, JSON]", _build_schema(fn, {"x": int}))
-        assert "required" not in s
-
-    def test_self_skipped(self) -> None:
-        class C:
-            def m(self, x: str) -> str:
-                del x
-                return ""
-
-        s = cast("dict[str, dict[str, Any]]", _build_schema(C.m, {"x": str}))
-        assert "self" not in s["properties"]
+def test_truncate_long_appends_notice() -> None:
+    out = truncate("x" * 50, 10)
+    assert out.startswith("x" * 10)
+    assert "truncated" in out
+    assert "40" in out
 
 
-# -- truncate ----------------------------------------------------------
+def test_to_result_wraps_string() -> None:
+    r = to_result("hello")
+    assert isinstance(r, ToolResult)
+    assert r.content == "hello"
+    assert r.call_id == ""
 
 
-class TestTruncate:
-    def test_short_unchanged(self) -> None:
-        assert truncate("hi", 100) == "hi"
-
-    def test_long_truncated_with_notice(self) -> None:
-        out = truncate("a" * 50, 10)
-        assert out.startswith("a" * 10)
-        assert "truncated" in out
-        assert "40 chars omitted" in out
-
-    def test_exactly_at_limit(self) -> None:
-        assert truncate("a" * 10, 10) == "a" * 10
+def test_to_result_passthrough_tool_result() -> None:
+    src = ToolResult(call_id="x", content="y", is_error=True)
+    assert to_result(src) is src
 
 
-# -- Recipe assets -----------------------------------------------------
+def test_opt_int_missing_returns_none() -> None:
+    assert opt_int({}, "k") is None
 
 
-def test_default_recipe_loads_tool_descriptions() -> None:
-    assert load_tool_description("agentself")
+def test_opt_int_present_coerces() -> None:
+    assert opt_int({"k": "42"}, "k") == 42
 
 
-def test_all_builtin_tools_have_description_assets() -> None:
-    recipe = core.recipe_dict("tool_descriptions")
-    recipe_paths = {k.lower(): Path(v) for k, v in recipe.items()}
-    missing_recipe: list[str] = []
-    missing_file: list[str] = []
-
-    for name in tools.__all__:
-        obj = getattr(tools, name, None)
-        tool_id = getattr(obj, "tool_id", None)
-        if not isinstance(obj, type) or not isinstance(tool_id, str):
-            continue
-        if not tool_id.startswith("application/x-tool-"):
-            continue
-        recipe_path = recipe_paths.get(name.lower())
-        if recipe_path is None:
-            missing_recipe.append(name)
-            continue
-        if not (core._ASSETS_DIR / recipe_path).is_file():
-            missing_file.append(f"{name}: {recipe_path}")
-
-    assert missing_recipe == []
-    assert missing_file == []
+def test_opt_str_missing_returns_none() -> None:
+    assert opt_str({}, "k") is None
 
 
-def test_missing_tool_description_asset_soft_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Missing tool description files return a generic prompt fragment."""
-    monkeypatch.setattr(
-        core,
-        "_recipe_cache",
-        {"tool_descriptions": {"MissingTool": "default/does_not_exist.md"}},
-    )
-
-    with caplog.at_level("ERROR", logger="sagent.tools.core"):
-        assert load_tool_description("MissingTool") == _MISSING_TOOL_DESCRIPTION
-
-    assert "MissingTool" in caplog.text
-    assert "default/does_not_exist.md" in caplog.text
+def test_opt_str_empty_returns_none() -> None:
+    assert opt_str({"k": ""}, "k") is None
 
 
-def test_missing_tool_description_include_soft_fails(
-    monkeypatch: pytest.MonkeyPatch,
+def test_opt_str_present() -> None:
+    assert opt_str({"k": "v"}, "k") == "v"
+
+
+def test_resolve_tool_path_empty_passthrough() -> None:
+    assert resolve_tool_path("") == ""
+
+
+def test_resolve_tool_path_absolute_unchanged(tmp_path: Path) -> None:
+    abs_p = str(tmp_path / "f.txt")
+    with with_fake_agent():
+        assert resolve_tool_path(abs_p) == abs_p
+
+
+def test_resolve_tool_path_relative_joins_cwd(tmp_path: Path) -> None:
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        out = resolve_tool_path("sub/f.txt")
+    assert out == str(tmp_path / "sub/f.txt")
+
+
+def test_resolve_tool_path_tilde_expansion() -> None:
+    with with_fake_agent():
+        out = resolve_tool_path("~/foo.txt")
+    # ``~`` is expanded to ``$HOME``; result must be absolute.
+    assert Path(out).is_absolute()
+
+
+def test_tool_state_initial_state() -> None:
+    s = ToolState()
+    assert s.recent_files == []
+    assert s.depth == 0
+    assert s.bash_cwd == s.start_cwd
+    assert s.additional_dirs == []
+    assert s.read_cache == {}
+
+
+def test_tool_state_mark_read_records(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    s = ToolState()
+    s.mark_read(str(f), offset=1, limit=10, content="hi")
+    assert s.has_been_read(str(f))
+    assert s.recent_files == [str(f)]
+    assert str(f.resolve()) in s.read_cache
+
+
+def test_tool_state_mark_read_mtime_default_stats(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("hi")
+    s = ToolState()
+    s.mark_read(str(f))
+    entry = s.read_cache[str(f.resolve())]
+    assert entry.mtime > 0.0
+
+
+def test_tool_state_mark_read_missing_file_mtime_zero(tmp_path: Path) -> None:
+    s = ToolState()
+    missing = tmp_path / "missing.txt"
+    s.mark_read(str(missing))
+    assert s.read_cache[str(missing.resolve())].mtime == 0.0
+
+
+def test_tool_state_mark_read_reorders(tmp_path: Path) -> None:
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("a")
+    b.write_text("b")
+    s = ToolState()
+    s.mark_read(str(a))
+    s.mark_read(str(b))
+    s.mark_read(str(a))
+    # After re-reading ``a``, it should be at the end (most recent).
+    assert s.recent_files[-1] == str(a)
+
+
+def test_tool_state_mark_written_resets_window(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("v0")
+    s = ToolState()
+    s.mark_read(str(f), offset=5, limit=100, content="v0")
+    s.mark_written(str(f))
+    entry = s.read_cache[str(f.resolve())]
+    assert entry.offset == 0
+    assert entry.limit == 0
+
+
+def test_tool_state_mark_written_missing_file_zero_mtime(tmp_path: Path) -> None:
+    s = ToolState()
+    missing = tmp_path / "missing.txt"
+    s.mark_written(str(missing))
+    assert s.read_cache[str(missing.resolve())].mtime == 0.0
+
+
+def test_tool_state_check_unchanged_no_record_false(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    assert s.check_unchanged(str(f), 0, 0) is False
+
+
+def test_tool_state_check_unchanged_window_mismatch(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), offset=1, limit=10)
+    assert s.check_unchanged(str(f), 2, 10) is False
+
+
+def test_tool_state_check_unchanged_match(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), offset=1, limit=10)
+    assert s.check_unchanged(str(f), 1, 10) is True
+
+
+def test_tool_state_check_unchanged_missing_file_false(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), offset=1, limit=10)
+    f.unlink()
+    assert s.check_unchanged(str(f), 1, 10) is False
+
+
+def test_tool_state_check_stale_no_record_false(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    assert s.check_stale(str(f)) is False
+
+
+def test_tool_state_check_stale_unchanged_mtime(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x")
+    assert s.check_stale(str(f)) is False
+
+
+def test_tool_state_check_stale_content_changed(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x", mtime=1.0)
+    f.write_text("y")
+    assert s.check_stale(str(f)) is True
+
+
+def test_tool_state_check_stale_content_equal_refreshes_mtime(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x", mtime=1.0)
+    new_mtime = time.time() + 100
+    os.utime(f, (new_mtime, new_mtime))
+    # Same content, different mtime → not stale; cache mtime updates.
+    assert s.check_stale(str(f)) is False
+    assert s.read_cache[str(f.resolve())].mtime == pytest.approx(new_mtime)
+
+
+def test_tool_state_check_stale_missing_file_false(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x")
+    f.unlink()
+    assert s.check_stale(str(f)) is False
+
+
+def test_tool_state_check_stale_binary_cache_conservative_stale(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Missing includes inside tool descriptions use the same soft-fail path."""
-    assets = tmp_path / "assets"
-    assets.mkdir()
-    (assets / "tool.md").write_text("before {{include: missing.md}} after")
-    monkeypatch.setattr(core, "_ASSETS_DIR", assets)
-    monkeypatch.setattr(
-        core,
-        "_recipe_cache",
-        {"tool_descriptions": {"MissingInclude": "tool.md"}},
-    )
-
-    with caplog.at_level("ERROR", logger="sagent.tools.core"):
-        assert load_tool_description("MissingInclude") == _MISSING_TOOL_DESCRIPTION
-
-    assert "MissingInclude" in caplog.text
-    assert "tool.md" in caplog.text
-
-
-def test_read_asset_remains_strict_for_missing_files(tmp_path: Path) -> None:
-    """Direct asset reads still raise for missing files."""
-    with pytest.raises(FileNotFoundError):
-        read_asset(tmp_path / "missing.md")
-
-
-def test_read_asset_remains_strict_for_missing_includes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Direct asset reads still raise for missing include targets."""
-    assets = tmp_path / "assets"
-    assets.mkdir()
-    (assets / "tool.md").write_text("{{include: missing.md}}")
-    monkeypatch.setattr(core, "_ASSETS_DIR", assets)
-
-    with pytest.raises(FileNotFoundError):
-        read_asset("tool.md")
-
-
-# -- run_sync ---------------------------------------------------------
-
-
-class TestRunSync:
-    @pytest.mark.anyio
-    async def test_returns_str_in_response(self) -> None:
-        def fn(x: int) -> str:
-            return f"got {x}"
-
-        r = await run_sync(fn, x=42)
-        assert isinstance(r, MessageBase)
-        assert r.descriptor == "text/plain"
-        assert r.content == "got 42"
-
-    @pytest.mark.anyio
-    async def test_truncates_large_output(self) -> None:
-        def fn() -> str:
-            return "x" * (TOOL_RESULT_MAX_CHARS + 100)
-
-        r = await run_sync(fn)
-        assert isinstance(r, MessageBase)
-        assert "truncated" in str(r.content)
-        assert len(str(r.content)) < TOOL_RESULT_MAX_CHARS + 200
-
-    @pytest.mark.anyio
-    async def test_exception_propagates(self) -> None:
-        def fn() -> str:
-            raise ValueError("boom")
-
-        with pytest.raises(ValueError, match="boom"):
-            await run_sync(fn)
-
-
-# -- @tool decorator --------------------------------------------------
-
-
-class TestToolDecorator:
-    def test_bare_decorator(self) -> None:
-        @tool
-        def my_fn(x: str) -> str:
-            return x.upper()
-
-        assert my_fn.name == "my_fn"
-        assert my_fn.directive_schema["required"] == ("x",)
-        assert my_fn.directive_schema["additionalProperties"] is False
-
-    def test_with_args(self) -> None:
-        @tool(name="Custom", description="desc")
-        def f(x: str) -> str:
-            return x
-
-        assert f.name == "Custom"
-        assert f.description == "desc"
-
-    def test_direct_call_with_args(self) -> None:
-        def f(x: str) -> str:
-            return x
-
-        schema: JSON = json_freeze({"type": "object", "required": ["x"]})
-        wrapped = tool(
-            f,
-            name="Custom",
-            description="desc",
-            schema=schema,
-            supports_microcompaction=True,
-        )
-
-        assert wrapped.name == "Custom"
-        assert wrapped.description == "desc"
-        assert wrapped.directive_schema == schema
-        assert wrapped.supports_microcompaction is True
-
-    def test_default_description_from_docstring(self) -> None:
-        @tool
-        def f(x: str) -> str:
-            """My docstring."""
-            return x
-
-        assert f.description == "My docstring."
-
-    @pytest.mark.anyio
-    async def test_async_fn_called_directly(self) -> None:
-        @tool
-        async def f(x: str) -> str:
-            return x.upper()
-
-        msg = MultipartMessage(
-            (JsonMessage(json_freeze({"x": "hi"}), "application/x-tool-f"),),
-            "multipart/x-tool-call",
-        )
-        r = await f.run(msg)
-        assert isinstance(r, MessageBase)
-        assert r.content == "HI"
-
-    @pytest.mark.anyio
-    async def test_sync_fn_threaded(self) -> None:
-        @tool
-        def f(x: str) -> str:
-            return x.lower()
-
-        msg = MultipartMessage(
-            (JsonMessage(json_freeze({"x": "HI"}), "application/x-tool-f"),),
-            "multipart/x-tool-call",
-        )
-        r = await f.run(msg)
-        assert isinstance(r, MessageBase)
-        assert r.content == "hi"
-
-    @pytest.mark.anyio
-    async def test_exception_propagates(self) -> None:
-        @tool
-        def f() -> str:
-            raise RuntimeError("oops")
-
-        msg = MultipartMessage(
-            (JsonMessage(json_freeze({}), "application/x-tool-f"),),
-            "multipart/x-tool-call",
-        )
-        with pytest.raises(RuntimeError, match="oops"):
-            await f.run(msg)
-
-    @pytest.mark.anyio
-    async def test_truncates_at_max_result_chars(self) -> None:
-        @tool(max_result_chars=20)
-        def f() -> str:
-            return "y" * 100
-
-        msg = MultipartMessage(
-            (JsonMessage(json_freeze({}), "application/x-tool-f"),),
-            "multipart/x-tool-call",
-        )
-        r = await f.run(msg)
-        assert isinstance(r, MessageBase)
-        assert "truncated" in str(r.content)
-
-
-# -- ToolState --------------------------------------------------------
-
-
-class TestToolState:
-    def test_mark_and_check_read(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hello")
-        s = ToolState()
-        assert not s.has_been_read(str(f))
-        s.mark_read(str(f), offset=1, limit=100)
-        assert s.has_been_read(str(f))
-
-    def test_check_unchanged_true_when_same_mtime(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), offset=1, limit=10)
-        assert s.check_unchanged(str(f), offset=1, limit=10)
-
-    def test_check_unchanged_false_after_modify(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), offset=1, limit=10)
-        time.sleep(0.01)  # ensure mtime delta
-        f.write_text("bye")
-        assert not s.check_unchanged(str(f), offset=1, limit=10)
-
-    def test_check_unchanged_false_on_different_window(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), offset=1, limit=10)
-        # Same file, different read window → not the same read.
-        assert not s.check_unchanged(str(f), offset=2, limit=10)
-
-    def test_check_stale_after_external_modify(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), content="hi")
-        time.sleep(0.01)
-        f.write_text("changed")
-        assert s.check_stale(str(f))
-
-    def test_check_stale_false_when_unread(self, tmp_path: Path) -> None:
-        s = ToolState()
-        # File was never read → can't be stale.
-        assert not s.check_stale(str(tmp_path / "missing.txt"))
-
-    def test_check_stale_false_when_content_unchanged_despite_mtime_bump(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Idempotent reformatter (ruff no-op) / cloud sync touch.
-
-        mtime bumped, content identical → content-equality fallback
-        treats as not-stale so Edit doesn't spuriously fail.
-        """
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), content="hi")
-        time.sleep(0.01)
-        # Rewrite with identical content - bumps mtime, same bytes.
-        f.write_text("hi")
-        assert not s.check_stale(str(f))
-
-    def test_check_stale_true_when_content_cache_missing(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Conservatively stale path: mark_read without content (binary/PDF)."""
-        f = tmp_path / "x.bin"
-        f.write_text("hi")
-        s = ToolState()
-        # mark_read without content argument (binary/PDF/image path).
-        s.mark_read(str(f))
-        time.sleep(0.01)
-        f.write_text("hi")  # same content, bumped mtime
-        # No cached content to compare against → conservatively stale.
-        assert s.check_stale(str(f))
-
-    def test_check_stale_refreshes_mtime_on_content_match(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """After a successful content-equality match, ``check_stale``
-        must refresh the cached mtime so subsequent calls hit the
-        O(1) mtime-match fast path instead of re-reading the file
-        forever.
-        """
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), content="hi")
-        time.sleep(0.01)
-        f.write_text("hi")  # mtime bumped, content identical
-        # First call does the content-equality comparison and refreshes.
-        assert not s.check_stale(str(f))
-        # Cached mtime now equals disk mtime; remove the content cache
-        # so we can prove the fast-path check returns False on mtime
-        # alone (without falling back to content equality).
-        s._content_cache.pop(str(f.resolve()), None)
-        assert not s.check_stale(str(f))
-
-    def test_mark_written_clears_read_window(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("v1")
-        s = ToolState()
-        s.mark_read(str(f), offset=5, limit=20)
-        s.mark_written(str(f))
-        # check_unchanged with the original window should now fail
-        # - mark_written clears offset/limit to 0,0 to force re-read.
-        assert not s.check_unchanged(str(f), offset=5, limit=20)
-
-    def test_recent_files_ordering(self, tmp_path: Path) -> None:
-        a = tmp_path / "a.txt"
-        b = tmp_path / "b.txt"
-        a.write_text("a")
-        b.write_text("b")
-        s = ToolState()
-        s.mark_read(str(a))
-        s.mark_read(str(b))
-        s.mark_read(str(a))  # re-read a → moves to most recent
-        assert s.recent_files == [str(b), str(a)]
-
-    def test_enforce_read_blocks_unread(self, tmp_path: Path) -> None:
-        s = ToolState()
-        err = s.enforce_read(str(tmp_path / "missing.txt"))
-        assert err is not None
-        assert "not yet read" in err
-
-    def test_enforce_read_passes_after_mark(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f))
-        assert s.enforce_read(str(f)) is None
-
-    def test_consume_changed_files_returns_diffs(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("line1\nline2\n")
-        s = ToolState()
-        s.mark_read(str(f), content="line1\nline2\n")
-        time.sleep(0.01)
-        f.write_text("line1\nLINE2\n")
-        changes = s.consume_changed_files()
-        assert str(f) in changes
-        assert "-line2" in changes[str(f)]
-        assert "+LINE2" in changes[str(f)]
-
-    def test_consume_changed_files_empty_when_unchanged(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        s.mark_read(str(f), content="hi")
-        assert s.consume_changed_files() == {}
-
-    def test_consume_changed_files_preserves_read_shape(self, tmp_path: Path) -> None:
-        """After change-reporting, original read window must survive.
-
-        Guards against a past bug where ``consume_changed_files``
-        reset the cache shape to ``(0, 0, 0)``, causing a subsequent
-        Read with the original params to mis-classify as "different
-        params, must re-fetch".
-        """
-        f = tmp_path / "x.txt"
-        f.write_text("v1\n")
-        s = ToolState()
-        s.mark_read(str(f), offset=5, limit=100, last_lines=0, content="v1\n")
-        time.sleep(0.01)
-        f.write_text("v2\n")
-        _ = s.consume_changed_files()
-        # Same params after consumption should dedup against current mtime.
-        assert s.check_unchanged(str(f), offset=5, limit=100, last_lines=0)
-
-
-# -- get/set_tool_state context var -----------------------------------
-
-
-class TestToolStateContextVar:
-    def test_default_state_returned_outside_context(self) -> None:
-        s = get_tool_state()
-        assert isinstance(s, ToolState)
-
-    def test_set_state_visible_to_get(self) -> None:
-        s = ToolState()
-        with tool_state_context(s):
-            assert get_tool_state() is s
-
-    def test_mark_read_helper_uses_current_state(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("hi")
-        s = ToolState()
-        with tool_state_context(s):
-            mark_read(str(f))
-            assert has_been_read(str(f))
-            assert s.has_been_read(str(f))
-
-    def test_context_restores_prior_state(self) -> None:
-        outer = ToolState()
-        inner = ToolState()
-        with tool_state_context(outer):
-            assert get_tool_state() is outer
-            with tool_state_context(inner):
-                assert get_tool_state() is inner
-            assert get_tool_state() is outer
-
-
-# -- changed_files_context ---------------------------------------------
-
-
-class TestChangedFilesContext:
-    def test_empty_when_no_changes(self) -> None:
-        with tool_state_context(ToolState()):
-            assert changed_files_context() == ""
-
-    def test_emits_system_reminder_with_diff(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("v1\n")
-        s = ToolState()
-        s.mark_read(str(f), content="v1\n")
-        time.sleep(0.01)
-        f.write_text("v2\n")
-        with tool_state_context(s):
-            ctx = changed_files_context()
-        assert "<system-reminder>" in ctx
-        assert "</system-reminder>" in ctx
-        assert str(f) in ctx
-        assert "-v1" in ctx
-        assert "+v2" in ctx
-
-    def test_clears_after_emit(self, tmp_path: Path) -> None:
-        f = tmp_path / "x.txt"
-        f.write_text("v1\n")
-        s = ToolState()
-        s.mark_read(str(f), content="v1\n")
-        time.sleep(0.01)
-        f.write_text("v2\n")
-        with tool_state_context(s):
-            first = changed_files_context()
-            second = changed_files_context()
-        assert first  # first call sees the change
-        assert second == ""  # mtime cache updated, no longer "changed"
-
-
-# -- Constants exposed as public API -----------------------------------
-
-
-def test_constants_exposed() -> None:
-    # These are imported by other modules; protect the public surface.
-    assert TOOL_RESULT_MAX_CHARS > 0
-
-
-def test_run_sync_async_compatible() -> None:
-    # Spot check that asyncio.run can drive run_sync from a sync test.
-    def fn() -> str:
+    f = tmp_path / "a.bin"
+    f.write_bytes(b"\x00\x01")
+    s = ToolState()
+    # No ``content`` argument => no cached content → conservative stale.
+    s.mark_read(str(f), mtime=1.0)
+    f.write_bytes(b"\x02")
+    assert s.check_stale(str(f)) is True
+
+
+def test_tool_state_reset_file_tracking(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x")
+    s.reset_file_tracking()
+    assert s.read_cache == {}
+    assert not s.has_been_read(str(f))
+    assert s.recent_files == []
+
+
+def test_tool_state_enforce_read_returns_error_when_unread(tmp_path: Path) -> None:
+    s = ToolState()
+    err = s.enforce_read(str(tmp_path / "missing"))
+    assert err is not None
+    assert "not yet read" in err
+
+
+def test_tool_state_enforce_read_none_after_read(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    s.mark_read(str(f), content="x")
+    assert s.enforce_read(str(f)) is None
+
+
+def test_tool_state_consume_changed_files_returns_diff(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("alpha\n")
+    s = ToolState()
+    s.mark_read(str(f), content="alpha\n", mtime=1.0)
+    f.write_text("beta\n")
+    diffs = s.consume_changed_files()
+    assert str(f) in diffs
+    assert "beta" in diffs[str(f)]
+
+
+def test_tool_state_consume_changed_files_idempotent(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("alpha\n")
+    s = ToolState()
+    s.mark_read(str(f), content="alpha\n", mtime=1.0)
+    f.write_text("beta\n")
+    _ = s.consume_changed_files()
+    assert s.consume_changed_files() == {}
+
+
+def test_tool_state_consume_changed_files_missing_file_skipped(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("alpha\n")
+    s = ToolState()
+    s.mark_read(str(f), content="alpha\n", mtime=1.0)
+    f.unlink()
+    assert s.consume_changed_files() == {}
+
+
+def test_get_tool_state_default_outside_context() -> None:
+    s = get_tool_state()
+    assert isinstance(s, ToolState)
+
+
+def test_tool_state_context_swaps_state() -> None:
+    custom = ToolState()
+    custom.bash_cwd = "/tmp"  # noqa: S108 -- test placeholder, not real fs use
+    with tool_state_context(custom):
+        assert get_tool_state() is custom
+    assert get_tool_state() is not custom
+
+
+def test_module_mark_read_and_has_been_read(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    s = ToolState()
+    with tool_state_context(s):
+        mark_read(str(f), content="x")
+        assert has_been_read(str(f))
+
+
+def test_get_file_write_lock_same_path_returns_same_lock(tmp_path: Path) -> None:
+    p = tmp_path / "x.txt"
+    p.write_text("v")
+    lk1 = get_file_write_lock(str(p))
+    lk2 = get_file_write_lock(str(p))
+    assert lk1 is lk2
+
+
+def test_get_file_write_lock_diff_paths_distinct(tmp_path: Path) -> None:
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    a.write_text("v")
+    b.write_text("v")
+    assert get_file_write_lock(str(a)) is not get_file_write_lock(str(b))
+
+
+def test_tool_decorator_bare_sync() -> None:
+    @tool
+    def my_fn(x: str) -> str:
+        return x.upper()
+
+    assert my_fn.name == "my_fn"
+    assert my_fn.tool_id == "application/x-tool-my_fn"
+
+
+def test_tool_decorator_paren_overrides() -> None:
+    @tool(name="Custom", description="custom desc")
+    def my_fn(x: str) -> str:
+        return x
+
+    assert my_fn.name == "Custom"
+    assert my_fn.description == "custom desc"
+    assert my_fn.tool_id == "application/x-tool-custom"
+
+
+def test_tool_summary_default() -> None:
+    @tool(name="X")
+    def fn(x: str) -> str:
+        return x
+
+    assert fn.summary({"k": "v"}) == "X"
+
+
+def test_tool_prompt_default_empty() -> None:
+    @tool(name="X")
+    def fn(x: str) -> str:
+        return x
+
+    assert fn.prompt() == ""
+
+
+def test_tool_summary_result_default_none() -> None:
+    @tool(name="X")
+    def fn(x: str) -> str:
+        return x
+
+    assert fn.summary_result(ToolResult(call_id="", content="hi")) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_run_sync_function_returns_result() -> None:
+    @tool
+    def fn(msg: str) -> str:
+        return msg.upper()
+
+    out = await fn.run({"msg": "hi"})
+    assert out.content == "HI"
+
+
+@pytest.mark.asyncio
+async def test_tool_run_async_function_returns_result() -> None:
+    @tool
+    async def fn(msg: str) -> str:
+        return f"async:{msg}"
+
+    out = await fn.run({"msg": "x"})
+    assert out.content == "async:x"
+
+
+@pytest.mark.asyncio
+async def test_tool_run_truncates_long_content() -> None:
+    @tool(max_result_chars=10)
+    def fn(x: str) -> str:
+        del x
+        return "y" * 100
+
+    out = await fn.run({"x": ""})
+    assert len(out.content) > 10  # contains the truncation notice too.
+    assert "truncated" in out.content
+
+
+@pytest.mark.asyncio
+async def test_tool_run_tool_result_passthrough() -> None:
+    @tool
+    def fn(x: str) -> ToolResult:
+        return ToolResult(call_id="", content=x, is_error=True)
+
+    out = await fn.run({"x": "boom"})
+    assert out.is_error
+    assert out.content == "boom"
+
+
+def test_tool_schema_built_from_signature() -> None:
+    @tool
+    def fn(name: str, count: int = 1) -> str:
+        del count
+        return name
+
+    schema = fn.directive_schema
+    assert isinstance(schema, Mapping)
+    props = schema["properties"]
+    assert isinstance(props, Mapping)
+    assert "name" in props
+    assert "count" in props
+    assert schema["required"] == ("name",)
+
+
+def test_tool_schema_annotated_description() -> None:
+    @tool
+    def fn(field: Annotated[str, "Field documentation."]) -> str:
+        return field
+
+    prop = _schema_property(fn.directive_schema, "field")
+    assert prop["description"] == "Field documentation."
+
+
+def test_tool_schema_supports_list_and_dict() -> None:
+    @tool
+    def fn(items: list[int], extra: dict[str, str]) -> str:
+        del items, extra
         return "ok"
 
-    r = asyncio.run(run_sync(fn))
-    assert isinstance(r, MessageBase)
-    assert r.content == "ok"
+    assert _schema_property(fn.directive_schema, "items")["type"] == "array"
+    assert _schema_property(fn.directive_schema, "extra")["type"] == "object"
 
 
-class TestOptStr:
-    def test_present_value(self) -> None:
-        assert opt_str({"k": "hello"}, "k") == "hello"
+def test_tool_schema_unknown_type_string_fallback() -> None:
+    @tool
+    def fn(x: Path) -> str:  # Path isn't in _TYPE_MAP.
+        return str(x)
 
-    def test_absent_key(self) -> None:
-        assert opt_str({}, "k") is None
+    assert _schema_property(fn.directive_schema, "x")["type"] == "string"
 
-    def test_none_value(self) -> None:
-        assert opt_str({"k": None}, "k") is None
 
-    def test_empty_string_treated_as_absent(self) -> None:
-        assert opt_str({"k": ""}, "k") is None
+def test_tool_decorator_explicit_schema_override() -> None:
+    @tool(schema=None)
+    def fn(x: str) -> str:
+        return x
+
+    # ``schema=None`` falls back to auto-generation.
+    assert isinstance(fn, _ToolImpl)
+
+
+@pytest.mark.asyncio
+async def test_run_sync_wraps_string() -> None:
+    def fn(*, x: str) -> str:
+        return f"got:{x}"
+
+    out = await run_sync(fn, x="hello")
+    assert out.content == "got:hello"
+
+
+@pytest.mark.asyncio
+async def test_run_sync_passes_tool_result() -> None:
+    def fn() -> ToolResult:
+        return ToolResult(call_id="", content="hi", is_error=True)
+
+    out = await run_sync(fn)
+    assert out.is_error
+
+
+@pytest.mark.asyncio
+async def test_run_sync_truncates_long() -> None:
+    def fn() -> str:
+        return "x" * (TOOL_RESULT_MAX_CHARS + 100)
+
+    out = await run_sync(fn)
+    assert "truncated" in out.content
+
+
+def test_resolve_recipe_bare_name() -> None:
+    p = resolve_recipe("sagent")
+    assert p.name == "sagent.yaml"
+
+
+def test_resolve_recipe_explicit_path(tmp_path: Path) -> None:
+    target = tmp_path / "x.yaml"
+    target.write_text("k: v\n")
+    p = resolve_recipe(str(target))
+    assert p == target.resolve()
+
+
+def test_set_recipe_switches_and_clears_cache(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("tool_descriptions:\n  Demo: nope\n")
+    set_recipe(str(target))
+    try:
+        # recipe_dict reflects the override.
+        out = recipe_dict("tool_descriptions")
+        assert out.get("Demo") == "nope"
+    finally:
+        set_recipe("sagent")
+
+
+def test_recipe_dict_missing_section_empty() -> None:
+    assert recipe_dict("__nonexistent__") == {}
+
+
+def test_recipe_list_missing_section_empty() -> None:
+    assert recipe_list("__nonexistent__", "k") == []
+
+
+def test_recipe_dict_non_dict_value_returns_empty(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("scalar: 42\n")
+    set_recipe(str(target))
+    try:
+        # ``scalar`` is an int, not a dict → empty mapping.
+        assert recipe_dict("scalar") == {}
+    finally:
+        set_recipe("sagent")
+
+
+def test_recipe_list_present(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("kit:\n  tools: [a, b, c]\n")
+    set_recipe(str(target))
+    try:
+        assert recipe_list("kit", "tools") == ["a", "b", "c"]
+    finally:
+        set_recipe("sagent")
+
+
+def test_recipe_list_non_list_value(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("kit:\n  tools: not-a-list\n")
+    set_recipe(str(target))
+    try:
+        assert recipe_list("kit", "tools") == []
+    finally:
+        set_recipe("sagent")
+
+
+def test_recipe_list_section_not_dict(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("kit: [a, b]\n")
+    set_recipe(str(target))
+    try:
+        assert recipe_list("kit", "tools") == []
+    finally:
+        set_recipe("sagent")
+
+
+def test_recipe_yaml_non_dict_root_returns_empty(tmp_path: Path) -> None:
+    target = tmp_path / "test.yaml"
+    target.write_text("just a string\n")
+    set_recipe(str(target))
+    try:
+        # Non-dict root → empty config.
+        assert recipe_dict("anything") == {}
+    finally:
+        set_recipe("sagent")
+
+
+def test_read_asset_includes_directive(tmp_path: Path) -> None:
+    inner = tmp_path / "inner.txt"
+    inner.write_text("INSIDE")
+    outer = tmp_path / "outer.txt"
+    outer.write_text(f"a\n{{{{include: {inner}}}}}\nb")
+    text = read_asset(outer)
+    assert "INSIDE" in text
+    assert "a\n" in text
+    assert "\nb" in text
+
+
+def test_load_tool_description_missing_returns_empty() -> None:
+    # A name not present in the sagent recipe falls back to "".
+    set_recipe("sagent")
+    desc = load_tool_description("__totally_made_up_tool__")
+    assert desc == ""
+
+
+def test_load_tool_description_known_returns_nonempty() -> None:
+    set_recipe("sagent")
+    desc = load_tool_description("Read")
+    assert desc != ""
+
+
+def test_changed_files_context_empty_when_no_changes() -> None:
+    with with_fake_agent():
+        assert changed_files_context() == ""
+
+
+def test_changed_files_context_returns_reminder(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("v0\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.mark_read(str(f), content="v0\n", mtime=1.0)
+        f.write_text("v1\n")
+        out = changed_files_context()
+    assert "<system-reminder>" in out
+    assert str(f) in out
+
+
+def test_changed_files_context_truncates_large_diff(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("\n".join(f"old{i}" for i in range(50)) + "\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.mark_read(str(f), content=f.read_text(), mtime=1.0)
+        f.write_text("\n".join(f"new{i}" for i in range(50)) + "\n")
+        out = changed_files_context(max_diff_lines=2)
+    assert "(truncated)" in out
+
+
+def test_read_cache_entry_is_namedtuple() -> None:
+    e = ReadCacheEntry(0, 1, 2, 3.0)
+    assert e.offset == 0
+    assert e.limit == 1
+    assert e.last_lines == 2
+    assert e.mtime == 3.0
+
+
+@pytest.mark.asyncio
+async def test_get_file_write_lock_serializes(tmp_path: Path) -> None:
+    p = tmp_path / "x.txt"
+    p.write_text("v")
+    lock = get_file_write_lock(str(p))
+    order: list[str] = []
+
+    async def t(label: str) -> None:
+        async with lock:
+            order.append(f"in:{label}")
+            await asyncio.sleep(0)
+            order.append(f"out:{label}")
+
+    await asyncio.gather(t("a"), t("b"))
+    assert order in (
+        ["in:a", "out:a", "in:b", "out:b"],
+        ["in:b", "out:b", "in:a", "out:a"],
+    )
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

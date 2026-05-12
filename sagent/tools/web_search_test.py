@@ -1,94 +1,174 @@
-"""Tests for WebSearch tool."""
+"""Tests for ``tools.web_search``: pluggable search backend tool."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
+import asyncio
 
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, json_freeze
+from sagent.agent.runtime import ToolResult
 from sagent.lib.web.search import SearchResult
-from sagent.tools.web_search import WebSearch
+from sagent.tools.web_search import WebSearch, _build_query
 
 
-websearch = WebSearch()
+def test_websearch_metadata() -> None:
+    t = WebSearch()
+    assert t.name == "WebSearch"
+    assert t.tool_id == "application/x-tool-websearch"
+    assert t.supports_microcompaction is True
 
-_DDG = "sagent.lib.web.search.duckduckgo"
+
+def test_description_resolves() -> None:
+    t = WebSearch()
+    desc = t.description
+    assert isinstance(desc, str)
+    assert desc != ""
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-websearch"),),
-        "multipart/x-tool-call",
+def test_summary_short_query() -> None:
+    t = WebSearch()
+    assert t.summary({"query": "cats"}) == "WebSearch 'cats'"
+
+
+def test_summary_long_query_truncates() -> None:
+    t = WebSearch()
+    q = "x" * 80
+    out = t.summary({"query": q})
+    assert out.endswith("...'")
+
+
+def test_summary_result_returns_none() -> None:
+    assert WebSearch().summary_result(ToolResult(call_id="", content="x")) is None
+
+
+def test_prompt_empty() -> None:
+    assert WebSearch().prompt() == ""
+
+
+def test_build_query_bare() -> None:
+    assert _build_query("ml", None, None) == "ml"
+
+
+def test_build_query_allowed_appended() -> None:
+    q = _build_query("ml", ["arxiv.org", "openai.com"], None)
+    assert "site:arxiv.org" in q
+    assert "site:openai.com" in q
+
+
+def test_build_query_blocked_appended() -> None:
+    q = _build_query("ml", None, ["x.com"])
+    assert "-site:x.com" in q
+
+
+def test_build_query_strips_whitespace() -> None:
+    q = _build_query("ml", ["  arxiv.org  "], None)
+    assert "site:arxiv.org" in q
+
+
+def test_build_query_ignores_non_string_domains() -> None:
+    q = _build_query("ml", [1, "good.com"], None)
+    assert "site:good.com" in q
+    assert "site:1" not in q
+
+
+def test_build_query_ignores_non_list() -> None:
+    q = _build_query("ml", "not-a-list", None)
+    assert q == "ml"
+
+
+def test_run_returns_formatted_results() -> None:
+    hits = [
+        SearchResult(url="https://x/1", title="One", snippet="snip1"),
+        SearchResult(url="https://x/2", title="Two", snippet="snip2"),
+    ]
+    with patch("sagent.tools.web_search.search", return_value=hits):
+        result = asyncio.run(WebSearch().run({"query": "cats"}))
+    assert "[One](https://x/1)" in result.content
+    assert "snip1" in result.content
+    assert "[Two](https://x/2)" in result.content
+
+
+def test_run_no_results() -> None:
+    with patch("sagent.tools.web_search.search", return_value=[]):
+        result = asyncio.run(WebSearch().run({"query": "nothing"}))
+    assert result.content == "(no results)"
+
+
+def test_run_caps_at_10_results() -> None:
+    hits = [
+        SearchResult(url=f"https://x/{i}", title=f"T{i}", snippet="s")
+        for i in range(25)
+    ]
+    with patch("sagent.tools.web_search.search", return_value=hits):
+        result = asyncio.run(WebSearch().run({"query": "many"}))
+    assert "T0" in result.content
+    assert "T9" in result.content
+    assert "T10" not in result.content
+
+
+def test_run_runtime_error_returns_tool_result_error() -> None:
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=RuntimeError("boom"),
+    ):
+        result = asyncio.run(WebSearch().run({"query": "x"}))
+    assert result.is_error
+    assert "boom" in result.content
+
+
+def test_run_value_error_returns_tool_result_error() -> None:
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=ValueError("nope"),
+    ):
+        result = asyncio.run(WebSearch().run({"query": "x"}))
+    assert result.is_error
+    assert "nope" in result.content
+
+
+def test_run_invalid_backend() -> None:
+    result = asyncio.run(
+        WebSearch().run({"query": "x", "backend": "invalid-engine"}),
     )
+    assert result.is_error
+    assert "Invalid backend" in result.content
 
 
-def _ddg_directive(extra: dict[str, object] | None = None) -> JSON:
-    d: dict[str, object] = {"query": "test", "backend": "duckduckgo"}
-    if extra:
-        d.update(extra)
-    return json_freeze(d)
+def test_run_valid_backend_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_search(q: str, *, backend: object) -> list[SearchResult]:
+        captured["q"] = q
+        captured["backend"] = backend
+        return []
+
+    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+        _ = asyncio.run(WebSearch().run({"query": "x", "backend": "duckduckgo"}))
+    assert captured["backend"] == "duckduckgo"
 
 
-class TestWebsearch:
-    @pytest.mark.anyio
-    async def test_success(self) -> None:
-        result = SearchResult(
-            title="Result",
-            url="https://example.com",
-            snippet="Desc.",
+def test_run_with_allowed_and_blocked_domains() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_search(q: str, *, backend: object) -> list[SearchResult]:
+        captured["q"] = q
+        del backend
+        return []
+
+    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+        _ = asyncio.run(
+            WebSearch().run(
+                {
+                    "query": "ml",
+                    "allowed_domains": ["arxiv.org"],
+                    "blocked_domains": ["x.com"],
+                }
+            ),
         )
-        with patch(_DDG, return_value=[result]):
-            response = await websearch.run(_msg(_ddg_directive()))
-        assert isinstance(response, TextMessage)
-        assert "Result" in response.content
-        assert "example.com" in response.content
-
-    @pytest.mark.anyio
-    async def test_no_results(self) -> None:
-        with patch(_DDG, return_value=[]):
-            response = await websearch.run(_msg(_ddg_directive()))
-        assert isinstance(response, TextMessage)
-        assert "no results" in response.content.lower()
-
-    @pytest.mark.anyio
-    async def test_backend_runtime_error_returns_tool_error(self) -> None:
-        with patch(_DDG, side_effect=RuntimeError("boom")):
-            response = await websearch.run(_msg(_ddg_directive()))
-        assert isinstance(response, TextMessage)
-        assert response.descriptor == "text/x-error"
-        assert "boom" in response.content
-
-    @pytest.mark.anyio
-    async def test_invalid_backend_returns_tool_error(self) -> None:
-        with patch(_DDG) as search:
-            response = await websearch.run(
-                _msg(json_freeze({"query": "test", "backend": "bad"}))
-            )
-        assert isinstance(response, TextMessage)
-        assert response.descriptor == "text/x-error"
-        assert "Invalid backend 'bad'" in response.content
-        search.assert_not_called()
-
-    @pytest.mark.anyio
-    async def test_blocked_domains(self) -> None:
-        with patch(_DDG, return_value=[]) as mock:
-            await websearch.run(_msg(_ddg_directive({"blocked_domains": ["bad.com"]})))
-        mock.assert_called_once_with("test -site:bad.com", 10, None)
-
-    @pytest.mark.anyio
-    async def test_allowed_domains(self) -> None:
-        with patch(_DDG, return_value=[]) as mock:
-            await websearch.run(
-                _msg(_ddg_directive({"allowed_domains": ["example.com"]}))
-            )
-        mock.assert_called_once_with("test site:example.com", 10, None)
+    q = captured["q"]
+    assert isinstance(q, str)
+    assert "site:arxiv.org" in q
+    assert "-site:x.com" in q
 
 
 if __name__ == "__main__":

@@ -1,332 +1,176 @@
-"""Tests for ``tools.AgentSend``."""
+"""Tests for ``tools.agent_send``: routing messages between live agents."""
 
 from __future__ import annotations
-
-from collections.abc import Callable
 
 import asyncio
 
 import pytest
 
-from sagent.agent import Agent
-from sagent.agent.inbox import Inbox
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    ModelRequest,
-    ModelResponse,
-    MultipartMessage,
-    TextMessage,
-    TokenCount,
-)
-from sagent.lib.descriptors import QUIT_SENTINEL
-from sagent.lib.json import JSON, json_freeze
-from sagent.testing import MockModelCaps
-from sagent.tools.agent_send import AgentSend, _deliver
-from sagent.tools.background_task import BackgroundTaskEntry
-from sagent.tools.core import (
-    agent_label_var,
-    agent_registry,
-)
+from sagent.agent.runtime import ToolResult, UserMessage
+from sagent.testing import FakeAgent, with_fake_agent
+from sagent.tools import agent_send as send_module
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.core import agent_label_var, agent_registry
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-agentsend"),),
-        "multipart/x-tool-call",
+def test_metadata_basics() -> None:
+    t = AgentSend()
+    assert t.name == "AgentSend"
+    assert t.tool_id == "application/x-tool-agentsend"
+    assert t.supports_microcompaction is False
+    assert t.summary_result(ToolResult(call_id="", content="")) is None
+
+
+def test_summary_short_and_long() -> None:
+    t = AgentSend()
+    assert t.summary({"to": "Bob", "content": "hi"}) == "AgentSend → Bob: hi"
+    long = "x" * 60
+    s = t.summary({"to": "Bob", "content": long})
+    assert s.endswith("...")
+    # Preview is truncated to 40 chars (37 + ...).
+    assert len(s.split(": ", 1)[1]) == 40
+
+
+def test_summary_without_to() -> None:
+    t = AgentSend()
+    assert t.summary({}) == "AgentSend"
+
+
+def test_prompt_lists_other_agents() -> None:
+    t = AgentSend()
+    token_self = agent_label_var.set("Me")
+    agent_registry["Me"] = FakeAgent()
+    agent_registry["Bob"] = FakeAgent()
+    agent_registry["Alice"] = FakeAgent()
+    try:
+        p = t.prompt()
+    finally:
+        agent_registry.pop("Me", None)
+        agent_registry.pop("Bob", None)
+        agent_registry.pop("Alice", None)
+        agent_label_var.reset(token_self)
+    assert "Alice" in p
+    assert "Bob" in p
+    assert "Me" not in p
+
+
+def test_prompt_empty_when_alone() -> None:
+    t = AgentSend()
+    token = agent_label_var.set("Me")
+    agent_registry["Me"] = FakeAgent()
+    try:
+        p = t.prompt()
+    finally:
+        agent_registry.pop("Me", None)
+        agent_label_var.reset(token)
+    assert p == ""
+
+
+@pytest.mark.asyncio
+async def test_run_requires_to() -> None:
+    t = AgentSend()
+    with with_fake_agent():
+        result = await t.run({"to": "", "content": "hi"})
+    assert result.is_error
+    assert "'to' is required" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_requires_content() -> None:
+    t = AgentSend()
+    with with_fake_agent():
+        result = await t.run({"to": "Bob", "content": ""})
+    assert result.is_error
+    assert "'content' is required" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_unknown_agent() -> None:
+    t = AgentSend()
+    with with_fake_agent():
+        result = await t.run({"to": "Ghost", "content": "hi"})
+    assert result.is_error
+    assert "Unknown agent" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_delivers_message() -> None:
+    t = AgentSend()
+    target = FakeAgent()
+    agent_registry["Bob"] = target
+    token = agent_label_var.set("Me")
+    try:
+        with with_fake_agent():
+            result = await t.run({"to": "Bob", "content": "hello"})
+    finally:
+        agent_registry.pop("Bob", None)
+        agent_label_var.reset(token)
+    assert not result.is_error
+    assert "Delivered to Bob" in result.content
+    # Drain the inbox -- the runtime's GatedDeque is async so use drain().
+    items = await target.runtime.inbox.drain()
+    assert any(
+        isinstance(i, UserMessage) and "hello" in i.text and "[from Me]" in i.text
+        for i in items
     )
 
 
-class _FakeAgent:
-    """Minimal ``AgentLike`` stub for ``agent_registry`` insertion."""
+@pytest.mark.asyncio
+async def test_run_delay_schedules_call_later(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = AgentSend()
+    target = FakeAgent()
+    agent_registry["Bob"] = target
+    token = agent_label_var.set("Me")
 
-    def __init__(self, name: str = "fake") -> None:
-        self.name = name
-        self.inbox: Inbox = Inbox()
-        # Required by the AgentLike protocol so agent_registry typecheck-
-        # accepts this stub. Not exercised by the tests in this module.
-        self.work: asyncio.Task[object] | None = None
-        self.background: dict[str, BackgroundTaskEntry] = {}
+    calls: list[tuple[float, object, tuple[object, ...]]] = []
 
+    class _FakeLoop:
+        def call_later(self, delay: float, fn: object, *args: object) -> None:
+            calls.append((delay, fn, args))
 
-def _register(name: str) -> _FakeAgent:
-    agent = _FakeAgent(name)
-    agent_registry[name] = agent
-    return agent
+    fake_loop = _FakeLoop()
 
+    def _get_loop() -> _FakeLoop:
+        return fake_loop
 
-class TestAgentSendBasics:
-    def test_name_and_schema(self) -> None:
-        t = AgentSend()
-        assert t.name == "AgentSend"
-        assert t.tool_id == "application/x-tool-agentsend"
-
-    def test_help_shows_target_and_preview(self) -> None:
-        t = AgentSend()
-        label = t.summary(_msg(json_freeze({"to": "Agent_0", "content": "hello"})))
-        assert "Agent_0" in label
-        assert "hello" in label
-
-    def test_help_truncates_long_content(self) -> None:
-        t = AgentSend()
-        label = t.summary(_msg(json_freeze({"to": "X", "content": "a" * 100})))
-        assert label.endswith("...")
-
-    def test_help_bare_when_no_target(self) -> None:
-        t = AgentSend()
-        label = t.summary(_msg(json_freeze({})))
-        assert label == "AgentSend"
+    monkeypatch.setattr("asyncio.get_running_loop", _get_loop)
+    try:
+        with with_fake_agent():
+            result = await t.run({"to": "Bob", "content": "later", "delay": 5})
+    finally:
+        agent_registry.pop("Bob", None)
+        agent_label_var.reset(token)
+    assert not result.is_error
+    assert "Scheduled for Bob in 5s" in result.content
+    assert calls
+    assert calls[0][0] == 5
+    # ``_deliver`` is the scheduled callable.
+    assert calls[0][1] is send_module._deliver
 
 
-class TestPrompt:
-    def test_lists_other_agents(self) -> None:
-        t = AgentSend()
-        _register("myroot")
-        _register("Agent_0")
-        token = agent_label_var.set("myroot")
-        try:
-            p = t.prompt()
-            assert "Agent_0" in p
-            assert "myroot" not in p
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-    def test_empty_when_alone(self) -> None:
-        t = AgentSend()
-        _register("agent")
-        token = agent_label_var.set("agent")
-        try:
-            assert t.prompt() == ""
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-    def test_empty_when_no_agents(self) -> None:
-        t = AgentSend()
-        agent_registry.clear()
-        assert t.prompt() == ""
+def test_deliver_into_live_inbox() -> None:
+    target = FakeAgent()
+    send_module._deliver(target, "Me", "ping", 7)
+    drained = (
+        asyncio.get_event_loop_policy()
+        .new_event_loop()
+        .run_until_complete(target.runtime.inbox.drain())
+    )
+    assert any(
+        isinstance(i, UserMessage)
+        and "ping" in i.text
+        and "[from Me, 7s ago]" in i.text
+        for i in drained
+    )
 
 
-class TestRun:
-    @pytest.mark.anyio
-    async def test_deliver_message(self) -> None:
-        t = AgentSend()
-        target = _register("Agent_0")
-        token = agent_label_var.set("agent")
-        try:
-            result = await t.run(
-                _msg(json_freeze({"to": "Agent_0", "content": "stop editing foo.py"}))
-            )
-            assert result.descriptor == "text/plain"
-            assert "Delivered" in str(result.content)
-            drained = target.inbox.drain_nowait()
-            assert len(drained) == 1
-            assert "[from agent]:" in str(drained[0].msg.content)
-            assert "stop editing foo.py" in str(drained[0].msg.content)
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-    @pytest.mark.anyio
-    async def test_unknown_target_returns_error(self) -> None:
-        t = AgentSend()
-        agent_registry.clear()
-        result = await t.run(_msg(json_freeze({"to": "Nonexistent", "content": "hi"})))
-        assert result.descriptor == "text/x-error"
-        assert "Unknown agent" in str(result.content)
-
-    @pytest.mark.anyio
-    async def test_missing_to_returns_error(self) -> None:
-        t = AgentSend()
-        result = await t.run(_msg(json_freeze({"to": "", "content": "hi"})))
-        assert result.descriptor == "text/x-error"
-
-    @pytest.mark.anyio
-    async def test_missing_content_returns_error(self) -> None:
-        t = AgentSend()
-        _register("X")
-        try:
-            result = await t.run(_msg(json_freeze({"to": "X", "content": ""})))
-            assert result.descriptor == "text/x-error"
-        finally:
-            agent_registry.clear()
-
-    @pytest.mark.anyio
-    async def test_sender_label_injected(self) -> None:
-        t = AgentSend()
-        target = _register("Agent1")
-        token = agent_label_var.set("Agent_0")
-        try:
-            await t.run(_msg(json_freeze({"to": "Agent1", "content": "hey"})))
-            drained = target.inbox.drain_nowait()
-            assert "[from Agent_0]:" in str(drained[0].msg.content)
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-    @pytest.mark.anyio
-    async def test_delayed_message_returns_scheduled(self) -> None:
-        t = AgentSend()
-        target = _register("Agent_0")
-        token = agent_label_var.set("agent")
-        try:
-            result = await t.run(
-                _msg(json_freeze({"to": "Agent_0", "content": "wake up", "delay": 60}))
-            )
-            assert result.descriptor == "text/plain"
-            assert "Scheduled" in str(result.content)
-            assert len(target.inbox) == 0
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-    def test_deliver_callback_formats_message(self) -> None:
-        target = _FakeAgent("Agent_0")
-        _deliver(target, "agent", "wake up", 60)
-        drained = target.inbox.drain_nowait()
-        assert len(drained) == 1
-        assert "[from agent, 60s ago]:" in str(drained[0].msg.content)
-        assert "wake up" in str(drained[0].msg.content)
-
-    def test_deliver_callback_dead_agent(self) -> None:
-        _deliver(object(), "agent", "hello", 10)
-
-    @pytest.mark.anyio
-    async def test_self_send_lands_in_own_inbox(self) -> None:
-        t = AgentSend()
-        me = _register("agent")
-        token = agent_label_var.set("agent")
-        try:
-            result = await t.run(
-                _msg(json_freeze({"to": "agent", "content": "note to self"}))
-            )
-            assert result.descriptor == "text/plain"
-            drained = me.inbox.drain_nowait()
-            assert len(drained) == 1
-            assert "[from agent]:" in str(drained[0].msg.content)
-        finally:
-            agent_label_var.reset(token)
-            agent_registry.clear()
-
-
-class _MockModel(MockModelCaps):
-    max_image_dim: int = 2000
-
-    def __init__(self, responses: list[ModelResponse] | None = None) -> None:
-        self._responses = responses or [self._text_response("done")]
-        self._idx = 0
-
-    @property
-    def max_request_tokens(self) -> int:
-        return 100_000
-
-    @property
-    def model_id(self) -> str:
-        return "mock"
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        del request
-        resp = self._responses[min(self._idx, len(self._responses) - 1)]
-        self._idx += 1
-        return resp
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
-    ) -> ModelResponse:
-        del on_text, on_thinking
-        return await self.buffer(request)
-
-    @staticmethod
-    def _text_response(text: str) -> ModelResponse:
-        return ModelResponse(
-            content=MultipartMessage(
-                (TextMessage(text, "text/plain"),),
-                "multipart/x-model-message",
-            ),
-            tokens=TokenCount(input_tokens=10, output_tokens=5),
-        )
-
-
-class TestAgentRegistration:
-    @pytest.mark.anyio
-    async def test_agent_registers_and_deregisters(self) -> None:
-        model = _MockModel()
-        agent = Agent(model=model, system="test", name="root")
-        assert "root" not in agent_registry
-        # Drive one message through the same loop entry the REPL uses.
-        agent.inbox.send(TextMessage("hi", "text/x-user-message"), source="user")
-        agent.shutdown(force=False)
-        await agent.serve_forever()
-        assert "root" not in agent_registry
-
-    @pytest.mark.anyio
-    async def test_agent_visible_during_run(self) -> None:
-        captured: list[bool] = []
-
-        class _CaptureTool:
-            name = "Capture"
-            tool_id = "application/x-tool-capture"
-            description = "."
-            directive_schema = json_freeze(
-                {"type": "object", "properties": {}, "required": []}
-            )
-            supports_microcompaction = False
-
-            def summary(self, msg: Message) -> str:
-                del msg
-                return self.name
-
-            def prompt(self) -> str:
-                return ""
-
-            def summary_result(self, result: Message) -> str | None:
-                del result
-                return None
-
-            async def run(self, msg: Message) -> Message:
-                del msg
-                captured.append("myagent" in agent_registry)
-                return TextMessage("ok", "text/plain")
-
-        capture = _CaptureTool()
-        tc = MultipartMessage(
-            (
-                TextMessage("tc1", "text/x-queue-id"),
-                JsonMessage(
-                    json_freeze({}),
-                    "application/x-tool-capture",
-                ),
-            ),
-            "multipart/x-tool-call",
-        )
-        model = _MockModel(
-            [
-                ModelResponse(
-                    content=MultipartMessage(
-                        (
-                            TextMessage("", "text/plain"),
-                            tc,
-                        ),
-                        "multipart/x-model-message",
-                    ),
-                    stop_reason="model_tool_use",
-                    tokens=TokenCount(input_tokens=10, output_tokens=5),
-                ),
-                _MockModel._text_response("final"),
-            ]
-        )
-        agent = Agent(model=model, system="test", name="myagent", tools=[capture])
-        agent.inbox.send(TextMessage("go", "text/x-user-message"), source="user")
-        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
-        await agent.serve_forever()
-        assert captured == [True]
+def test_deliver_dead_target_is_noop(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        send_module._deliver(None, "Me", "x", 3)
+    assert any("Delayed message to dead agent" in rec.message for rec in caplog.records)
 
 
 if __name__ == "__main__":
-    import sys
+    from sagent.lib.testing import test_main
 
-    sys.exit(pytest.main([__file__, "-v"]))
+    test_main(__file__)

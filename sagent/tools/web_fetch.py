@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -14,10 +14,9 @@ import socket
 
 import cachetools
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.lazy_import import lazy_import
-from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -84,10 +83,10 @@ class WebFetch:
         and stdout redirects are already filtered by ``unwrap_cd_prefix``.
 
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bashlex command trees from the active Bash call.
 
         Returns:
-          nudge: Suggested WebFetch invocation, or ``None`` if no match.
+          hint: Nudge string redirecting to the WebFetch tool, or ``None``.
 
         """
         unwrapped = unwrap_cd_prefix(trees)
@@ -98,65 +97,73 @@ class WebFetch:
             return None
         return _match_http_fetch(cmd.exe, cmd.args)
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Directive carrying ``url``.
 
         Returns:
-          label: Human-readable summary string.
+          label: ``WebFetch <url>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        url = str(directive.get("url", ""))
+        url = str(args.get("url", ""))
         if len(url) > 60:
             url = url[:57] + "..."
         return f"WebFetch {url}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for WebFetch.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return supplemental system-prompt text.
+        """Return no supplemental system-prompt text for WebFetch.
 
         Returns:
-          prompt: Empty string; this tool adds no prompt.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Fetch the URL, extract main content, and return as text.
 
         Args:
-          msg: Directive message containing the target URL and optional
-            ``method``/``json``/``form`` for POST requests.
+          args: Directive with ``url`` and optional ``method`` / ``json``
+              / ``form`` keys.
 
         Returns:
-          result: Extracted page text or an error message.
+          result: Extracted text body, or a fetch/extraction error.
 
         """
-        directive = get_directive(msg)
-        raw_url = str(directive.get("url", ""))
-        method = str(directive.get("method", "GET")).upper()
+        raw_url = str(args.get("url", ""))
+        method = str(args.get("method", "GET")).upper()
         if method not in ("GET", "POST"):
-            return TextMessage(
-                f"Unsupported method {method!r}; only GET and POST allowed.",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"Unsupported method {method!r}; only GET and POST allowed.",
+                is_error=True,
             )
 
         try:
-            json_body, form_body = _request_bodies(method, directive)
+            json_body, form_body = _request_bodies(method, args)
         except ValueError as e:
-            return TextMessage(str(e), "text/x-error")
+            return ToolResult(call_id="", content=str(e), is_error=True)
 
         cache_key = raw_url if method == "GET" else None
         if cache_key is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                return TextMessage(cached, "text/plain")
+                return ToolResult(call_id="", content=cached)
 
         try:
             body, reddit_thread = await _fetch_body(
@@ -166,7 +173,7 @@ class WebFetch:
                 form_body=form_body,
             )
         except (FetchError, ValueError, OSError) as e:
-            return TextMessage(f"Fetch failed: {e}", "text/x-error")
+            return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
 
         text = await _extract_text(
             body,
@@ -176,18 +183,18 @@ class WebFetch:
         truncated = truncate(text, TOOL_RESULT_MAX_CHARS)
         if cache_key is not None:
             self._cache[cache_key] = truncated
-        return TextMessage(truncated, "text/plain")
+        return ToolResult(call_id="", content=truncated)
 
 
 def _request_bodies(
     method: str,
-    directive: JSON,
+    args: Mapping[str, object],
 ) -> tuple[JSONValue, dict[str, str] | None]:
     """Return POST request bodies from a tool directive."""
     if method != "POST":
         return None, None
-    raw_json = directive.get("json")
-    raw_form = directive.get("form")
+    raw_json = args.get("json")
+    raw_form = args.get("form")
     if raw_json is not None and raw_form is not None:
         raise ValueError("'json' and 'form' are mutually exclusive.")
     if raw_json is not None:
@@ -227,6 +234,12 @@ async def _fetch_body(
     form_body: dict[str, str] | None,
 ) -> tuple[bytes, bool]:
     """Fetch a URL and identify Reddit thread JSON responses.
+
+    Args:
+      raw_url: Target URL to fetch.
+      method: HTTP method (``GET`` or ``POST``).
+      json_body: JSON-serializable body for POST requests.
+      form_body: Form-encoded body for POST requests.
 
     Returns:
       body: Raw response bytes.

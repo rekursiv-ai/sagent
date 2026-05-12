@@ -40,7 +40,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import cast
 
@@ -53,29 +53,35 @@ import os
 import signal
 import sys
 
-from sagent import providers, sessions, tools
-from sagent.agent import Agent
-from sagent.compactor import SummaryCompactor
-from sagent.custom_types import (
-    InterruptedEvent,
-    IrrecoverableErrorEvent,
-    Message,
-    Model,
-    ModelSpec,
-    Provider,
-    RecoverableErrorEvent,
-    StatusUpdateEvent,
-    TextChunkEvent,
-    TextMessage,
-    ThinkingEvent,
-    Tool,
-    ToolLabelEvent,
-    ToolResultEvent,
+from sagent import (
+    providers,
+    sessions,
+    tools,
 )
-from sagent.lib.descriptors import QUIT_SENTINEL
+from sagent.agent import Agent
+from sagent.agent.runtime import (
+    AssistantMessage,
+    HistoryEntry,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    Quit,
+    RuntimeEvent,
+    SaveSession,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
+)
+from sagent.agent.session_io import (
+    SessionMeta,
+    append_session,
+    load_session,
+    serialize_tool_state,
+)
+from sagent.compactor import SummaryCompactor
+from sagent.custom_types import Model, ModelSpec, Provider, Tool
 from sagent.lib.json import MutableJSON, json_unfreeze
-from sagent.lib.message import response_text
-from sagent.prompt import build_system_dict
+from sagent.prompt import build_system
 from sagent.providers import build_provider
 from sagent.repl import run_repl
 from sagent.tools.advisor import Advisor
@@ -84,7 +90,6 @@ from sagent.tools.core import set_recipe
 
 _DEFAULT_PROVIDER = "Anthropic"
 _DEFAULT_AUTH = "env"
-
 
 DEFAULT_TOOLS = [
     "AgentSpawn",
@@ -128,7 +133,6 @@ def resolve_tools(names: list[str]) -> list[Tool]:
     """
     if names == ["none"]:
         return []
-    # First pass: instantiate every non-Bash tool.
     non_bash: dict[str, Tool] = {}
     for name in names:
         if name == "Bash":
@@ -137,7 +141,6 @@ def resolve_tools(names: list[str]) -> list[Tool]:
         if cls is None:
             raise SystemExit(f"unknown tool: {name!r}")
         non_bash[name] = cls()
-    # Second pass: assemble in the order requested, wiring Bash peers.
     resolved: list[Tool] = []
     peers = tuple(non_bash.values())
     for name in names:
@@ -149,14 +152,7 @@ def resolve_tools(names: list[str]) -> list[Tool]:
 
 
 def _resolve_session_dir(args: argparse.Namespace) -> str | None:
-    """Pick the session directory per --session / --resume / --continue.
-
-    Precedence:
-    - ``--session <path>`` wins, always (explicit user intent).
-    - ``--continue`` → most recent session for cwd, or a new one if none.
-    - ``--resume``   → interactive picker, or a new session on abort.
-    - Otherwise: a new session dir under the default project root.
-    """
+    """Pick the session directory per --session / --resume / --continue."""
     if args.session is not None:
         return str(args.session)
     cwd = Path.cwd()
@@ -214,6 +210,7 @@ def _resolve_resume(cwd: Path) -> str:
 
 
 def _resolve_continue_all() -> str:
+    """Resume the most recent session across all projects, or start fresh."""
     all_sessions = sessions.list_all_sessions()
     if all_sessions:
         sys.stderr.write(f"[resume] {all_sessions[0].path}\n")
@@ -223,6 +220,7 @@ def _resolve_continue_all() -> str:
 
 
 def _resolve_resume_all() -> str:
+    """Show interactive picker across all projects, or start fresh on no selection."""
     avail = sessions.list_all_sessions()
     if not avail:
         sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
@@ -239,11 +237,15 @@ def parse_agent_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
 ) -> tuple[argparse.Namespace, list[str]]:
-    """Add shared agent flags and parse.
+    """Add shared agent flags to ``parser`` and parse ``argv``.
 
-    Leaf of the parse cascade: adds LLM/tool/compaction/effort flags
-    and calls ``parse_known_args``.  Callers add their own flags
-    first, then delegate here.
+    Args:
+      parser: Argparse parser to extend in place.
+      argv: Optional argument list; defaults to ``sys.argv[1:]``.
+
+    Returns:
+      parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
+
     """
     parser.add_argument(
         "--provider",
@@ -303,15 +305,6 @@ def parse_agent_args(
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Automatic compaction (default: on; --no-compact to disable).",
-    )
-    parser.add_argument(
-        "--show-exception-trace",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Render structured stack traces inline with error events"
-            " (default: on; --no-show-exception-trace to suppress)."
-        ),
     )
     parser.add_argument(
         "--effort",
@@ -484,12 +477,7 @@ def _parse_cli_args(
 def _build_provider_model(
     args: argparse.Namespace,
 ) -> tuple[Provider, Model, str]:
-    """Build the provider/model pair requested by CLI flags.
-
-    ``SelfHosted`` is path-backed: ``--model /path/to/hf-snapshot`` is the
-    model load path, so the provider must be built from that path before
-    ``provider.model(...)`` can validate the bound model id.
-    """
+    """Build the provider/model pair requested by CLI flags."""
     auth = str(args.auth)
     model_id = cast(str | None, args.model)
     model_lookup = model_id
@@ -525,26 +513,12 @@ async def _with_signals(
 ) -> None:
     """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit.
 
-    First signal: post ``text/x-quit`` to ``agent.inbox`` and let the
-    dispatch loop drain on its own. Mirrors typing ``/quit`` from the
-    REPL but works when prompt-toolkit isn't capturing input (between
-    turns, during shutdown drain).
-
-    Second signal: ``os._exit(1)``. Skips ``atexit`` cleanup so a sync
-    tool wedged in ``asyncio.to_thread`` can't block process exit on a
-    ``ThreadPoolExecutor.join``. The user already asked twice; honor it.
-
-    Headless note: the asyncio handler is suspended inside
-    :func:`_run_headless` while the initial stdin read is blocked --
-    ``to_thread`` cannot be cancelled mid-read, so during that window
-    the default Python KeyboardInterrupt is what gets the user out.
-
-    Modeled on ``loop/experimental/switchboard/hub.py:828``.
+    First signal: push ``Quit()`` to ``agent.inbox`` so the runtime
+    drains cleanly. Second signal: ``os._exit(1)``.
     """
     loop = asyncio.get_running_loop()
     handler = _quit_handler(agent)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        # Windows / non-mainthread runners don't support add_signal_handler.
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, handler)
     try:
@@ -556,13 +530,7 @@ async def _with_signals(
 
 
 def _parse_stream_json(raw: str) -> str:
-    """Parse NDJSON stdin: each non-empty line is ``{"prompt": "..."}``.
-
-    Joins prompt fields with blank lines. Raises ``ValueError`` on
-    unparseable JSON or ``TypeError`` on the wrong shape, so programmatic
-    clients see a hard failure instead of silently wrong behavior; the
-    caller maps that to an exit code.
-    """
+    """Parse NDJSON stdin: each non-empty line is ``{"prompt": "..."}``."""
     prompts: list[str] = []
     for raw_line in raw.splitlines():
         line = raw_line.strip()
@@ -574,8 +542,6 @@ def _parse_stream_json(raw: str) -> str:
             raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
         if not isinstance(obj, dict):
             raise TypeError("stream-json input requires JSON objects per line.")
-        # cast: isinstance narrows to dict but can't parameterize key type.
-        # JSON deserialization guarantees str keys, so this assumption holds.
         parsed = json_unfreeze(cast(Mapping[str, object], obj))
         p = parsed.get("prompt")
         if isinstance(p, str) and p:
@@ -583,27 +549,31 @@ def _parse_stream_json(raw: str) -> str:
     return "\n\n".join(prompts)
 
 
-def _event_to_json_record(event: object) -> MutableJSON | None:
-    if isinstance(event, TextChunkEvent):
+def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
+    """Serialize a ``RuntimeEvent`` for stream-json output, or skip."""
+    if isinstance(event, ModelResponsePartial):
         return {"descriptor": "text/plain", "content": event.text}
-    if isinstance(event, ThinkingEvent):
+    if isinstance(event, ModelResponseThinking):
         return {"descriptor": "text/x-thinking", "content": event.text}
-    if isinstance(event, ToolLabelEvent):
-        return {"descriptor": "text/x-tool-label", "content": event.text}
-    if isinstance(event, ToolResultEvent):
-        return event.msg.serialize()
-    if isinstance(event, RecoverableErrorEvent):
-        record = event.msg.serialize()
-        record["severity"] = "recoverable"
-        return record
-    if isinstance(event, IrrecoverableErrorEvent):
-        record = event.msg.serialize()
-        record["severity"] = "irrecoverable"
-        return record
-    if isinstance(event, InterruptedEvent):
-        return {"descriptor": "text/x-interrupted", "content": ""}
-    if isinstance(event, StatusUpdateEvent):
-        return {"descriptor": "text/x-status-update", "content": event.text}
+    if isinstance(event, ToolLabel):
+        return {
+            "descriptor": "text/x-tool-label",
+            "content": event.text,
+            "call_id": event.call_id,
+        }
+    if isinstance(event, ToolResult):
+        return {
+            "descriptor": "application/x-tool-result",
+            "call_id": event.call_id,
+            "content": event.content,
+            "is_error": event.is_error,
+        }
+    if isinstance(event, ModelResponseError):
+        exc = event.exception
+        return {
+            "descriptor": "application/x-error",
+            "content": f"{type(exc).__name__}: {exc}",
+        }
     return None
 
 
@@ -620,16 +590,9 @@ async def _run_headless(
     handler from :func:`_with_signals` is suspended for the duration
     of the read because ``to_thread`` cannot be cancelled mid-read --
     Python's default SIGINT handler (KeyboardInterrupt) is what gets
-    the user out. Once the prompt is read and the agent run starts,
-    the asyncio handlers take over and the first signal posts a
-    graceful ``text/x-quit``.
+    the user out.
     """
     loop = asyncio.get_running_loop()
-    # Suspend the asyncio signal handler so SIGINT during the blocked
-    # stdin read raises KeyboardInterrupt instead of being swallowed
-    # by ``add_signal_handler`` (which would post QUIT to an inbox no
-    # one reads pre-prompt). Restored before agent.run() so the
-    # graceful path is active during the actual work.
     suspended: list[signal.Signals] = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError, RuntimeError):
@@ -638,11 +601,7 @@ async def _run_headless(
     try:
         raw = await asyncio.to_thread(sys.stdin.read)
     except KeyboardInterrupt:
-        # Unix convention: a process killed by signal N exits with
-        # ``128 + N``. SIGINT is signal 2, so 130. Shells interpret
-        # this as "interrupted by Ctrl+C" -- scripts wrapping the
-        # headless mode see the same exit code as any other
-        # interrupted command.
+        # Unix convention: signal N → exit code 128 + N. SIGINT = 130.
         sys.stderr.write("Interrupted before input was provided.\n")
         sys.exit(130)
     finally:
@@ -661,7 +620,7 @@ async def _run_headless(
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)
 
-    user_msg = TextMessage(prompt, "text/x-user-message")
+    user_msg = UserMessage(text=prompt)
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
             record = _event_to_json_record(event)
@@ -684,20 +643,16 @@ async def _run_headless(
         sys.stdout.write("\n")
 
 
-def _last_assistant_text(history: Sequence[Message]) -> str:
-    """Return the final text from the last assistant message in ``history``."""
-    for msg in reversed(history):
-        if msg.descriptor == "multipart/x-model-message":
-            return response_text(msg)
+def _last_assistant_text(history: list[HistoryEntry]) -> str:
+    """Return the text from the most recent ``AssistantMessage`` in ``history``."""
+    for entry in reversed(history):
+        if isinstance(entry, AssistantMessage):
+            return entry.text
     return ""
 
 
 def _quit_handler(agent: Agent) -> Callable[[], None]:
-    """Return a signal handler that posts ``text/x-quit`` once, then exits.
-
-    Mirrors :func:`_with_signals`' two-strikes contract for
-    re-installation after a signal-handler suspension.
-    """
+    """Return a signal handler that pushes ``Quit`` once, then exits."""
     triggered = False
 
     def _on_signal() -> None:
@@ -705,9 +660,47 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
         if triggered:
             os._exit(1)
         triggered = True
-        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
+        agent.runtime.inbox.push_back(Quit())
 
     return _on_signal
+
+
+def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
+    """Attach a ``SaveSession`` observer that appends history deltas to disk."""
+    persisted_len = len(agent.history)
+    meta_written = False
+
+    def _on_event(event: RuntimeEvent) -> None:
+        nonlocal persisted_len, meta_written
+        if not isinstance(event, SaveSession):
+            return
+        delta = agent.history[persisted_len:]
+        spec = agent.model_spec
+        meta = SessionMeta(
+            session_id=agent.session_id,
+            model_id=agent.model.model_id,
+            provider=spec.provider if spec else "",
+            auth=spec.auth if spec else "",
+            account=(spec.account or "") if spec else "",
+            name=agent.name,
+            status=agent.status,
+            tokens=agent.total_tokens,
+            total_cost_usd=agent.total_cost_usd,
+            num_tool_call_rounds=agent.num_tool_call_rounds,
+            compact_count=agent.compaction_state.compact_count,
+            bash_cwd=agent.tool_state.bash_cwd,
+            total_active_elapsed_seconds=agent.activity.elapsed_seconds,
+        )
+        append_session(
+            session_dir / "session.jsonl",
+            meta=meta.serialize() if (delta or not meta_written) else None,
+            history_delta=delta or None,
+            tool_state_snapshot=serialize_tool_state(agent.tool_state),
+        )
+        persisted_len = len(agent.history)
+        meta_written = True
+
+    agent.runtime.observers.append(_on_event)
 
 
 def main() -> None:
@@ -768,16 +761,21 @@ def main() -> None:
         if not headless:
             sys.stderr.write(f"[advisor] {advisor_model.model_id}\n")
 
+    custom_system = args.system
+
+    def _system() -> str:
+        return build_system(
+            model.model_id,
+            custom=custom_system,
+            include_memory=not args.no_session,
+        )
+
     agent = Agent(
         name=args.name,
         description="Interactive CLI agent.",
         model=model,
         model_spec=model_spec,
-        system=build_system_dict(
-            model.model_id,
-            custom=args.system,
-            include_memory=not args.no_session,
-        ),
+        system=_system,
         tools=agent_tools,
         compactor=compactor,
         session_dir=session_dir,
@@ -789,7 +787,17 @@ def main() -> None:
         agent.max_request_tokens = args.max_request_tokens
     if args.max_response_tokens is not None:
         agent.max_response_tokens = args.max_response_tokens
+
+    if session_dir is not None:
+        loaded = load_session(Path(session_dir), {})
+        if loaded is not None:
+            _, prior_history, prior_state = loaded
+            agent.runtime.history.extend(prior_history)
+            agent.tool_state = prior_state
+        _install_session_persistence(agent, Path(session_dir))
+
     agent.tool_state.additional_dirs = list(args.add_dir)
+
     if not headless:
         if args.output_format != "text":
             sys.stderr.write(
@@ -798,11 +806,7 @@ def main() -> None:
         asyncio.run(
             _with_signals(
                 agent,
-                run_repl(
-                    agent,
-                    history=args.history,
-                    show_exception_stack=args.show_exception_trace,
-                ),
+                run_repl(agent, history=args.history),
             ),
         )
     else:
@@ -819,12 +823,7 @@ def main() -> None:
 
 
 def _do_login(args: argparse.Namespace) -> None:
-    """Run the OAuth flow for ``args.provider`` and save under ``args.account``.
-
-    Fails fast if the provider class doesn't expose both ``login``
-    and ``save`` classmethods. Output of the login flow goes to
-    stderr so pipes and scripts can capture them cleanly.
-    """
+    """Run the OAuth flow for ``args.provider`` and save under ``args.account``."""
     cls = getattr(providers, args.provider, None)
     if cls is None:
         sys.stderr.write(f"Error: unknown provider {args.provider!r}\n")

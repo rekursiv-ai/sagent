@@ -1,9 +1,9 @@
-"""``run_repl``: orchestrate an interactive REPL on top of ``Agent``.
+"""``run_repl``: orchestrate an interactive REPL on top of an ``Agent``.
 
 Builds a prompt-toolkit session, attaches one render observer to the
 agent's observer list, spawns the input pump as a hidden background
-task, and calls ``agent.serve_forever()``. Returns when the user types
-``/quit`` or sends EOF.
+task, and calls ``agent.serve_forever()``. Returns when the user
+types ``/quit`` or sends EOF.
 
 Important: the ``rich.Console`` is constructed INSIDE the
 ``patch_stdout`` context. ``patch_stdout`` swaps ``sys.stdout`` /
@@ -52,9 +52,7 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
     from sagent.repl.render import Printer
 
-
 logger = logging.getLogger(__name__)
-
 
 _DEFAULT_HISTORY = Path.home() / ".sagent_history"
 
@@ -63,15 +61,12 @@ async def run_repl(
     agent: Agent,
     *,
     history: Path | None = None,
-    show_exception_stack: bool = True,
 ) -> None:
     """Drive ``agent`` interactively until the user types ``/quit``.
 
     Args:
       agent: The agent to drive.
       history: Path to the input-history file. ``None`` -> ``~/.sagent_history``.
-      show_exception_stack: When True, render structured stack traces for
-        error Messages that include them. Defaults to True.
 
     """
     history_path = history or _DEFAULT_HISTORY
@@ -82,30 +77,29 @@ async def run_repl(
             "prompt": "bold",
         },
     )
+    pending: list[str] = []
     with patch_stdout(raw=True):
         console = Console(stderr=True)
         session: PromptSession[str] = PromptSession(
-            functools.partial(dynamic_prompt, agent),
+            functools.partial(dynamic_prompt, agent, pending),
             multiline=True,
             erase_when_done=True,
             history=FileHistory(str(history_path)),
             auto_suggest=AutoSuggestFromHistory(),
             bottom_toolbar=functools.partial(render_toolbar, agent),
             refresh_interval=0.2,
-            key_bindings=build_key_bindings(agent),
+            key_bindings=build_key_bindings(agent, pending),
             enable_open_in_editor=False,
             style=style,
         )
         printer = ConsolePrinter(console)
-        agent.observers.append(
-            make_render_observer(printer, show_exception_stack=show_exception_stack),
-        )
+        agent.runtime.observers.append(make_render_observer(printer))
         pump_task = spawn_repl_pump(
             agent,
-            PromptToolkitInputSource(session, agent=agent, console=console),
+            PromptToolkitInputSource(session, pending=pending, console=console),
             printer=printer,
         )
-        replay_messages(agent, printer, show_exception_stack=show_exception_stack)
+        replay_messages(agent, printer)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:
@@ -122,16 +116,23 @@ async def run_repl(
             for t in bg_tasks:
                 _ = t.cancel()
             if bg_tasks:
-                await asyncio.gather(*bg_tasks, return_exceptions=True)
+                _ = await asyncio.gather(*bg_tasks, return_exceptions=True)
             _ = pump_task.cancel()
             try:
                 with contextlib.suppress(asyncio.CancelledError):
                     await pump_task
             except Exception:
                 logger.exception("REPL input pump raised during shutdown")
-            _ = agent.background.pop(REPL_PUMP_KEY, None)
+            agent.cancel_background(REPL_PUMP_KEY)
     if agent.session_dir is not None:
-        sys.stderr.write(f"[session {agent.session_dir.name}]\n")
+        _ = sys.stderr.write(
+            "Resume this session with:\n"
+            f"sagent --resume {agent.session_dir.name[:8]}  # this exact session (any unique prefix works)\n"
+            "sagent --continue         # most recent session in this dir\n"
+            "sagent --resume           # interactive picker for this dir\n"
+            "sagent --continue-all     # most recent session across all dirs\n"
+            "sagent --resume-all       # interactive picker across all dirs\n"
+        )
 
 
 def do_switch_model(
@@ -199,7 +200,13 @@ def do_switch_model(
 
 
 def do_login(agent: Agent, printer: Printer | None) -> None:
-    """Re-auth the agent's current provider via its ``login`` classmethod."""
+    """Re-auth the agent's current provider via its ``login`` classmethod.
+
+    Args:
+      agent: Agent whose provider should be re-authenticated.
+      printer: Optional sink for status messages.
+
+    """
     spec = agent.model_spec
     if spec is None:
         _write(printer, "[/login] agent has no model spec")
@@ -220,7 +227,16 @@ def do_login(agent: Agent, printer: Printer | None) -> None:
 
 
 def format_tasks(agent: Agent) -> str:
-    """Format running fg/bg work across every registered agent."""
+    """Format running fg/bg work across every registered agent.
+
+    Args:
+      agent: Agent used to mark the "(self)" row in the listing.
+
+    Returns:
+      summary: Multi-line summary header followed by one row per agent
+          and one indented row per visible background job.
+
+    """
     lines: list[str] = []
     now = time.time()
     total_fg = 0
@@ -263,6 +279,7 @@ def format_tasks(agent: Agent) -> str:
 
 
 def _write(printer: Printer | None, line: str) -> None:
+    """Forward ``line`` to ``printer.write_line`` when a printer is wired."""
     if printer is not None:
         printer.write_line(line)
 

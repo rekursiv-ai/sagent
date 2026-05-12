@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast, get_args
 
 import asyncio
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, JSONValue, json_freeze
-from sagent.lib.message import get_directive
 from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -30,10 +30,6 @@ class WebSearch:
 
         A long-running process that spans a month boundary must not freeze
         the substitution at import time.
-
-        Returns:
-          description: Rendered tool description with current timestamp.
-
         """
         return load_tool_description("WebSearch")
 
@@ -55,92 +51,111 @@ class WebSearch:
                 "backend": {
                     "type": "string",
                     "enum": get_args(SearchBackends),
-                    "description": f'Search backend (default: "{DEFAULT_SEARCH_BACKEND}").',
+                    "description": (
+                        f'Search backend (default: "{DEFAULT_SEARCH_BACKEND}").'
+                    ),
                 },
             },
             "required": ["query"],
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Directive carrying the ``query`` string.
 
         Returns:
-          label: Human-readable summary string.
+          label: ``WebSearch '<query>'`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", ""))
+        query = str(args.get("query", ""))
         if len(query) > 50:
             query = query[:47] + "..."
         return f"WebSearch {query!r}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for WebSearch.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return supplemental system-prompt text.
+        """Return no supplemental system-prompt text for WebSearch.
 
         Returns:
-          prompt: Empty string; this tool adds no prompt.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute the web search and return formatted results.
 
         Args:
-          msg: Directive message containing query and optional filters.
+          args: Directive with ``query``, optional ``allowed_domains`` /
+              ``blocked_domains`` / ``backend``.
 
         Returns:
-          result: Plain-text search results or an error message.
+          result: Top results rendered as ``[title](url)`` over a
+              snippet line, or an error when the backend rejects the query.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", ""))
+        query = str(args.get("query", ""))
         backend: SearchBackends = DEFAULT_SEARCH_BACKEND
-        backend_val = directive.get("backend")
+        backend_val = args.get("backend")
         if isinstance(backend_val, str) and backend_val in get_args(SearchBackends):
             backend = cast(SearchBackends, backend_val)
         elif backend_val is not None:
-            return TextMessage(
-                f"Invalid backend {backend_val!r}. Valid: {', '.join(get_args(SearchBackends))}.",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid backend {backend_val!r}."
+                    f" Valid: {', '.join(get_args(SearchBackends))}."
+                ),
+                is_error=True,
             )
         q = _build_query(
             query,
-            directive.get("allowed_domains"),
-            directive.get("blocked_domains"),
+            args.get("allowed_domains"),
+            args.get("blocked_domains"),
         )
         try:
             results = await asyncio.to_thread(search, q, backend=backend)
         except (RuntimeError, ValueError) as err:
-            return TextMessage(str(err), "text/x-error")
+            return ToolResult(call_id="", content=str(err), is_error=True)
         if not results:
             text = "(no results)"
         else:
             text = "\n\n".join(
                 f"[{r.title}]({r.url})\n{r.snippet}" for r in results[:10]
             )
-        return TextMessage(truncate(text, TOOL_RESULT_MAX_CHARS), "text/plain")
+        return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
 
 
 def _build_query(
     query: str,
-    allowed_domains: JSONValue | None,
-    blocked_domains: JSONValue | None,
+    allowed_domains: object,
+    blocked_domains: object,
 ) -> str:
     """Return *query* with site:/-site: filters appended."""
     allowed = (
-        list(allowed_domains) if isinstance(allowed_domains, (list, tuple)) else []
+        list(cast(list[JSONValue], allowed_domains))
+        if isinstance(allowed_domains, (list, tuple))
+        else []
     )
     blocked = (
-        list(blocked_domains) if isinstance(blocked_domains, (list, tuple)) else []
+        list(cast(list[JSONValue], blocked_domains))
+        if isinstance(blocked_domains, (list, tuple))
+        else []
     )
     for domain in allowed:
         if isinstance(domain, str) and domain:

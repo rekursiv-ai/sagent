@@ -9,19 +9,18 @@ from __future__ import annotations
 from pathlib import Path
 
 import asyncio
+import base64
+import dataclasses
 import json
 import logging
 
-from sagent.custom_types import Message
-from sagent.lib.atomic_file import atomic_write
-from sagent.lib.descriptors import flat_text
-from sagent.lib.message import (
-    append_to_first_user_message,
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    response_tool_calls,
+from sagent.agent.runtime import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolResult,
+    UserMessage,
 )
+from sagent.lib.atomic_file import atomic_write
 
 
 logger = logging.getLogger(__name__)
@@ -31,22 +30,76 @@ CLEARED = "[Prior tool output omitted]"
 
 def write_pre_compact_transcript(
     path: Path,
-    messages: list[Message],
+    history: list[HistoryEntry],
 ) -> None:
-    """Dump messages to ``path`` as JSONL for Recompact recovery.
+    """Dump history to ``path`` as JSONL for Recompact recovery.
+
+    Each entry is serialized via ``dataclasses.asdict`` plus a discriminator
+    column (``_kind``) so the reload path can reconstruct the right
+    dataclass. ``BytesMessage`` attachments serialize as base64.
 
     Args:
-      path: Output file path.
-      messages: Messages to serialize.
+      path: Destination ``.jsonl`` file (atomically written).
+      history: History entries to persist, one record per line.
 
     """
     with atomic_write(path) as f:
-        for msg in messages:
-            _ = f.write(json.dumps(msg.serialize()) + "\n")
+        for entry in history:
+            _ = f.write(json.dumps(_serialize_entry(entry)) + "\n")
+
+
+def _serialize_entry(entry: HistoryEntry) -> dict[str, object]:
+    """Convert one entry to a JSONL-safe dict."""
+    if isinstance(entry, UserMessage):
+        return {
+            "_kind": "user",
+            "text": entry.text,
+            "attachments": [_serialize_bytes(a) for a in entry.attachments],
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+        }
+    if isinstance(entry, AssistantMessage):
+        return {
+            "_kind": "assistant",
+            "text": entry.text,
+            "thinking_blocks": [dict(b) for b in entry.thinking_blocks],
+            "tool_calls": [
+                {"id": tc.id, "name": tc.name, "args": dict(tc.args)}
+                for tc in entry.tool_calls
+            ],
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+        }
+    return {
+        "_kind": "tool_result",
+        "call_id": entry.call_id,
+        "content": entry.content,
+        "is_error": entry.is_error,
+        "diff": entry.diff,
+        "diff_file_path": entry.diff_file_path,
+        "hint": entry.hint,
+        "summary": entry.summary,
+        "attachments": [_serialize_bytes(a) for a in entry.attachments],
+        "id": entry.id,
+        "parent_id": entry.parent_id,
+        "timestamp": entry.timestamp,
+    }
+
+
+def _serialize_bytes(att: object) -> dict[str, str]:
+    """Serialize a ``BytesMessage`` attachment to ``{mime, data_b64}``."""
+    data = getattr(att, "data", b"")
+    descriptor = getattr(att, "descriptor", "application/octet-stream")
+    return {
+        "mime": str(descriptor),
+        "data_b64": base64.b64encode(data if isinstance(data, bytes) else b"").decode(),
+    }
 
 
 async def reattach_files(
-    messages: list[Message],
+    history: list[HistoryEntry],
     recent_files: list[str],
     *,
     count: int,
@@ -55,20 +108,22 @@ async def reattach_files(
 ) -> None:
     """Re-inject recently-read files after compaction.
 
-    Mutates ``messages`` in place.
+    Mutates ``history`` in place: the reattached block lands on the
+    first ``UserMessage`` (or a new one is inserted at position 0 if
+    no user message exists yet).
 
     Args:
-      messages: Message list, mutated in place.
-      recent_files: Recently-read file paths.
-      count: Maximum number of recent files to consider.
-      max_chars: Per-file character truncation limit.
-      budget: Total character budget across all re-attached files.
+      history: History list to mutate in place.
+      recent_files: Original file paths in recency order (oldest first).
+      count: Take only the last ``count`` files.
+      max_chars: Per-file character cap; longer files are truncated.
+      budget: Total character budget across all reattached files.
 
     """
     recent = recent_files[-count:]
     if not recent:
         return
-    preserved = _collect_read_paths(messages)
+    preserved = _collect_read_paths(history)
     resolved = [str(Path(p).resolve()) for p in recent]  # noqa: ASYNC240 -- resolve() is CPU-only, no I/O
     parts: list[str] = []
     total_chars = 0
@@ -99,7 +154,7 @@ async def reattach_files(
         "Recently accessed files"
         " (re-attached post-compaction):\n\n" + "\n\n".join(parts)
     )
-    append_to_first_user_message(messages, reattach)
+    _append_to_first_user(history, reattach)
     logger.debug(
         "Re-attached %d files post-compaction (%d chars).",
         len(parts),
@@ -107,35 +162,38 @@ async def reattach_files(
     )
 
 
-def tool_result_text(msg: Message) -> str:
-    """Extract text/plain content from a tool result message.
+def _append_to_first_user(history: list[HistoryEntry], text: str) -> None:
+    """Append ``text`` to the first UserMessage, or insert one at position 0."""
+    for j, entry in enumerate(history):
+        if isinstance(entry, UserMessage):
+            joined = f"{entry.text}\n\n{text}" if entry.text else text
+            history[j] = dataclasses.replace(entry, text=joined)
+            return
+    history.insert(0, UserMessage(text=text))
 
-    Args:
-      msg: Tool result message.
 
-    Returns:
-      text: Plain text content of the result.
+def _collect_read_paths(history: list[HistoryEntry]) -> set[str]:
+    """Collect resolved file paths from Read tool results.
 
+    Walks pairs of ``AssistantMessage`` (with a Read ``ToolCall``) plus
+    the immediately-following ``ToolResult`` so we can dedup re-attach
+    against the file that's already inline in history.
     """
-    return flat_text(msg)
-
-
-def _collect_read_paths(messages: list[Message]) -> set[str]:
-    """Collect resolved file paths from Read tool results."""
     read_paths: dict[str, str] = {}
-    for msg in messages:
-        if msg.descriptor != "multipart/x-model-message":
+    for entry in history:
+        if not isinstance(entry, AssistantMessage):
             continue
-        for tc in response_tool_calls(msg):
-            if get_tool_name(tc) == "read":
-                fp = get_directive(tc).get("file_path", "")
+        for tc in entry.tool_calls:
+            if tc.name.lower() == "read":
+                fp = tc.args.get("file_path")
                 if isinstance(fp, str) and fp:
-                    read_paths[get_queue_id(tc)] = fp
+                    read_paths[tc.id] = fp
     paths: set[str] = set()
-    for msg in messages:
-        qid = get_queue_id(msg)
-        if msg.descriptor != "multipart/x-tool-result" or qid not in read_paths:
+    for entry in history:
+        if not isinstance(entry, ToolResult):
             continue
-        if tool_result_text(msg) != CLEARED:
-            paths.add(str(Path(read_paths[qid]).resolve()))
+        fp = read_paths.get(entry.call_id)
+        if fp is None or entry.is_error or entry.content == CLEARED:
+            continue
+        paths.add(str(Path(fp).resolve()))
     return paths

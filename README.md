@@ -97,19 +97,70 @@ Three pieces make Sagent distinctive:
 
 ## Install
 
-From a checkout:
+Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are
+optional — sagent has Python fallbacks when absent — but recommended
+for faster `Grep` / `Glob`. PDF rendering uses the bundled `pypdfium2`
+wheel and needs no system install.
+
+### CLI
+
+Installs the `sagent` binary into an isolated environment so it lands
+on your PATH without touching the system Python.
+
+#### Ubuntu / Debian
 
 ```bash
-uv sync
+sudo apt-get install -y ripgrep fd-find pipx
+pipx install sagent
 ```
 
-From PyPI:
+#### macOS
 
 ```bash
+brew install ripgrep fd pipx
+pipx install sagent
+```
+
+### Library
+
+For embedding sagent in your own Python project.
+
+#### Ubuntu / Debian
+
+```bash
+sudo apt-get install -y ripgrep fd-find python3-venv
+python3 -m venv .venv && source .venv/bin/activate
 pip install sagent
 ```
 
-Sagent requires Python 3.12.
+#### macOS
+
+```bash
+brew install ripgrep fd
+python3 -m venv .venv && source .venv/bin/activate
+pip install sagent
+```
+
+### From source
+
+#### Ubuntu / Debian
+
+```bash
+sudo apt-get install -y ripgrep fd-find git
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
+cd sagent && uv sync
+uv run sagent/bin/cli.py --help
+```
+
+#### macOS
+
+```bash
+brew install ripgrep fd uv git
+git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
+cd sagent && uv sync
+uv run sagent/bin/cli.py --help
+```
 
 ## Quickstart: CLI
 

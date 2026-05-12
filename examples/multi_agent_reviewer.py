@@ -6,13 +6,13 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.custom_types import TextMessage
-from sagent.lib.message import response_text
+from sagent.agent.runtime import AssistantMessage, UserMessage
 from sagent.providers import Google
 from sagent.tools import AgentSpawn
 
 
 async def main() -> None:
+    """Run the parent-with-reviewer-sub-agent example."""
     reviewer = AgentSpawn(
         system="You are a strict reviewer. Return only concrete issues.",
         tools=[],
@@ -28,14 +28,14 @@ async def main() -> None:
         tools=[reviewer],
     )
     prompt = (
-        "Write a two-sentence explanation of why typed Message "
-        "objects help agent tool dispatch."
+        "Write a two-sentence explanation of why typed history entries "
+        "help agent tool dispatch."
     )
-    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+    async for _event in agent.run(UserMessage(text=prompt)):
         pass
     for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            sys.stdout.write(f"{response_text(m)}\n")
+        if isinstance(m, AssistantMessage) and m.text:
+            sys.stdout.write(f"{m.text}\n")
             return
 
 

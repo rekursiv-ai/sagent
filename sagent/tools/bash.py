@@ -6,7 +6,7 @@ live in :mod:`sagent.tools.lib.bash`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -20,9 +20,8 @@ import signal
 import subprocess
 import time
 
-from sagent.custom_types import Message, MultipartMessage, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     ToolState,
@@ -31,15 +30,11 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, cached_parse_bash
-from sagent.tools.lib.state_parts import bash_state_part
 
 
 logger = logging.getLogger(__name__)
 
-
-# Matches ``[exit code: N]`` appended by ``Bash._run`` on non-zero exits.
-# Anchored to ``\n`` or start-of-string because ``_run`` strips the leading
-# newline when stdout was empty (e.g. ``false`` → ``"[exit code: 1]"``).
+# Matches ``[exit code: N]`` appended by ``_run`` on non-zero exits.
 _BASH_EXIT_RE = re.compile(r"(?:^|\n)\[exit code: (\d+)\]\s*$")
 
 
@@ -64,13 +59,8 @@ _BASH_TAIL_LINES = 250
 BASH_DEFAULT_TIMEOUT_MS = 120_000
 BASH_MAX_TIMEOUT_MS = 600_000
 
-
 # Kept-alive references to background subprocesses so their Popen
-# objects don't get garbage-collected mid-run. GC fires ``__del__``
-# which emits ``ResourceWarning: subprocess N still running`` and
-# (under ``asyncio`` debug mode) kills the child. Retaining the
-# ``Popen`` here trades a tiny leak (sizeof(Popen) per bg job,
-# released at interpreter exit via ``atexit``) for clean semantics.
+# objects don't get garbage-collected mid-run.
 _BACKGROUND_PROCESSES: list[subprocess.Popen[bytes]] = []
 
 
@@ -150,40 +140,46 @@ class Bash:
 
         Peers are sibling tools in the same agent. Any peer whose class
         defines ``bash_match(self, trees: Sequence[Node]) -> str | None``
-        is registered as a lint source; its output is prepended to the
-        ``tool_result`` inside a ``<system-reminder>`` block when it
-        fires - same framing as ``changed_files_context`` so the model
-        treats it as ambient metadata rather than tool output.
+        is registered as a lint source; its output is surfaced via the
+        result's ``hint`` field for renderer-only display, AND the same
+        nudges are prepended to ``content`` as a ``<system-reminder>``
+        block so the model sees them too.
         """
         self._peer_matchers: tuple[Callable[[Sequence[Node]], str | None], ...] = tuple(
             peer.bash_match for peer in peers if isinstance(peer, _BashMatchPeer)
         )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Parsed tool directive mapping.
 
         Returns:
-          label: Human-readable summary of the command.
+          label: Compact one-line label for renderer display.
 
         """
-        directive = get_directive(msg)
-        cmd = str(directive.get("command", ""))
+        cmd = str(args.get("command", ""))
         cmd = cmd.replace("\r\n", "⏎").replace("\n", "⏎").replace("\r", "⏎")
         cmd = cmd.replace("\t", " ")
         if len(cmd) > 60:
             cmd = cmd[:57] + "..."
         return f"Bash {cmd}" if cmd else "Bash"
 
-    def summary_result(self, result: Message) -> str | None:
-        """One-line receipt: line count + nonzero exit code."""
-        if not self.emit_tool_summary:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Return a one-line receipt: line count plus nonzero exit code.
+
+        Args:
+          result: The completed ``ToolResult``.
+
+        Returns:
+          receipt: Line-count receipt (with exit code on nonzero), or
+            ``None`` when summaries are disabled or the result is an error.
+
+        """
+        if not self.emit_tool_summary or result.is_error:
             return None
-        text = _first_text(result)
-        if text is None:
-            return None
+        text = result.content
         exit_match = _BASH_EXIT_RE.search(text)
         body = text[: exit_match.start()] if exit_match else text
         lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
@@ -195,31 +191,30 @@ class Bash:
         """Return supplemental prompt text for this tool.
 
         Returns:
-          prompt: Always empty.
+          text: Supplemental prompt text; empty for Bash.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute the command and return the result.
 
         Cancellation propagates natively: ``asyncio.create_subprocess_exec``
         starts the bash process in its own session group, and on
         ``CancelledError`` we ``SIGTERM`` (then ``SIGKILL``) the whole
-        group before re-raising. Subprocesses cannot outlive the
-        cancelled task -- no polling, no shared abort event, no race.
+        group before re-raising.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Parsed tool directive mapping.
 
         Returns:
-          result: Tool result Message with stdout/stderr.
+          result: ``ToolResult`` carrying truncated stdout/stderr and any
+            bash-lint nudges.
 
         """
-        directive = get_directive(msg)
-        command = str(directive.get("command", ""))
-        timeout = int_val(directive.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
-        run_in_background = bool_val(directive.get("run_in_background"), False)
+        command = str(args.get("command", ""))
+        timeout = int_val(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
+        run_in_background = bool_val(args.get("run_in_background"), False)
         state = get_tool_state()
         _ensure_valid_cwd(state)
         if run_in_background:
@@ -227,30 +222,24 @@ class Bash:
         else:
             timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
             text = await _run_foreground(command, state=state, timeout_s=timeout_s)
-        text_part = TextMessage(
-            truncate(text, TOOL_RESULT_MAX_CHARS),
-            "text/plain",
-            parent_id=msg.id,
-        )
-        cwd_part = bash_state_part(state)
-        if self._peer_matchers:
-            nudges = self._collect_nudges(command)
-            if nudges:
-                body = "\n".join(f"[bash-lint] {h}" for h in nudges)
-                banner = f"<system-reminder>\n{body}\n</system-reminder>"
-                return MultipartMessage(
-                    (
-                        TextMessage(f"{banner}\n\n{text}", "text/plain"),
-                        *(TextMessage(h, "text/x-hint-tool-use-nudge") for h in nudges),
-                        cwd_part,
-                    ),
-                    "multipart/mixed",
-                )
-        return MultipartMessage(
-            (text_part, cwd_part), "multipart/mixed", parent_id=msg.id
+        body = truncate(text, TOOL_RESULT_MAX_CHARS)
+        if not self._peer_matchers:
+            return ToolResult(call_id="", content=body)
+        nudges = self._collect_nudges(command)
+        if not nudges:
+            return ToolResult(call_id="", content=body)
+        # Bake the banner into ``content`` so the model sees it, and
+        # surface the same nudges on ``hint`` for the renderer.
+        banner_body = "\n".join(f"[bash-lint] {h}" for h in nudges)
+        banner = f"<system-reminder>\n{banner_body}\n</system-reminder>"
+        return ToolResult(
+            call_id="",
+            content=f"{banner}\n\n{body}",
+            hint="\n".join(nudges),
         )
 
     def _collect_nudges(self, command: str) -> list[str]:
+        """Run peer ``bash_match`` matchers and return any nudges."""
         trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
         if trees is None:
             return []
@@ -260,17 +249,6 @@ class Bash:
             if nudge:
                 nudges.append(nudge)
         return nudges
-
-
-def _first_text(result: Message) -> str | None:
-    """Return the first ``text/plain`` content from a tool result Message."""
-    if result.descriptor == "text/plain":
-        return str(result.content)
-    if isinstance(result, MultipartMessage):
-        for p in result.content:
-            if isinstance(p, TextMessage) and p.descriptor == "text/plain":
-                return p.content
-    return None
 
 
 def _ensure_valid_cwd(state: ToolState) -> None:
@@ -300,23 +278,13 @@ def _run_background(command: str, *, state: ToolState) -> str:
 
 
 async def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> str:
-    """Run a foreground bash command via :mod:`asyncio.subprocess`.
-
-    Cancellation propagation: ``asyncio.create_subprocess_exec`` returns
-    a ``Process`` whose ``communicate`` is awaitable. If the task is
-    cancelled, the ``await`` raises ``CancelledError``; we kill the
-    process group on the way out and re-raise. Timeouts use
-    :func:`asyncio.wait_for`. No polling, no shared event.
-    """
+    """Run a foreground bash command via :mod:`asyncio.subprocess`."""
     sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
     tracked_cmd = f"trap 'echo {sentinel}=$(pwd)' EXIT\n{command}"
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash",
         "-c",
         tracked_cmd,
-        # Commands that need input should use pipes, heredocs, or file
-        # redirects. Inheriting stdin lets tools like pytest --pdb
-        # compete with the REPL for terminal input.
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

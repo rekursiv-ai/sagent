@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sagent.lib.message import response_text, response_tool_calls
-
 
 if TYPE_CHECKING:
     from sagent.custom_types import ModelResponse
@@ -80,8 +78,8 @@ class ModelTerminationError(Exception):
     """
 
     def __init__(self, response: ModelResponse) -> None:
-        tool_count = len(response_tool_calls(response.content))
-        text_len = len(response_text(response.content))
+        tool_count = len(response.message.tool_calls)
+        text_len = len(response.message.text)
         super().__init__(
             f"Model stopped with unrecognized stop_reason="
             f"{response.stop_reason!r} (tool_calls={tool_count}, "

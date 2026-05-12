@@ -1,554 +1,422 @@
-"""Tests for AgentSelf tool."""
+"""Tests for ``tools.agent_self``: agent self-mutation directives."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import override
 
 import pytest
 
-from sagent.agent import PendingOp
+from sagent.agent.agent import Agent
+from sagent.agent.runtime import (
+    AssistantMessage,
+    Clear,
+    Compact,
+    Recompact,
+)
 from sagent.custom_types import (
-    ContextBudget,
-    JsonMessage,
-    Message,
+    ModelRequest,
+    ModelResponse,
     ModelSpec,
-    MultipartMessage,
+    Pricing,
 )
-from sagent.lib.json import JSON, json_freeze
+from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.tools.core import (
-    ToolState,
-    current_agent_var,
-    tool_state_context,
-)
+from sagent.tools.core import current_agent_var, tool_state_var
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-agentself"),),
-        "multipart/x-tool-call",
+@dataclass(slots=True, kw_only=True)
+class StubProviderModel(MockModelCaps):
+    """Provider model that returns scripted responses on call."""
+
+    model_id: str = "stub-1"
+    max_request_tokens: int = 100_000
+    responses: list[AssistantMessage] = field(default_factory=list)
+    _idx: int = field(default=0, init=False)
+
+    @property
+    @override
+    def pricing(self) -> Pricing:
+        return Pricing()
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        idx = self._idx
+        self._idx += 1
+        msg = (
+            self.responses[idx]
+            if idx < len(self.responses)
+            else AssistantMessage(text="ok")
+        )
+        return ModelResponse(message=msg)
+
+
+def _make_agent(*, spec: ModelSpec | None = None) -> Agent:
+    return Agent(
+        model=StubProviderModel(),
+        tools=[],
+        model_spec=spec,
     )
 
 
-@pytest.fixture
-def tool_state() -> Iterator[ToolState]:
-    ts = ToolState()
-    with tool_state_context(ts):
-        yield ts
+@contextmanager
+def _active(agent: Agent) -> Generator[Agent]:
+    token = current_agent_var.set(agent)
+    state_token = tool_state_var.set(agent.tool_state)
+    try:
+        yield agent
+    finally:
+        tool_state_var.reset(state_token)
+        current_agent_var.reset(token)
 
 
-@pytest.mark.usefixtures("tool_state")
-class TestPatch:
-    @pytest.mark.anyio
-    async def test_empty_patch_is_noop(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(_msg(json_freeze({})))
-            assert result.descriptor == "text/plain"
-            assert result.content == "No changes."
-        finally:
-            current_agent_var.reset(token)
+def test_metadata_basics() -> None:
+    t = AgentSelf()
+    assert t.name == "AgentSelf"
+    assert t.tool_id == "application/x-tool-agentself"
+    assert t.supports_microcompaction is True
+    assert t.prompt() == ""
 
-    @pytest.mark.anyio
-    async def test_sets_status_and_limits_together(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(
-                    json_freeze(
-                        {
-                            "status": "Debugging tests",
-                            "max_request_tokens": 180_000,
-                            "max_response_tokens": 7_000,
-                        }
-                    )
-                )
-            )
-            assert result.descriptor == "text/plain"
-            assert agent.status == "Debugging tests"
-            assert agent.max_request_tokens == 180_000
-            assert agent.max_response_tokens == 7_000
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_empty_status_is_error_when_provided(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(_msg(json_freeze({"status": ""})))
-            assert result.descriptor == "text/x-error"
-        finally:
-            current_agent_var.reset(token)
+def test_summary_renders_parts() -> None:
+    t = AgentSelf()
+    out = t.summary(
+        {
+            "status": "thinking",
+            "context": "compact",
+            "model_id": "m1",
+            "provider": "P",
+            "max_request_tokens": 100,
+            "max_response_tokens": 10,
+            "model_options": {"thinking": True},
+            "diagnostics": True,
+            "catalog": "models",
+        },
+    )
+    assert "status=thinking" in out
+    assert "context=compact" in out
+    assert "diagnostics" in out
+    assert "catalog=models" in out
 
-    @pytest.mark.anyio
-    async def test_context_prompt_requires_context(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(json_freeze({"context_prompt": "keep details"}))
-            )
-            assert result.descriptor == "text/x-error"
-            assert "context_prompt" in str(result.content)
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_queues_context_actions(self, tool_state: ToolState) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(
-                    json_freeze(
-                        {"context": "compact", "context_prompt": "keep the API spec"}
-                    )
-                )
-            )
-            assert result.descriptor == "text/plain"
-            del tool_state  # not used in v3 -- ops live on agent._next_op
-            assert agent._next_op is not None
-            assert agent._next_op.kind == "compact"
-            assert agent._next_op.args == "keep the API spec"
-        finally:
-            current_agent_var.reset(token)
+def test_summary_empty_just_name() -> None:
+    t = AgentSelf()
+    assert t.summary({}) == "AgentSelf"
 
-    @pytest.mark.anyio
-    async def test_diagnostics_reports_model_options(
-        self, tool_state: ToolState
-    ) -> None:
-        tool_state.stats = {"max_request_tokens": 0, "input_tokens": 100}
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(_msg(json_freeze({"diagnostics": True})))
-            text = str(result.content)
-            assert "0.0%" in text
-            assert "Thinking:           on" in text
-            assert "Effort:             unset" in text
-            assert (
-                "Supported model_options: thinking: boolean, effort: string,"
-                " cache_ttl: '5m' | '1h'"
-            ) in text
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_diagnostics_lists_provider_catalog(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(json_freeze({"diagnostics": True, "catalog": "providers"}))
-            )
-            text = str(result.content)
-            assert result.descriptor == "text/plain"
-            assert "Known providers:" in text
-            assert "Anthropic" in text
-            assert "OpenAI" in text
-        finally:
-            current_agent_var.reset(token)
+@pytest.mark.asyncio
+async def test_run_no_active_agent() -> None:
+    token = current_agent_var.set(None)
+    try:
+        t = AgentSelf()
+        result = await t.run({})
+    finally:
+        current_agent_var.reset(token)
+    assert result.is_error
+    assert "No active agent" in result.content
 
-    @pytest.mark.anyio
-    async def test_diagnostics_lists_model_catalog(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(
-                    json_freeze(
-                        {
-                            "diagnostics": True,
-                            "catalog": "models",
-                            "catalog_provider": "Anthropic",
-                        }
-                    )
-                )
-            )
-            text = str(result.content)
-            assert result.descriptor == "text/plain"
-            assert "Provider catalog: Anthropic" in text
-            assert "Default model:" in text
-            assert "claude" in text
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_model_options_reject_unsupported_keys(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(json_freeze({"model_options": {"temperature": 0.2}}))
-            )
-            assert result.descriptor == "text/x-error"
-            assert "temperature" in str(result.content)
-        finally:
-            current_agent_var.reset(token)
+@pytest.mark.asyncio
+async def test_run_no_changes_message() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({})
+    assert not result.is_error
+    assert "No changes" in result.content
 
-    @pytest.mark.anyio
-    async def test_model_options_update_thinking_and_effort(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(
-                    json_freeze(
-                        {"model_options": {"thinking": False, "effort": "high"}}
-                    )
-                )
-            )
-            assert result.descriptor == "text/plain"
-            assert agent.thinking is None
-            assert agent.effort == "high"
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_rejects_model_options_when_unsupported(self) -> None:
-        agent = _LimitAgent(supports_thinking=False, supports_effort=False)
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(json_freeze({"model_options": {"thinking": True}}))
-            )
-            assert result.descriptor == "text/x-error"
-            assert "thinking" in str(result.content)
-        finally:
-            current_agent_var.reset(token)
+@pytest.mark.asyncio
+async def test_run_status_updates_agent() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"status": "working"})
+    assert not result.is_error
+    assert agent.status == "working"
+    assert "status=working" in result.content
 
-    @pytest.mark.anyio
-    async def test_rejects_zero_max_request_tokens(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(_msg(json_freeze({"max_request_tokens": 0})))
-            assert result.descriptor == "text/x-error"
-            assert agent.max_request_tokens == 200_000
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_invalid_patch_does_not_apply_earlier_fields(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(
-                    json_freeze(
-                        {
-                            "status": "Mutated",
-                            "model_options": {"cache_ttl": "1h"},
-                            "max_request_tokens": 1,
-                            "context": "compact",
-                        }
-                    )
-                )
-            )
-            assert result.descriptor == "text/x-error"
-            assert agent.status == ""
-            assert agent.cache_ttl == "5m"
-            assert agent.max_request_tokens == 200_000
-            assert agent._next_op is None
-        finally:
-            current_agent_var.reset(token)
+@pytest.mark.asyncio
+async def test_run_empty_status_is_error() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"status": "   "})
+    assert result.is_error
 
-    @pytest.mark.anyio
-    async def test_model_options_sets_cache_ttl(self) -> None:
-        agent = _LimitAgent()
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            result = await AgentSelf().run(
-                _msg(json_freeze({"model_options": {"cache_ttl": "1h"}}))
-            )
-            assert result.descriptor == "text/plain"
-            assert agent.cache_ttl == "1h"
-        finally:
-            current_agent_var.reset(token)
 
-    @pytest.mark.anyio
-    async def test_selfhosted_local_path_updates_auth(self) -> None:
-        agent = _LimitAgent()
-        agent.model_spec = ModelSpec(
-            provider="SelfHosted",
-            auth="/old/model",
-            model_id="/old/model",
+@pytest.mark.asyncio
+async def test_context_prompt_without_context_is_error() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"context_prompt": "x"})
+    assert result.is_error
+    assert "context_prompt is only valid" in result.content
+
+
+@pytest.mark.asyncio
+async def test_invalid_context_is_error() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"context": "wipe"})
+    assert result.is_error
+    assert "Invalid context" in result.content
+
+
+@pytest.mark.asyncio
+async def test_invalid_model_options_object_errors() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": "not-an-object"})
+    assert result.is_error
+    assert "model_options must be an object" in result.content
+
+
+@pytest.mark.asyncio
+async def test_invalid_catalog_errors() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"catalog": "garbage"})
+    assert result.is_error
+    assert "Invalid catalog" in result.content
+
+
+@pytest.mark.asyncio
+async def test_catalog_provider_without_models_catalog_errors() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"catalog_provider": "P"})
+    assert result.is_error
+    assert "catalog_provider is only valid" in result.content
+
+
+@pytest.mark.asyncio
+async def test_context_clear_pushes_clear_event() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"context": "clear"})
+    assert not result.is_error
+    items = await agent.runtime.inbox.drain()
+    assert any(isinstance(i, Clear) for i in items)
+
+
+@pytest.mark.asyncio
+async def test_context_compact_pushes_compact_event() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"context": "compact", "context_prompt": "trim it"})
+    assert not result.is_error
+    items = await agent.runtime.inbox.drain()
+    compacts = [i for i in items if isinstance(i, Compact)]
+    assert len(compacts) == 1
+    assert compacts[0].args == "trim it"
+
+
+@pytest.mark.asyncio
+async def test_context_recompact_pushes_recompact_event() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"context": "recompact"})
+    assert not result.is_error
+    items = await agent.runtime.inbox.drain()
+    assert any(isinstance(i, Recompact) for i in items)
+
+
+@pytest.mark.asyncio
+async def test_max_request_tokens_within_model_cap() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_request_tokens": 10_000})
+    assert not result.is_error
+    assert agent.max_request_tokens == 10_000
+
+
+@pytest.mark.asyncio
+async def test_max_request_tokens_exceeds_model_cap() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_request_tokens": 999_999_999})
+    assert result.is_error
+    assert "exceeds model" in result.content
+
+
+@pytest.mark.asyncio
+async def test_max_request_tokens_below_one_errors() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_request_tokens": 0})
+    assert result.is_error
+    assert "Must be at least 1" in result.content
+
+
+@pytest.mark.asyncio
+async def test_max_request_tokens_wrong_type_errors() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        # Lists are not coercible to int.
+        result = await t.run({"max_request_tokens": [10]})
+    assert result.is_error
+    assert "must be a number" in result.content
+
+
+@pytest.mark.asyncio
+async def test_model_swap_without_spec_errors() -> None:
+    agent = _make_agent(spec=None)
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_id": "claude"})
+    assert result.is_error
+    assert "no model spec" in result.content
+
+
+@pytest.mark.asyncio
+async def test_model_change_auth_without_model_id_errors() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(provider="StubP", auth="env", model_id="stub-1", account=""),
+    )
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"auth": "new"})
+    assert result.is_error
+    assert "model_id is required" in result.content
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_returns_lines() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(provider="StubP", auth="env", model_id="stub-1", account=""),
+    )
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True})
+    assert not result.is_error
+    assert "Provider:" in result.content
+    assert "Bash cwd:" in result.content
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_catalog_providers() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True, "catalog": "providers"})
+    assert "Known providers:" in result.content
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_catalog_models_unknown_provider() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run(
+            {
+                "diagnostics": True,
+                "catalog": "models",
+                "catalog_provider": "Nope",
+            },
         )
-        agent.model.model_id = "/old/model"
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            with patch("sagent.tools.agent_self.build_provider") as mock_bp:
-                mock_bp.return_value.model.return_value = MagicMock(
-                    model_id="/new/model",
-                    max_request_tokens=200_000,
-                    max_response_tokens=8_000,
-                    supports_thinking=True,
-                    supports_effort=True,
-                )
-                result = await AgentSelf().run(
-                    _msg(json_freeze({"model_id": "/new/model"}))
-                )
-            assert result.descriptor == "text/plain"
-            mock_bp.assert_called_once_with("SelfHosted", "/new/model", account=None)
-            assert agent.swapped_spec is not None
-            spec = agent.swapped_spec
-            assert spec.provider == "SelfHosted"
-            assert spec.auth == "/new/model"
-            assert spec.model_id == "/new/model"
-        finally:
-            current_agent_var.reset(token)
-
-    @pytest.mark.anyio
-    async def test_model_swap_resets_budget_on_smaller_model(self) -> None:
-        agent = _LimitAgent()  # budget: max_request=200K, max_response=8K
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            with patch("sagent.tools.agent_self.build_provider") as mock_bp:
-                mock_bp.return_value.model.return_value = _ModelStub(
-                    model_id="small-model",
-                    max_request_tokens=100_000,
-                    max_response_tokens=8_000,
-                )
-                result = await AgentSelf().run(
-                    _msg(json_freeze({"model_id": "small-model"}))
-                )
-            assert result.descriptor == "text/plain", result.content
-            assert agent.swapped_spec is not None
-            assert agent.model.model_id == "small-model"
-            assert agent._budget is None
-        finally:
-            current_agent_var.reset(token)
-
-    @pytest.mark.anyio
-    async def test_model_swap_clears_effort_when_unsupported(self) -> None:
-        agent = _LimitAgent()
-        agent._effort = "medium"
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            with patch("sagent.tools.agent_self.build_provider") as mock_bp:
-                mock_bp.return_value.model.return_value = _ModelStub(
-                    model_id="no-effort-model",
-                    supports_effort=False,
-                )
-                result = await AgentSelf().run(
-                    _msg(json_freeze({"model_id": "no-effort-model"}))
-                )
-            assert result.descriptor == "text/plain", result.content
-            assert agent.effort is None
-            assert "effort=unset" in str(result.content)
-        finally:
-            current_agent_var.reset(token)
-
-    @pytest.mark.anyio
-    async def test_model_swap_clears_thinking_when_unsupported(self) -> None:
-        agent = _LimitAgent()  # thinking is "adaptive" by default
-        token = current_agent_var.set(cast(Any, agent))
-        try:
-            with patch("sagent.tools.agent_self.build_provider") as mock_bp:
-                mock_bp.return_value.model.return_value = _ModelStub(
-                    model_id="no-thinking-model",
-                    supports_thinking=False,
-                )
-                result = await AgentSelf().run(
-                    _msg(json_freeze({"model_id": "no-thinking-model"}))
-                )
-            assert result.descriptor == "text/plain", result.content
-            assert agent.thinking is None
-            assert "thinking=off" in str(result.content)
-        finally:
-            current_agent_var.reset(token)
+    assert "unknown provider" in result.content
 
 
-class TestPrompt:
-    def test_static_guidance_lives_in_description(self) -> None:
-        assert AgentSelf().prompt() == ""
-        desc = AgentSelf.description
-        assert "model_options" in desc
-        assert "context" in desc
-        assert "max_request_tokens" in desc
+@pytest.mark.asyncio
+async def test_diagnostics_catalog_models_no_provider() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True, "catalog": "models"})
+    assert "set catalog_provider" in result.content
 
 
-class TestHelp:
-    def test_summary(self) -> None:
-        h = AgentSelf().summary(
-            _msg(
-                json_freeze(
-                    {
-                        "status": "Debugging",
-                        "context": "compact",
-                        "max_request_tokens": 180_000,
-                    }
-                )
-            )
-        )
-        assert "status=Debugging" in h
-        assert "context=compact" in h
-        assert "max_request_tokens=180000" in h
+@pytest.mark.asyncio
+async def test_diagnostics_includes_stats_lines_when_present() -> None:
+    agent = _make_agent()
+    agent.tool_state.stats = {
+        "num_tool_call_rounds": 2,
+        "max_request_tokens": 50,
+        "max_response_tokens": 5,
+        "input_tokens": 10,
+        "total_input_tokens": 20,
+        "total_output_tokens": 30,
+        "cache_creation_tokens": 0,
+        "cache_read_tokens": 0,
+        "total_cost_usd": 0.42,
+    }
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True})
+    assert "Tool call rounds:" in result.content
+    assert "Total cost (USD):   $0.42" in result.content
 
 
-class TestSchema:
-    def test_patch_schema_has_no_required_operation(self) -> None:
-        schema = cast(dict[str, Any], AgentSelf.directive_schema)
-        props = cast(dict[str, dict[str, Any]], schema["properties"])
-        assert schema["additionalProperties"] is False
-        assert schema["required"] == ()
-        assert "operation" not in props
-        assert tuple(props["context"]["enum"]) == ("clear", "compact", "recompact")
-        assert "cache_ttl" not in props
-        assert props["max_request_tokens"]["minimum"] == 1
-        assert props["model_options"]["type"] == "object"
-        assert tuple(props["catalog"]["enum"]) == ("providers", "models")
-        assert props["catalog_provider"]["type"] == "string"
-
-    def test_patch_schema_preserves_contract_guidance(self) -> None:
-        schema = cast(dict[str, Any], AgentSelf.directive_schema)
-        props = cast(dict[str, dict[str, Any]], schema["properties"])
-        context_prompt = str(props["context_prompt"]["description"])
-        model_options = str(props["model_options"]["description"])
-        diagnostics = str(props["diagnostics"]["description"])
-        assert "Only valid when context is set" in context_prompt
-        assert "Supported keys" in model_options
-        assert "diagnostics" in model_options
-        assert "current diagnostics" in diagnostics
-        assert "catalog" in props
-        assert "catalog_provider" in props
+@pytest.mark.asyncio
+async def test_model_options_unsupported_key_errors() -> None:
+    # StubProviderModel doesn't support thinking; passing the key errors.
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"thinking": True}})
+    assert result.is_error
+    assert "Unsupported model_options" in result.content
 
 
-class _ModelStub:
-    def __init__(
-        self,
-        *,
-        model_id: str = "model",
-        max_request_tokens: int = 200_000,
-        max_response_tokens: int = 8_000,
-        supports_thinking: bool = True,
-        supports_effort: bool = True,
-        supports_cache_control: bool = True,
-    ) -> None:
-        self.model_id = model_id
-        self.max_request_tokens = max_request_tokens
-        self.max_response_tokens = max_response_tokens
-        self.supports_thinking = supports_thinking
-        self.supports_effort = supports_effort
-        self.supports_cache_control = supports_cache_control
+@pytest.mark.asyncio
+async def test_max_response_tokens_exceeds_model_cap() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_response_tokens": 1_000_000})
+    assert result.is_error
+    assert "max_response_tokens" in result.content
 
 
-class _LimitAgent:
-    def __init__(
-        self,
-        *,
-        supports_thinking: bool = True,
-        supports_effort: bool = True,
-        supports_cache_control: bool = True,
-    ) -> None:
-        self._max_request_tokens = 200_000
-        self._max_response_tokens = 8_000
-        self._cache_ttl = "5m"
-        self._thinking = "adaptive"
-        self._effort: str | None = None
-        self._status = ""
-        self._budget: ContextBudget | None = None
-        self.model = _ModelStub(
-            supports_thinking=supports_thinking,
-            supports_effort=supports_effort,
-            supports_cache_control=supports_cache_control,
-        )
-        self.model_spec = ModelSpec(provider="Anthropic", auth="env", model_id="model")
-        self.swapped_spec: ModelSpec | None = None
-        self._next_op: PendingOp | None = None
-        self.session_id: str = "test1234"
-        self.session_dir: Path | None = None
-        self.tool_state = ToolState()
+@pytest.mark.asyncio
+async def test_max_response_tokens_within_cap_applied() -> None:
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_response_tokens": 1_024})
+    assert not result.is_error
+    assert agent.max_response_tokens == 1_024
 
-    @property
-    def budget(self) -> ContextBudget:
-        if self._budget is not None:
-            return self._budget
-        return ContextBudget(
-            max_request_tokens=self.max_request_tokens,
-            max_response_tokens=self.max_response_tokens,
-            buffer_tokens=128_000,
-        )
 
-    @property
-    def max_request_tokens(self) -> int:
-        return self._max_request_tokens
-
-    @max_request_tokens.setter
-    def max_request_tokens(self, value: int) -> None:
-        if value < 128_000:
-            raise ValueError(
-                f"buffer_tokens (128000) must be < max_request_tokens ({value})"
-            )
-        self._max_request_tokens = value
-
-    @property
-    def max_response_tokens(self) -> int:
-        return self._max_response_tokens
-
-    @max_response_tokens.setter
-    def max_response_tokens(self, value: int) -> None:
-        self._max_response_tokens = value
-
-    @property
-    def cache_ttl(self) -> str:
-        return self._cache_ttl
-
-    @cache_ttl.setter
-    def cache_ttl(self, value: str) -> None:
-        if value not in ("5m", "1h"):
-            raise ValueError(f"cache_ttl must be '5m' or '1h', got {value!r}")
-        self._cache_ttl = value
-
-    @property
-    def status(self) -> str:
-        return self._status
-
-    @status.setter
-    def status(self, value: str) -> None:
-        self._status = value
-
-    @property
-    def thinking(self) -> str | None:
-        return self._thinking
-
-    @thinking.setter
-    def thinking(self, value: str | None) -> None:
-        self._thinking = value
-
-    @property
-    def effort(self) -> str | None:
-        return self._effort
-
-    @effort.setter
-    def effort(self, value: str | None) -> None:
-        if value is not None and not self.model.supports_effort:
-            raise ValueError(f"Model {self.model.model_id!r} does not support effort.")
-        self._effort = value
-
-    def swap_model(self, model: _ModelStub, *, spec: ModelSpec | None = None) -> None:
-        if self._budget is not None:
-            budget = self._budget
-            if (
-                budget.max_request_tokens > model.max_request_tokens
-                or budget.max_response_tokens > model.max_response_tokens
-            ):
-                raise ValueError(
-                    f"budget.max_request_tokens={budget.max_request_tokens} "
-                    f"exceeds model's {model.max_request_tokens}"
-                )
-        self.model = model
-        self.model_spec = spec
-        self.swapped_spec = spec
-
-    def reset_budget(self) -> None:
-        self._budget = None
+@pytest.mark.asyncio
+async def test_model_id_change_unknown_provider_errors() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(
+            provider="UnknownProvider",
+            auth="env",
+            model_id="x",
+            account="",
+        ),
+    )
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_id": "newmodel"})
+    assert result.is_error
+    assert "Failed to build model" in result.content
 
 
 if __name__ == "__main__":

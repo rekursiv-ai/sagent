@@ -5,7 +5,7 @@ This is ``tools.AgentSpawn`` (the tool), distinct from
 Python namespaces disambiguate.
 
 The factory's job is to convert an LLM-emitted tool call into a
-fresh ``AgentSpawn`` instance with the right knobs resolved, run it to
+fresh ``Agent`` instance with the right knobs resolved, run it to
 completion, and return its final output. Every knob follows one
 rule: ``LLM arg → factory arg → parent → hard default``. ``None``
 at any layer means "fall through."
@@ -17,9 +17,9 @@ itself *is* the registry for those objects.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import dataclasses
@@ -27,29 +27,24 @@ import logging
 import time
 import uuid
 
-from sagent.custom_types import (
+from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.runtime import (
+    AssistantMessage,
     ChildDoneEvent,
     ChildEvent,
-    Event,
-    IrrecoverableErrorEvent,
-    Message,
-    ModelSpec,
-    MultipartMessage,
-    RecoverableErrorEvent,
-    TextChunkEvent,
-    TextMessage,
-    ThinkingEvent,
-    Tool,
-    ToolLabelEvent,
-    ToolResultEvent,
-    is_message,
+    HistoryEntry,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
 )
-from sagent.lib.descriptors import flat_text, has_error
+from sagent.custom_types import Compactor, Model, ModelSpec, Tool
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
-from sagent.lib.message import get_directive, response_text
 from sagent.providers import PROVIDER_NAMES, build_provider
-from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import (
     agent_counter_var,
     agent_label_var,
@@ -66,31 +61,43 @@ from sagent.tools.core import (
 
 agent_lib = lazy_import("sagent.agent")
 
-
 if TYPE_CHECKING:
     from sagent.agent import (
         Agent as _Agent,
-        SystemPrompt,
+        SystemPromptArg,
     )
-    from sagent.custom_types import Compactor, Model
-
 
 # Prevent GC of persistent agent tasks. Keyed by label; cleaned
 # up in the wrapper's ``finally`` block.
 _persistent_tasks: dict[str, asyncio.Task[None]] = {}
 
 
+def _current_agent() -> _Agent | None:
+    """Resolve the currently-executing concrete ``Agent``.
+
+    ``current_agent_var`` is typed as the minimal ``AgentLike`` Protocol
+    so ``tools.core`` avoids a circular import with the concrete class.
+    Inside ``AgentSpawn`` we always need the full surface; non-``Agent``
+    holders (e.g. ``FakeAgent`` in unit tests) return ``None`` so callers
+    fall through to "no parent" semantics.
+    """
+    agent = current_agent_var.get()
+    if agent is None:
+        return None
+    cls = _get_agent_class()
+    return agent if isinstance(agent, cls) else None
+
+
 def _get_agent_class() -> type[_Agent]:
     """Resolve ``sagent.agent.Agent`` lazily.
 
-    ``tools.agent`` is re-exported from ``tools/__init__.py`` for
-    ``tools.AgentSpawn`` ergonomics. That re-export runs while
-    ``sagent.agent`` is mid-initialization (``sagent.__init__`` ->
-    ``sagent.agent`` -> ``tools.core`` -> ``tools/__init__.py`` ->
-    ``tools.agent``). A top-level attribute import of ``Agent`` at
-    this stage would hit the partially-initialized ``sagent.agent``
-    and fail. Deferring the lookup until ``__call__`` time sidesteps
-    the cycle cleanly; the class is guaranteed to be resolved by then.
+    ``tools.AgentSpawn`` is re-exported from ``tools/__init__.py``. That
+    re-export runs while ``sagent.agent`` is mid-initialization
+    (``sagent.agent`` -> ``tools.core`` -> ``tools/__init__.py`` ->
+    ``tools.agent_spawn``). A top-level attribute import of ``Agent``
+    here would hit the partially-initialized module and fail. Deferring
+    the lookup until ``__call__`` time sidesteps the cycle; the class
+    is guaranteed to be resolved by then.
     """
     return agent_lib.Agent
 
@@ -193,7 +200,7 @@ class AgentSpawn:
                     "type": "boolean",
                     "description": (
                         "Run the child as a persistent agent via"
-                        " run_forever(). Returns immediately with"
+                        " serve_forever(). Returns immediately with"
                         " the child's label. Send messages via"
                         " AgentSend; manage via BackgroundTask."
                     ),
@@ -217,7 +224,7 @@ class AgentSpawn:
         auth: str | None = None,
         model_id: str | None = None,
         account: str | None = None,
-        system: SystemPrompt | None = None,
+        system: SystemPromptArg | None = None,
         tools: list[Tool] | None = None,
         max_tool_call_rounds: int | None = None,
         max_depth: int | None = None,
@@ -226,7 +233,6 @@ class AgentSpawn:
         thinking: str | None = None,
         effort: str | None = None,
         session_root_dir: str | Path | None = None,
-        on_message: Callable[[Message], None] | None = None,
         verbosity: int = 1,
     ) -> None:
         self._provider = provider
@@ -244,48 +250,38 @@ class AgentSpawn:
         self._session_root_dir = (
             Path(session_root_dir) if session_root_dir is not None else None
         )
-        # Streaming callback. When set, the factory gives the child an
-        # ``asyncio.Queue[Message | None]`` and pumps events into
-        # ``on_message`` concurrently with the child's run. ``None``
-        # means buffered-only (the default) - the caller sees just the
-        # final ``ToolResponse``.
-        self._on_message = on_message
         self._verbosity = verbosity
         self.on_persistent_spawn: (
-            Callable[[str, asyncio.Queue[Message | None]], None] | None
+            Callable[[str, asyncio.Queue[RuntimeEvent | None]], None] | None
         ) = None
         self.on_persistent_stop: Callable[[str], None] | None = None
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this spawn call.
 
         Args:
-          msg: Tool call message.
+          args: Parsed tool directive mapping.
 
         Returns:
-          label: Human-readable summary with prompt preview and model.
+          label: Compact one-line label for renderer display.
 
         """
-        directive = get_directive(msg)
-        prompt_arg = directive.get("prompt")
+        prompt_arg = args.get("prompt")
         prompt = prompt_arg if isinstance(prompt_arg, str) else ""
         preview = prompt.replace("\n", " ").strip()
         if len(preview) > 60:
             preview = preview[:57] + "..."
-        model_arg = directive.get("model_id")
+        model_arg = args.get("model_id")
         suffix = f" [{model_arg}]" if isinstance(model_arg, str) and model_arg else ""
-        label = f"{self.name} {preview}{suffix}" if preview else self.name
-        return label
+        return f"{self.name} {preview}{suffix}" if preview else self.name
 
     def prompt(self) -> str:
         """Return spawn-budget info for the system prompt.
 
         Returns:
-          prompt: Budget summary, or empty string if uncapped.
+          text: Depth/cap reminder text, or empty when no cap is active.
 
         """
-        # Surface spawn budget so agents plan inline instead of attempting
-        # AgentSpawn calls that will immediately fail at the depth limit.
         depth = get_tool_state().depth
         cap = max_depth_var.get()
         if cap is None:
@@ -297,53 +293,66 @@ class AgentSpawn:
                 "Do not call AgentSpawn; it will fail. Do the work directly."
             )
         s = "s" if remaining != 1 else ""
-        return f"Spawn budget: depth {depth}/{cap} -- {remaining} generation{s} of sub-spawning available."
+        return (
+            f"Spawn budget: depth {depth}/{cap} -- "
+            f"{remaining} generation{s} of sub-spawning available."
+        )
 
-    def summary_result(self, result: Message) -> str | None:
-        """Return a one-line receipt for the child result."""
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Return a one-line receipt for the child result.
+
+        Args:
+          result: The child's completed ``ToolResult``.
+
+        Returns:
+          receipt: Compact line-count receipt, or ``None`` when summaries
+            are disabled for this tool.
+
+        """
         if not self.emit_tool_summary:
             return None
-        text = flat_text(result).strip()
+        text = result.content.strip()
         if not text:
             return "completed with no output"
         return f"{len(text.splitlines())}L"
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Spawn and run a child agent per the directive.
 
         Args:
-          msg: Tool call message with prompt, model, tools, etc.
+          args: Parsed tool directive mapping.
 
         Returns:
-          result: Child agent's final output message.
+          result: Child's final assistant message wrapped as a
+            ``ToolResult``, or an error.
 
         """
-        directive = get_directive(msg)
-        prompt = str(directive.get("prompt", ""))
-        system = opt_str(directive, "system")
-        provider = opt_str(directive, "provider")
-        auth = opt_str(directive, "auth")
-        model_id = opt_str(directive, "model_id")
-        account = opt_str(directive, "account")
-        tools_raw = directive.get("tools")
-        tools: list[str] | None = (
-            [str(t) for t in tools_raw]
-            if isinstance(tools_raw, (list, tuple))
-            else None
-        )
-        max_rounds = opt_int(directive, "max_tool_call_rounds")
-        max_depth = opt_int(directive, "max_depth")
-        persistent = bool_val(directive.get("persistent"), False)
-        custom_label = opt_str(directive, "label")
-        parent_agent = current_agent_var.get()
+        prompt = str(args.get("prompt", ""))
+        system = opt_str(args, "system")
+        provider = opt_str(args, "provider")
+        auth = opt_str(args, "auth")
+        model_id = opt_str(args, "model_id")
+        account = opt_str(args, "account")
+        tools_raw = args.get("tools")
+        tools: list[str] | None
+        if isinstance(tools_raw, (list, tuple)):
+            tools = [
+                str(t) for t in cast("list[object] | tuple[object, ...]", tools_raw)
+            ]
+        else:
+            tools = None
+        max_rounds = opt_int(args, "max_tool_call_rounds")
+        max_depth = opt_int(args, "max_depth")
+        persistent = bool_val(args.get("persistent"), False)
+        custom_label = opt_str(args, "label")
+        parent_agent = _current_agent()
         parent_depth = get_tool_state().depth
 
         # Effective max_depth = ``min`` over every non-None cap in
         # play: LLM-supplied, factory construction, and the ambient
         # ``max_depth_var`` set by an ancestor. Semantics is "tighten
         # only" - neither the LLM nor the factory can *raise* a cap an
-        # ancestor already put in place. ``None`` still propagates a
-        # no-cap signal, but any concrete int on any layer is binding.
+        # ancestor already put in place.
         caps = [
             c
             for c in (max_depth, self._max_depth, max_depth_var.get())
@@ -352,9 +361,10 @@ class AgentSpawn:
         eff_max_depth: int | None = min(caps) if caps else None
 
         if eff_max_depth is not None and parent_depth > eff_max_depth:
-            return TextMessage(
-                f"max_depth {eff_max_depth} exceeded (current depth {parent_depth})",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"max_depth {eff_max_depth} exceeded (current depth {parent_depth})",
+                is_error=True,
             )
 
         resolved = self._resolve_model(
@@ -364,11 +374,11 @@ class AgentSpawn:
             account=account,
             parent_agent=parent_agent,
         )
-        if is_message(resolved):
+        if isinstance(resolved, ToolResult):
             return resolved
         child_model, child_spec = resolved
         child_tools = self._resolve_tools(tools, parent_agent)
-        if is_message(child_tools):
+        if isinstance(child_tools, ToolResult):
             return child_tools
 
         child = self._build_child(
@@ -389,16 +399,14 @@ class AgentSpawn:
         label = custom_label or f"Agent_{child_path}"
 
         if persistent:
-            return self._spawn_persistent(child, label, prompt, msg)
+            return self._spawn_persistent(child, label, prompt)
 
-        child_directive = json_freeze({"prompt": prompt})
         return await self._execute_child(
             child,
-            child_directive=child_directive,
+            prompt=prompt,
             label=label,
             child_path=child_path,
             eff_max_depth=eff_max_depth,
-            msg=msg,
         )
 
     def _build_child(
@@ -435,15 +443,13 @@ class AgentSpawn:
         self,
         child: _Agent,
         *,
-        child_directive: JSON,
+        prompt: str,
         label: str,
         child_path: str,
         eff_max_depth: int | None,
-        msg: Message,
-    ) -> Message:
+    ) -> ToolResult:
         """Run a non-persistent child with contextvar isolation."""
-        del child_directive  # built locally below from directive["prompt"]
-        parent_agent = current_agent_var.get()
+        parent_agent = _current_agent()
         assert parent_agent is not None
         depth_token = max_depth_var.set(eff_max_depth)
         path_token = agent_path_var.set(child_path)
@@ -453,22 +459,17 @@ class AgentSpawn:
         try:
             forwarder = _build_forwarder(label, self._verbosity, parent_agent)
             if forwarder is not None:
-                child.observers.append(forwarder)
-            user_msg = TextMessage(
-                str(get_directive(msg).get("prompt", "")),
-                "text/x-user-message",
-            )
+                child.runtime.observers.append(forwarder)
             try:
-                async for _event in child.run(user_msg):
+                async for _event in child.run(UserMessage(text=prompt)):
                     pass
             finally:
-                if forwarder is not None and forwarder in child.observers:
-                    child.observers.remove(forwarder)
+                if forwarder is not None and forwarder in child.runtime.observers:
+                    child.runtime.observers.remove(forwarder)
                 if forwarder is not None:
                     forwarder.emit_done()
-            return _last_assistant_message(child.history, msg.id)
+            return _last_assistant_result(child.history)
         finally:
-            parent_agent.active_children.pop(label, None)
             agent_registry.pop(label, None)
             current_agent_var.reset(agent_token)
             agent_label_var.reset(label_token)
@@ -480,26 +481,25 @@ class AgentSpawn:
         child: _Agent,
         label: str,
         prompt: str,
-        msg: Message,
-    ) -> Message:
+    ) -> ToolResult:
         """Start a persistent child agent via ``serve_forever()``.
 
         Registers the child in ``agent_registry``, attaches the parent
         forwarder as an observer, seeds the child's inbox with the prompt,
         spawns ``serve_forever`` as a visible bg job under
-        ``parent.background``. Returns immediately with the label.
+        ``parent._bg``. Returns immediately with the label.
         """
         child._persistent = True  # noqa: SLF001 -- cross-layer flag
         child.name = label
         if self._session_root_dir is not None:
             child.session_dir = self._session_root_dir / label
         agent_registry[label] = child
-        parent_agent = current_agent_var.get()
+        parent_agent = _current_agent()
         forwarder = _build_forwarder(label, self._verbosity, parent_agent)
         if forwarder is not None:
-            child.observers.append(forwarder)
+            child.runtime.observers.append(forwarder)
         bg_key = f"persistent:{label}"
-        external_queue: asyncio.Queue[Message | None] | None = (
+        external_queue: asyncio.Queue[RuntimeEvent | None] | None = (
             asyncio.Queue() if self.on_persistent_spawn is not None else None
         )
 
@@ -507,40 +507,39 @@ class AgentSpawn:
             try:
                 await child.serve_forever()
             finally:
-                if forwarder is not None and forwarder in child.observers:
-                    child.observers.remove(forwarder)
+                if forwarder is not None and forwarder in child.runtime.observers:
+                    child.runtime.observers.remove(forwarder)
                 if forwarder is not None:
                     forwarder.emit_done()
                 agent_registry.pop(label, None)
                 _persistent_tasks.pop(label, None)
                 if parent_agent is not None:
-                    parent_agent.background.pop(bg_key, None)
+                    parent_agent.cancel_background(bg_key)
                 if external_queue is not None:
                     external_queue.put_nowait(None)
                 if self.on_persistent_stop is not None:
                     self.on_persistent_stop(label)
 
-        child.inbox.send(
-            TextMessage(prompt, "text/x-user-message"),
-            source="user",
-        )
+        child.runtime.inbox.push_back(UserMessage(text=prompt))
         task = asyncio.create_task(_run())
         _persistent_tasks[label] = task
         if parent_agent is not None:
-            parent_agent.background[bg_key] = BackgroundTaskEntry(
-                task=task,
-                tool_name="persistent-agent",
-                queue_id=label,
-                started=time.time(),
-                hidden=False,
-                kind="persistent_subagent",
+            parent_agent.register_background(
+                bg_key,
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name="persistent-agent",
+                    queue_id=label,
+                    started=time.time(),
+                    hidden=False,
+                    kind="persistent_subagent",
+                ),
             )
         if self.on_persistent_spawn is not None and external_queue is not None:
             self.on_persistent_spawn(label, external_queue)
-        return TextMessage(
-            f"Persistent agent started: {label}",
-            "text/plain",
-            parent_id=msg.id,
+        return ToolResult(
+            call_id="",
+            content=f"Persistent agent started: {label}",
         )
 
     def _inherit(self, name: str, parent_agent: _Agent | None) -> object:
@@ -564,7 +563,7 @@ class AgentSpawn:
         self,
         llm_arg: str | None,
         parent_agent: _Agent | None,
-    ) -> SystemPrompt:
+    ) -> SystemPromptArg:
         """Resolve system prompt via LLM arg → factory → parent fallthrough."""
         if llm_arg is not None:
             return llm_arg
@@ -582,7 +581,7 @@ class AgentSpawn:
         model_id: str | None,
         account: str | None,
         parent_agent: _Agent | None,
-    ) -> tuple[Model, ModelSpec | None] | Message:
+    ) -> tuple[Model, ModelSpec | None] | ToolResult:
         """Resolve ``(model, model_spec)`` for the child.
 
         Per-field fallthrough: ``LLM arg → factory arg →
@@ -631,14 +630,15 @@ class AgentSpawn:
             return parent_agent.model, parent_spec
 
         if p is None or a is None or m is None:
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     "Cannot build a model: need provider, auth, and"
                     f" model_id; got provider={p!r}, auth={a!r},"
                     f" model_id={m!r}. The parent agent has no model_spec"
                     " to inherit from."
                 ),
-                "text/x-error",
+                is_error=True,
             )
         built_provider = build_provider(p, a, account=ac)
         new_model = built_provider.model(m)
@@ -654,7 +654,7 @@ class AgentSpawn:
         self,
         names: list[str] | None,
         parent_agent: _Agent | None,
-    ) -> list[Tool] | Message:
+    ) -> list[Tool] | ToolResult:
         """Resolve LLM-supplied tool names to tool instances.
 
         - ``names is None``: inherit. Use factory's ``self._tools``
@@ -679,9 +679,10 @@ class AgentSpawn:
         by_name = {t.name: t for t in available}
         missing = [n for n in names if n not in by_name]
         if missing:
-            return TextMessage(
-                f"Unknown tools: {missing}. Available: {list(by_name)}",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"Unknown tools: {missing}. Available: {list(by_name)}",
+                is_error=True,
             )
         return [by_name[n] for n in names]
 
@@ -718,13 +719,13 @@ def _pick_field(
     return spec_val
 
 
-# Verbosity -> set of Event subclasses forwarded to the parent observer.
+# Verbosity -> set of RuntimeEvent subclasses forwarded to the parent observer.
 # verbosity 0: nothing; 1: tool labels + tool results + assistant text;
 # 2: also thinking blocks. Errors are always forwarded.
-_VERBOSITY: dict[int, frozenset[type[Event]]] = {
+_VERBOSITY: dict[int, frozenset[type]] = {
     0: frozenset(),
-    1: frozenset({ToolLabelEvent, ToolResultEvent, TextChunkEvent}),
-    2: frozenset({ToolLabelEvent, ToolResultEvent, TextChunkEvent, ThinkingEvent}),
+    1: frozenset({ToolLabel, ToolResult, ModelResponsePartial}),
+    2: frozenset({ToolLabel, ToolResult, ModelResponsePartial, ModelResponseThinking}),
 }
 
 
@@ -733,11 +734,22 @@ class ChildStats:
     """Parent-scoped toolbar stats for one child agent."""
 
     label: str
+    """Child agent's display label."""
+
     start: float
+    """Monotonic clock seconds when the child run began."""
+
     model_response_tokens: int = 0
+    """Approximate response tokens streamed so far."""
+
     model_response_chars: int = 0
+    """Response characters streamed so far (drives the token estimate)."""
+
     cost_usd: float = 0.0
+    """Running cost in USD attributed to the child."""
+
     done: bool = False
+    """True after ``emit_done`` publishes the final ``ChildDoneEvent``."""
 
 
 class _ChildForwarder:
@@ -754,7 +766,7 @@ class _ChildForwarder:
         self,
         *,
         parent_agent: _Agent,
-        forward_set: frozenset[type[Event]],
+        forward_set: frozenset[type],
         stats: ChildStats,
         label: str,
     ) -> None:
@@ -763,7 +775,7 @@ class _ChildForwarder:
         self._stats = stats
         self._label = label
 
-    def __call__(self, event: Event) -> None:
+    def __call__(self, event: RuntimeEvent) -> None:
         if isinstance(event, ChildEvent):
             self._parent_agent.publish(
                 ChildEvent(label=f"{self._label}/{event.label}", inner=event.inner)
@@ -779,18 +791,18 @@ class _ChildForwarder:
                 )
             )
             return
-        if isinstance(event, TextChunkEvent):
+        if isinstance(event, ModelResponsePartial):
             self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4
-        always_forward = isinstance(
-            event, (RecoverableErrorEvent, IrrecoverableErrorEvent)
-        ) or (isinstance(event, ToolResultEvent) and has_error(event.msg))
+        always_forward = isinstance(event, ModelResponseError) or (
+            isinstance(event, ToolResult) and event.is_error
+        )
         if not always_forward and type(event) not in self._forward_set:
             return
         self._parent_agent.publish(ChildEvent(label=self._label, inner=event))
 
     def emit_done(self) -> None:
-        """Publish a final ``ChildDoneEvent`` summary; clears parent active_children."""
+        """Publish the final ``ChildDoneEvent`` summary for this child run."""
         self._stats.done = True
         elapsed = time.monotonic() - self._stats.start
         self._parent_agent.publish(
@@ -801,7 +813,6 @@ class _ChildForwarder:
                 cost=self._stats.cost_usd,
             ),
         )
-        self._parent_agent.active_children.pop(self._label, None)
 
 
 def _build_forwarder(
@@ -814,7 +825,6 @@ def _build_forwarder(
         return None
     forward_set = _VERBOSITY.get(verbosity, _VERBOSITY[1])
     stats = ChildStats(label=label, start=time.monotonic())
-    parent_agent.active_children[label] = stats
     return _ChildForwarder(
         parent_agent=parent_agent,
         forward_set=forward_set,
@@ -823,23 +833,12 @@ def _build_forwarder(
     )
 
 
-def _last_assistant_message(history: list[Message], parent_id: int) -> Message:
-    """Return the child's last assistant message as a flat ``text/plain`` reply."""
+def _last_assistant_result(history: list[HistoryEntry]) -> ToolResult:
+    """Return the child's last assistant message as a ``ToolResult``."""
     for m in reversed(history):
-        if m.descriptor == "multipart/x-model-message":
-            text = response_text(m)
-            if text:
-                return TextMessage(text, "text/plain", parent_id=parent_id)
-            if isinstance(m, MultipartMessage):
-                for part in m.content:
-                    if part.descriptor == "text/x-error":
-                        return TextMessage(
-                            str(part.content),
-                            "text/x-error",
-                            parent_id=parent_id,
-                        )
-            return TextMessage("", "text/plain", parent_id=parent_id)
-    return TextMessage("", "text/plain", parent_id=parent_id)
+        if isinstance(m, AssistantMessage):
+            return ToolResult(call_id="", content=m.text)
+    return ToolResult(call_id="", content="")
 
 
 _logger = logging.getLogger(__name__)

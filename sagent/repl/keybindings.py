@@ -1,24 +1,27 @@
-"""v3 prompt-toolkit keybindings.
+"""prompt-toolkit keybindings.
 
-Translates key events into agent method calls (sync) or buffered text
+Translates key events into agent method calls (sync) or queued text
 that the input pump consumes on the next ``next_line()`` call.
 
 Bindings:
 
-- Enter: queue inline input while active; submit when idle.
+- Enter: queue input into the REPL-local pending list while active;
+  submit when idle.
 - Alt+Enter: insert a newline (multi-line composition).
-- Up: pull most recent queued user message into the buffer for editing; else history-backward.
+- Up: pull most recent pending user message into the buffer for
+  editing; else history-backward.
 - Shift-Up / Shift-Down: prefix-based history search.
 - Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
-- Ctrl+C: ``agent.halt()`` while active; clear input buffer when idle. Never exits.
+- Ctrl+C: ``agent.halt()`` while active; clear input buffer when
+  idle. Never exits.
 - Ctrl+D / ``/quit``: exit the REPL.
 - Ctrl+_ / Esc-z: undo.
 - Ctrl+Z: suspend.
 
-The Tab follow-up queue (``QUEUED_USER_MESSAGE``) was removed per
-``execution_model.md`` §8 -- user messages go straight into the inbox
-as ``text/x-user-message``; the round loop merges them in arrival
-order along with peer / bg-tool deliveries.
+The pending list is the REPL's local view of user texts not yet
+drained by the runtime. ``GatedDeque`` doesn't support tag-based
+peek / pop, so the REPL maintains this list itself and the
+keybindings update it.
 """
 
 from __future__ import annotations
@@ -30,8 +33,7 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.agent.inbox import USER_SOURCE
-from sagent.custom_types import TextMessage
+from sagent.agent.runtime import UserMessage
 
 
 if TYPE_CHECKING:
@@ -40,20 +42,23 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
 
-def build_key_bindings(agent: Agent) -> KeyBindings:
-    """Build the v3 REPL keybindings bound to ``agent``.
+def build_key_bindings(agent: Agent, pending: list[str]) -> KeyBindings:
+    """Build the REPL keybindings bound to ``agent`` and ``pending``.
 
     Args:
       agent: Agent these key handlers will mutate.
+      pending: REPL-local list of texts typed while the agent was
+          busy. Submitted-when-active inputs append here; Up pops
+          the tail.
 
     Returns:
       kb: Configured ``KeyBindings``.
 
     """
     kb = KeyBindings()
-    kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent))
+    kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent, pending))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("up")(functools.partial(_kb_up, agent))
+    kb.add("up")(functools.partial(_kb_up, pending))
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
@@ -64,36 +69,49 @@ def build_key_bindings(agent: Agent) -> KeyBindings:
     return kb
 
 
-def _kb_submit(agent: Agent, event: KeyPressEvent) -> None:
-    """Submit when idle; queue input into the inbox while active."""
-    if agent.work is None:
+def _kb_submit(
+    agent: Agent,
+    pending: list[str],
+    event: KeyPressEvent,
+) -> None:
+    """Submit when idle; queue input into the pending list while active.
+
+    Active submissions push a ``UserMessage`` to the runtime inbox
+    immediately (the runtime preempts and stubs unfinished tools) and
+    record the text in ``pending`` so the dim preview and Up-arrow
+    edit-back keep working.
+    """
+    if agent.work is None and not agent.runtime.cohort:
         event.current_buffer.validate_and_handle()
         return
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
         return
-    agent.inbox.send(TextMessage(text, "text/x-user-message"), source=USER_SOURCE)
+    agent.runtime.inbox.push_back(UserMessage(text=text))
+    pending.append(text)
     buf.append_to_history()
     buf.reset()
 
 
 def _kb_newline(event: KeyPressEvent) -> None:
+    """Insert a literal newline into the current buffer (Alt+Enter)."""
     event.current_buffer.insert_text("\n")
 
 
-def _kb_up(agent: Agent, event: KeyPressEvent) -> None:
-    """Lift the most recent queued user message into the buffer; else history-back."""
-    item = agent.inbox.pop_by_source(USER_SOURCE)
-    if item is not None and isinstance(item.msg.content, str):
+def _kb_up(pending: list[str], event: KeyPressEvent) -> None:
+    """Lift the most recent pending text into the buffer; else history-back."""
+    if pending:
+        text = pending.pop()
         buf = event.current_buffer
-        buf.text = item.msg.content
+        buf.text = text
         buf.cursor_position = len(buf.text)
         return
     event.current_buffer.history_backward(count=1)
 
 
 def _kb_history_prefix_back(event: KeyPressEvent) -> None:
+    """Walk history backward to the next entry matching the pre-cursor prefix."""
     buf = event.current_buffer
     text = buf.document.text_before_cursor
     while True:
@@ -106,6 +124,7 @@ def _kb_history_prefix_back(event: KeyPressEvent) -> None:
 
 
 def _kb_history_prefix_fwd(event: KeyPressEvent) -> None:
+    """Walk history forward to the next entry matching the pre-cursor prefix."""
     buf = event.current_buffer
     text = buf.document.text_before_cursor
     while True:
@@ -118,6 +137,7 @@ def _kb_history_prefix_fwd(event: KeyPressEvent) -> None:
 
 
 def _kb_open_editor(event: KeyPressEvent) -> None:
+    """Open the current buffer in ``$EDITOR`` (Ctrl+X Ctrl+E)."""
     event.current_buffer.open_in_editor()
 
 
@@ -128,15 +148,17 @@ def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
     abandon the line you were composing). To exit the REPL use Ctrl+D
     or ``/quit``.
     """
-    if agent.work is not None:
+    if agent.work is not None or agent.runtime.cohort:
         agent.halt()
         return
     event.current_buffer.reset()
 
 
 def _kb_suspend(event: KeyPressEvent) -> None:
+    """Suspend the REPL to background (Ctrl+Z)."""
     event.app.suspend_to_background()
 
 
 def _kb_undo(event: KeyPressEvent) -> None:
+    """Undo the last buffer edit (Ctrl+_ / Esc-z)."""
     event.current_buffer.undo()

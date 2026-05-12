@@ -11,31 +11,23 @@ near-Opus intelligence at a fraction of the cost. This module is a
 client-side approximation of Anthropic's server-side ``advisor`` tool
 - two round-trips per consult instead of one, but provider-agnostic
 and fully observable in the REPL.
-
-Usage::
-
-    from sagent.tools.advisor import Advisor
-    from sagent.agent import Agent
-    from sagent.providers import resolve_model
-
-    _, sonnet = resolve_model("anthropic", "claude-sonnet-4-6")
-    _, opus = resolve_model("anthropic", "claude-opus-4-7")
-
-    advisor = Advisor(model=opus)  # max_uses=None → unlimited
-    agent = Agent(model=sonnet, tools=[..., advisor])
-
-Or via the CLI::
-
-    ./cli.py --model claude-sonnet-4-6 --advisor claude-opus-4-7
 """
 
 from __future__ import annotations
 
-from sagent.agent import Agent
-from sagent.custom_types import Message, Model, TextMessage
+from collections.abc import Callable, Mapping
+
+from sagent.agent.runtime import (
+    AgentRuntime,
+    AssistantMessage,
+    HistoryEntry,
+    Tool as RuntimeTool,
+    ToolResult,
+    UserMessage,
+)
+from sagent.custom_types import Model, ModelRequest
 from sagent.lib import debug_log
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive, response_text
 
 
 _SYSTEM = (
@@ -54,10 +46,6 @@ _DESCRIPTION = (
     " considered, and the specific decision you need help with."
 )
 
-
-# System-prompt section added when the advisor is enabled. Tool
-# descriptions are low-salience vs system text - this nudge tells
-# the executor concretely when to reach for the advisor.
 SYSTEM_NUDGE = (
     "# Advisor\n\n"
     "An `advisor` tool is available - a more capable model with no"
@@ -79,14 +67,41 @@ SYSTEM_NUDGE = (
 )
 
 
-class Advisor:
-    """``Tool`` wrapper exposing an LLM as an advisor sub-agent.
+class _AdvisorModel:
+    """Bridge a provider ``Model`` to the runtime ``Model`` protocol."""
 
-    Each call runs a fresh ``Agent`` with empty history, so advice is
-    independent across consults. ``max_uses`` caps invocations per
-    instance (``None`` = unlimited - bounded only by the host agent's
-    ``--max-tool-call-rounds`` CLI flag).
-    """
+    def __init__(self, inner: Model) -> None:
+        self._inner = inner
+
+    async def stream(
+        self,
+        history: list[HistoryEntry],
+        system: str,
+        tools: list[RuntimeTool],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        """Stream a provider response and adapt it to the runtime ``Model`` protocol.
+
+        Args:
+          history: Conversation history for the advisor consult.
+          system: System prompt to send.
+          tools: Runtime-side tools forwarded by the engine (ignored).
+          on_text: Callback for each streamed text chunk.
+          on_thinking: Callback for each streamed thinking chunk.
+
+        Returns:
+          message: Final ``AssistantMessage`` from the inner provider.
+
+        """
+        del tools
+        request = ModelRequest(messages=history, system=system or None)
+        response = await self._inner.stream(request, on_text, on_thinking)
+        return response.message
+
+
+class Advisor:
+    """``Tool`` wrapper exposing an LLM as an advisor sub-agent."""
 
     name: str = "advisor"
     tool_id: str = "application/x-tool-advisor"
@@ -109,28 +124,37 @@ class Advisor:
     )
     supports_microcompaction: bool = False
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label for this advisor consultation.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return the toolbar label for a pending advisor consult.
 
         Args:
-          msg: Tool call message (unused).
+          args: Directive arguments (ignored).
 
         Returns:
-          label: Static "Advisor consulting…" string.
+          label: ``Advisor consulting…`` line shown before invocation.
 
         """
-        del msg
+        del args
         return "Advisor consulting…"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for advisor consults.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return the system prompt nudge for advisor usage.
+        """Return the advisor system-prompt nudge.
 
         Returns:
-          prompt: Multi-paragraph guidance on when to consult the advisor.
+          contribution: Advisor invocation guidance for the system prompt.
 
         """
         return SYSTEM_NUDGE
@@ -147,22 +171,22 @@ class Advisor:
         self._system = system
         self._uses = 0
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Run a fresh sub-agent consultation and return the advice.
 
         Args:
-          msg: Tool call message with ``prompt`` field.
+          args: Directive with the ``prompt`` string.
 
         Returns:
-          result: Advisor's response or quota-exhausted error.
+          result: Advisor's reply, or a quota-exhausted error.
 
         """
-        directive = get_directive(msg)
-        prompt = str(directive.get("prompt", ""))
+        prompt = str(args.get("prompt", ""))
         if self._max_uses is not None and self._uses >= self._max_uses:
-            return TextMessage(
-                f"Advisor quota exhausted ({self._max_uses} uses).",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"Advisor quota exhausted ({self._max_uses} uses).",
+                is_error=True,
             )
         self._uses += 1
         debug_log.trace(
@@ -172,16 +196,13 @@ class Advisor:
             uses=self._uses,
             max_uses=self._max_uses,
         )
-        sub = Agent(
-            name="advisor",
-            description="Advisor sub-agent.",
-            model=self._model,
+        runtime = AgentRuntime(
+            model=_AdvisorModel(self._model),
             system=self._system,
             tools=[],
         )
-        async for _event in sub.run(TextMessage(prompt, "text/x-user-message")):
-            pass
-        for m in reversed(sub.history):
-            if m.descriptor == "multipart/x-model-message":
-                return TextMessage(response_text(m), "text/plain")
-        return TextMessage("", "text/plain")
+        history = await runtime.run(UserMessage(text=prompt))
+        for m in reversed(history):
+            if isinstance(m, AssistantMessage):
+                return ToolResult(call_id="", content=m.text)
+        return ToolResult(call_id="", content="")

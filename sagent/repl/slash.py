@@ -1,4 +1,4 @@
-"""Slash-command parsing for the v3 REPL.
+"""Slash-command parsing for the REPL.
 
 The input pump (active and idle paths) parses each typed line into a
 :class:`SlashAction` -- a tagged union of typed actions -- and dispatches
@@ -104,7 +104,6 @@ type SlashAction = (
     | Text
     | Unknown
 )
-
 
 # Quit phrases recognized by both REPL paths.
 QUIT_WORDS: frozenset[str] = frozenset({"/quit"})

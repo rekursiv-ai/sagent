@@ -13,7 +13,15 @@ SORT_VALUES: Final = ("name", "name_desc", "mtime", "mtime_desc", "size", "size_
 
 
 def safe_mtime(p: Path) -> float:
-    """Return ``mtime`` for ``p`` or 0 on stat failure (e.g. broken symlinks)."""
+    """Return ``mtime`` for ``p`` or 0 on stat failure (e.g. broken symlinks).
+
+    Args:
+      p: Filesystem path to stat.
+
+    Returns:
+      mtime: Modification time in seconds, or 0.0 on stat failure.
+
+    """
     try:
         return p.stat().st_mtime
     except OSError:
@@ -21,7 +29,15 @@ def safe_mtime(p: Path) -> float:
 
 
 def safe_size(p: Path) -> int:
-    """Return ``size`` for ``p`` or 0 on stat failure (e.g. broken symlinks)."""
+    """Return ``size`` for ``p`` or 0 on stat failure (e.g. broken symlinks).
+
+    Args:
+      p: Filesystem path to stat.
+
+    Returns:
+      size: Size in bytes, or 0 on stat failure.
+
+    """
     try:
         return p.stat().st_size
     except OSError:
@@ -54,6 +70,5 @@ def sort_paths(paths: list[Path], sort: SortKey) -> None:
 
 
 def _by_name(p: Path) -> tuple[str, str]:
-    # Mirror GNU ``ls``: case-insensitive primary, raw name as tiebreak
-    # so 'A' and 'a' sort adjacent but deterministically.
+    """Case-insensitive name with raw name as tiebreak (mirrors GNU ``ls``)."""
     return (p.name.casefold(), p.name)

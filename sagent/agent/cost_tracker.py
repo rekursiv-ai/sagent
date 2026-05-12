@@ -32,10 +32,19 @@ class CostTracker:
     """Per-agent cumulative cost; the only cost store."""
 
     last_request: TokenCount = dataclasses.field(default_factory=TokenCount)
+    """Token counts from the most recent response."""
+
     total: TokenCount = dataclasses.field(default_factory=TokenCount)
+    """Cumulative token counts across all recorded responses."""
+
     total_cost_usd: float = 0.0
+    """Cumulative USD cost."""
+
     calls_by_model: dict[str, int] = dataclasses.field(default_factory=dict)
+    """Map from model id to number of recorded calls."""
+
     last_response_time: float = dataclasses.field(default_factory=time.time)
+    """Wall-clock seconds of the last ``record``."""
 
     def record(self, response: ModelResponse, *, model_id: str) -> None:
         """Update totals from one completed model response.

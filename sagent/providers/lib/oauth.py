@@ -34,7 +34,7 @@ def resolve_account(account: str | None) -> str:
         unnamed account ``"default"``.
 
     Returns:
-      Canonical account name matching ``[A-Za-z0-9][A-Za-z0-9_-]*``.
+      name: Canonical account name matching ``[A-Za-z0-9][A-Za-z0-9_-]*``.
 
     Raises:
       ValueError: If ``account`` contains characters that could escape
@@ -63,7 +63,7 @@ def credentials_path(default_path: Path, account: str | None) -> Path:
         path; any other value selects the per-account variant.
 
     Returns:
-      Resolved per-account path.
+      path: Resolved per-account credentials file path.
 
     Raises:
       ValueError: Via :func:`resolve_account` for malformed names.

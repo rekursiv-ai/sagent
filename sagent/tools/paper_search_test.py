@@ -1,531 +1,328 @@
-"""Tests for tools.paper_search. All HTTP calls are mocked."""
+"""Tests for ``tools.paper_search``: S2 + OpenAlex search + fusion."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any, cast
+from unittest.mock import patch
 
+import asyncio
 import json
 
-import pytest
-
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.json import MutableJSON
 from sagent.lib.web.fetch import FetchError
-from sagent.tools import paper_search as ps_mod
+from sagent.tools.paper_common import PaperRecord
+from sagent.tools.paper_search import (
+    PaperSearch,
+    _dedup_key,
+    _fuse,
+    _merge,
+    _normalize_title,
+    _openalex_filter,
+    _openalex_work_to_record,
+    _s2_year_param,
+)
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-papersearch"),),
-        "multipart/x-tool-call",
+def test_paper_search_metadata() -> None:
+    t = PaperSearch()
+    assert t.name == "PaperSearch"
+    assert t.tool_id == "application/x-tool-papersearch"
+
+
+def test_summary_default() -> None:
+    t = PaperSearch()
+    out = t.summary({"query": "transformers"})
+    assert "PaperSearch" in out
+    assert "transformers" in out
+
+
+def test_summary_with_source() -> None:
+    out = PaperSearch().summary({"query": "x", "source": "openalex"})
+    assert "(openalex)" in out
+
+
+def test_summary_truncates_long_query() -> None:
+    out = PaperSearch().summary({"query": "q" * 80})
+    assert "..." in out
+
+
+def test_summary_empty_query() -> None:
+    assert PaperSearch().summary({"query": ""}) == "PaperSearch"
+
+
+def test_prompt_empty() -> None:
+    assert PaperSearch().prompt() == ""
+
+
+def test_s2_year_param_both() -> None:
+    assert _s2_year_param(2020, 2022) == "2020-2022"
+
+
+def test_s2_year_param_from_only() -> None:
+    assert _s2_year_param(2020, None) == "2020-"
+
+
+def test_s2_year_param_to_only() -> None:
+    assert _s2_year_param(None, 2022) == "-2022"
+
+
+def test_s2_year_param_neither() -> None:
+    assert _s2_year_param(None, None) is None
+
+
+def test_openalex_filter_no_bounds() -> None:
+    assert (
+        _openalex_filter(year_from=None, year_to=None, open_access_only=False) is None
     )
 
 
-def _txt(msg: Message) -> str:
-    if isinstance(msg, TextMessage):
-        return msg.content
-    if isinstance(msg, MultipartMessage):
-        for p in msg.content:
-            if isinstance(p, TextMessage):
-                return p.content
-    return ""
+def test_openalex_filter_year_from() -> None:
+    out = _openalex_filter(year_from=2020, year_to=None, open_access_only=False)
+    assert out == "from_publication_date:2020-01-01"
 
 
-class _Response:
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        json_data: Any = None,
-    ) -> None:
-        self.status_code = status_code
-        self.is_success = 200 <= status_code < 300
-        self.text = ""
-        self._json = json_data
-
-    def json(self) -> Any:
-        return self._json
+def test_openalex_filter_open_access() -> None:
+    out = _openalex_filter(year_from=None, year_to=None, open_access_only=True)
+    assert out == "open_access.is_oa:true"
 
 
-class _Calls:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict[str, str]]] = []
+def test_openalex_filter_combined() -> None:
+    out = _openalex_filter(year_from=2020, year_to=2022, open_access_only=True)
+    assert out is not None
+    assert "from_publication_date:2020-01-01" in out
+    assert "to_publication_date:2022-12-31" in out
+    assert "open_access.is_oa:true" in out
 
 
-def _patch_client(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    s2: _Response | None = None,
-    openalex: _Response | None = None,
-) -> _Calls:
-    tracker = _Calls()
-
-    def _mock_fetch(url: str, **kwargs: object) -> bytes:
-        raw = kwargs.get("params")
-        d = cast(dict[str, Any], raw) if isinstance(raw, dict) else {}
-        params: dict[str, str] = {str(k): str(v) for k, v in d.items()}
-        tracker.calls.append(("GET", url, params))
-        if "semanticscholar.org" in url:
-            if s2 is None:
-                raise FetchError(url, 503, {}, b"")
-            if s2.status_code >= 400:
-                raise FetchError(url, s2.status_code, {}, b"")
-            return json.dumps(s2._json).encode()
-        if "openalex.org" in url:
-            if openalex is None:
-                raise FetchError(url, 503, {}, b"")
-            if openalex.status_code >= 400:
-                raise FetchError(url, openalex.status_code, {}, b"")
-            return json.dumps(openalex._json).encode()
-        raise FetchError(url, 404, {}, b"")
-
-    monkeypatch.setattr("sagent.tools.paper_search.fetch", _mock_fetch)
-    monkeypatch.setattr("sagent.tools.paper_common.fetch", _mock_fetch)
-    return tracker
-
-
-@pytest.fixture(autouse=True)
-def _clear_cache() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
-    ps_mod._cache.clear()
-    yield
-    ps_mod._cache.clear()
-
-
-def _s2_hit(
-    *,
-    paper_id: str = "p1",
-    title: str = "Example",
-    doi: str | None = None,
-    arxiv: str | None = None,
-) -> dict[str, Any]:
-    ext: dict[str, Any] = {}
-    if doi:
-        ext["DOI"] = doi
-    if arxiv:
-        ext["ArXiv"] = arxiv
-    return {
-        "paperId": paper_id,
-        "externalIds": ext,
-        "title": title,
-        "abstract": "s2 abstract",
-        "authors": [{"name": "Alice"}],
-        "year": 2020,
-        "venue": "TestConf",
-        "citationCount": 10,
-        "referenceCount": 3,
-        "openAccessPdf": {"url": "https://x/y"},
+def test_openalex_work_to_record_full() -> None:
+    work: MutableJSON = {
+        "title": "Attention",
+        "authorships": [
+            {"author": {"display_name": "A"}},
+            {"author": {"display_name": "B"}},
+            {"author": {}},
+        ],
+        "publication_year": 2017,
+        "primary_location": {"source": {"display_name": "NeurIPS"}},
+        "doi": "https://doi.org/10.0/abc",
+        "ids": {"arxiv": "https://arxiv.org/abs/1706.03762"},
+        "abstract_inverted_index": {"hello": [0], "world": [1]},
+        "cited_by_count": 100_000,
+        "referenced_works_count": 50,
+        "open_access": {"oa_url": "https://oa/x"},
     }
+    rec = _openalex_work_to_record(work)
+    assert rec.title == "Attention"
+    assert rec.authors == ("A", "B")
+    assert rec.year == 2017
+    assert rec.venue == "NeurIPS"
+    assert rec.doi == "10.0/abc"
+    assert rec.arxiv_id == "1706.03762"
+    assert rec.abstract == "hello world"
+    assert rec.citation_count == 100_000
+    assert rec.open_access_pdf == "https://oa/x"
+    assert rec.sources == ("openalex",)
 
 
-def _oa_hit(
-    *,
-    doi: str | None = None,
-    arxiv: str | None = None,
-    title: str = "Example",
-) -> dict[str, Any]:
-    ids: dict[str, Any] = {}
-    if doi:
-        ids["doi"] = f"https://doi.org/{doi}"
-    if arxiv:
-        ids["arxiv"] = f"https://arxiv.org/abs/{arxiv}"
-    return {
-        "id": "https://openalex.org/W1",
-        "doi": f"https://doi.org/{doi}" if doi else None,
-        "ids": ids,
-        "title": title,
-        "display_name": title,
-        "authorships": [{"author": {"display_name": "Bob"}}],
-        "publication_year": 2021,
-        "primary_location": {"source": {"display_name": "OAVenue"}},
-        "cited_by_count": 7,
-        "referenced_works_count": 4,
-        "abstract_inverted_index": {
-            "Hello": [0, 2],
-            "world": [1, 3],
-        },
-        "open_access": {"is_oa": True, "oa_url": "https://oa/url"},
-    }
+def test_openalex_work_to_record_sparse() -> None:
+    rec = _openalex_work_to_record({"display_name": "Bare"})
+    assert rec.title == "Bare"
+    assert rec.authors == ()
+    assert rec.doi is None
 
 
-class TestValidation:
-    @pytest.mark.anyio
-    async def test_missing_query(self) -> None:
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": ""})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in str(resp.content)
+def test_openalex_work_to_record_doi_no_prefix() -> None:
+    rec = _openalex_work_to_record({"title": "X", "doi": "10.1/y"})
+    assert rec.doi == "10.1/y"
 
-    @pytest.mark.anyio
-    async def test_bad_source(self) -> None:
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "google"})))
-        assert resp.descriptor == "text/x-error"
-        assert "Invalid source" in str(resp.content)
 
-    @pytest.mark.anyio
-    async def test_default_source_is_s2(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Without ``source=``, only S2 is queried - not OpenAlex."""
-        mock = _patch_client(
-            monkeypatch,
-            s2=_Response(
-                json_data={
-                    "total": 1,
-                    "data": [_s2_hit(title="Only", doi="10.1234/a")],
-                },
-            ),
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(title="Other", doi="10.1234/b")],
-                },
-            ),
+def test_normalize_title_strips_punct_lowercase() -> None:
+    assert _normalize_title("Hello, World!") == "hello world"
+
+
+def test_normalize_title_collapses_whitespace() -> None:
+    assert _normalize_title("a   b\t\nc") == "a b c"
+
+
+def test_dedup_key_prefers_doi() -> None:
+    rec = PaperRecord(title="T", doi="10.1/X")
+    assert _dedup_key(rec) == "doi:10.1/x"
+
+
+def test_dedup_key_falls_back_to_title() -> None:
+    rec = PaperRecord(title="Some Paper!")
+    assert _dedup_key(rec) == "title:some paper"
+
+
+def test_merge_prefers_first() -> None:
+    a = PaperRecord(title="A", year=2020, sources=("s2",))
+    b = PaperRecord(title="A", year=2019, doi="10.1/x", sources=("openalex",))
+    out = _merge(a, b)
+    assert out.year == 2020  # first wins
+    assert out.doi == "10.1/x"  # filled from second
+    assert out.sources == ("s2", "openalex")
+
+
+def test_fuse_orders_s2_first() -> None:
+    s2 = [PaperRecord(title="X", doi="10.1/a")]
+    oa = [PaperRecord(title="Y", doi="10.1/b")]
+    fused = _fuse(s2, oa)
+    assert fused[0].doi == "10.1/a"
+    assert fused[1].doi == "10.1/b"
+
+
+def test_fuse_dedups_by_doi() -> None:
+    s2 = [PaperRecord(title="X", doi="10.1/a", citation_count=100, sources=("s2",))]
+    oa = [PaperRecord(title="Y", doi="10.1/a", abstract="abs", sources=("openalex",))]
+    fused = _fuse(s2, oa)
+    assert len(fused) == 1
+    assert fused[0].title == "X"
+    assert fused[0].abstract == "abs"
+    assert "s2" in fused[0].sources
+    assert "openalex" in fused[0].sources
+
+
+def test_run_empty_query() -> None:
+    result = asyncio.run(PaperSearch().run({"query": "  "}))
+    assert result.is_error
+    assert "required" in result.content
+
+
+def test_run_invalid_source() -> None:
+    result = asyncio.run(PaperSearch().run({"query": "x", "source": "bing"}))
+    assert result.is_error
+    assert "Invalid source" in result.content
+
+
+def _s2_search_payload() -> bytes:
+    return json.dumps(
+        {
+            "total": 1,
+            "data": [
+                {
+                    "title": "Hit",
+                    "year": 2020,
+                    "externalIds": {"DOI": "10.0/x"},
+                    "authors": [{"name": "A"}],
+                }
+            ],
+        }
+    ).encode()
+
+
+def test_run_s2_success() -> None:
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        return_value=_s2_search_payload(),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "transformers"}))
+    assert not result.is_error
+    assert "Hit" in result.content
+
+
+def test_run_no_results() -> None:
+    payload = json.dumps({"total": 0, "data": []}).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        result = asyncio.run(PaperSearch().run({"query": "nothing"}))
+    assert result.content == "(no results)"
+
+
+def test_run_openalex_path() -> None:
+    payload = json.dumps(
+        {
+            "meta": {"count": 1},
+            "results": [
+                {"title": "OA Hit", "doi": "10.0/oa", "publication_year": 2021}
+            ],
+        }
+    ).encode()
+    with patch("sagent.tools.paper_search.fetch", return_value=payload):
+        result = asyncio.run(
+            PaperSearch().run({"query": "openalex_path_query", "source": "openalex"}),
         )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x"})))
-        assert "Only" in _txt(resp)
-        assert "Other" not in _txt(resp)
-        # Exactly one API call - to S2.
-        assert len(mock.calls) == 1
-        assert "semanticscholar.org" in mock.calls[0][1]
+    assert "OA Hit" in result.content
 
 
-class TestS2Only:
-    @pytest.mark.anyio
-    async def test_returns_formatted_hits(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            s2=_Response(
-                json_data={
-                    "total": 2,
-                    "data": [
-                        _s2_hit(title="Attn", doi="10.1234/a"),
-                        _s2_hit(title="BERT", doi="10.1234/b", paper_id="p2"),
-                    ],
-                },
-            ),
-        )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(
-            _msg(json_freeze({"query": "transformer", "source": "s2"}))
-        )
-        assert "Attn" in _txt(resp)
-        assert "BERT" in _txt(resp)
-        assert "sources: s2" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_year_filter_sent_to_s2(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            s2=_Response(json_data={"total": 0, "data": []}),
-        )
-        tool = ps_mod.PaperSearch()
-        _ = await tool.run(
-            _msg(
-                json_freeze(
-                    {"query": "x", "source": "s2", "year_from": 2020, "year_to": 2023}
-                )
-            )
-        )
-        _, _, params = mock.calls[0]
-        assert params["year"] == "2020-2023"
-
-    @pytest.mark.anyio
-    async def test_oa_flag(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            s2=_Response(json_data={"total": 0, "data": []}),
-        )
-        tool = ps_mod.PaperSearch()
-        _ = await tool.run(
-            _msg(json_freeze({"query": "x", "source": "s2", "open_access_only": True}))
-        )
-        _, _, params = mock.calls[0]
-        assert "openAccessPdf" in params
-
-    @pytest.mark.anyio
-    async def test_429_hint(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, s2=_Response(status_code=429))
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "s2"})))
-        assert resp.descriptor == "text/x-error"
-        assert "rate limit" in str(resp.content).lower()
-
-
-class TestOpenAlexOnly:
-    @pytest.mark.anyio
-    async def test_returns_formatted_hits(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(doi="10.1234/oa", title="OA Paper")],
-                },
+def test_run_openalex_rate_limit_returns_error() -> None:
+    err = FetchError(
+        url="https://api.openalex.org/works",
+        status=429,
+        headers={},
+        body=b"slow down",
+    )
+    with patch("sagent.tools.paper_search.fetch", side_effect=err):
+        result = asyncio.run(
+            PaperSearch().run(
+                {"query": "openalex_rate_limit_query", "source": "openalex"}
             ),
         )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "openalex"})))
-        assert "OA Paper" in _txt(resp)
-        assert "sources: openalex" in _txt(resp)
-        assert "doi:10.1234/oa" in _txt(resp)
-        # Abstract reconstructed from inverted index
-        assert "Hello world" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_filter_includes_open_access(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            openalex=_Response(json_data={"meta": {"count": 0}, "results": []}),
-        )
-        tool = ps_mod.PaperSearch()
-        _ = await tool.run(
-            _msg(
-                json_freeze(
-                    {"query": "x", "source": "openalex", "open_access_only": True}
-                )
-            )
-        )
-        _, _, params = mock.calls[0]
-        assert "open_access.is_oa:true" in params["filter"]
-
-    @pytest.mark.anyio
-    async def test_year_range_becomes_date_range(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            openalex=_Response(json_data={"meta": {"count": 0}, "results": []}),
-        )
-        tool = ps_mod.PaperSearch()
-        _ = await tool.run(
-            _msg(
-                json_freeze(
-                    {
-                        "query": "x",
-                        "source": "openalex",
-                        "year_from": 2020,
-                        "year_to": 2023,
-                    }
-                )
-            )
-        )
-        _, _, params = mock.calls[0]
-        assert "from_publication_date:2020-01-01" in params["filter"]
-        assert "to_publication_date:2023-12-31" in params["filter"]
-
-    @pytest.mark.anyio
-    async def test_polite_pool_ua(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("OPENALEX_EMAIL", "test@example.com")
-        # Just ensure this path doesn't raise; header inspection would
-        # require a richer mock.
-        _patch_client(
-            monkeypatch,
-            openalex=_Response(json_data={"meta": {"count": 0}, "results": []}),
-        )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "openalex"})))
-        assert resp.content is not None
+    assert result.is_error
+    assert "rate limit" in result.content.lower()
 
 
-class TestFused:
-    @pytest.mark.anyio
-    async def test_merges_and_dedups_by_doi(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        shared_doi = "10.1234/shared"
-        _patch_client(
-            monkeypatch,
-            s2=_Response(
-                json_data={
-                    "total": 2,
-                    "data": [
-                        _s2_hit(title="Shared", doi=shared_doi),
-                        _s2_hit(title="S2Only", doi="10.1234/s2", paper_id="p2"),
-                    ],
-                },
-            ),
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 2},
-                    "results": [
-                        _oa_hit(title="Shared (casing off)", doi=shared_doi),
-                        _oa_hit(title="OAOnly", doi="10.1234/oa"),
-                    ],
-                },
+def test_run_openalex_other_http_error() -> None:
+    err = FetchError(
+        url="https://api.openalex.org/works",
+        status=500,
+        headers={},
+        body=b"boom",
+    )
+    with patch("sagent.tools.paper_search.fetch", side_effect=err):
+        result = asyncio.run(
+            PaperSearch().run(
+                {"query": "openalex_other_http_query", "source": "openalex"}
             ),
         )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "fused"})))
-        # S2 rank is first - "Shared" should precede "S2Only" should
-        # precede "OAOnly" in the rendered output.
-        lines = [ln for ln in _txt(resp).split("\n") if ln.startswith("[")]
-        titles = list(lines)
-        shared_idx = next(i for i, t in enumerate(titles) if "Shared" in t)
-        s2_only_idx = next(i for i, t in enumerate(titles) if "S2Only" in t)
-        oa_only_idx = next(i for i, t in enumerate(titles) if "OAOnly" in t)
-        assert shared_idx < s2_only_idx
-        assert s2_only_idx < oa_only_idx
-        # Shared record should carry both sources
-        shared_line = next(ln for ln in lines if "Shared" in ln)
-        assert "sources: s2,openalex" in shared_line
-        # S2-only record should have only s2 in sources
-        s2_line = next(ln for ln in lines if "S2Only" in ln)
-        assert "sources: s2" in s2_line
-        assert "openalex" not in s2_line
-        # OA-only record should have only openalex
-        oa_line = next(ln for ln in lines if "OAOnly" in ln)
-        assert "sources: openalex" in oa_line
+    assert result.is_error
+    assert "500" in result.content
 
-    @pytest.mark.anyio
-    async def test_dedup_by_title_when_doi_missing(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            s2=_Response(
-                json_data={
-                    "total": 1,
-                    "data": [_s2_hit(title="A Paper About Things")],
-                },
-            ),
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(title="A  paper  about  things!")],
-                },
-            ),
+
+def test_run_fused_combines_backends() -> None:
+    s2_payload = _s2_search_payload()
+    openalex_payload = json.dumps(
+        {
+            "meta": {"count": 1},
+            "results": [{"title": "Other", "doi": "10.0/other"}],
+        }
+    ).encode()
+
+    def s2_fetch(**_kw: object) -> bytes:
+        return s2_payload
+
+    def oa_fetch(**_kw: object) -> bytes:
+        return openalex_payload
+
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=s2_fetch),
+        patch("sagent.tools.paper_search.fetch", side_effect=oa_fetch),
+    ):
+        result = asyncio.run(
+            PaperSearch().run({"query": "fused_combines_query", "source": "fused"}),
         )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "fused"})))
-        # Should be deduped (punctuation / case / spacing normalized)
-        assert _txt(resp).count("A Paper About Things") == 1
+    assert "Hit" in result.content
+    assert "Other" in result.content
 
-    @pytest.mark.anyio
-    async def test_s2_failure_degrades_to_openalex(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            s2=_Response(status_code=500),
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(title="OAHit", doi="10.1234/a")],
-                },
-            ),
+
+def test_run_fused_all_fail_returns_error() -> None:
+    err = FetchError(url="u", status=500, headers={}, body=b"")
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=err),
+        patch("sagent.tools.paper_search.fetch", side_effect=err),
+    ):
+        result = asyncio.run(
+            PaperSearch().run({"query": "fused_all_fail_query", "source": "fused"}),
         )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "fused"})))
-        assert "OAHit" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_both_failures_is_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            s2=_Response(status_code=500),
-            openalex=_Response(status_code=500),
-        )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "fused"})))
-        assert resp.descriptor == "text/x-error"
+    assert result.is_error
 
 
-class TestCache:
-    @pytest.mark.anyio
-    async def test_cache_hit(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            s2=_Response(
-                json_data={
-                    "total": 1,
-                    "data": [_s2_hit(title="Only", doi="10.1234/a")],
-                },
-            ),
-        )
-        tool = ps_mod.PaperSearch()
-        _ = await tool.run(_msg(json_freeze({"query": "foo", "source": "s2"})))
-        _ = await tool.run(_msg(json_freeze({"query": "foo", "source": "s2"})))
-        assert len(mock.calls) == 1
-
-
-class TestOpenAlexParsing:
-    @pytest.mark.anyio
-    async def test_strips_doi_prefix(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(doi="10.1234/abc", title="T")],
-                },
-            ),
-        )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "openalex"})))
-        assert "doi:10.1234/abc" in _txt(resp)
-        assert "https://doi.org" not in _txt(resp)  # prefix stripped
-
-    @pytest.mark.anyio
-    async def test_extracts_arxiv_from_ids(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            openalex=_Response(
-                json_data={
-                    "meta": {"count": 1},
-                    "results": [_oa_hit(arxiv="2106.15928", title="T")],
-                },
-            ),
-        )
-        tool = ps_mod.PaperSearch()
-        resp = await tool.run(_msg(json_freeze({"query": "x", "source": "openalex"})))
-        assert "arXiv:2106.15928" in _txt(resp)
+def test_run_caches_results() -> None:
+    payload = _s2_search_payload()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload) as mock_fetch:
+        _ = asyncio.run(PaperSearch().run({"query": "uniquecachetestkey1"}))
+        _ = asyncio.run(PaperSearch().run({"query": "uniquecachetestkey1"}))
+    assert mock_fetch.call_count == 1
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

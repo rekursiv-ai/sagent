@@ -35,7 +35,6 @@ else:
     bashlex = lazy_import("bashlex")  # 88ms cold
     Node = object
 
-
 __all__ = [
     "BashParseCache",
     "Command",
@@ -49,11 +48,7 @@ __all__ = [
     "unwrap_cd_subtree",
 ]
 
-
 type BashParseCache = dict[str, tuple[Node, ...] | None]
-
-
-# -- Records ---------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -72,12 +67,16 @@ class Command:
     """
 
     exe: str
+    """Executable name (first word; ``""`` for assignment-only commands)."""
+
     args: tuple[str, ...]
+    """Positional arguments after ``exe`` in argv order."""
+
     env_prefix: Mapping[str, str]
+    """Leading ``KEY=value`` assignments (e.g. ``FOO=bar ./cmd``)."""
+
     captures_stdout: bool
-
-
-# -- Parse + matcher helpers -----------------------------------------
+    """True when a redirect diverts fd 1 (``>``/``>>``/``>|``/``>&``)."""
 
 
 def parse_bash(command: str) -> tuple[Node, ...] | None:
@@ -295,7 +294,6 @@ def is_read_only(trees: Sequence[Node]) -> bool:
     return all(_is_node_safe(t) for t in trees)
 
 
-# -- Read-only command classifier --------------------------------------
 #
 # Lets the agent batch consecutive Bash calls in parallel when their
 # commands cannot mutate state.
@@ -305,7 +303,6 @@ def is_read_only(trees: Sequence[Node]) -> bool:
 # read-only - all return False. False positives mean serial dispatch
 # (slow), false negatives mean concurrent writes (broken). Bias hard
 # toward False.
-
 
 _READ_ONLY_BASE: frozenset[str] = frozenset(
     {
@@ -615,14 +612,12 @@ _SUBCOMMAND: dict[str, tuple[tuple[str, ...], ...]] = {
     "go": tuple((w,) for w in ("version", "env", "doc", "list")),
 }
 
-
 # For these (command, subcommand) pairs, reject if the token
 # immediately following the matched subcommand is in the deny set.
 _SUBCOMMAND_NEXT_DENY: dict[tuple[str, str], frozenset[str]] = {
     ("git", "reflog"): frozenset({"expire", "delete", "exists"}),
     ("npm", "audit"): frozenset({"fix"}),
 }
-
 
 # `git branch|tag` are safe for *listing* but mutate when given a
 # ref name positional (create/delete/rename). Flags are fine;

@@ -8,7 +8,7 @@ duplicate -- the formatting logic is already correct and battle-tested.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 import io
 import re
@@ -16,35 +16,28 @@ import re
 from rich.console import Console
 from rich.text import Text
 
-from sagent.custom_types import (
-    JsonMessage,
-    MultipartMessage,
-    TextMessage,
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ModelResponseThinking,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
 )
 from sagent.repl.format import (
-    format_elapsed,
     print_user_bar,
     set_terminal_title,
 )
-from sagent.repl.render import render_error, render_tool_result
+from sagent.repl.render import render_tool_result
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
 
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from sagent.custom_types import Message
-
-
 class ConsolePrinter:
-    """Rich-backed :class:`Printer` implementation.
+    """Rich-backed :class:`Printer` implementation."""
 
-    Attributes:
-      console: Underlying rich console (exposed for one-off rich
-          renderers that need to emit Text/Panel/Syntax objects).
-
-    """
+    console: Console
+    """Underlying rich console (exposed for one-off rich renderers that
+    need to emit Text/Panel/Syntax objects)."""
 
     def __init__(self, console: Console) -> None:
         self.console = console
@@ -118,16 +111,16 @@ class ConsolePrinter:
         self.console.print(Text(text, style="bold red"))
         self.console.print(Text(bar, style="red"))
 
-    def write_child_block(self, label: str, items: list[Message]) -> None:
+    def write_child_block(self, label: str, items: list[object]) -> None:
         r"""Render a child agent's labeled block.
 
         Format: first line carries the label gutter (``Agent_N  :  ``),
         subsequent lines indent to align with the gutter width. Each
         item is rendered through the same paths the parent uses for
-        its own output (Markdown for ``text/plain``, dim text for
-        tool labels, the diff renderer for tool results, etc.) so
-        child output looks identical to parent output up to the
-        gutter prefix.
+        its own output (Markdown for ``AssistantMessage`` text, dim
+        text for ``ToolLabel``, the diff renderer for ``ToolResult``,
+        etc.) so child output looks identical to parent output up to
+        the gutter prefix.
 
         Implementation: render each item to a captured ``Console``
         with reduced width (real width minus gutter), then split the
@@ -145,15 +138,7 @@ class ConsolePrinter:
         pfx = _gutter_prefix(label, gutter_width)
         indent = " " * gutter_width
 
-        # Render into a sub-printer wrapping a Console that writes
-        # to a buffer with reduced width. ConsolePrinter is the
-        # natural sub-printer because the same code paths
-        # (write_markdown, write_tool_error, write_diff, etc.) need
-        # to fire here.
         buf = io.StringIO()
-        # ``color_system`` is a Literal in rich's typing; the live
-        # console exposes it as an arbitrary str. Pass through as
-        # cast so the inner console matches the outer's color depth.
         inner_console = Console(
             file=buf,
             width=max(20, self.console.width - gutter_width),
@@ -265,39 +250,21 @@ def _gutter_prefix(label: str, width: int) -> str:
     return pfx
 
 
-def _render_child_item(printer: ConsolePrinter, item: Message) -> None:
-    """Dispatch one child-event item to the appropriate printer method.
+def _render_child_item(printer: ConsolePrinter, item: object) -> None:
+    """Dispatch one child-block item to the appropriate printer method.
 
-    Used by ``ConsolePrinter.write_child_block`` for each accumulated
-    inner event. Rendering goes through the same code paths the
-    parent uses for its own output -- the gutter prefix is applied
-    around the entire block, not per item.
+    Child items are runtime types accumulated by the render observer:
+    ``AssistantMessage`` (streamed model text), ``ToolLabel``,
+    ``ModelResponseThinking``, ``ToolResult``, ``UserMessage``.
     """
-    desc = item.descriptor
-    if desc == "text/plain" and isinstance(item, TextMessage):
-        printer.write_markdown(item.content)
-    elif desc == "text/x-tool-label" and isinstance(item, TextMessage):
-        printer.write_tool_label(item.content)
-    elif desc == "text/x-thinking" and isinstance(item, TextMessage):
-        printer.write_thinking(item.content)
-    elif desc == "text/x-error" and isinstance(item, TextMessage):
-        printer.write_tool_error(item.content)
-    elif desc == "multipart/x-error" and isinstance(item, MultipartMessage):
-        render_error(printer, item)
-    elif desc == "text/x-hint-tool-use-nudge" and isinstance(item, TextMessage):
-        printer.write_hint(item.content)
-    elif desc == "multipart/x-tool-result" and isinstance(item, MultipartMessage):
+    if isinstance(item, AssistantMessage):
+        if item.text:
+            printer.write_markdown(item.text)
+    elif isinstance(item, ToolLabel):
+        printer.write_tool_label(item.text)
+    elif isinstance(item, ModelResponseThinking):
+        printer.write_thinking(item.text)
+    elif isinstance(item, ToolResult):
         render_tool_result(printer, item)
-    elif desc == "application/x-child-done" and isinstance(item, JsonMessage):
-        data = cast("Mapping[str, float]", item.content)
-        elapsed = data.get("elapsed", 0.0)
-        tokens = int(data.get("model_response_tokens", 0))
-        cost = data.get("cost_usd", 0.0)
-        summary_parts: list[str] = [format_elapsed(elapsed)]
-        if tokens:
-            summary_parts.append(f"{tokens}↓")
-        if cost > 0:
-            summary_parts.append(f"${cost:.2f}")
-        printer.console.print(
-            Text(f"done [{' · '.join(summary_parts)}]", style="dim"),
-        )
+    elif isinstance(item, UserMessage):
+        printer.write_user_bar(item.text)

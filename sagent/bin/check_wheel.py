@@ -37,6 +37,17 @@ _RECIPE_ASSET_SECTIONS = ("system_prompt", "compactor", "tool_descriptions")
 
 
 def main() -> int:
+    """Validate the freshest wheel under ``dist/`` and return a shell exit code.
+
+    Returns:
+      exit_code: ``0`` on success; this function raises ``SystemExit`` on
+        failure rather than returning non-zero.
+
+    Raises:
+      SystemExit: If no wheel is found, required entries are missing, or
+        the recipe references missing/invalid assets.
+
+    """
     wheels = sorted(Path("dist").glob("sagent-*.whl"))
     if not wheels:
         raise SystemExit("uv build produced no Sagent wheel")

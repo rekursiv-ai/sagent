@@ -1,34 +1,44 @@
+"""Tests for ``providers.lib.id_remap``: cross-provider tool-call ID remapping."""
+
 from __future__ import annotations
 
 from sagent.providers.lib.id_remap import IdRemapper
 
 
-class TestIdRemapper:
-    def test_first_call_returns_prefix_zero(self) -> None:
-        r = IdRemapper("msg_")
-        assert r.map("original") == "msg_0"
+def test_first_mapping_uses_prefix_zero() -> None:
+    r = IdRemapper("toolu_")
+    assert r.map("orig-1") == "toolu_0"
 
-    def test_second_distinct_id_returns_prefix_one(self) -> None:
-        r = IdRemapper("msg_")
-        r.map("a")
-        assert r.map("b") == "msg_1"
 
-    def test_same_id_is_idempotent(self) -> None:
-        r = IdRemapper("msg_")
-        first = r.map("x")
-        second = r.map("x")
-        assert first == second == "msg_0"
+def test_subsequent_mappings_increment() -> None:
+    r = IdRemapper("call_")
+    assert r.map("a") == "call_0"
+    assert r.map("b") == "call_1"
+    assert r.map("c") == "call_2"
 
-    def test_different_prefixes(self) -> None:
-        a = IdRemapper("a_")
-        b = IdRemapper("b_")
-        assert a.map("id") == "a_0"
-        assert b.map("id") == "b_0"
 
-    def test_counter_increments_across_ids(self) -> None:
-        r = IdRemapper("n")
-        results = [r.map(f"id_{i}") for i in range(5)]
-        assert results == ["n0", "n1", "n2", "n3", "n4"]
+def test_repeated_id_returns_same_mapping() -> None:
+    r = IdRemapper("fc_")
+    first = r.map("x")
+    second = r.map("x")
+    assert first == second
+    # Counter does not advance for a repeated id.
+    assert r.map("y") == "fc_1"
+
+
+def test_tool_call_result_pair_round_trip() -> None:
+    """Tool-call/result pairing within a single request stays consistent."""
+    r = IdRemapper("toolu_")
+    call_native = r.map("ext-abc")
+    result_native = r.map("ext-abc")
+    assert call_native == result_native
+
+
+def test_distinct_prefix_independent_counters() -> None:
+    a = IdRemapper("a_")
+    b = IdRemapper("b_")
+    assert a.map("x") == "a_0"
+    assert b.map("x") == "b_0"
 
 
 if __name__ == "__main__":

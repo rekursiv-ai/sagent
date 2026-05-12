@@ -1,9 +1,9 @@
-"""Tests for bin.verify_models."""
+"""Tests for ``bin.verify_models``: provider limits checking via stubbed HTTP."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Self
+from typing import Self
 
 import sys
 
@@ -16,7 +16,7 @@ from sagent.bin import verify_models
 class _Response:
     def __init__(
         self,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, object] | None = None,
         text: str = "",
         status_code: int = 200,
     ) -> None:
@@ -29,7 +29,7 @@ class _Response:
     def is_success(self) -> bool:
         return 200 <= self.status_code < 300
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> dict[str, object]:
         return self._json_body
 
     def raise_for_status(self) -> None:
@@ -153,6 +153,19 @@ class TestFetchAnthropic:
         assert "missing limits" in out
         assert "HTTP 500" in out
 
+    @pytest.mark.anyio
+    async def test_404_reports_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(
+            httpx, "AsyncClient", _make_client([_Response(status_code=404)])
+        )
+        limits = await verify_models.fetch_anthropic("key", ["missing"])
+        assert limits == {}
+        assert "not found in API" in capsys.readouterr().out
+
 
 class TestCompare:
     def test_reports_unknown_and_mismatches(
@@ -224,6 +237,54 @@ class TestMain:
 
         monkeypatch.setattr(verify_models, "fetch_openai", fake_fetch_openai)
         assert await verify_models.main() == 1
+
+    @pytest.mark.anyio
+    async def test_runs_google_when_key_set(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["verify", "--provider", "google"])
+        monkeypatch.setenv("GOOGLE_API_KEY", "x")
+
+        async def fake_fetch_google(
+            _: str,
+        ) -> dict[str, verify_models.ModelLimits]:
+            return {}
+
+        monkeypatch.setattr(verify_models, "fetch_google", fake_fetch_google)
+        assert await verify_models.main() == 0
+        assert "Google" in capsys.readouterr().out
+
+    @pytest.mark.anyio
+    async def test_skips_missing_anthropic_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["verify", "--provider", "anthropic"])
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        assert await verify_models.main() == 0
+        assert "ANTHROPIC_API_KEY not set" in capsys.readouterr().out
+
+    @pytest.mark.anyio
+    async def test_runs_anthropic_when_key_set(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["verify", "--provider", "anthropic"])
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+
+        async def fake_fetch_anthropic(
+            _key: str,
+            _ids: list[str],
+        ) -> dict[str, verify_models.ModelLimits]:
+            return {}
+
+        monkeypatch.setattr(verify_models, "fetch_anthropic", fake_fetch_anthropic)
+        assert await verify_models.main() == 0
+        assert "Anthropic" in capsys.readouterr().out
 
 
 if __name__ == "__main__":
