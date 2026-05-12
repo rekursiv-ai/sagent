@@ -35,15 +35,10 @@ dependencies = [
     "PyYAML>=6.0",
     "rich",
     "slack-sdk>=3.33.0",
-    "sniffio",
     "bashlex>=0.18",
     "trafilatura",
-    "typing_extensions",
     "aiohttp",
-    "jaxtyping",
-    "typeguard",
     "webp>=0.4.0",
-    "dbus-next ; sys_platform == 'linux'",
     "brotli",
     "beautifulsoup4",
     "zstandard",
@@ -77,31 +72,10 @@ debug = [
     "ipykernel",
     "ipython",
 ]
-docs = [
-    "markdown",
-    "python-pptx>=1.0.2",
-    "sphinx",
-]
 lint = [
     "pre-commit>=3.5",
-
-    # checks for spelling mistakes
     "codespell>=2.2.4",
-
-    # ruff linter checks for issues and potential bugs
     "ruff",
-
-    # checks for unused code
-    "vulture",
-
-    # required for codespell to parse pyproject.toml
-    "tomli",
-
-    # validation of pyproject.toml
-    "validate-pyproject[all]",
-
-    # automatic sorting of imports
-    "isort",
 ]
 test = [
     "pytest-asyncio>=1.3.0",
@@ -112,11 +86,9 @@ test = [
 ]
 typing = [
     "basedpyright>=1.10",
-    "basedtyping>=0.1.10",
     "ty",
 ]
 dev = [
-    {include-group = "docs"},
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typing"},
@@ -448,13 +420,6 @@ formats = "ipynb,py:percent"
 [tool.uv]
 package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
-constraint-dependencies = [
-    # TODO: remove once NVIDIA publishes x86_64 wheel for v9.21+.
-    # v9.21.0.82 (uploaded 2026-04-14) only shipped an aarch64 wheel,
-    # breaking `uv sync` on x86_64 Linux.
-    "nvidia-cudnn-cu12<9.21",
-]
-
 [tool.uv.pip]
 compile-bytecode = true
 

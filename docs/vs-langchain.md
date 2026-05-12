@@ -1,55 +1,36 @@
 # Sagent vs LangChain/LangGraph
 
-LangChain is the closest Python-shaped neighbour to sagent on the
-adjacent-projects table, so it gets a deep comparison. The short version:
-**LangChain is a ~700-package ecosystem covering RAG, agents, evals, and
-LLM pipelines of every shape; sagent is a single-package runtime
-specialised for coding agents, which deliberately omits most of what
-LangChain ships.** They overlap on "call an LLM with tools" and diverge
-nearly everywhere else. If your problem is broad LLM-application
-plumbing, sagent is the wrong tool — that is not a slight, it is the
-design.
+LangChain is a ~700-package ecosystem for any LLM application: RAG,
+agents, evals, extraction, classification, ETL. Sagent is one package
+for coding agents. They overlap on "call an LLM with tools" and diverge
+elsewhere.
 
 ## What each one is
 
-**LangChain** is an ecosystem. `langchain-core` ships the `Runnable` /
-LCEL interfaces; `langchain` ships chains, retrievers, and output
-parsers; `langgraph` ships state-machine agents with durable
-checkpointing; `langsmith` provides hosted traces and evals; and a few
-hundred integration packages plug in chat models, embedding models,
-vector stores, document loaders, and tools. The project is positioned as
-a framework for *any* LLM application: RAG, agents, extraction,
-classification, ETL.
+LangChain: `langchain-core` (Runnable/LCEL), `langchain` (chains,
+retrievers, output parsers), `langgraph` (state-machine agents with
+durable checkpointing), `langsmith` (hosted traces and evals), plus
+hundreds of integration packages.
 
-**Sagent** is a single Apache-licensed Python package focused on coding
-agents. It ships:
-
-- Five typed contracts: `Message`, `Tool`, `Model`, `Provider`, `Agent`.
-- One locked runtime: `AgentRuntime.run_forever`, an inbox-driven loop.
-- Built-in tools for files, shell, search, web, papers, Slack, Linear,
-  audio, wiki access, skills, background jobs, and agent coordination.
-- A CLI, a `prompt_toolkit` REPL, a Slack Socket Mode surface, and a
-  Python library API — all on top of the same `Agent` object.
-
-Sagent deliberately omits document loaders, embedding models, vector
-stores, retrievers, re-rankers, output parsers, and a graph DSL.
+Sagent: one Apache-licensed Python package shipping five typed
+contracts (`Message`, `Tool`, `Model`, `Provider`, `Agent`), one locked
+inbox-driven runtime, built-in tools (files, shell, search, web,
+papers, Slack, Linear, audio, wiki, skills, background jobs, agent
+coordination), and four surfaces on the same `Agent` (CLI, REPL, Slack
+Socket Mode, library API). No document loaders, embeddings, vector
+stores, retrievers, output parsers, or graph DSL.
 
 ## Execution model
 
 ### LangGraph: state-machine workflow runner
 
-LangGraph models an agent as a `StateGraph`. Nodes are functions over a
-typed `State`; edges are conditional. `ToolNode` invokes tools in
-parallel via `asyncio.gather` when the model emits multiple calls in a
-turn. `astream` and `astream_events` expose token-level streaming and
-intermediate events.
-
-Durable interrupts are first-class. A node calls `interrupt(payload)`;
-the configured `Checkpointer` (memory, SQLite, Postgres) persists state;
-control returns to the caller. You resume by re-invoking the graph with
-`Command(resume=value)`. The node re-runs from the top up to the
-interrupt call. This is designed for human-in-the-loop approval that
-must survive process restart.
+`StateGraph` of typed `State`, conditional edges, `ToolNode` for
+parallel tool calls, `astream` / `astream_events` for streaming.
+`interrupt(payload)` persists state via the `Checkpointer` (memory,
+SQLite, Postgres) and returns control to the caller; resume by
+re-invoking with `Command(resume=value)` and the node replays from the
+top. Built for human-in-the-loop approvals that survive process
+restart.
 
 ### Sagent: drain-driven inbox loop
 
@@ -61,57 +42,32 @@ while True:
         call model
 ```
 
-Everything is a `RuntimeEvent` on a `GatedDeque`: user text, model
-response chunks, tool results, halt, kill, clear, peer-agent messages,
-background task completions, compaction completions. One loop, one pipe,
-one match block.
+Every input is a `RuntimeEvent` on a `GatedDeque`: user text, model
+chunks, tool results, halt, kill, clear, peer messages, background
+completions, compaction completions. Tool calls run as `asyncio.Task`s
+in a cohort set; the model gate fires when the cohort drains.
 
-Tool calls run as `asyncio.Task`s tracked in a cohort set. The model
-gate fires only when the cohort drains. Five verbs control in-flight
-work:
+Five in-flight verbs:
 
-- `halt`: cancel the model call, gate on user input, leave tools running.
-- `kill <id|all>`: cancel running task(s), drop them from the cohort.
-- `detach <id|all>`: stub unfinished tools with `[detached]` placeholders
-  so the provider's `tool_use` / `tool_result` invariant stays valid,
-  let them finish in the background, deliver their results as
-  `DetachedResult` events into the next round.
-- `undetach <id|all>`: re-gate the model on a previously detached tool.
-- `clear`: cancel the model, detach all tools, wipe history, gate.
+- `halt`: cancel the model, gate on user input, leave tools running.
+- `kill <id|all>`: cancel tasks, drop from cohort.
+- `detach <id|all>`: stub with `[detached]` (satisfies the provider's
+  `tool_use`/`tool_result` invariant), let tools finish in the
+  background, deliver as `DetachedResult` in the next round.
+- `undetach <id|all>`: re-gate on a detached tool.
+- `clear`: cancel model, detach all tools, wipe history, gate.
 
-User input that arrives mid-cohort uses the detach machinery
-automatically — type while three tools are running, the runtime stubs
-them, appends the user message, fires the model, and the detached tools
-land as `DetachedResult` user-context in the next round.
-
-`Await(types)` gates the deque: `Halt`, `Clear`, and `ModelResponseError`
-push an `Await` so `drain()` blocks until a matching event (or `Quit`)
-arrives. That's how the runtime waits for user input without polling.
+User input arriving mid-cohort uses detach automatically. `Await(types)`
+blocks `drain()` until a matching event lands, so the runtime sleeps
+without polling.
 
 ### Where each model is better
 
-LangGraph wins when:
-
-- You need durable cross-process pause/resume. The `Checkpointer` is
-  built for this; sagent persists sessions but does not model mid-run
-  pause across processes.
-- You want declarative branching/looping topology the framework
-  enforces.
-- You want human-in-the-loop gates that survive restart.
-
-Sagent wins when:
-
-- You want mid-turn user injection that handles the provider invariant
-  for you, without rebuilding the agent graph.
-- You want multiple input sources (REPL, Slack, peer agents, background
-  tasks) unified on one loop with one control plane.
-- You want fine-grained in-flight verbs (`halt` / `kill` / `detach` /
-  `undetach` / `clear`) as runtime primitives.
-- You want peer-to-peer agent messaging at runtime, not a static graph.
-
-Neither model is strictly "better." LangGraph optimises for durability
-and explicit control flow. Sagent optimises for dynamic interactivity
-and one-loop simplicity. Reinventing one inside the other would yield
+LangGraph wins on durable cross-process pause/resume, declarative
+branching/looping topology, and human-in-the-loop gates that survive
+restart. Sagent wins on mid-turn user injection, multiple input sources
+on one loop, the five in-flight verbs as primitives, and peer-to-peer
+agent messaging at runtime. Reinventing one inside the other yields
 the other.
 
 ## Background work, scheduling, and inbox priority
@@ -122,11 +78,11 @@ the other.
 | Run a single tool call asynchronously, deliver result later | `background: true` / `delay: N` injected into every tool's directive schema by `BackgroundAwareTool` | Application-defined: write a tool that returns a job id and a separate poll tool |
 | Model-callable job control (list / cancel / resume long-running work) | `BackgroundTask` tool with `list` / `cancel <id>` / `foreground <id>` operations | Application-defined |
 | Registry of in-flight long-running operations | `BackgroundTaskEntry` covering tool calls, persistent subagents, detached cohort members, hidden infra | Application-defined |
-| Pause execution mid-run and resume later in another process | None — sessions persist transcripts, not mid-cohort state | `interrupt()` + `Checkpointer` (memory / SQLite / Postgres backends) |
+| Pause execution mid-run and resume later in another process | None. Sessions persist transcripts, not mid-cohort state | `interrupt()` + `Checkpointer` (memory / SQLite / Postgres backends) |
 | Resume semantics after pause | N/A | Replay-based: the node re-runs from the top up to the `interrupt()` call |
 | Pluggable persistence backend for run state | Local JSONL session transcripts only | `Checkpointer` interface with shipped backends (memory / SQLite / Postgres) and a community pattern for more |
 | Inject user context that preempts in-flight work | `UserMessage` via `push_front`, stubs cohort with `[detached]`, fires model on the new state | `interrupt()` + `Command(resume=...)` — graph-level pause and replay, not per-cohort rebase |
-| Inject user context that does *not* preempt in-flight work | `UserQueuedMessage` — buffers, coalesces into next `UserMessage` after cohort drains | Application-defined |
+| Inject user context that does *not* preempt in-flight work | `UserQueuedMessage`, buffers, coalesces into next `UserMessage` after cohort drains | Application-defined |
 | Route different message sources to different inbox priorities | `push_front` vs `push_back` on `GatedDeque` | Application-defined |
 | Wait for an event without polling, in-process | `Await(types)` gates `drain()` until matching event lands; the agent loop stays running and idle | LangGraph stops the graph at `interrupt()`; the orchestrating process can do anything and resume by re-invoking the graph |
 | Deliver a message to another agent at a future time | `AgentSend(delay=N)` via `loop.call_later` | Application-defined (external scheduler) |
@@ -135,78 +91,31 @@ the other.
 | Stream typed intermediate execution events | `RuntimeEvent` observer fan-out (cost, session, REPL, budget) | `astream_events` / `astream_log` over the Runnable / graph |
 | Resume the same conversation on a fresh process | `--continue` reloads session transcript and replays state | `Checkpointer` restores graph state from durable storage |
 
-A few cells earn more than one line of prose:
+Concurrent tool execution is at parity. Durable cross-process pause is
+LangGraph's. Background tools, model-callable job control,
+non-preempting user queue, inbox priority, delayed peer delivery, and
+persistent live agents are sagent primitives; on LangGraph they are
+patterns you assemble.
 
-**`background: true`** is the most consequential entry. Every tool's
-directive schema is wrapped by `BackgroundAwareTool` to add
-`background: bool` and `delay: integer`. When set, dispatch returns a
-"scheduled" tool result immediately and the real result is `push_back`'d
-to the inbox on completion. The cohort gate proceeds as if the tool
-finished quickly; the result arrives as user-context in the next
-round.
-
-**`Await(types)`** is the no-polling primitive. `Halt`, `Clear`, and
-`ModelResponseError` push an `Await(types)` onto the deque so `drain()`
-blocks until an event matching those types (or `Quit`) lands. No
-sleep loop, no timeout — the runtime sleeps until something
-interesting happens.
-
-**Detach** completes the picture. Preempting `UserMessage` arrival
-stubs unfinished cohort members with `[detached]` placeholders to
-satisfy the provider's `tool_use` / `tool_result` invariant. The
-detached tools keep running and deliver their results as
-`DetachedResult` events into the next round's user-context.
-
-**Persistent live agents vs LangGraph long-running runs.** You can
-build "agent waiting for inbound messages" on LangGraph with a
-long-running graph, a `Checkpointer` for durability, and an external
-trigger (HTTP webhook, Postgres `LISTEN`, message-queue subscription).
-That works and survives process restart, which sagent's in-process
-registry does not. Sagent gives you a named-agent registry and inbox
-delivery for free; LangGraph gives you durability for free.
-
-**Streaming intermediate events.** Sagent's `RuntimeEvent` fan-out
-publishes typed dataclass events to in-process observers:
-`ModelCallStarted`, `ModelResponsePartial` (per text chunk),
-`ModelResponseThinking` (per thinking chunk), `ModelResponseComplete`,
-`ToolLabel` (pre-execution), `ToolResult`, `DetachedResult`,
-`CohortComplete`, `ModelIdle`, `CompactComplete`, `SaveSession`,
-`ChildEvent`, `ChildDoneEvent`. Observers are plain callables, fanned
-out synchronously inside the runtime. LangChain's `astream_events` (v2)
-exposes a richer chain-of-Runnables view: per-Runnable
-`on_chat_model_start` / `on_chat_model_stream` / `on_chat_model_end`,
-`on_tool_start` / `on_tool_end`, `on_chain_*`, `on_retriever_*`, etc.,
-each with a metadata dict carrying tags, run id, parent id, and the
-emitting Runnable's name. LangChain's surface is more general (it
-streams from anywhere in the composed pipeline, not just an agent
-loop); sagent's is narrower and tied to the one loop, but the event
-catalogue covers the agent-runtime concerns directly without an
-intermediate Runnable abstraction.
-
-**Net.** Concurrent tool execution is at parity. Durable cross-process
-pause is LangGraph's win. Background tools, model-callable job
-control, non-preempting user queue, inbox priority, delayed peer
-delivery, and persistent live agents are sagent's. You can build any
-of the sagent items on LangGraph; they just aren't framework
-primitives there.
+On streaming events: sagent fans `RuntimeEvent` dataclasses to
+in-process observers; LangChain's `astream_events` exposes a richer
+chain-of-Runnables view with per-Runnable hooks and metadata. LangChain
+streams from anywhere in a composed pipeline; sagent streams from one
+loop.
 
 ## Tools
 
-Both frameworks let you wrap a function and let the model call it. The
-abstractions diverge on what else the tool layer carries.
+LangChain: `@tool` decorator → `BaseTool` with Pydantic args, bound via
+`model.bind_tools([...])`, dispatched by `ToolNode`.
 
-**LangChain:** `@tool` decorator → `BaseTool` with Pydantic-typed args.
-Bound to a model via `model.bind_tools([...])`. Dispatch is done by
-`ToolNode` inside a graph.
-
-**Sagent:** `Tool` is a `Protocol` with metadata the runtime consumes:
+Sagent: `Tool` is a `Protocol`:
 
 ```python
 class Tool(Protocol):
     name: str
-    tool_id: str                 # MIME-style identifier
+    tool_id: str
     description: str
-    directive_schema: JSON       # JSON Schema for args
+    directive_schema: JSON
     supports_microcompaction: bool
 
     def summary(self, args: Mapping[str, object]) -> str: ...
@@ -215,93 +124,59 @@ class Tool(Protocol):
     async def run(self, args: Mapping[str, object]) -> ToolResult: ...
 ```
 
-Plus an optional `CompactRestorable.post_compact_restore` so tools can
-rehydrate their state after the conversation is summarised.
-
-Concrete differences:
-
-- `prompt()` lets each tool contribute a per-request system-prompt
-  fragment. The agent assembles them.
-- `summary()` / `summary_result()` produce pre- and post-execution UI
-  labels.
-- `supports_microcompaction` flags whether old results are eligible for
-  microcompaction.
-- `post_compact_restore` reinjects tool-specific context after
-  compaction.
-
-`Agent` itself implements the same shape. `AgentSpawn` is a tool whose
-`run` builds a child `Agent` and returns its final message as a
-`ToolResult`. Recursive agent composition falls out of the tool
-protocol; there is no separate orchestration layer.
+`prompt()` contributes a per-request system-prompt fragment;
+`summary()` / `summary_result()` produce UI labels; optional
+`CompactRestorable.post_compact_restore` rehydrates tool state after
+compaction. `Agent` itself implements the same shape — `AgentSpawn` is
+a tool whose `run` builds a child `Agent`. Recursive composition falls
+out of the protocol; no separate orchestration layer.
 
 ## Providers
 
-LangChain has one `BaseChatModel` per provider, each in its own package
-(`langchain-openai`, `langchain-anthropic`, etc.). `init_chat_model(
-"openai:gpt-...")` gives a string-keyed factory.
-`Runnable.configurable_alternatives` allows runtime swap.
+LangChain: one `BaseChatModel` per provider in its own package
+(`langchain-openai`, `langchain-anthropic`, …), factory via
+`init_chat_model("openai:gpt-...")`, swap via
+`Runnable.configurable_alternatives`.
 
-Sagent has one `Provider` / `Model` protocol that all backends
-implement. Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax,
-llama.cpp, and self-hosted (Transformers) all normalise to the same
-`ModelRequest` → `ModelResponse` shape. Cost, cache-control,
-extended-thinking, effort hints, persistent-retry, context-overflow
-classification, and image limits live on the same protocol. Mid-session
-swap is a first-class agent verb (`Agent.swap_model`, exposed to the
-model itself via the `AgentSelf` tool).
-
-LangChain can swap models. Sagent normalises the runtime semantics
-around the swap (cache TTL, prompt-cache breakpoints, overflow recovery,
-retry classification) so the agent loop doesn't see provider-specific
-behaviour.
+Sagent: one `Provider` / `Model` protocol across Anthropic, OpenAI,
+Google, Moonshot, DashScope, MiniMax, llama.cpp, and self-hosted
+Transformers. Cost, cache-control, extended-thinking, effort,
+retry-classification, and overflow-classification all normalise on the
+protocol, so the agent loop does not see provider-specific behaviour
+across a mid-session swap.
 
 ## Multi-agent
 
-LangGraph multi-agent: subgraphs, supervisor patterns, `Send` API for
-fan-out. Multi-agent is a graph topology you build. Subgraphs are real
-sub-runtimes; sagent's table marks LangChain ✅ on recursive spawn and
-fully-detached multi-agent because LangGraph genuinely supports it.
+LangGraph: subgraphs, supervisor patterns, `Send` fan-out. Topology
+first.
 
-Sagent multi-agent: three primitives in the runtime.
+Sagent: three runtime primitives.
 
-- `AgentSelf`: the agent inspects or mutates its own state — diagnostics,
-  status, compaction, history clear, model swap, token-limit changes.
-  Exposed to the model as a tool.
+- `AgentSelf`: inspect or mutate own state (status, compaction, model
+  swap, token limits).
 - `AgentSpawn`: build a child agent with explicit tool/depth limits.
-  Children inherit provider, model, and tool knobs unless overridden.
-  Recursion is depth-bounded.
-- `AgentSend`: deliver a message to another live named agent's inbox.
-  Peer-to-peer, not parent-only. Persistent named children stay in the
-  live-agent registry and accept future sends.
+- `AgentSend`: deliver to another live named agent's inbox.
+  Peer-to-peer with delayed delivery.
 
-LangGraph multi-agent is *spec-first*: write the topology, instantiate
-it. Sagent multi-agent is *runtime-first*: agents spawn and send at
-execution time, like processes talking over pipes.
+Agents spawn and send at execution time, like processes over pipes.
 
 ## Memory and compaction
 
-LangChain ships memory classes: `ConversationBufferMemory`,
-`ConversationSummaryMemory`, `ConversationSummaryBufferMemory`, plus
-vector-backed memory. LangGraph adds a `Checkpointer` for state
-durability and a memory store API.
+LangChain: `ConversationBufferMemory`, `ConversationSummaryMemory`,
+`ConversationSummaryBufferMemory`, vector-backed memory. LangGraph adds
+`Checkpointer` durability and a memory store API.
 
-Sagent separates three concerns:
+Sagent:
 
-1. **Session persistence.** Per-cwd JSONL transcripts, replayable.
-2. **Full compaction.** A `Compactor` protocol with `should_compact` and
-   `compact`. Writes `pre_compact_<N>.jsonl` transcripts when a session
-   directory is set, runs a post-compact enrich pipeline (file
-   reattach, status injection, tool restore), and supports
-   prompt-too-long retry that triggers compaction in-flight.
-3. **Microcompaction.** Per-tool result trimming and disk offload. Tools
-   opt in via `supports_microcompaction`. Tools needing rehydration
-   implement `post_compact_restore` to reinject their state into the
-   compacted history.
+1. **Session persistence** — per-cwd JSONL transcripts, replayable.
+2. **Full compaction** — `Compactor` protocol; writes
+   `pre_compact_<N>.jsonl`, runs post-compact enrich (file reattach,
+   status injection, tool restore), retries on prompt-too-long.
+3. **Microcompaction** — per-tool result trimming and disk offload via
+   `supports_microcompaction`; `post_compact_restore` rehydrates state.
 
-LangChain has nothing equivalent to microcompaction or the
-`CompactRestorable` hook. Conversely, sagent has nothing equivalent to
-LangGraph's cross-process `Checkpointer`; sessions are durable, but the
-runtime is not designed to pause mid-tool-call across processes.
+No cross-process `Checkpointer` equivalent. No LangChain equivalent of
+microcompaction or `CompactRestorable`.
 
 ## RAG and the breadth question
 
@@ -313,15 +188,13 @@ multi-query, and self-query patterns. Output parsers (Pydantic, JSON,
 retry-on-fail) sit on the same layer.
 
 Sagent ships none of this. Coding agents typically read files directly
-through a `Read` / `Grep` / `Glob` tool surface; for the workloads
-sagent targets, that's been a reasonable default. If you need RAG over
-ten million Confluence pages, sagent expects you to either write the
-ingestion + retrieval as a tool or use LangChain's prebuilt stack.
+through a `Read` / `Grep` / `Glob` tool surface, which has been a
+reasonable default for the workloads sagent targets. If you need RAG
+over ten million Confluence pages, sagent expects you to either write
+the ingestion + retrieval as a tool or use LangChain's prebuilt stack.
 
-This is the single most useful disambiguator for a reader landing on
-sagent expecting "Python agent framework": **sagent is not a LangChain
-replacement; it is a different shape that overlaps in the agent loop
-only.**
+Sagent is not a LangChain replacement. It is a different shape that
+overlaps in the agent loop only.
 
 ## Observability and evals
 
@@ -332,7 +205,7 @@ Sagent's runtime publishes `RuntimeEvent` items to in-process observers.
 Built-in observers cover cost tracking, session writes, REPL rendering,
 budget caps, and tool labels. Streaming text and thinking flow through
 `on_text` / `on_thinking` callbacks. There is no hosted observability
-surface; cost tracker and JSONL transcripts are the default
+surface; the cost tracker and JSONL transcripts are the default
 instrumentation.
 
 ## Typing and size
@@ -345,191 +218,156 @@ rule. The runtime engine fits in `custom_types.py` plus
 afternoon.
 
 LangChain's install graph includes dozens of optional integration
-packages. Sagent is one wheel with one optional extra (`[selfhosted]`
-for local Transformers).
+packages. Sagent is one wheel plus one `[selfhosted]` extra for local
+Transformers.
 
 ## What sagent has that LangChain does not
 
-A list this short is the honest one. Most things LangChain "doesn't
-have" it could ship in a week if it wanted to; the items below are
-shaped by sagent's opinionated runtime and are awkward to retrofit into
-a building-block framework.
+Each item is a capability the agent unlocks, followed by the runtime
+mechanics that deliver it. None are theoretically impossible in
+LangChain; they are awkward enough to retrofit that almost no
+LangChain-based agent has them.
 
-- **Cohort detach for mid-turn user injection.** When the user types
-  while a cohort of tool calls is in flight, the runtime stubs
-  unfinished calls with `[detached]` placeholders so the provider's
-  `tool_use` / `tool_result` invariant stays valid, fires the model on
-  the user message, and delivers the detached results into the next
-  round as `DetachedResult` user-context. LangGraph can `interrupt()`,
-  but it does not transparently rebase mid-cohort against the provider
-  invariant — that work falls on you.
-- **Five in-flight verbs as primitives.** `halt` / `kill` / `detach` /
-  `undetach` / `clear` are runtime events with documented semantics,
-  not application-defined patterns.
-- **`AgentSelf` exposed as a model-callable tool.** One directive
-  carries all self-mutation knobs: `status` text, `context` verbs
-  (`clear` / `compact` / `recompact`) dispatched as first-class
-  `RuntimeEvent`s on the inbox, `model_id` / `provider` / `auth` /
-  `account` for mid-session backend swap with provider/auth inferred
-  from the model id, `max_request_tokens` / `max_response_tokens` for
-  live context-budget rebudgeting, `model_options` for provider-specific
-  knobs (cache TTL, thinking, effort), `diagnostics` for self-inspection,
-  and `catalog` for read-only enumeration of known providers and
-  models. LangChain has nothing equivalent. The closest piece,
-  `Runnable.configurable_alternatives` + `with_config(...)`, is
-  *caller-driven* configuration, not a model-callable verb. The agent
-  cannot decide on its own to swap models, compact history, or rebudget
-  tokens; the surrounding application has to. Trade-off: model-callable
-  self-mutation is a footgun. A confused agent can compact useful
-  context away, swap to a model that doesn't fit the task, or shrink
-  its own token budget below the next request. LangChain's
-  caller-controls-config posture is arguably safer for high-trust
-  production deployments; sagent's posture is built for interactive
-  agents whose operator is reading along.
-- **`AgentSend` peer-to-peer between live named agents.** Delivers
-  `UserMessage(text=f"[from {sender}]: {content}")` into the target
-  agent's inbox via the live-agent registry, with optional delayed
-  delivery (`asyncio.get_running_loop().call_later`). The tool's
-  `prompt()` contribution dynamically lists currently-live peers the
-  model can address. LangGraph's `Send` is fan-out within one graph
-  step; there is no live-agent registry, no named addressability across
-  independent agent runs, and no delayed inbox delivery.
-- **One inbox unifying user / Slack / peer / background / commands.**
-  REPL keystrokes, Slack messages, peer-agent sends, and background
-  task completions all land on the same `GatedDeque`. The agent does
-  not need a separate control plane per source.
-- **Microcompaction with `CompactRestorable.post_compact_restore`.**
-  Tools opt in to per-result trimming and rehydrate their state after
-  full compaction. LangChain has summary memory but no per-tool
-  restoration hook.
-- **Prompt-too-long recovery as an event.** Context overflow on a
-  request triggers in-flight compaction and retry inside the runtime,
-  not at the application layer.
-- **Hot-swappable providers with normalised semantics.** Cache TTL,
-  prompt-cache breakpoints, extended-thinking, effort hints,
-  retryable-error classification, and overflow classification all live
-  on one `Model` protocol. LangChain models expose provider-specific
-  knobs that do not all line up.
-- **Same `Agent` behind CLI, REPL, Slack, parent agents, and library
-  calls.** Surfaces differ in how messages enter the inbox and how
-  events are rendered; the agent logic does not fork per surface.
-- **Full `bashlex` AST analysis on the `Bash` tool.** Parsing is cached
-  per request. `is_read_only` classifies a parse as side-effect-free
-  using per-command rules (git subcommand safety, sed mutation
-  detection, type-checker mutation, leading-flag handling), enabling
-  the runtime to run multiple read-only bash calls concurrently while
-  serialising writes. `unwrap_cd_prefix` normalises `cd X && CMD` into
-  `(cwd, CMD)` so the runtime tracks cwd shifts and matchers see the
-  real command. `match_pipeline` extracts clean two-command pipelines
-  for matcher analysis, and stdout-redirect detection distinguishes
-  fd-1 redirects (which change what the model sees) from cosmetic
-  stderr redirects. Sibling tools (`Edit`, `List`, `Glob`, `Grep`)
-  implement a `bash_match(trees)` hook so when the model reaches for
-  `ls`, `sed`, `find`, or `grep` through Bash, the tool result nudges
-  it toward the dedicated tool. LangChain's `ShellTool` is a thin
-  wrapper around `subprocess.run` with no AST analysis, no read-only
-  classification, and no peer-tool routing.
+- **The user can interrupt mid-cohort and the agent keeps the prior
+  work running.** Type while three tools are in flight; the new message
+  preempts and the tools finish in the background.
+  - `[detached]` placeholder results stub unfinished cohort members so
+    the provider's `tool_use` / `tool_result` invariant stays valid.
+  - The runtime fires the model on the new `UserMessage` immediately.
+  - Detached tools keep running; their real results land as
+    `DetachedResult` user-context in the next round.
+  - LangGraph's `interrupt()` pauses the graph but does not rebase the
+    in-flight tool cohort against the provider invariant.
 
-None of these are theoretically impossible in LangChain. The point is
-that sagent ships them as primitives, and they are awkward enough to
-build on top of LangGraph that almost no LangChain-based agent actually
-has them.
+- **The user has five distinct verbs for controlling in-flight work**
+  instead of one "stop" button.
+  - `halt`: cancel the model call, gate on user input, leave tools
+    running.
+  - `kill <id|all>`: cancel tasks, drop from cohort.
+  - `detach <id|all>`: stub now, finish in the background.
+  - `undetach <id|all>`: re-gate on a previously detached tool.
+  - `clear`: cancel model, detach all tools, wipe history, gate.
+
+- **The agent rewrites its own runtime config mid-session** — model
+  swap, compact, rebudget tokens — via one tool call.
+  - `AgentSelf` covers `status`, context verbs (`clear`/`compact`/
+    `recompact`), model swap, token-budget rebudgeting, provider
+    `model_options`, diagnostics, and catalog.
+  - LangChain's `configurable_alternatives` + `with_config()` is
+    caller-driven; the agent cannot mutate its own config.
+
+- **Agents can address other live agents by name and deliver into
+  their inbox**, with optional delayed delivery.
+  - `AgentSend` writes `UserMessage(text=f"[from {sender}]: {content}")`
+    into the target's `GatedDeque`.
+  - `AgentSpawn(persistent=true)` registers the child in the
+    live-agent registry under a name.
+  - `delay=N` uses `asyncio.get_running_loop().call_later` for future
+    delivery.
+  - The tool's `prompt()` contribution dynamically lists currently-live
+    peers.
+  - LangGraph's `Send` is fan-out within one graph step; no named
+    addressability across runs, no delayed delivery.
+
+- **One inbox unifies every input source**, so there is no separate
+  control plane per surface.
+  - REPL keystrokes, Slack messages, peer `AgentSend`s, background
+    task completions, model responses, tool results, and runtime
+    commands all land on the same `GatedDeque`.
+  - `push_front` vs `push_back` gives priority control.
+  - `Await(types)` blocks `drain()` without polling until a matching
+    event lands.
+
+- **Tools survive history compaction** without losing their state.
+  - `supports_microcompaction` opts a tool into per-result trimming
+    and disk offload.
+  - `CompactRestorable.post_compact_restore` rehydrates tool-specific
+    context after full compaction.
+  - LangChain has summary memory but no per-tool restoration hook.
+
+- **Context overflow recovers automatically inside the runtime**, not
+  at the application layer.
+  - A prompt-too-long error triggers in-flight compaction.
+  - The request retries on the compacted history without the
+    application seeing the failure.
+
+- **Provider swap mid-session does not leak provider-specific
+  behaviour into the agent loop.**
+  - One `Model` protocol normalises cache TTL, prompt-cache
+    breakpoints, extended-thinking, effort hints, retryable-error
+    classification, and overflow classification.
+  - The agent loop sees identical semantics across Anthropic, OpenAI,
+    Google, Moonshot, DashScope, MiniMax, llama.cpp, self-hosted, and
+    OpenAI-compatible endpoints.
+
+- **The same `Agent` runs behind CLI, REPL, Slack, parent agents, and
+  the library API.** Surfaces differ only in how messages enter the
+  inbox and how events render; the agent logic does not fork.
+
+- **The `Bash` tool understands shell ASTs**, so it parallelises
+  read-only commands, tracks `cd`, and routes the model to dedicated
+  tools.
+  - `bashlex` parses cached per request; `is_read_only` classifies
+    side-effects per-command (git, sed, type-checker, flag handling).
+  - `unwrap_cd_prefix` normalises `cd X && CMD` so cwd tracks and
+    matchers see the real command.
+  - Sibling tools (`Edit`, `List`, `Glob`, `Grep`) implement
+    `bash_match(trees)` so a `Bash` call to `ls`/`sed`/`find`/`grep`
+    nudges the model toward the dedicated tool.
+  - LangChain's `ShellTool` wraps `subprocess.run` with none of this.
 
 ## Where sagent is weaker
 
-Read this section if you are evaluating sagent for production work. The
-gaps below are real and not all fixable by "writing a tool for it."
-
-- **No durable cross-process pause/resume.** LangGraph's `Checkpointer`
-  + `interrupt()` is built for human-in-the-loop approvals that survive
-  process restart, queue across days, and resume on a different machine.
-  Sagent persists session transcripts but the runtime expects to keep
-  running. If your workflow needs "pause for human approval, come back
-  on Monday," LangGraph is the right tool, not sagent.
-- **No RAG layer.** No document loaders, no text splitters, no embedding
-  models, no vector stores, no retrievers, no re-rankers. If your
-  problem is retrieval-heavy, sagent gives you `Read` / `Grep` / `Glob`
-  and expects you to write the rest. For coding agents over a local
-  tree this is often fine; for RAG over a ten-million-page corpus it is
-  not.
-- **No graph DSL.** Heterogeneous LLM pipelines (classification →
-  routing → extraction → summary) are easy to express in LangGraph and
-  awkward in sagent, where the only loop is the agent loop.
-- **Tool-call validation, but no general-purpose output parsers.**
-  Sagent validates tool-call directives against each tool's
-  `directive_schema` (JSON Schema), which covers the
-  structured-output-from-the-model case for tool use. It does not ship
-  the broader LangChain surface — `PydanticOutputParser`,
-  `JsonOutputParser`, retry-on-fail wrappers, `OutputFixingParser`,
-  structured-extraction chains — for parsing model output into Python
-  objects outside the tool-call path.
-- **A different shape of prompt-template system.** Sagent ships YAML
-  recipes (`assets/sagent.yaml`, `bare.yaml`, `codex.yaml`) that map
-  logical roles to markdown files, with `.format()` / `.replace()`
-  placeholder substitution and per-tool `Tool.prompt()` contributions
-  composed by the agent. It does not ship a runtime `PromptTemplate` class object,
-  `ChatPromptTemplate` / `MessagesPlaceholder` multi-turn templating,
-  Jinja2 conditionals/loops, or few-shot example selectors. For
-  prompt-heavy work that depends on those primitives — semantic
-  example selection over a dataset, dynamic chat-template composition,
-  template inheritance with conditionals — LangChain's templating is
-  more powerful.
-- **No hosted observability.** No LangSmith equivalent for traces,
-  datasets, evals, prompt management, or shared dashboards. You get
-  in-process `RuntimeEvent` observers, a cost tracker, and JSONL
-  transcripts.
-- **Narrower provider coverage.** Anthropic, OpenAI, Google, Moonshot,
-  DashScope, MiniMax, llama.cpp, self-hosted Transformers, and generic
-  OpenAI-compatible endpoints. No first-class Cohere, Bedrock, Vertex,
-  Azure OpenAI, Together, Replicate, Mistral, or Groq. You can use them
-  through the OpenAI-compatible adapter when they expose one.
-- **No MCP, no LSP, no native sandbox, no tree-sitter repo map, no
-  browser automation.** All stated explicitly in the README. aider in
-  particular has a tree-sitter repo map with PageRank ranking that
-  sagent does not match for structural code awareness.
-- **A locked runtime.** `AgentRuntime` is locked per an internal
-  contract. The loop is opinionated by design. If sagent's opinions
-  don't match your problem, your option is to fork; you cannot rewire
-  the loop while keeping the rest of the package.
-- **Tiny ecosystem.** No community-maintained integrations, no
-  StackOverflow answers, no books, no courses, no third-party tools.
-  LangChain has 135k+ GitHub stars and an enormous community surface;
-  sagent has neither.
-- **Python 3.12+ only.** LangChain runs on much older Python; sagent
-  does not.
-- **Single-process design.** Distributing agent work across machines or
-  workers is on you. LangGraph plus a Postgres checkpointer at least
-  gives you a starting point.
-- **No batch / async-many API.** LangChain Runnables expose `batch` and
-  `abatch` for parallel application of the same pipeline across many
-  inputs. Sagent's `Agent.run` is single-input.
+- No durable cross-process pause/resume. Sagent persists transcripts,
+  not mid-run state. Use LangGraph's `Checkpointer` + `interrupt()` if
+  you need "pause for approval, resume next Monday on another machine."
+- No RAG layer. No loaders, splitters, embeddings, vector stores,
+  retrievers, or re-rankers. `Read` / `Grep` / `Glob` is the whole
+  retrieval surface.
+- No graph DSL for non-agent LLM pipelines (classify → route → extract
+  → summarise). The only loop is the agent loop.
+- No general-purpose output parsers. Tool calls validate against
+  `directive_schema` (JSON Schema); structured extraction outside the
+  tool-call path is not covered.
+- Smaller prompt-template system. YAML recipes with `.format()` /
+  `.replace()` substitution and per-tool `Tool.prompt()` contributions.
+  No `ChatPromptTemplate`, Jinja2 loops, or few-shot example selectors.
+- No hosted observability. No LangSmith. You get in-process
+  `RuntimeEvent` observers, a cost tracker, and JSONL transcripts.
+- Narrower provider coverage. No native Cohere, Bedrock, Vertex, Azure
+  OpenAI, Together, Replicate, Mistral, or Groq. Use them via the
+  OpenAI-compatible adapter when they expose one.
+- No MCP, no LSP, no native sandbox, no tree-sitter repo map, no
+  browser automation. aider's PageRank-ranked repo map has no analogue
+  here.
+- Locked runtime. `AgentRuntime` is fixed by contract. If the loop's
+  opinions don't fit, fork.
+- Tiny ecosystem. No community integrations, no books, no courses.
+  LangChain has 135k+ GitHub stars; sagent does not.
+- Python 3.12+ required. LangChain runs on 3.10+.
+- Single-process. Distributing agents across machines is on you.
+- No batch / async-many API. `Agent.run` is single-input; LangChain
+  Runnables expose `batch` / `abatch`.
 
 ## When to reach for which
 
-Reach for LangChain when:
+Pick LangChain if you need any of:
 
-- You need RAG, retrievers, vector stores, document loaders, or output
-  parsers.
-- You want LangGraph's durable cross-process `interrupt()` /
-  Checkpointer for human-in-the-loop workflows.
-- You want a graph DSL for heterogeneous LLM pipelines beyond agents.
-- You want LangSmith traces, evals, prompt management.
-- You need a provider sagent does not cover, or you need the long tail
-  of community integrations.
+- RAG, retrievers, vector stores, document loaders, output parsers.
+- Durable cross-process pause/resume for human-in-the-loop.
+- A graph DSL for non-agent LLM pipelines.
+- LangSmith traces, evals, or prompt management.
+- A provider sagent does not cover, or community integrations.
 
-Reach for sagent when:
+Pick sagent if you need any of:
 
-- You are building a coding-style agent that runs locally and needs
-  one inbox unifying REPL, Slack, peer agents, and background tasks.
-- You need mid-turn user injection, in-flight halt / kill / detach /
-  clear, or peer-to-peer agent messaging as primitives, not patterns.
-- You want the agent itself to swap models, compact context, and spawn
-  peers via ordinary tool calls.
-- You want a small, opinionated, basedpyright-clean Python package you
-  can read end-to-end before depending on it.
+- One inbox unifying REPL, Slack, peer agents, and background tasks.
+- Mid-turn user injection, halt/kill/detach/clear, or peer-to-peer
+  agent messaging as primitives.
+- The agent itself swapping models, compacting context, or spawning
+  peers via tool calls.
+- A small Python package you can read end-to-end before depending on it.
 
-The frameworks are not in direct competition. LangChain is the answer
-when the question is "framework for LLM applications." Sagent is the
-answer when the question is "typed runtime for one kind of agent." If
-your problem is "framework for LLM applications" and you reach for
-sagent, you will have to build most of LangChain yourself.
+LangChain answers "framework for LLM applications." Sagent answers
+"typed runtime for one kind of agent." Pick by the question, not the
+brand.
