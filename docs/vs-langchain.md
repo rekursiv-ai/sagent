@@ -1,9 +1,12 @@
 # Sagent vs LangChain/LangGraph
 
 LangChain is a ~700-package ecosystem for any LLM application: RAG,
-agents, evals, extraction, classification, ETL. Sagent is one package
-for coding agents. They overlap on "call an LLM with tools" and diverge
-elsewhere.
+agents, evals, extraction, classification, ETL — the agent is a
+workflow the framework executes. Sagent treats agents as live,
+addressable actors: each runs an inbox-driven loop, and users, peers,
+background tasks, and the agent itself all communicate through that
+inbox. The two overlap on "call an LLM with tools" and diverge
+everywhere else.
 
 ## What each one is
 
@@ -65,43 +68,46 @@ without polling.
 
 LangGraph wins on durable cross-process pause/resume, declarative
 branching/looping topology, and human-in-the-loop gates that survive
-restart. Sagent wins on mid-turn user injection, multiple input sources
-on one loop, the five in-flight verbs as primitives, and peer-to-peer
-agent messaging at runtime. Reinventing one inside the other yields
-the other.
+restart — agent-as-workflow concerns. Sagent wins on mid-turn user
+injection, multiple input sources on one loop, the five in-flight
+verbs, and peer-to-peer agent messaging — agent-as-actor concerns.
 
-## Background work, scheduling, and inbox priority
+## Runtime capability matrix
+
+### Concurrent execution and background work
 
 | Capability | Sagent | LangChain / LangGraph |
 | --- | --- | --- |
-| Run multiple tool calls from one turn concurrently | `asyncio.Task` per call, cohort `set[str]` gates the next model call | `ToolNode` + `asyncio.gather` |
-| Run a single tool call asynchronously, deliver result later | `background: true` / `delay: N` injected into every tool's directive schema by `BackgroundAwareTool` | Application-defined: write a tool that returns a job id and a separate poll tool |
-| Model-callable job control (list / cancel / resume long-running work) | `BackgroundTask` tool with `list` / `cancel <id>` / `foreground <id>` operations | Application-defined |
-| Registry of in-flight long-running operations | `BackgroundTaskEntry` covering tool calls, persistent subagents, detached cohort members, hidden infra | Application-defined |
-| Pause execution mid-run and resume later in another process | None. Sessions persist transcripts, not mid-cohort state | `interrupt()` + `Checkpointer` (memory / SQLite / Postgres backends) |
-| Resume semantics after pause | N/A | Replay-based: the node re-runs from the top up to the `interrupt()` call |
-| Pluggable persistence backend for run state | Local JSONL session transcripts only | `Checkpointer` interface with shipped backends (memory / SQLite / Postgres) and a community pattern for more |
-| Inject user context that preempts in-flight work | `UserMessage` via `push_front`, stubs cohort with `[detached]`, fires model on the new state | `interrupt()` + `Command(resume=...)` — graph-level pause and replay, not per-cohort rebase |
-| Inject user context that does *not* preempt in-flight work | `UserQueuedMessage`, buffers, coalesces into next `UserMessage` after cohort drains | Application-defined |
-| Route different message sources to different inbox priorities | `push_front` vs `push_back` on `GatedDeque` | Application-defined |
-| Wait for an event without polling, in-process | `Await(types)` gates `drain()` until matching event lands; the agent loop stays running and idle | LangGraph stops the graph at `interrupt()`; the orchestrating process can do anything and resume by re-invoking the graph |
-| Deliver a message to another agent at a future time | `AgentSend(delay=N)` via `loop.call_later` | Application-defined (external scheduler) |
-| Address a live agent by name and deliver into its inbox | `AgentSpawn(persistent=true)` + named registry; `AgentSend` delivers | Application-defined: long-running graph + external trigger (HTTP webhook, Postgres `LISTEN`, MQ subscription) + `Checkpointer` |
-| Typed serialisable run state | Per-event dataclasses; JSONL session transcript | Typed `State` dict per graph; serialised by the `Checkpointer` |
-| Stream typed intermediate execution events | `RuntimeEvent` observer fan-out (cost, session, REPL, budget) | `astream_events` / `astream_log` over the Runnable / graph |
-| Resume the same conversation on a fresh process | `--continue` reloads session transcript and replays state | `Checkpointer` restores graph state from durable storage |
+| Multiple tool calls from one turn, concurrent | `asyncio.Task` per call, cohort `set[str]` gates the next model call | `ToolNode` + `asyncio.gather` |
+| Single tool call async, result delivered later | `background: true` / `delay: N` on every tool via `BackgroundAwareTool` | Write a tool that returns a job id plus a separate poll tool |
+| Model-callable job control | `BackgroundTask` with `list` / `cancel` / `foreground` | Application-defined |
+| Registry of in-flight long-running ops | `BackgroundTaskEntry` (tool calls, persistent subagents, detached cohort, hidden infra) | Application-defined |
+
+### Pause, persist, resume
+
+| Capability | Sagent | LangChain / LangGraph |
+| --- | --- | --- |
+| Cross-process pause mid-run | None — sessions persist transcripts, not mid-cohort state | `interrupt()` + `Checkpointer` |
+| Resume semantics | N/A | Node replays from the top up to the `interrupt()` call |
+| Pluggable persistence backend | Local JSONL transcripts only | `Checkpointer`: memory / SQLite / Postgres |
+| Resume the same conversation on a fresh process | `--continue` reloads transcript and replays | `Checkpointer` restores graph state |
+| Typed serialisable run state | Per-event dataclasses; JSONL transcript | Typed `State` dict per graph |
+
+### Mid-turn injection, inbox, peers, events
+
+| Capability | Sagent | LangChain / LangGraph |
+| --- | --- | --- |
+| Inject user context that *preempts* in-flight work | `UserMessage` via `push_front`, stubs cohort with `[detached]`, fires model | `interrupt()` + `Command(resume=...)` — graph-level, not per-cohort rebase |
+| Inject user context that does *not* preempt | `UserQueuedMessage`, coalesces into next `UserMessage` after cohort drains | Application-defined |
+| Inbox priority routing | `push_front` vs `push_back` on `GatedDeque` | Application-defined |
+| Wait without polling | `Await(types)` blocks `drain()` until match | LangGraph stops at `interrupt()`; the host re-invokes the graph |
+| Address a live agent by name | `AgentSpawn(persistent=true)` + registry; `AgentSend` delivers | Long-running graph + external trigger + `Checkpointer` |
+| Delayed delivery to another agent | `AgentSend(delay=N)` via `loop.call_later` | External scheduler |
+| Stream typed intermediate events | `RuntimeEvent` observer fan-out | `astream_events` over Runnables — richer per-Runnable metadata |
 
 Concurrent tool execution is at parity. Durable cross-process pause is
-LangGraph's. Background tools, model-callable job control,
-non-preempting user queue, inbox priority, delayed peer delivery, and
-persistent live agents are sagent primitives; on LangGraph they are
-patterns you assemble.
-
-On streaming events: sagent fans `RuntimeEvent` dataclasses to
-in-process observers; LangChain's `astream_events` exposes a richer
-chain-of-Runnables view with per-Runnable hooks and metadata. LangChain
-streams from anywhere in a composed pipeline; sagent streams from one
-loop.
+LangGraph's. The rest of the sagent column is primitives; the LangGraph
+column there is patterns you assemble.
 
 ## Tools
 
@@ -223,98 +229,77 @@ Transformers.
 
 ## What sagent has that LangChain does not
 
-Each item is a capability the agent unlocks, followed by the runtime
-mechanics that deliver it. None are theoretically impossible in
-LangChain; they are awkward enough to retrofit that almost no
-LangChain-based agent has them.
+### Headline differentiators
 
-- **The user can interrupt mid-cohort and the agent keeps the prior
-  work running.** Type while three tools are in flight; the new message
-  preempts and the tools finish in the background.
-  - `[detached]` placeholder results stub unfinished cohort members so
-    the provider's `tool_use` / `tool_result` invariant stays valid.
-  - The runtime fires the model on the new `UserMessage` immediately.
-  - Detached tools keep running; their real results land as
-    `DetachedResult` user-context in the next round.
-  - LangGraph's `interrupt()` pauses the graph but does not rebase the
-    in-flight tool cohort against the provider invariant.
+All five below are facets of the same architectural commitment: agents
+are live actors on a shared inbox, addressable by users, peers, and
+themselves.
 
-- **The user has five distinct verbs for controlling in-flight work**
-  instead of one "stop" button.
-  - `halt`: cancel the model call, gate on user input, leave tools
-    running.
-  - `kill <id|all>`: cancel tasks, drop from cohort.
-  - `detach <id|all>`: stub now, finish in the background.
-  - `undetach <id|all>`: re-gate on a previously detached tool.
-  - `clear`: cancel model, detach all tools, wipe history, gate.
+**1. Mid-cohort user injection that respects the provider's tool-call
+invariant.** Type while three tools are in flight; the message preempts,
+the model fires immediately, and the tools finish in the background.
 
-- **The agent rewrites its own runtime config mid-session** — model
-  swap, compact, rebudget tokens — via one tool call.
-  - `AgentSelf` covers `status`, context verbs (`clear`/`compact`/
-    `recompact`), model swap, token-budget rebudgeting, provider
-    `model_options`, diagnostics, and catalog.
-  - LangChain's `configurable_alternatives` + `with_config()` is
-    caller-driven; the agent cannot mutate its own config.
+- Unfinished cohort members get stubbed with `[detached]` placeholders,
+  satisfying the `tool_use` / `tool_result` invariant.
+- Detached tools keep running; real results arrive as `DetachedResult`
+  in the next round.
+- LangGraph's `interrupt()` pauses the graph but does not rebase
+  in-flight tool cohorts against the provider.
 
-- **Agents can address other live agents by name and deliver into
-  their inbox**, with optional delayed delivery.
-  - `AgentSend` writes `UserMessage(text=f"[from {sender}]: {content}")`
-    into the target's `GatedDeque`.
-  - `AgentSpawn(persistent=true)` registers the child in the
-    live-agent registry under a name.
-  - `delay=N` uses `asyncio.get_running_loop().call_later` for future
-    delivery.
-  - The tool's `prompt()` contribution dynamically lists currently-live
-    peers.
-  - LangGraph's `Send` is fan-out within one graph step; no named
-    addressability across runs, no delayed delivery.
+**2. Five verbs for controlling in-flight work**, not one "stop" button.
 
-- **One inbox unifies every input source**, so there is no separate
-  control plane per surface.
-  - REPL keystrokes, Slack messages, peer `AgentSend`s, background
-    task completions, model responses, tool results, and runtime
-    commands all land on the same `GatedDeque`.
-  - `push_front` vs `push_back` gives priority control.
-  - `Await(types)` blocks `drain()` without polling until a matching
-    event lands.
+- `halt` — cancel model, gate, leave tools running.
+- `kill` — cancel tasks, drop from cohort.
+- `detach` — stub now, finish in the background.
+- `undetach` — re-gate on a detached tool.
+- `clear` — cancel model, detach all, wipe history, gate.
 
-- **Tools survive history compaction** without losing their state.
-  - `supports_microcompaction` opts a tool into per-result trimming
-    and disk offload.
-  - `CompactRestorable.post_compact_restore` rehydrates tool-specific
-    context after full compaction.
-  - LangChain has summary memory but no per-tool restoration hook.
+**3. The agent rewrites its own runtime config via tool calls.** Model
+swap, compaction, token rebudgeting — all addressable from inside the
+loop.
 
-- **Context overflow recovers automatically inside the runtime**, not
-  at the application layer.
-  - A prompt-too-long error triggers in-flight compaction.
-  - The request retries on the compacted history without the
-    application seeing the failure.
+- `AgentSelf` covers status, context verbs (`clear`/`compact`/
+  `recompact`), model/provider swap, token budgets, provider
+  `model_options`, diagnostics, catalog.
+- LangChain's `configurable_alternatives` is caller-driven; the agent
+  cannot mutate its own config.
 
-- **Provider swap mid-session does not leak provider-specific
-  behaviour into the agent loop.**
-  - One `Model` protocol normalises cache TTL, prompt-cache
-    breakpoints, extended-thinking, effort hints, retryable-error
-    classification, and overflow classification.
-  - The agent loop sees identical semantics across Anthropic, OpenAI,
-    Google, Moonshot, DashScope, MiniMax, llama.cpp, self-hosted, and
-    OpenAI-compatible endpoints.
+**4. Named live-agent registry with inbox delivery.** Agents address
+each other by name, with delayed delivery.
 
-- **The same `Agent` runs behind CLI, REPL, Slack, parent agents, and
-  the library API.** Surfaces differ only in how messages enter the
-  inbox and how events render; the agent logic does not fork.
+- `AgentSpawn(persistent=true)` registers under a name.
+- `AgentSend` delivers into the target's `GatedDeque` (`delay=N` via
+  `loop.call_later` for future delivery).
+- `prompt()` contribution lists currently-live peers.
+- LangGraph's `Send` is fan-out within one graph step; no addressing
+  across runs, no delayed delivery.
 
-- **The `Bash` tool understands shell ASTs**, so it parallelises
-  read-only commands, tracks `cd`, and routes the model to dedicated
-  tools.
-  - `bashlex` parses cached per request; `is_read_only` classifies
-    side-effects per-command (git, sed, type-checker, flag handling).
-  - `unwrap_cd_prefix` normalises `cd X && CMD` so cwd tracks and
-    matchers see the real command.
-  - Sibling tools (`Edit`, `List`, `Glob`, `Grep`) implement
-    `bash_match(trees)` so a `Bash` call to `ls`/`sed`/`find`/`grep`
-    nudges the model toward the dedicated tool.
-  - LangChain's `ShellTool` wraps `subprocess.run` with none of this.
+**5. One inbox unifies every input source.** REPL, Slack, peer sends,
+background completions, model responses, tool results, runtime commands
+— all on the same `GatedDeque`, with `push_front`/`push_back` priority
+and `Await(types)` blocking without polling. No separate control plane
+per surface.
+
+### Other primitives
+
+- **Tools survive compaction.** `supports_microcompaction` opts a tool
+  into per-result trimming; `CompactRestorable.post_compact_restore`
+  rehydrates state. LangChain has no per-tool restoration hook.
+- **Context overflow auto-recovers.** Prompt-too-long triggers
+  in-flight compaction and retry; the application never sees it.
+- **Provider swap normalises semantics.** One `Model` protocol covers
+  cache TTL, prompt-cache breakpoints, thinking, effort, retry, and
+  overflow classification across Anthropic, OpenAI, Google, Moonshot,
+  DashScope, MiniMax, llama.cpp, self-hosted, OpenAI-compatible.
+- **One `Agent` behind every surface.** CLI, REPL, Slack, parent
+  agents, library API — surfaces differ only in message ingress and
+  event rendering.
+- **`Bash` understands shell ASTs.** `bashlex` parses cached per
+  request; `is_read_only` parallelises reads and serialises writes;
+  `unwrap_cd_prefix` tracks cwd shifts; sibling tools (`Edit`, `List`,
+  `Glob`, `Grep`) implement `bash_match(trees)` to nudge the model
+  toward dedicated tools. LangChain's `ShellTool` wraps
+  `subprocess.run` with none of this.
 
 ## Where sagent is weaker
 
@@ -369,5 +354,5 @@ Pick sagent if you need any of:
 - A small Python package you can read end-to-end before depending on it.
 
 LangChain answers "framework for LLM applications." Sagent answers
-"typed runtime for one kind of agent." Pick by the question, not the
-brand.
+"runtime for agents that talk — to users, peers, and themselves — over
+one inbox." Pick by the question, not the brand.
