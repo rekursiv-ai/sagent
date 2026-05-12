@@ -1,4 +1,4 @@
-"""Tests for sagent.bin.check_wheel."""
+"""Tests for ``bin.check_wheel``: wheel surface and recipe asset validation."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ class TestCheckWheel:
         )
 
         with pytest.raises(SystemExit, match=r"default/prompt\.md"):
-            check_wheel.main()
+            _ = check_wheel.main()
 
     def test_rejects_recipe_referenced_missing_tool_asset(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -95,7 +95,7 @@ class TestCheckWheel:
         _write_sagent_wheel(tmp_path, files)
 
         with pytest.raises(SystemExit, match=r"default/tools_websearch\.md"):
-            check_wheel.main()
+            _ = check_wheel.main()
 
     def test_rejects_missing_included_asset(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -110,7 +110,7 @@ class TestCheckWheel:
             SystemExit,
             match=r"default/tools_websearch\.md -> missing\.md",
         ):
-            check_wheel.main()
+            _ = check_wheel.main()
 
     def test_rejects_malformed_recipe(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -122,7 +122,7 @@ class TestCheckWheel:
         _write_sagent_wheel(tmp_path, files)
 
         with pytest.raises(SystemExit, match=r"invalid sagent/assets/sagent\.yaml"):
-            check_wheel.main()
+            _ = check_wheel.main()
 
     def test_rejects_non_string_asset_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -134,7 +134,7 @@ class TestCheckWheel:
         _write_sagent_wheel(tmp_path, files)
 
         with pytest.raises(SystemExit, match=r"tool_descriptions\.Bash"):
-            check_wheel.main()
+            _ = check_wheel.main()
 
     def test_rejects_include_cycle(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -150,7 +150,94 @@ class TestCheckWheel:
             SystemExit,
             match=r"default/tools_bash\.md -> b\.md -> default/tools_bash\.md",
         ):
-            check_wheel.main()
+            _ = check_wheel.main()
+
+
+class TestCheckWheelErrors:
+    """Error paths for missing wheels, modules, and recipe shape."""
+
+    def test_rejects_no_wheels(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "dist").mkdir()
+        with pytest.raises(SystemExit, match=r"uv build produced no Sagent wheel"):
+            _ = check_wheel.main()
+
+    def test_rejects_missing_entry_points_file(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        del files["sagent-0.1.0.dist-info/entry_points.txt"]
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"entry_points\.txt"):
+            _ = check_wheel.main()
+
+    def test_rejects_missing_required_entry(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        del files["sagent/lib/web/fetch.py"]
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"sagent/lib/web/fetch\.py"):
+            _ = check_wheel.main()
+
+    def test_rejects_missing_console_script(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent-0.1.0.dist-info/entry_points.txt"] = (
+            "[console_scripts]\nsagent = sagent.bin.cli:main\n"
+        )
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"sagent-slack"):
+            _ = check_wheel.main()
+
+    def test_rejects_recipe_not_a_mapping(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/sagent.yaml"] = "- one\n- two\n"
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"expected mapping"):
+            _ = check_wheel.main()
+
+    def test_skips_non_mapping_recipe_section(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/sagent.yaml"] = (
+            "system_prompt: not-a-mapping\n"
+            "compactor:\n  full: default/compactor.md\n"
+            "  partial: default/compactor_partial.md\n"
+            "tool_descriptions:\n  Bash: default/tools_bash.md\n"
+            "  WebSearch: default/tools_websearch.md\n"
+        )
+        _write_sagent_wheel(tmp_path, files)
+        # Skipping the non-mapping section means no missing-asset error.
+        assert check_wheel.main() == 0
+
+    def test_rejects_absolute_asset_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/sagent.yaml"] = (
+            "tool_descriptions:\n  Bash: /etc/passwd\n"
+            "  WebSearch: default/tools_websearch.md\n"
+            "system_prompt:\n  base: default/prompt.md\n"
+            "  env: default/prompt_env.md\n"
+            "compactor:\n  full: default/compactor.md\n"
+            "  partial: default/compactor_partial.md\n"
+        )
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"must stay inside sagent/assets"):
+            _ = check_wheel.main()
 
 
 if __name__ == "__main__":

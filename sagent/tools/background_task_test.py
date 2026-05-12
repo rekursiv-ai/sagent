@@ -1,418 +1,395 @@
-"""Tests for BackgroundTask tool and background dispatch."""
+"""Tests for ``tools.background_task``: bash-style job control surface."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Mapping
 
 import asyncio
+import contextlib
+import time
 
 import pytest
 
-from sagent.agent.agent import Agent
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    ModelRequest,
-    ModelResponse as _ModelResponse,
-    MultipartMessage,
-    TextMessage,
-    TokenCount,
-)
-from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import (
-    get_directive,
-    response_text,
-    tool_call_message,
-)
-from sagent.testing import MockModelCaps
-from sagent.tools.background_task import (
-    BackgroundTask,
+from sagent.agent.background import (
+    BackgroundAwareTool,
     BackgroundTaskEntry,
 )
+from sagent.agent.runtime import ToolResult
+from sagent.lib.json import json_freeze
+from sagent.testing import with_fake_agent
+from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import current_agent_var
 
 
-# -- v3-compat helper --------------------------------------------------
-
-
-async def _run(agent: Agent, prompt: str) -> Message:
-    """Drain ``run`` and return the last assistant text as a Message."""
-    async for _ev in agent.run(TextMessage(prompt, "text/x-user-message")):
-        pass
-    for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            return TextMessage(response_text(m), "text/plain")
-    return TextMessage("", "text/plain")
-
-
-# -- Factories ---------------------------------------------------------
-
-
-def ModelResponse(  # noqa: N802 -- PascalCase factory mimics Message constructor
-    *,
-    text: str = "",
-    tool_calls: list[Message] | None = None,
-    stop_reason: str = "model_finished",
-    input_tokens: int = 0,
-    output_tokens: int = 0,
-) -> _ModelResponse:
-    parts: list[Message] = []
-    if text:
-        parts.append(TextMessage(text, "text/plain"))
-    parts.extend(tool_calls or [])
-    content = MultipartMessage(tuple(parts), "multipart/x-model-message")
-    return _ModelResponse(
-        content=content,
-        stop_reason=stop_reason,
-        tokens=TokenCount(input_tokens=input_tokens, output_tokens=output_tokens),
-    )
-
-
-class _MockCaps(MockModelCaps):
-    max_image_dim: int = 2000
-
-
-class _MockModel(_MockCaps):
-    def __init__(self, responses: list[_ModelResponse]) -> None:
-        self._responses = responses
-        self._call_idx = 0
-        self.requests: list[ModelRequest] = []
-
-    @property
-    def max_request_tokens(self) -> int:
-        return 100_000
-
-    @property
-    def model_id(self) -> str:
-        return "mock"
-
-    async def buffer(self, request: ModelRequest) -> _ModelResponse:
-        self.requests.append(request)
-        resp = self._responses[min(self._call_idx, len(self._responses) - 1)]
-        self._call_idx += 1
-        return resp
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
-    ) -> _ModelResponse:
-        del on_text, on_thinking
-        return await self.buffer(request=request)
-
-
-class _MockTool:
-    name = "echo"
-    tool_id = "application/x-tool-echo"
-    description = "Echoes input."
-    supports_microcompaction = False
-    directive_schema: JSON = json_freeze(
+class _DummyInner:
+    name: str = "Dummy"
+    tool_id: str = "application/x-tool-dummy"
+    description: str = "dummy"
+    supports_microcompaction: bool = False
+    directive_schema = json_freeze(
         {
             "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        del msg
-        return self.name
+    def summary(self, args: Mapping[str, object]) -> str:
+        return f"Dummy {args.get('x', '')}"
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        del result
+        return "ok"
 
     def prompt(self) -> str:
-        return ""
+        return "dummy-prompt"
 
-    def summary_result(self, result: Message) -> str | None:
-        del result
-        return None
-
-    async def run(self, msg: Message) -> Message:
-        directive = get_directive(msg)
-        return TextMessage(str(directive.get("text", "")), "text/plain")
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        return ToolResult(call_id="", content=str(args.get("x", "")))
 
 
-class _SlowTool:
-    name = "slow"
-    tool_id = "application/x-tool-slow"
-    description = "Sleeps then returns."
-    supports_microcompaction = False
-    directive_schema: JSON = json_freeze(
-        {
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-        }
+def test_aware_injects_background_and_delay_into_schema() -> None:
+    wrapped = BackgroundAwareTool(_DummyInner())
+    schema = wrapped.directive_schema
+    assert isinstance(schema, Mapping)
+    props = schema["properties"]
+    assert isinstance(props, Mapping)
+    assert "background" in props
+    assert "delay" in props
+    # Original properties survive.
+    assert "x" in props
+
+
+def test_aware_preserves_metadata_and_delegates() -> None:
+    inner = _DummyInner()
+    wrapped = BackgroundAwareTool(inner)
+    assert wrapped.name == "Dummy"
+    assert wrapped.tool_id == "application/x-tool-dummy"
+    assert wrapped.description == "dummy"
+    assert wrapped.supports_microcompaction is False
+    assert wrapped.summary({"x": "hi"}) == "Dummy hi"
+    assert wrapped.summary_result(ToolResult(call_id="", content="")) == "ok"
+    assert wrapped.prompt() == "dummy-prompt"
+
+
+def test_aware_schema_without_properties_passes_through() -> None:
+    class NoProps:
+        name: str = "NP"
+        tool_id: str = "application/x-tool-np"
+        description: str = ""
+        supports_microcompaction: bool = False
+        directive_schema = json_freeze({"type": "object"})
+
+        def summary(self, args: Mapping[str, object]) -> str:
+            del args
+            return "np"
+
+        def summary_result(self, result: ToolResult) -> str | None:
+            del result
+            return None
+
+        def prompt(self) -> str:
+            return ""
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            return ToolResult(call_id="", content="")
+
+    wrapped = BackgroundAwareTool(NoProps())
+    # Schema unchanged - no properties key to merge into.
+    assert wrapped.directive_schema == {"type": "object"}
+
+
+@pytest.mark.asyncio
+async def test_aware_run_forwards_to_inner() -> None:
+    wrapped = BackgroundAwareTool(_DummyInner())
+    r = await wrapped.run({"x": "hello"})
+    assert r.content == "hello"
+
+
+def test_metadata_basics() -> None:
+    t = BackgroundTask()
+    assert t.name == "BackgroundTask"
+    assert t.tool_id == "application/x-tool-backgroundtask"
+    assert t.supports_microcompaction is True
+    assert "background:" in t.prompt()
+    assert t.summary_result(ToolResult(call_id="", content="")) is None
+
+
+def test_summary_with_and_without_id() -> None:
+    t = BackgroundTask()
+    assert t.summary({"operation": "list"}) == "BackgroundTask list"
+    assert t.summary({"operation": "cancel", "id": "job-1"}) == (
+        "BackgroundTask cancel job-1"
     )
 
-    def summary(self, msg: Message) -> str:
-        del msg
-        return self.name
 
-    def prompt(self) -> str:
-        return ""
+async def _slow() -> ToolResult:
+    """Long-running task body for foreground tests.
 
-    def summary_result(self, result: Message) -> str | None:
-        del result
-        return None
-
-    async def run(self, msg: Message) -> Message:
-        directive = get_directive(msg)
-        await asyncio.sleep(0.05)
-        return TextMessage(str(directive.get("text", "")), "text/plain")
+    Uses ``asyncio.Future`` rather than ``asyncio.sleep`` so the
+    autouse ``_fast_sleep`` patcher (in ``conftest.py``) can't make
+    the body return early.
+    """
+    await asyncio.get_running_loop().create_future()
+    return ToolResult(call_id="", content="done")
 
 
-# -- Tests: background dispatch ----------------------------------------
+@pytest.mark.asyncio
+async def test_run_no_agent_errors() -> None:
+    token = current_agent_var.set(None)
+    try:
+        t = BackgroundTask()
+        result = await t.run({"operation": "list"})
+    finally:
+        current_agent_var.reset(token)
+    assert result.is_error
+    assert "no active agent" in result.content
 
 
-class TestBackgroundDispatch:
-    @pytest.mark.anyio
-    async def test_background_tool_returns_placeholder(self) -> None:
-        model = _MockModel(
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        tool_call_message(
-                            "t1",
-                            "echo",
-                            json_freeze({"text": "hello", "background": True}),
-                        ),
-                    ],
-                    stop_reason="model_tool_use",
-                    input_tokens=10,
-                    output_tokens=5,
-                ),
-                ModelResponse(text="done", input_tokens=20, output_tokens=5),
-            ],
-        )
-        agent = Agent(
-            name="test",
-            model=model,
-            tools=[_MockTool(), BackgroundTask()],
-        )
-        await _run(agent, "go")
-        # Placeholder was appended to messages.
-        placeholders = [
-            m
-            for m in agent.messages
-            if m.descriptor == "multipart/x-tool-result"
-            and "Running in background" in str(m.content)
-        ]
-        assert len(placeholders) == 1
-
-    @pytest.mark.anyio
-    async def test_background_result_lands_in_inbox(self) -> None:
-        model = _MockModel(
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        tool_call_message(
-                            "t1",
-                            "slow",
-                            json_freeze({"text": "bg-result", "background": True}),
-                        ),
-                    ],
-                    stop_reason="model_tool_use",
-                    input_tokens=10,
-                    output_tokens=5,
-                ),
-                ModelResponse(text="done", input_tokens=20, output_tokens=5),
-            ],
-        )
-        agent = Agent(
-            name="test",
-            model=model,
-            tools=[_SlowTool(), BackgroundTask()],
-        )
-        await _run(agent, "go")
-        # Wait for the background task to finish (may already have).
-        job = agent.background.get("t1")
-        if job is not None:
-            await job.task
-        # The bg post becomes a text/x-user-message either still in
-        # the inbox (if posted after run exit) or already in history
-        # (if processed by the dispatch loop). Either is correct for
-        # the v2 spine.
-        inbox_msgs = [item.msg for item in agent.inbox.drain_nowait()]
-        sources = [*inbox_msgs, *agent.messages]
-        assert any("bg-result" in str(item.content) for item in sources)
-
-    @pytest.mark.anyio
-    async def test_delay_implies_background(self) -> None:
-        model = _MockModel(
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        tool_call_message(
-                            "t1", "echo", json_freeze({"text": "delayed", "delay": 1})
-                        ),
-                    ],
-                    stop_reason="model_tool_use",
-                    input_tokens=10,
-                    output_tokens=5,
-                ),
-                ModelResponse(text="done", input_tokens=20, output_tokens=5),
-            ],
-        )
-        agent = Agent(
-            name="test",
-            model=model,
-            tools=[_MockTool(), BackgroundTask()],
-        )
-        await _run(agent, "go")
-        # delay=0 still backgrounds (delay implies background).
-        placeholders = [
-            m for m in agent.messages if "Running in background" in str(m.content)
-        ]
-        assert len(placeholders) == 1
-
-    @pytest.mark.anyio
-    async def test_foreground_tool_unchanged(self) -> None:
-        model = _MockModel(
-            responses=[
-                ModelResponse(
-                    tool_calls=[
-                        tool_call_message("t1", "echo", json_freeze({"text": "sync"})),
-                    ],
-                    stop_reason="model_tool_use",
-                    input_tokens=10,
-                    output_tokens=5,
-                ),
-                ModelResponse(text="done", input_tokens=20, output_tokens=5),
-            ],
-        )
-        agent = Agent(
-            name="test",
-            model=model,
-            tools=[_MockTool(), BackgroundTask()],
-        )
-        result = await _run(agent, "go")
-        assert str(result.content) == "done"
-        # No placeholders -- tool ran synchronously.
-        placeholders = [
-            m for m in agent.messages if "Running in background" in str(m.content)
-        ]
-        assert len(placeholders) == 0
+@pytest.mark.asyncio
+async def test_list_empty() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "list"})
+    assert result.content == "No background tasks."
 
 
-# -- Tests: BackgroundTask tool ----------------------------------------
-
-
-class TestBackgroundTaskTool:
-    @pytest.mark.anyio
-    async def test_list_empty(self) -> None:
-        model = _MockModel([ModelResponse(text="hi")])
-        agent = Agent(name="test", model=model, tools=[BackgroundTask()])
-        token = current_agent_var.set(agent)
+@pytest.mark.asyncio
+async def test_list_filters_hidden_and_reports_phases() -> None:
+    t = BackgroundTask()
+    now = time.time()
+    with with_fake_agent() as agent:
+        # Build three tasks: one running, one delayed (sleeping), one hidden.
+        running_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        sleeping_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        hidden_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
         try:
-            tool = BackgroundTask()
-            msg = MultipartMessage(
-                (
-                    TextMessage("q1", "text/x-queue-id"),
-                    JsonMessage(
-                        json_freeze({"operation": "list"}),
-                        "application/x-tool-backgroundtask",
-                    ),
+            agent.register_background(
+                "j-run",
+                BackgroundTaskEntry(
+                    task=running_task,
+                    tool_name="Dummy",
+                    queue_id="j-run",
+                    started=now,
                 ),
-                "multipart/x-tool-call",
             )
-            result = await tool.run(msg)
-            assert "No background tasks" in str(result.content)
+            agent.register_background(
+                "j-sleep",
+                BackgroundTaskEntry(
+                    task=sleeping_task,
+                    tool_name="Dummy",
+                    queue_id="j-sleep",
+                    started=now,
+                    delay_sec=10_000.0,
+                ),
+            )
+            agent.register_background(
+                "j-hide",
+                BackgroundTaskEntry(
+                    task=hidden_task,
+                    tool_name="HiddenInfra",
+                    queue_id="j-hide",
+                    started=now,
+                    hidden=True,
+                ),
+            )
+            result = await t.run({"operation": "list"})
         finally:
-            current_agent_var.reset(token)
+            for task in (running_task, sleeping_task, hidden_task):
+                _ = task.cancel()
+    assert "j-run" in result.content
+    assert "j-sleep" in result.content
+    # Hidden infra jobs are filtered out.
+    assert "j-hide" not in result.content
+    assert "running" in result.content
+    assert "sleeping" in result.content
 
-    @pytest.mark.anyio
-    async def test_cancel(self) -> None:
-        model = _MockModel([ModelResponse(text="hi")])
-        agent = Agent(name="test", model=model, tools=[BackgroundTask()])
 
-        # Create a fake background job.
-        async def _long_wait() -> Message:
-            await asyncio.sleep(100)
-            return TextMessage("", "text/plain")
+@pytest.mark.asyncio
+async def test_list_reports_completed_and_cancelled() -> None:
+    t = BackgroundTask()
 
-        task = asyncio.create_task(_long_wait())
-        agent.background["j1"] = BackgroundTaskEntry(
-            task=task,
-            tool_name="slow",
-            queue_id="j1",
-            started=0.0,
+    async def quick() -> ToolResult:
+        return ToolResult(call_id="", content="ok")
+
+    with with_fake_agent() as agent:
+        done_task: asyncio.Task[ToolResult] = asyncio.create_task(quick())
+        await done_task  # let it finish
+        cancelled_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        # Cancel; await with suppression so .cancelled() flips before the
+        # tool inspects the task state.
+        _ = cancelled_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cancelled_task
+        agent.register_background(
+            "j-done",
+            BackgroundTaskEntry(
+                task=done_task, tool_name="Dummy", queue_id="j-done", started=0.0
+            ),
         )
-        token = current_agent_var.set(agent)
-        try:
-            tool = BackgroundTask()
-            msg = MultipartMessage(
-                (
-                    TextMessage("q1", "text/x-queue-id"),
-                    JsonMessage(
-                        json_freeze({"operation": "cancel", "id": "j1"}),
-                        "application/x-tool-backgroundtask",
-                    ),
-                ),
-                "multipart/x-tool-call",
-            )
-            result = await tool.run(msg)
-            assert "Cancelled" in str(result.content)
-            assert "j1" not in agent.background
-            assert task.cancelling()
-        finally:
-            current_agent_var.reset(token)
-
-    @pytest.mark.anyio
-    async def test_foreground(self) -> None:
-        model = _MockModel([ModelResponse(text="hi")])
-        agent = Agent(name="test", model=model, tools=[BackgroundTask()])
-
-        async def _delayed_result() -> Message:
-            await asyncio.sleep(0.01)
-            return TextMessage("the-result", "text/plain")
-
-        task = asyncio.create_task(_delayed_result())
-        agent.background["j1"] = BackgroundTaskEntry(
-            task=task,
-            tool_name="echo",
-            queue_id="j1",
-            started=0.0,
+        agent.register_background(
+            "j-cancel",
+            BackgroundTaskEntry(
+                task=cancelled_task,
+                tool_name="Dummy",
+                queue_id="j-cancel",
+                started=0.0,
+            ),
         )
-        token = current_agent_var.set(agent)
-        try:
-            tool = BackgroundTask()
-            msg = MultipartMessage(
-                (
-                    TextMessage("q1", "text/x-queue-id"),
-                    JsonMessage(
-                        json_freeze({"operation": "foreground", "id": "j1"}),
-                        "application/x-tool-backgroundtask",
-                    ),
-                ),
-                "multipart/x-tool-call",
-            )
-            result = await tool.run(msg)
-            assert "the-result" in str(result.content)
-            assert "j1" not in agent.background
-        finally:
-            current_agent_var.reset(token)
+        result = await t.run({"operation": "list"})
+    assert "completed" in result.content
+    assert "cancelled" in result.content
 
-    @pytest.mark.anyio
-    async def test_cancel_nonexistent(self) -> None:
-        model = _MockModel([ModelResponse(text="hi")])
-        agent = Agent(name="test", model=model, tools=[BackgroundTask()])
-        token = current_agent_var.set(agent)
+
+@pytest.mark.asyncio
+async def test_cancel_requires_id() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "cancel"})
+    assert result.is_error
+    assert "requires an id" in result.content
+
+
+@pytest.mark.asyncio
+async def test_cancel_unknown_id() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "cancel", "id": "ghost"})
+    assert result.is_error
+    assert "No such job" in result.content
+
+
+@pytest.mark.asyncio
+async def test_cancel_hidden_treated_as_unknown() -> None:
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
         try:
-            tool = BackgroundTask()
-            msg = MultipartMessage(
-                (
-                    TextMessage("q1", "text/x-queue-id"),
-                    JsonMessage(
-                        json_freeze({"operation": "cancel", "id": "nope"}),
-                        "application/x-tool-backgroundtask",
-                    ),
+            agent.register_background(
+                "h",
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name="HiddenInfra",
+                    queue_id="h",
+                    started=0.0,
+                    hidden=True,
                 ),
-                "multipart/x-tool-call",
             )
-            result = await tool.run(msg)
-            assert result.descriptor == "text/x-error"
+            result = await t.run({"operation": "cancel", "id": "h"})
         finally:
-            current_agent_var.reset(token)
+            _ = task.cancel()
+    assert result.is_error
+    assert "No such job" in result.content
+
+
+@pytest.mark.asyncio
+async def test_cancel_success_clears_registry() -> None:
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+        result = await t.run({"operation": "cancel", "id": "j"})
+        # Yield once so the cancellation is observed by the task.
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert "Cancelled" in result.content
+    assert task.cancelled()
+    assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_requires_id() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "foreground"})
+    assert result.is_error
+    assert "requires an id" in result.content
+
+
+@pytest.mark.asyncio
+async def test_foreground_unknown_id() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "foreground", "id": "ghost"})
+    assert result.is_error
+    assert "No such job" in result.content
+
+
+@pytest.mark.asyncio
+async def test_foreground_success_returns_tool_result() -> None:
+    t = BackgroundTask()
+
+    async def produce() -> ToolResult:
+        return ToolResult(call_id="", content="payload")
+
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(produce())
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+        result = await t.run({"operation": "foreground", "id": "j"})
+    assert result.content == "payload"
+    assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_wraps_plain_value() -> None:
+    t = BackgroundTask()
+
+    async def produce_str() -> str:
+        return "scalar"
+
+    with with_fake_agent() as agent:
+        task: asyncio.Task[str] = asyncio.create_task(produce_str())
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+        result = await t.run({"operation": "foreground", "id": "j"})
+    assert result.content == "scalar"
+    assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_foreground_propagates_task_failure() -> None:
+    t = BackgroundTask()
+
+    async def fail() -> ToolResult:
+        raise RuntimeError("boom")
+
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(fail())
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+        result = await t.run({"operation": "foreground", "id": "j"})
+    assert result.is_error
+    assert "RuntimeError" in result.content
+    assert "boom" in result.content
+    assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_run_unknown_operation() -> None:
+    t = BackgroundTask()
+    with with_fake_agent():
+        result = await t.run({"operation": "bogus"})
+    assert result.is_error
+    assert "Unknown operation" in result.content
 
 
 if __name__ == "__main__":

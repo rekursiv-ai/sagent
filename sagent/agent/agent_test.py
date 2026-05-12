@@ -1,116 +1,83 @@
-"""Smoke tests for the v3 Agent surface.
-
-Covers the public API and the cross-cutting invariants the design doc
-commits to: ``_start_foreground`` cancel-and-claim, ``run`` yielding
-events for one turn, ``cancel`` interrupting the foreground task,
-``_next_op`` draining at the top of each iteration, and ``shutdown``
-exiting ``serve_forever``. Tool-level / provider-level behavior lives in
-the corresponding ``tools/*_test.py`` and ``providers/*_test.py``.
-"""
+"""Tests for ``agent.agent``: Agent composition class."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast, override
+from typing import override
 
 import asyncio
 import contextlib
 
 import pytest
 
-from sagent.agent import Agent, PendingOp
-from sagent.agent.agent import wrap_errors_for_llm
-from sagent.agent.cohort import Cohort, CohortMember
+from sagent.agent.agent import (
+    ActivityTracker,
+    Agent,
+    SystemPromptArg,
+)
+from sagent.agent.background import (
+    BackgroundAwareTool,
+    BackgroundTaskEntry,
+)
+from sagent.agent.runtime import (
+    AssistantMessage,
+    Clear as RuntimeClear,
+    Halt as RuntimeHalt,
+    HistoryEntry,
+    Kill as RuntimeKill,
+    ModelCallStarted,
+    ModelResponseComplete,
+    ModelResponseError,
+    ModelResponsePartial,
+    ToolCall as RuntimeToolCall,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
+)
+from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
-    Compactor,
-    Event,
-    IrrecoverableErrorEvent,
-    Message,
-    Model,
+    ContextBudget,
+    Model as RichModel,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
     Pricing,
-    RecoverableErrorEvent,
-    TextMessage,
     TokenCount,
-    Tool,
+    Tool as RichTool,
 )
-from sagent.lib.descriptors import QUIT_SENTINEL, flat_text
-from sagent.lib.json import json_freeze
-from sagent.lib.message import build_error_message, tool_call_message
+from sagent.lib.json import JSON, json_freeze
 
 
-pytestmark = pytest.mark.anyio
+@dataclass(slots=True, kw_only=True)
+class StubModel:
+    """Configurable model that yields scripted responses."""
 
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
-
-
-def _model_response(
-    text: str = "ok",
-    *,
-    stop_reason: str = "model_finished",
-) -> ModelResponse:
-    return ModelResponse(
-        content=MultipartMessage(
-            (TextMessage(text, "text/plain"),),
-            "multipart/x-model-message",
-        ),
-        tokens=TokenCount(input_tokens=10, output_tokens=5),
-        stop_reason=stop_reason,
-    )
-
-
-class _MockModel:
-    """Minimal Model stub for tests not exercising provider behavior."""
-
-    model_id: str = "mock"
-    max_request_tokens: int = 1_000_000
-    max_response_tokens: int = 8_000
+    model_id: str = "stub-1"
+    max_request_tokens: int = 100_000
+    max_response_tokens: int = 1_024
+    supports_streaming: bool = True
     supports_thinking: bool = False
     supports_effort: bool = False
     supports_cache_control: bool = False
-    supports_streaming: bool = True
+    supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
-    supports_context_management: bool = False
-    max_image_dim: int = 0
-    max_image_bytes: int = 0
-    pricing: Pricing = Pricing()
+    max_image_dim: int = 8_000
+    max_image_bytes: int = 5 * 1024 * 1024
+    responses: list[AssistantMessage] = field(default_factory=list)
+    received: list[ModelRequest] = field(default_factory=list)
 
-    def __init__(self) -> None:
-        self.responses: list[ModelResponse] = []
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing()
 
     def estimate_text_token_count(self, text: str) -> int:
-        return len(text) // 4
+        return max(1, len(text) // 4)
 
     def estimate_image_token_count(self, data: bytes) -> int:
         del data
-        return 0
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        del request
-        if self.responses:
-            return self.responses.pop(0)
-        return _model_response()
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
-    ) -> ModelResponse:
-        del request, on_thinking
-        resp = self.responses.pop(0) if self.responses else _model_response()
-        if on_text is not None and isinstance(resp.content, MultipartMessage):
-            for part in resp.content.content:
-                if part.descriptor == "text/plain":
-                    on_text(str(part.content))
-        return resp
+        return 256
 
     def is_context_overflow(self, error: Exception) -> bool:
         del error
@@ -120,645 +87,1011 @@ class _MockModel:
         del error
         return False
 
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
 
-def _build_agent(model: object) -> Agent:
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: object = None,
+        on_thinking: object = None,
+    ) -> ModelResponse:
+        del on_text, on_thinking
+        self.received.append(request)
+        msg = self.responses.pop(0) if self.responses else AssistantMessage(text="ok")
+        return ModelResponse(message=msg)
+
+
+_STUB_SCHEMA: JSON = json_freeze({"type": "object"})
+
+
+@dataclass(slots=True, kw_only=True)
+class StubTool:
+    """Minimal tool that records calls."""
+
+    name: str = "Echo"
+    tool_id: str = "application/x-tool-echo"
+    description: str = "Echo tool."
+    supports_microcompaction: bool = False
+    directive_schema: JSON = _STUB_SCHEMA
+    calls: list[Mapping[str, object]] = field(default_factory=list)
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        del args
+        return "echo"
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        del result
+        return None
+
+    def prompt(self) -> str:
+        return ""
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        self.calls.append(args)
+        return ToolResult(call_id="", content=str(args.get("msg", "")))
+
+
+def _build_agent(
+    *,
+    model: RichModel | None = None,
+    tools: list[RichTool] | None = None,
+    system: SystemPromptArg = "",
+    budget: ContextBudget | None = None,
+    max_budget_usd: float | None = None,
+) -> Agent:
     return Agent(
-        model=cast(Model, model),
-        system="",
-        tools=[],
-        compactor=None,
+        model=model or StubModel(),
+        tools=tools or [],
+        system=system,
+        budget=budget,
+        max_budget_usd=max_budget_usd,
     )
 
 
-class TestLifecycle:
-    async def test_shutdown_exits_serve_forever(self) -> None:
-        agent = _build_agent(_MockModel())
-        task = asyncio.create_task(agent.serve_forever())
-        await asyncio.sleep(0)
-        agent.shutdown()
-        await asyncio.wait_for(task, timeout=1.0)
-
-    async def test_quit_sentinel_exits_serve_forever(self) -> None:
-        agent = _build_agent(_MockModel())
-        task = asyncio.create_task(agent.serve_forever())
-        await asyncio.sleep(0)
-        agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
-        await asyncio.wait_for(task, timeout=1.0)
-
-    async def test_serve_forever_publishes_error_and_continues(self) -> None:
-        class _CrashingModel(_MockModel):
-            @override
-            async def stream(
-                self,
-                request: ModelRequest,
-                on_text: Callable[[str], None] | None = None,
-                on_thinking: Callable[[str], None] | None = None,
-            ) -> ModelResponse:
-                del request, on_text, on_thinking
-                raise RuntimeError("provider exploded")
-
-        agent = _build_agent(_CrashingModel())
-        events: list[Event] = []
-        error_seen = asyncio.Event()
-
-        def observe(event: Event) -> None:
-            events.append(event)
-            if isinstance(event, (RecoverableErrorEvent, IrrecoverableErrorEvent)):
-                error_seen.set()
-
-        agent.observers.append(observe)
-        task = asyncio.create_task(agent.serve_forever())
-        done_wait = asyncio.create_task(error_seen.wait())
-        try:
-            agent.inbox.send(
-                TextMessage("hi", "text/x-user-message"),
-                source="user",
-            )
-            done, _ = await asyncio.wait(
-                {task, done_wait},
-                timeout=1.0,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            assert done_wait in done
-            assert not task.done()
-            agent.inbox.send(TextMessage("", QUIT_SENTINEL), source="quit")
-            await asyncio.wait_for(task, timeout=1.0)
-        finally:
-            done_wait.cancel()
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-        errs = [event for event in events if isinstance(event, IrrecoverableErrorEvent)]
-        assert len(errs) == 1
-        err_text = flat_text(errs[0].msg, include_errors=True)
-        assert "turn failed" in err_text
-        assert "RuntimeError" in err_text
+def test_agent_init_sets_basics() -> None:
+    a = _build_agent()
+    assert a.model is not None
+    assert a.tools == []
+    assert isinstance(a.activity, ActivityTracker)
+    assert a.history == []
+    assert a.cost_tracker.total_cost_usd == 0.0
 
 
-class TestForeground:
-    async def test_cancel_clears_work(self) -> None:
-        agent = _build_agent(_MockModel())
-        started = asyncio.Event()
-
-        async def long() -> None:
-            started.set()
-            await asyncio.sleep(10)
-
-        bg = asyncio.create_task(agent._start_foreground(long()))
-        await started.wait()
-        assert agent.work is not None
-        agent.cancel()
-        # Drain bg; expect cancellation. pytest-anyio may swallow the
-        # CancelledError at the harness boundary, so just confirm the
-        # task ended and ``work`` was cleared.
-        with contextlib.suppress(asyncio.CancelledError):
-            await bg
-        assert bg.done()
-        assert agent.work is None
+def test_agent_budget_defaults_from_model() -> None:
+    a = _build_agent()
+    assert isinstance(a.budget, ContextBudget)
+    assert a.budget.max_request_tokens == 100_000
 
 
-class TestRun:
-    async def test_single_turn_yields_events_in_order(self) -> None:
-        model = _MockModel()
-        model.responses.append(_model_response("hello"))
-        agent = _build_agent(model)
-        events: list[Event] = [
-            ev
-            async for ev in agent.run(
-                TextMessage("hi", "text/x-user-message"),
-            )
-        ]
-        kinds = [type(e).__name__ for e in events]
-        assert kinds[0] == "UserBarEvent"
-        assert kinds[-1] == "TurnCompleteEvent"
-
-    async def test_history_grows_after_run(self) -> None:
-        model = _MockModel()
-        model.responses.append(_model_response("hi back"))
-        agent = _build_agent(model)
-        async for _ev in agent.run(TextMessage("hi", "text/x-user-message")):
-            pass
-        descriptors = [m.descriptor for m in agent.history]
-        assert descriptors == ["text/x-user-message", "multipart/x-model-message"]
+def test_agent_budget_override_respected() -> None:
+    b = ContextBudget.from_model(StubModel())
+    a = _build_agent(budget=b)
+    assert a.budget is b
 
 
-class TestPendingOp:
-    async def test_clear_op_wipes_history(self) -> None:
-        model = _MockModel()
-        agent = _build_agent(model)
-        agent.history.append(TextMessage("seed", "text/x-user-message"))
-        agent._next_op = PendingOp(kind="clear")
-        async for _ev in agent.run(TextMessage("trigger", "text/x-user-message")):
-            pass
-        assert agent.history == []
-
-
-class TestCancellation:
-    async def test_run_yields_interrupted_on_cancel(self) -> None:
-        model = _MockModel()
-        hang_event = asyncio.Event()
-        called = asyncio.Event()
-
-        async def _hang(*args: object, **kwargs: object) -> ModelResponse:
-            del args, kwargs
-            called.set()
-            await hang_event.wait()
-            return _model_response()
-
-        # Mock model swap; ty complains about implicit shadowing.
-        model.stream = _hang  # ty: ignore[invalid-assignment]
-        model.buffer = _hang  # ty: ignore[invalid-assignment]
-        agent = _build_agent(model)
-        events: list[Event] = []
-
-        async def consume() -> None:
-            # Async list comprehension would lose items on mid-iter cancel.
-            async for ev in agent.run(
-                TextMessage("hi", "text/x-user-message"),
-            ):
-                events.append(ev)  # noqa: PERF401
-
-        consumer = asyncio.create_task(consume())
-        await called.wait()
-        agent.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await consumer
-        kinds = [type(e).__name__ for e in events]
-        assert "InterruptedEvent" in kinds
-
-
-class TestHaltSemantics:
-    """``halt()`` arms the round body to requeue items + block_until_user."""
-
-    @pytest.mark.real_sleep
-    async def test_halt_during_model_call_requeues_and_blocks(self) -> None:
-        model = _MockModel()
-        hang = asyncio.Event()
-        entered = asyncio.Event()
-
-        async def _hang(*args: object, **kwargs: object) -> ModelResponse:
-            del args, kwargs
-            entered.set()
-            await hang.wait()
-            return _model_response()
-
-        model.stream = _hang  # ty: ignore[invalid-assignment]
-        model.buffer = _hang  # ty: ignore[invalid-assignment]
-        agent = _build_agent(model)
-        loop_task = asyncio.create_task(agent.serve_forever())
-        agent.inbox.send(
-            TextMessage("fix bug", "text/x-user-message"),
-            source="user",
+def test_agent_register_and_cancel_background() -> None:
+    a = _build_agent()
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(0))
+        entry = BackgroundTaskEntry(
+            task=task,
+            tool_name="bg",
+            queue_id="job-1",
+            started=0.0,
         )
-        await entered.wait()
-        agent.halt()
-        # Wait for the round body to finish unwinding the cancellation.
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if agent.work is None:
-                break
-        # After halt, the round body has requeued the user item at the
-        # front and armed ``block_until_user``. A peer-source arrival
-        # should accumulate without waking the drain.
-        agent.inbox.send(
-            TextMessage("peer ping", "text/x-user-message"),
-            source="Agent_X",
-        )
-        await asyncio.sleep(0.02)
-        sources = [item.source for item in agent.inbox]
-        assert sources[0] == "user"
-        assert sources[1] == "Agent_X"
-        # Cleanup.
-        agent.shutdown(force=True)
-        hang.set()
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.wait_for(loop_task, timeout=1.0)
+        a.register_background("job-1", entry)
+        assert "job-1" in a.background
+        a.cancel_background("job-1")
+        assert "job-1" not in a.background
+        _ = task.cancel()
+    finally:
+        loop.close()
 
 
-class TestKillTool:
-    """``kill_tool`` / ``kill_all_tools`` cancel cohort + bg tasks by qid."""
-
-    @pytest.mark.real_sleep
-    async def test_kill_tool_finds_member_in_active_cohort(self) -> None:
-        agent = _build_agent(_MockModel())
-        hang = asyncio.Event()
-
-        async def _hang() -> Message:
-            await hang.wait()
-            return TextMessage("never", "text/plain")
-
-        def _noop_promote(_: CohortMember) -> None:
-            return
-
-        emissions: list[list[Message]] = []
-        cohort = Cohort(
-            on_emit=emissions.append,
-            on_promote_to_bg=_noop_promote,
-        )
-        agent._active_cohorts.append(cohort)
-        member = CohortMember(
-            tool_use_id="qid_1",
-            tool_name="Bash",
-            task=asyncio.create_task(_hang()),
-        )
-        cohort.add_member(member)
-        try:
-            assert agent.kill_tool("qid_1") is True
-            for _ in range(20):
-                await asyncio.sleep(0.01)
-                if member.task.done():
-                    break
-            assert member.task.cancelled() or member.task.done()
-        finally:
-            hang.set()
-            with contextlib.suppress(asyncio.CancelledError):
-                await member.task
-
-    @pytest.mark.real_sleep
-    async def test_kill_all_tools_returns_count(self) -> None:
-        agent = _build_agent(_MockModel())
-        hang = asyncio.Event()
-
-        async def _hang() -> Message:
-            await hang.wait()
-            return TextMessage("never", "text/plain")
-
-        def _noop_emit(_: list[Message]) -> None:
-            return
-
-        def _noop_promote(_: CohortMember) -> None:
-            return
-
-        cohort = Cohort(
-            on_emit=_noop_emit,
-            on_promote_to_bg=_noop_promote,
-        )
-        agent._active_cohorts.append(cohort)
-        members = [
-            CohortMember(
-                tool_use_id=f"qid_{i}",
-                tool_name="Bash",
-                task=asyncio.create_task(_hang()),
-            )
-            for i in range(2)
-        ]
-        for m in members:
-            cohort.add_member(m)
-        try:
-            count = agent.kill_all_tools()
-            assert count == 2
-        finally:
-            hang.set()
-            for m in members:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await m.task
-
-    def test_kill_tool_returns_false_on_unknown_qid(self) -> None:
-        agent = _build_agent(_MockModel())
-        assert agent.kill_tool("nope") is False
+def test_agent_microcompact_history_noop_without_compactor() -> None:
+    a = _build_agent()
+    msg = UserMessage(text="hi")
+    history: list[HistoryEntry] = [msg]
+    a.microcompact_history(history)
+    # No compactor wired -- history unchanged identity.
+    assert history == [msg]
+    assert history[0] is msg
 
 
-class TestCohortEmitsToInbox:
-    """Cohort completion sends a ``multipart/x-tool-batch-result`` to inbox."""
+def test_agent_system_string_to_factory() -> None:
+    a = _build_agent(system="hi there")
+    assert a.system_prompt() == "hi there"
 
-    async def test_cohort_bundle_drains_into_history(self) -> None:
-        # Two-response sequence: first emits a tool call; second is final.
-        tc = tool_call_message("t1", "Echo", json_freeze({"text": "hi"}))
-        model = _MockModel()
-        model.responses = [
-            ModelResponse(
-                content=MultipartMessage(
-                    (TextMessage("", "text/plain"), tc),
-                    "multipart/x-model-message",
-                ),
-                stop_reason="model_tool_use",
-                tokens=TokenCount(input_tokens=10, output_tokens=5),
+
+def test_agent_system_callable_passthrough() -> None:
+    calls: list[int] = []
+
+    def make_sys() -> str:
+        calls.append(1)
+        return f"call {len(calls)}"
+
+    a = _build_agent(system=make_sys)
+    n_before = len(calls)
+    p1 = a.system_prompt()
+    p2 = a.system_prompt()
+    # Each ``system_prompt`` call re-invokes the factory; counters
+    # therefore advance by exactly two between the two calls.
+    assert p2 != p1
+    assert len(calls) == n_before + 2
+
+
+def test_agent_tools_map_wraps_in_background_aware() -> None:
+    tool: RichTool = StubTool()
+    a = _build_agent(tools=[tool])
+    assert "Echo" in a.tools_map
+    wrapped = a.tools_map["Echo"]
+    assert isinstance(wrapped, BackgroundAwareTool)
+    assert wrapped.name == "Echo"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_yields_idle_at_end() -> None:
+    a = _build_agent()
+    events: list[str] = [
+        type(ev).__name__ async for ev in a.run(UserMessage(text="ping"))
+    ]
+    assert "ModelIdle" in events
+    assert len(a.history) >= 2
+    assert isinstance(a.history[0], UserMessage)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_passes_rich_tools_to_model() -> None:
+    """Regression: provider iterates ``request.tools`` reading ``.description``
+    etc.; the runtime hands the model layer ``_AgentTool`` wrappers, which
+    expose only ``name``/``run``. The Agent must translate them back to rich
+    tools before constructing ``ModelRequest`` so providers see the full
+    Tool surface.
+    """
+    model = StubModel()
+    tool: RichTool = StubTool()
+    a = _build_agent(model=model, tools=[tool])
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    assert model.received, "model.stream must have been invoked"
+    req = model.received[-1]
+    assert req.tools is not None
+    assert len(req.tools) == 1
+    seen = req.tools[0]
+    # Every Tool-protocol attribute the providers read must resolve.
+    assert seen.name == "Echo"
+    assert seen.description == "Echo tool."
+    assert seen.tool_id == "application/x-tool-echo"
+    assert dict(seen.directive_schema) == {"type": "object"}
+    assert seen.supports_microcompaction is False
+    assert seen.summary({}) == "echo"
+    assert seen.prompt() == ""
+
+
+@pytest.mark.asyncio
+async def test_agent_records_response_into_cost_tracker() -> None:
+    model = StubModel()
+    a = _build_agent(model=model)
+    async for _ in a.run(UserMessage(text="ping")):
+        pass
+    # StubModel emits empty TokenCount, but ``calls_by_model`` records
+    # one entry per model invocation.
+    assert a.cost_tracker.calls_by_model.get("stub-1", 0) >= 1
+
+
+def test_agent_record_response_budget_exhaustion_raises() -> None:
+    a = _build_agent(max_budget_usd=1.0)
+    # First response below the cap: clean.
+    a.record_response(ModelResponse(message=AssistantMessage(text="x")))
+    # Force an over-budget total and verify the next call raises.
+    a.cost_tracker.total_cost_usd = 2.0
+    with pytest.raises(RuntimeError, match="Budget exhausted"):
+        a.record_response(ModelResponse(message=AssistantMessage(text="x")))
+
+
+def test_token_count_addable() -> None:
+    """``TokenCount`` supports ``+`` so ``CostTracker.record`` can fold."""
+    a = TokenCount()
+    b = TokenCount()
+    c = a + b
+    assert isinstance(c, TokenCount)
+
+
+def test_agent_shutdown_idempotent() -> None:
+    a = _build_agent()
+    a.shutdown()
+    a.shutdown()  # Second call must not raise.
+
+
+def test_system_prompt_arg_type_alias_str_or_callable() -> None:
+    # ``SystemPromptArg`` is exposed as a type alias for the constructor.
+    arg: SystemPromptArg = "hi"
+    assert isinstance(arg, str)
+
+    def factory() -> str:
+        return "x"
+
+    arg2: SystemPromptArg = factory
+    assert callable(arg2)
+
+
+def test_max_request_tokens_setter_rejects_over_model_limit() -> None:
+    a = _build_agent()
+    with pytest.raises(ValueError, match="exceeds model's"):
+        a.max_request_tokens = a.model.max_request_tokens + 1
+
+
+def test_max_request_tokens_setter_accepts_within_limit() -> None:
+    a = _build_agent()
+    a.max_request_tokens = 50_000
+    assert a.budget.max_request_tokens == 50_000
+
+
+def test_max_response_tokens_setter_rejects_over_model_limit() -> None:
+    a = _build_agent()
+    with pytest.raises(ValueError, match="exceeds model's"):
+        a.max_response_tokens = a.model.max_response_tokens + 1
+
+
+def test_max_response_tokens_setter_accepts_within_limit() -> None:
+    a = _build_agent()
+    a.max_response_tokens = 256
+    assert a.budget.max_response_tokens == 256
+
+
+def test_reset_budget_restores_model_defaults() -> None:
+    a = _build_agent()
+    a.max_request_tokens = 50_000  # under buffer+chars-per-token constraints
+    assert a.budget.max_request_tokens == 50_000
+    a.reset_budget()
+    assert a.budget.max_request_tokens == a.model.max_request_tokens
+
+
+def test_thinking_setter() -> None:
+    a = _build_agent()
+    a.thinking = "extended"
+    assert a.thinking == "extended"
+    a.thinking = None
+    assert a.thinking is None
+
+
+def test_effort_setter_rejects_when_model_lacks_support() -> None:
+    a = _build_agent()  # StubModel.supports_effort = False
+    with pytest.raises(ValueError, match="does not support effort"):
+        a.effort = "high"
+
+
+def test_effort_setter_accepts_when_model_supports() -> None:
+    model = StubModel(supports_effort=True)
+    a = _build_agent(model=model)
+    a.effort = "medium"
+    assert a.effort == "medium"
+
+
+def test_effort_setter_accepts_none_unconditionally() -> None:
+    a = _build_agent()
+    a.effort = None
+    assert a.effort is None
+
+
+def test_cache_ttl_setter_rejects_invalid() -> None:
+    a = _build_agent()
+    with pytest.raises(ValueError, match="cache_ttl must be"):
+        a.cache_ttl = "10m"
+
+
+def test_cache_ttl_setter_accepts_valid() -> None:
+    a = _build_agent()
+    a.cache_ttl = "1h"
+    assert a.cache_ttl == "1h"
+
+
+def test_status_setter_round_trip() -> None:
+    a = _build_agent()
+    a.status = "busy"
+    assert a.status == "busy"
+
+
+def test_session_id_is_hex_string() -> None:
+    a = _build_agent()
+    assert len(a.session_id) == 8
+
+
+def test_inbox_and_work_properties_reflect_runtime() -> None:
+    a = _build_agent()
+    assert a.inbox is a.runtime.inbox
+    # No model call or compact_task is active right after construction.
+    assert a.work is None
+
+
+def test_tools_property_lists_wrapped_tools() -> None:
+    tool: RichTool = StubTool()
+    a = _build_agent(tools=[tool])
+    assert len(a.tools) == 1
+
+
+def test_total_cost_total_tokens_num_rounds_initially_zero() -> None:
+    a = _build_agent()
+    assert a.total_cost_usd == 0.0
+    assert a.total_tokens.input_tokens == 0
+    assert a.num_tool_call_rounds == 0
+
+
+def test_system_property_rebuilds_each_access() -> None:
+    """``Agent.system`` property re-runs ``_build_system``."""
+    a = _build_agent(system="root")
+    assert a.system == "root"
+
+
+def test_background_merges_detached_and_explicit() -> None:
+    a = _build_agent()
+    loop = asyncio.new_event_loop()
+    try:
+        # Stash a detached task on the runtime; expect it surfaces.
+        det_task = loop.create_task(asyncio.sleep(0))
+        a.runtime.detached["det-1"] = det_task
+        # Register an explicit job too.
+        ex_task = loop.create_task(asyncio.sleep(0))
+        a.register_background(
+            "job-1",
+            BackgroundTaskEntry(
+                task=ex_task, tool_name="X", queue_id="job-1", started=0.0
             ),
-            _model_response("done"),
-        ]
-
-        class _EchoTool:
-            name = "Echo"
-            tool_id = "application/x-tool-echo"
-            description = ""
-            directive_schema: object = json_freeze(
-                {"type": "object", "properties": {"text": {"type": "string"}}},
-            )
-            supports_microcompaction = False
-
-            def summary(self, msg: Message) -> str:
-                del msg
-                return "Echo"
-
-            def summary_result(self, result: Message) -> str | None:
-                del result
-                return None
-
-            def prompt(self) -> str:
-                return ""
-
-            async def run(self, msg: Message) -> Message:
-                del msg
-                return TextMessage("echo-result", "text/plain")
-
-        agent = Agent(
-            model=cast(Model, model),
-            tools=[cast(Tool, _EchoTool())],
         )
-        events: list[Event] = [
-            ev async for ev in agent.run(TextMessage("go", "text/x-user-message"))
-        ]
-        # Round 2 should have unpacked the cohort bundle into history with
-        # the underlying multipart/x-tool-result paired with the tool_use.
-        # Either shape is acceptable: a synthetic empty user-msg may have
-        # been added for the second round (only-tool-results case) or
-        # omitted. Both satisfy the API contract.
-        kinds = [m.descriptor for m in agent.history]
-        assert kinds in (
-            [
-                "text/x-user-message",
-                "multipart/x-model-message",
-                "multipart/x-tool-result",
-                "text/x-user-message",
-                "multipart/x-model-message",
-            ],
-            [
-                "text/x-user-message",
-                "multipart/x-model-message",
-                "multipart/x-tool-result",
-                "multipart/x-model-message",
-            ],
-        )
-        names = [type(e).__name__ for e in events]
-        assert "ToolResultEvent" in names
-        assert names[-1] == "TurnCompleteEvent"
+        merged = a.background
+        assert "det-1" in merged
+        assert "job-1" in merged
+        assert merged["det-1"].kind == "detached"
+        _ = det_task.cancel()
+        _ = ex_task.cancel()
+    finally:
+        loop.close()
 
-    async def test_post_drain_inbox_items_get_picked_up(self) -> None:
-        # Regression: between ``serve_forever``'s ``await drain()`` and
-        # ``_round_body`` actually running, a cohort's done-callback can
-        # fire (the ``await asyncio.create_task(...)`` yields). The
-        # bundle lands in the inbox AFTER drain captured ``items`` --
-        # if the round body doesn't ``drain_nowait`` at the top, the
-        # bundle stays parked and the next model call hits an unpaired
-        # ``tool_use`` -> 400 from Anthropic.
-        #
-        # Directly exercise the race: prime history with an assistant
-        # tool_use, place a matching tool-result bundle in the inbox,
-        # and call ``_round_body(items=[])``. The model will be invoked
-        # iff merge unpacked the bundle into history.
-        model = _MockModel()
-        model.responses = [_model_response("done")]
-        agent = _build_agent(model)
 
-        tc = tool_call_message("t1", "Echo", json_freeze({}))
-        agent.history.append(
-            MultipartMessage(
-                (TextMessage("", "text/plain"), tc),
-                "multipart/x-model-message",
-            )
-        )
-        tool_result = MultipartMessage(
-            (
-                TextMessage("t1", "text/x-queue-id"),
-                TextMessage("echo-result", "text/plain"),
-            ),
-            "multipart/x-tool-result",
-        )
-        bundle = MultipartMessage(
-            (tool_result,),
-            "multipart/x-tool-batch-result",
-        )
-        agent.inbox.send(bundle, source="tools")
+def test_swap_model_rejects_smaller_request_window() -> None:
+    a = _build_agent()
+    smaller = StubModel(max_request_tokens=50)
+    with pytest.raises(ValueError, match="max_request_tokens"):
+        a.swap_model(smaller)
 
-        # Round body with items=[]: the fix must drain_nowait and pull
-        # the bundle in. Without it, the bundle stays in the inbox and
-        # the model is called with a dangling tool_use.
-        await agent._round_body([])
 
-        descriptors = [m.descriptor for m in agent.history]
-        # Tool_use assistant message must be immediately followed by the
-        # tool_result so the Anthropic adapter pairs them in one user
-        # message; the model response lands at the end.
-        assert descriptors[0] == "multipart/x-model-message"
-        assert descriptors[1] == "multipart/x-tool-result"
-        assert descriptors[-1] == "multipart/x-model-message"
+def test_swap_model_rejects_smaller_response_window() -> None:
+    a = _build_agent()
+    smaller = StubModel(max_response_tokens=10)
+    with pytest.raises(ValueError, match="max_response_tokens"):
+        a.swap_model(smaller)
 
-    @pytest.mark.real_sleep
-    async def test_post_drain_cohort_emit_is_picked_up(self) -> None:
-        # Regression: a cohort done-callback that fires AFTER serve_forever's
-        # drain returned but BEFORE the round body starts must not strand
-        # its tool-result bundle in the inbox -- otherwise the next model
-        # call sees a dangling tool_use and Anthropic rejects with 400.
-        tc = tool_call_message("t1", "Slow", json_freeze({}))
-        model = _MockModel()
-        model.responses = [
-            ModelResponse(
-                content=MultipartMessage(
-                    (TextMessage("", "text/plain"), tc),
-                    "multipart/x-model-message",
-                ),
-                stop_reason="model_tool_use",
-                tokens=TokenCount(input_tokens=10, output_tokens=5),
-            ),
-            _model_response("done"),
-        ]
 
-        gate = asyncio.Event()
+def test_swap_model_replaces_model_and_inner_wrapper() -> None:
+    a = _build_agent()
+    new = StubModel(model_id="stub-2")
+    a.swap_model(new)
+    assert a.model is new
+    # The wrapper's inner reference was updated too.
+    assert a._agent_model._inner is new
 
-        class _SlowTool:
-            name = "Slow"
-            tool_id = "application/x-tool-slow"
-            description = ""
-            directive_schema: object = json_freeze(
-                {"type": "object", "properties": {}},
-            )
-            supports_microcompaction = False
 
-            def summary(self, msg: Message) -> str:
-                del msg
-                return "Slow"
+def test_halt_pushes_halt_event() -> None:
+    a = _build_agent()
+    a.halt()
+    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
+    assert any(isinstance(i, RuntimeHalt) for i in items)
 
-            def summary_result(self, result: Message) -> str | None:
-                del result
-                return None
 
-            def prompt(self) -> str:
-                return ""
+def test_kill_tool_pushes_kill_event() -> None:
+    a = _build_agent()
+    a.kill_tool("call-7")
+    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
+    kills = [i for i in items if isinstance(i, RuntimeKill)]
+    assert len(kills) == 1
+    assert kills[0].call_id == "call-7"
 
-            async def run(self, msg: Message) -> Message:
-                del msg
-                await gate.wait()
-                return TextMessage("slow-result", "text/plain")
 
-        agent = Agent(
-            model=cast(Model, model),
-            tools=[cast(Tool, _SlowTool())],
-        )
-        loop_task = asyncio.create_task(agent.serve_forever())
-        agent.inbox.send(
-            TextMessage("go", "text/x-user-message"),
-            source="user",
-        )
-        # Wait for round 1 to spawn the cohort and return.
-        for _ in range(200):
-            await asyncio.sleep(0.005)
-            if agent._active_cohorts and agent.work is None:
-                break
-        assert agent._active_cohorts, "cohort never spawned"
-        # Release the slow tool so its task completes. The done-callback
-        # will fire, the cohort emits, and its bundle goes into the inbox
-        # while serve_forever is mid-`await drain()`.
-        gate.set()
-        # Wait for the second round to consume the bundle and the model
-        # to return "done" -- without the post-drain drain_nowait fix,
-        # this hangs / errors because the bundle is parked in the inbox.
-        for _ in range(200):
-            await asyncio.sleep(0.005)
-            if any(m.descriptor == "multipart/x-tool-result" for m in agent.history):
-                break
-        # History must contain the tool_result immediately after the
-        # assistant message bearing the tool_use.
-        descriptors = [m.descriptor for m in agent.history]
-        assert "multipart/x-tool-result" in descriptors
-        tu_idx = descriptors.index("multipart/x-model-message")
-        assert descriptors[tu_idx + 1] == "multipart/x-tool-result"
-        agent.shutdown(force=True)
+def test_kill_all_tools_pushes_kill_with_none_id() -> None:
+    a = _build_agent()
+    a.kill_all_tools()
+    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
+    kills = [i for i in items if isinstance(i, RuntimeKill)]
+    assert kills[0].call_id is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_force_cancels_explicit_jobs() -> None:
+    a = _build_agent()
+
+    async def hang() -> None:
+        await asyncio.sleep(10.0)
+
+    task = asyncio.create_task(hang())
+    a.register_background(
+        "job-x",
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="bg",
+            queue_id="job-x",
+            started=0.0,
+            hidden=False,
+        ),
+    )
+    a.shutdown(force=True)
+    # Yield so the cancellation propagates.
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_compact_awaits_compact_complete_event() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _StubCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [UserMessage(text="[summary]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
+
+    async def drive() -> None:
+        await a.serve_forever()
+
+    drive_task = asyncio.create_task(drive())
+    try:
+        await a.compact("")
+    finally:
+        a.shutdown()
         with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.wait_for(loop_task, timeout=1.0)
+            await drive_task
+
+    assert any(isinstance(e, UserMessage) and e.text == "[summary]" for e in a.history)
 
 
-class TestErrorEventPublication:
-    """compaction/recompact failures must publish error events."""
+@pytest.mark.asyncio
+async def test_recompact_awaits_compact_complete_event() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _StubCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
 
-    async def test_compaction_failure_publishes_error_event(self) -> None:
-        agent = _build_agent(_MockModel())
-        events: list[Event] = []
-        agent.observers.append(events.append)
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [UserMessage(text="[recompacted]")]
 
-        class _BoomCompactor:
-            async def should_compact(
-                self,
-                input_tokens: int,
-                max_request_tokens: int,
-                max_response_tokens: int = 0,
-            ) -> bool:
-                del input_tokens, max_request_tokens, max_response_tokens
-                return True
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
 
-            async def compact(self, **kwargs: object) -> list[Message]:
-                del kwargs
-                raise RuntimeError("compactor exploded")
+    a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
+    drive_task = asyncio.create_task(a.serve_forever())
+    try:
+        await a.recompact("instr")
+    finally:
+        a.shutdown()
+        with contextlib.suppress(asyncio.CancelledError):
+            await drive_task
 
-        agent.compactor = cast(Compactor, _BoomCompactor())
-        ok = await agent._do_compact("")
+    assert any(
+        isinstance(e, UserMessage) and e.text == "[recompacted]" for e in a.history
+    )
 
-        assert ok is False
-        errs = [e for e in events if isinstance(e, RecoverableErrorEvent)]
-        assert len(errs) == 1
-        err_text = flat_text(errs[0].msg, include_errors=True)
-        assert "compaction failed" in err_text
-        assert "RuntimeError" in err_text
 
-    async def test_recompact_load_failure_publishes_error_event(
+@pytest.mark.asyncio
+async def test_clear_pushes_clear_event_and_resets_file_tracking() -> None:
+    a = _build_agent()
+    # Stage a tracked file.
+    a.tool_state.mark_read("/tmp/x.txt")  # noqa: S108 -- placeholder
+    assert a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
+
+    await a.clear()
+    assert not a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
+
+    # Clear event is sitting on the inbox.
+    items = await a.runtime.inbox.drain()
+    assert any(isinstance(i, RuntimeClear) for i in items)
+
+
+def test_build_system_appends_tool_contributions() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _PromptingTool(StubTool):
+        @override
+        def prompt(self) -> str:
+            return "(extra-tool-prompt)"
+
+    a = _build_agent(system="root", tools=[_PromptingTool()])
+    out = a.system_prompt()
+    assert "root" in out
+    assert "(extra-tool-prompt)" in out
+
+
+@pytest.mark.asyncio
+async def test_streaming_chars_recorded_in_activity() -> None:
+    """``_track_activity`` accumulates streamed chars on ModelResponsePartial."""
+    a = _build_agent()
+    # Push a partial event through the publish path.
+    a.publish(ModelResponsePartial(text="abc"))
+    # The handler only acts when ``active`` is True; bracket via
+    # ModelCallStarted first.
+    a.publish(ModelCallStarted())
+    a.publish(ModelResponsePartial(text="defg"))
+    assert a.activity.live_response_chars == 4
+
+
+def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
+    """``_track_tool_registry`` records cohort id → tool name and bumps rounds."""
+    a = _build_agent()
+    tc = RuntimeToolCall(id="c1", name="Echo", args={})
+    msg = AssistantMessage(text="", tool_calls=(tc,))
+    a.publish(ModelResponseComplete(message=msg))
+    assert a._tool_registry["c1"][0] == "Echo"
+    assert a.activity.num_tool_call_rounds == 1
+
+
+def test_enforce_caps_pushes_error_when_limit_reached() -> None:
+    """``_enforce_caps`` posts a ModelResponseError when rounds cap is hit."""
+    a = Agent(model=StubModel(), tools=[], max_tool_call_rounds=1)
+    tc = RuntimeToolCall(id="c1", name="Echo", args={})
+    msg = AssistantMessage(text="", tool_calls=(tc,))
+    a.publish(ModelResponseComplete(message=msg))
+
+    # Round count is now 1 == cap; the next observation triggers the
+    # error push.
+    a.publish(ModelResponseComplete(message=msg))
+    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
+    assert any(isinstance(i, ModelResponseError) for i in items)
+
+
+@dataclass(slots=True, kw_only=True)
+class _MaintainStubCompactor:
+    """Compactor whose ``maintain`` records calls."""
+
+    maintained: list[list[HistoryEntry]] = field(default_factory=list)
+
+    async def should_compact(
+        self, input_tokens: int, max_request_tokens: int, max_response_tokens: int = 0
+    ) -> bool:
+        del input_tokens, max_request_tokens, max_response_tokens
+        return False
+
+    async def compact(
         self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        history: list[HistoryEntry],
+        model: object,
+        transcript_path: object = None,
+        direction: str = "from",
+        keep_recent: int | None = None,
+        custom_instructions: str | None = None,
+        summary_pointers: object = None,
+    ) -> list[HistoryEntry]:
+        del model, transcript_path, direction, keep_recent
+        del custom_instructions, summary_pointers
+        return list(history)
+
+    def maintain(
+        self, history: list[HistoryEntry], tools: object, **kwargs: object
     ) -> None:
-        agent = _build_agent(_MockModel())
-        agent.session_dir = tmp_path
-        agent.compactor = cast(Compactor, object())
-        agent.compaction_state.compact_count = 1
-        (tmp_path / "pre_compact_0.jsonl").write_text("{}\n", encoding="utf-8")
-        events: list[Event] = []
-        agent.observers.append(events.append)
-
-        def boom(data: object) -> Message:
-            del data
-            raise KeyError("descriptor")
-
-        monkeypatch.setattr(
-            "sagent.agent.agent.load_message",
-            boom,
-        )
-        await agent._do_recompact("")
-
-        errs = [e for e in events if isinstance(e, RecoverableErrorEvent)]
-        assert len(errs) == 1
-        err_text = flat_text(errs[0].msg, include_errors=True)
-        assert "recompact transcript load failed" in err_text
-        assert "KeyError" in err_text
+        del tools, kwargs
+        self.maintained.append(list(history))
 
 
-class TestPublish:
-    def test_observer_exception_swallowed_and_logged(
+def test_microcompact_history_forwards_to_compactor() -> None:
+    compactor = _MaintainStubCompactor()
+    a = Agent(model=StubModel(), tools=[], compactor=compactor)
+    history: list[HistoryEntry] = [UserMessage(text="x")]
+    a.microcompact_history(history)
+    assert compactor.maintained, "maintain() should have been called"
+
+
+@pytest.mark.asyncio
+async def test_compact_now_no_compactor_is_noop() -> None:
+    a = _build_agent()
+    a.runtime.history.append(UserMessage(text="x"))
+    await a.compact_now()
+    # History untouched: no compactor wired.
+    assert len(a.runtime.history) == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_now_replaces_history_in_place() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _ReplaceCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [UserMessage(text="[summary]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_ReplaceCompactor())
+    a.runtime.history.append(UserMessage(text="old"))
+    await a.compact_now()
+    assert len(a.runtime.history) == 1
+    entry = a.runtime.history[0]
+    assert isinstance(entry, UserMessage)
+    assert entry.text == "[summary]"
+
+
+@pytest.mark.asyncio
+async def test_compact_now_failure_appends_error_user_message() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            raise RuntimeError("compaction failed")
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
+    a.runtime.history.append(UserMessage(text="x"))
+    await a.compact_now()
+    err = [
+        e
+        for e in a.runtime.history
+        if isinstance(e, UserMessage) and "[Compaction error:" in e.text
+    ]
+    assert len(err) == 1
+
+
+@dataclass(slots=True, kw_only=True)
+class _OverflowModel:
+    """Model that raises PromptTooLongError on the first N calls."""
+
+    model_id: str = "ovf"
+    max_request_tokens: int = 100_000
+    max_response_tokens: int = 1_024
+    supports_streaming: bool = True
+    supports_thinking: bool = False
+    supports_effort: bool = False
+    supports_cache_control: bool = False
+    supports_context_management: bool = False
+    supports_persistent_retry: bool = False
+    supports_account_auth: bool = False
+    max_image_dim: int = 8_000
+    max_image_bytes: int = 5 * 1024 * 1024
+    overflow_count: int = 0
+    call_index: int = 0
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing()
+
+    def estimate_text_token_count(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def estimate_image_token_count(self, data: bytes) -> int:
+        del data
+        return 256
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        del error
+        return False
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+    async def stream(
         self,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        agent = _build_agent(_MockModel())
-        events: list[Event] = []
-
-        def good(ev: Event) -> None:
-            events.append(ev)
-
-        def bad(ev: Event) -> None:
-            del ev
-            raise RuntimeError("kaboom")
-
-        agent.observers.extend([bad, good])
-        with caplog.at_level("WARNING", logger="sagent.agent.agent"):
-            agent.publish(RecoverableErrorEvent(msg=TextMessage("hi", "text/x-error")))
-        # ``good`` still saw the event (fan-out continued past ``bad``).
-        assert len(events) == 1
-        # Warning is one-liner; no ERROR-level traceback dump.
-        records = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("RuntimeError" in r.getMessage() for r in records)
-        assert not any(r.levelname == "ERROR" for r in caplog.records)
+        request: ModelRequest,
+        on_text: object = None,
+        on_thinking: object = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        idx = self.call_index
+        self.call_index += 1
+        if idx < self.overflow_count:
+            raise PromptTooLongError("too long")
+        return ModelResponse(message=AssistantMessage(text="recovered"))
 
 
-class TestWrapErrorsForLlm:
-    """``wrap_errors_for_llm`` is the provider-bound shape transform."""
+@pytest.mark.asyncio
+async def test_agent_model_overflow_triggers_compact_now() -> None:
+    """One overflow followed by success: compact_now runs once, response returned."""
+    compact_calls: list[int] = []
 
-    def test_multipart_x_error_flattens_to_user_message(self) -> None:
-        err = build_error_message(
-            "turn failed: HTTPStatusError: 503",
-            exc=RuntimeError("simulated"),
+    @dataclass(slots=True, kw_only=True)
+    class _CountingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            compact_calls.append(1)
+            return [UserMessage(text="[compact]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    model = _OverflowModel(overflow_count=1)
+    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    assert len(compact_calls) == 1
+    # _OverflowModel emitted "recovered" on the second call.
+    assert any(
+        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
+    """Exhaust MAX_OVERFLOW_RECOVERY: PromptTooLongError surfaces."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _NoOpCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            # Returns short summary; model keeps overflowing.
+            return [UserMessage(text="[compact]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    model = _OverflowModel(overflow_count=10)  # always overflow
+    a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
+    with pytest.raises(PromptTooLongError):
+        await a._agent_model.stream(
+            history=[UserMessage(text="x")],
+            system="",
+            tools=[],
+            on_text=lambda _t: None,
+            on_thinking=lambda _t: None,
         )
-        assert err.descriptor == "multipart/x-error"
-        flat = wrap_errors_for_llm(err)
-        assert isinstance(flat, TextMessage)
-        assert flat.descriptor == "text/x-user-message"
-        assert "turn failed" in flat.content
-        assert "503" in flat.content
-
-    def test_tool_result_wraps_text_x_error(self) -> None:
-        tr = MultipartMessage(
-            (
-                TextMessage("qid_1", "text/x-queue-id"),
-                TextMessage("boom", "text/x-error"),
-            ),
-            "multipart/x-tool-result",
-        )
-        wrapped = wrap_errors_for_llm(tr)
-        assert isinstance(wrapped, MultipartMessage)
-        err_part = next(p for p in wrapped.content if p.descriptor == "text/x-error")
-        assert isinstance(err_part, TextMessage)
-        assert err_part.content == "<tool_use_error>boom</tool_use_error>"
-
-    def test_passthrough_for_unrelated_descriptors(self) -> None:
-        msg = TextMessage("hi", "text/x-user-message")
-        assert wrap_errors_for_llm(msg) is msg
 
 
-class TestHaltSemanticsOnIrrecoverable:
-    """``IrrecoverableErrorEvent`` arms ``inbox.block_until_user``."""
+@pytest.mark.asyncio
+async def test_agent_tool_emits_label_and_delegates() -> None:
+    """The wrapper publishes a ToolLabel and forwards to the inner tool."""
+    inner = StubTool()
+    a = _build_agent(tools=[inner])
 
-    def test_publish_irrecoverable_blocks_drain_until_user(self) -> None:
-        agent = _build_agent(_MockModel())
-        msg = build_error_message("dead", exc=RuntimeError("x"))
-        agent.publish_irrecoverable_error(msg)
-        # ``block_until_user`` is armed via the private ``_user_block`` flag.
-        assert agent.inbox._user_block is True
+    labels: list[ToolLabel] = []
+
+    def _watch(ev: object) -> None:
+        if isinstance(ev, ToolLabel):
+            labels.append(ev)
+
+    a.runtime.observers.append(_watch)
+
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    result = await wrapper.run({"msg": "hi"})
+    assert result.content == "hi"
+    assert len(labels) == 1
+    assert labels[0].text == "echo"
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
+    tmp_path: Path,
+) -> None:
+    """If summary ends with AssistantMessage, an inert UserMessage is appended."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _AssistantTerminatedCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [AssistantMessage(text="model said")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(
+        model=StubModel(),
+        tools=[],
+        compactor=_AssistantTerminatedCompactor(),
+        session_dir=tmp_path,
+    )
+    a.runtime.history.append(UserMessage(text="x"))
+    await a.compact_now()
+    # The continuation user-message terminator was appended.
+    last = a.runtime.history[-1]
+    assert isinstance(last, UserMessage)
+    assert last.text == "[continuation]"
+    # Pre-compact transcript was written.
+    assert (tmp_path / "pre_compact_0.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_post_enrich_failure_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Errors inside ``post_compact_enrich`` are logged and don't propagate."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [UserMessage(text="[summary]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    async def _boom(**kwargs: object) -> None:
+        del kwargs
+        raise RuntimeError("enrich failed")
+
+    a = Agent(
+        model=StubModel(),
+        tools=[],
+        compactor=_OkCompactor(),
+        session_dir=tmp_path,
+    )
+    a.runtime.history.append(UserMessage(text="x"))
+
+    monkeypatch.setattr("sagent.agent.agent.post_compact_enrich", _boom)
+    await a.compact_now()
+
+    # Summary still survived; the enrich failure was swallowed.
+    assert any(
+        isinstance(e, UserMessage) and e.text == "[summary]" for e in a.runtime.history
+    )
 
 
 if __name__ == "__main__":

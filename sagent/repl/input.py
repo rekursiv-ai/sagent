@@ -1,15 +1,13 @@
 """REPL input pump + ``InputSource`` abstraction.
 
 The pump is a long-running coroutine spawned as a *hidden* background
-task in ``agent.background``. It loops on an :class:`InputSource`,
-parses each line via :func:`repl.slash.parse_slash`, and dispatches the
-resulting :class:`SlashAction` directly against the agent's public API.
+task on the Agent. It loops on an :class:`InputSource`, parses each
+line via :func:`repl.slash.parse_slash`, and dispatches the resulting
+:class:`SlashAction` directly against the agent's public API.
 
-The pump is intentionally NOT a Handler / Tool / inbox sender. v2's
-spawned-handler pump tangled with ``agent.tasks`` and got cancelled by
-``/abort``, deadlocking the terminal. v3 keeps it cleanly in
-``agent.background[hidden=True]`` so user-initiated abort can never tear
-down the input loop.
+The pump is intentionally NOT a Handler / Tool / runtime event. It
+lives in ``agent._bg`` as a hidden entry so user-initiated abort
+(``/halt`` / ``/kill``) can never tear down the input loop.
 """
 
 from __future__ import annotations
@@ -20,24 +18,29 @@ import asyncio
 import logging
 import time
 
-from sagent.custom_types import TextMessage
-from sagent.lib.lazy_import import lazy_import
-from sagent.repl.slash import (
+from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.runtime import (
     Clear,
     Compact,
-    Halt,
-    Help,
-    Kill,
-    Login,
-    ModelSwitch,
-    Quit,
     Recompact,
+    UserMessage,
+)
+from sagent.lib.lazy_import import lazy_import
+from sagent.repl.slash import (
+    Clear as SlashClear,
+    Compact as SlashCompact,
+    Halt as SlashHalt,
+    Help as SlashHelp,
+    Kill as SlashKill,
+    Login as SlashLogin,
+    ModelSwitch as SlashModelSwitch,
+    Quit as SlashQuit,
+    Recompact as SlashRecompact,
     SlashAction,
-    Tasks,
-    Text,
+    Tasks as SlashTasks,
+    Text as SlashText,
     parse_slash,
 )
-from sagent.tools.background_task import BackgroundTaskEntry
 from sagent.tools.core import agent_registry
 
 
@@ -47,14 +50,11 @@ from sagent.tools.core import agent_registry
 _run_repl = lazy_import("sagent.repl.run_repl")
 _render = lazy_import("sagent.repl.render")
 
-
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
     from sagent.repl.render import Printer
 
-
 logger = logging.getLogger(__name__)
-
 
 __all__ = [
     "REPL_PUMP_KEY",
@@ -63,8 +63,7 @@ __all__ = [
     "spawn_repl_pump",
 ]
 
-
-# Stable key for the REPL pump entry in ``agent.background``.
+# Stable key for the REPL pump entry in ``agent._bg``.
 REPL_PUMP_KEY = "__repl_pump__"
 
 
@@ -108,13 +107,16 @@ def spawn_repl_pump(
 
     """
     task = asyncio.create_task(_input_pump(agent, source, printer))
-    agent.background[REPL_PUMP_KEY] = BackgroundTaskEntry(
-        task=task,
-        tool_name="repl-input",
-        queue_id=REPL_PUMP_KEY,
-        started=time.time(),
-        hidden=True,
-        kind="tool",
+    agent.register_background(
+        REPL_PUMP_KEY,
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="repl-input",
+            queue_id=REPL_PUMP_KEY,
+            started=time.time(),
+            hidden=True,
+            kind="tool",
+        ),
     )
     return task
 
@@ -151,10 +153,10 @@ async def _dispatch(
     printer: Printer | None,
 ) -> bool:
     """Dispatch one parsed slash action; return True to exit the pump."""
-    if isinstance(action, Quit):
+    if isinstance(action, SlashQuit):
         agent.shutdown(force=False)
         return True
-    if isinstance(action, Halt):
+    if isinstance(action, SlashHalt):
         if action.target in ("", agent.name):
             agent.halt()
         else:
@@ -164,57 +166,49 @@ async def _dispatch(
             elif printer is not None:
                 printer.write_tool_error(f"[/halt] unknown agent: {action.target}")
         return False
-    if isinstance(action, Kill):
+    if isinstance(action, SlashKill):
         if action.target == "all":
-            count = agent.kill_all_tools()
+            agent.kill_all_tools()
             if printer is not None:
-                printer.write_line(f"[/kill] cancelled {count} task(s)")
+                printer.write_line("[/kill] cancelled all tool tasks")
         else:
-            ok = agent.kill_tool(action.target)
+            agent.kill_tool(action.target)
             if printer is not None:
-                if ok:
-                    printer.write_line(f"[/kill] cancelled {action.target}")
-                else:
-                    printer.write_tool_error(
-                        f"[/kill] no such task: {action.target}",
-                    )
+                printer.write_line(f"[/kill] cancelled {action.target}")
         return False
-    if isinstance(action, Clear):
-        await agent.clear()
+    if isinstance(action, SlashClear):
+        agent.runtime.inbox.push_back(Clear())
         if printer is not None:
             printer.write_line("[/clear] history cleared")
         return False
-    if isinstance(action, Compact):
-        await agent.compact(action.args)
+    if isinstance(action, SlashCompact):
+        agent.runtime.inbox.push_back(Compact(args=action.args))
         if printer is not None:
             note = f" ({action.args})" if action.args else ""
-            printer.write_line(f"[/compact] done{note}")
+            printer.write_line(f"[/compact] queued{note}")
         return False
-    if isinstance(action, Recompact):
-        await agent.recompact(action.args)
+    if isinstance(action, SlashRecompact):
+        agent.runtime.inbox.push_back(Recompact(args=action.args))
         if printer is not None:
             note = f" ({action.args})" if action.args else ""
-            printer.write_line(f"[/recompact] done{note}")
+            printer.write_line(f"[/recompact] queued{note}")
         return False
-    if isinstance(action, ModelSwitch):
+    if isinstance(action, SlashModelSwitch):
         _run_repl.do_switch_model(agent, action.args, printer)
         return False
-    if isinstance(action, Login):
+    if isinstance(action, SlashLogin):
         _run_repl.do_login(agent, printer)
         return False
-    if isinstance(action, Help):
+    if isinstance(action, SlashHelp):
         if printer is not None:
             printer.write_line(_render.HELP_TEXT)
         return False
-    if isinstance(action, Tasks):
+    if isinstance(action, SlashTasks):
         if printer is not None:
             printer.write_line(_run_repl.format_tasks(agent))
         return False
-    if isinstance(action, Text):
-        agent.inbox.send(
-            TextMessage(action.content, "text/x-user-message"),
-            source="user",
-        )
+    if isinstance(action, SlashText):
+        agent.runtime.inbox.push_back(UserMessage(text=action.content))
         return False
     # Remaining variant: Unknown -- surface the parse error.
     if printer is not None:

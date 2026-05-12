@@ -12,7 +12,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import asyncio
@@ -34,28 +34,23 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    TextMessage,
     TokenCount,
 )
-from sagent.lib.descriptors import is_image
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
     int_val,
-    json_freeze,
     json_unfreeze,
-)
-from sagent.lib.message import (
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    tool_call_message,
 )
 from sagent.providers.lib.cost import (
     ModelProfile,
@@ -80,82 +75,46 @@ class Google:
     # Model limits and pricing.
     # Limits: https://ai.google.dev/gemini-api/docs/models
     # Pricing: https://ai.google.dev/gemini-api/docs/pricing
-    # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
-    #
-    # To add a new model: check the Gemini API docs for the model's
-    # input token limit and max output tokens.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         "gemini-3-flash-preview": ModelProfile(
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.50,
-                response=3.00,
-                cache_read=0.05,
-            ),
+            pricing=Pricing(request=0.50, response=3.00, cache_read=0.05),
         ),
         "gemini-3.1-pro-preview": ModelProfile(
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=2.00,
-                response=12.00,
-                cache_read=0.20,
-            ),
+            pricing=Pricing(request=2.00, response=12.00, cache_read=0.20),
         ),
         "gemini-2.0-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.10,
-                response=0.40,
-                cache_read=0.025,
-            ),
+            pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
         ),
         "gemini-2.5-flash-lite": ModelProfile(
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.10,
-                response=0.40,
-                cache_read=0.025,
-            ),
+            pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
         ),
         "gemini-2.5-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.30,
-                response=2.50,
-                cache_read=0.075,
-            ),
+            pricing=Pricing(request=0.30, response=2.50, cache_read=0.075),
         ),
         "gemini-2.5-pro": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=1.25,
-                response=10.0,
-                cache_read=0.31,
-            ),
+            pricing=Pricing(request=1.25, response=10.0, cache_read=0.31),
         ),
         "gemini-1.5-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.075,
-                response=0.3,
-                cache_read=0.01875,
-            ),
+            pricing=Pricing(request=0.075, response=0.3, cache_read=0.01875),
         ),
         "gemini-1.5-pro": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
-            pricing=Pricing(
-                request=1.25,
-                response=5.0,
-                cache_read=0.3125,
-            ),
+            pricing=Pricing(request=1.25, response=5.0, cache_read=0.3125),
         ),
     }
 
@@ -167,20 +126,20 @@ class Google:
         """Create provider from an API key.
 
         Args:
-          api_key: Google API key (``AIza...``).
+          api_key: Google AI Studio API key.
 
         Returns:
-          provider: Google provider instance.
+          provider: Configured Google provider instance.
 
         """
         return cls(api_key=api_key)
 
     @classmethod
     def from_env(cls) -> Google:
-        """Create provider from GOOGLE_API_KEY env var.
+        """Create provider from ``GOOGLE_API_KEY`` env var.
 
         Returns:
-          provider: Google provider instance.
+          provider: Configured Google provider instance.
 
         Raises:
           RuntimeError: If ``GOOGLE_API_KEY`` is not set.
@@ -196,21 +155,20 @@ class Google:
         model_id: str | None = None,
         max_request_tokens: int | None = None,
     ) -> _GeminiModel:
-        """Create a model backend. ``None`` → ``DEFAULT_MODEL``.
+        """Create a model backend.
 
         Args:
-          model_id: Model ID (e.g. ``"gemini-3-flash-preview"``). ``None`` for default.
-          max_request_tokens: Max request tokens; ``None`` uses the provider default.
+          model_id: Model ID; ``None`` uses ``DEFAULT_MODEL``.
+          max_request_tokens: Override max input tokens.
 
         Returns:
-          model: Model backend implementing Model.
+          model: Gemini model backend.
 
         Raises:
           ValueError: If ``model_id`` is not in ``KNOWN_MODELS``.
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Fail fast -- every supported model must be in KNOWN_MODELS.
         profile = self.KNOWN_MODELS.get(mid)
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
@@ -232,7 +190,7 @@ class Google:
         """Return the default utility (fast/cheap) model backend.
 
         Returns:
-          model: Model backend for ``DEFAULT_UTILITY_MODEL``.
+          model: Backend for ``DEFAULT_UTILITY_MODEL``.
 
         """
         return self.model(self.DEFAULT_UTILITY_MODEL)
@@ -252,7 +210,6 @@ class _GeminiModel:
         self._model_id = model_id
         self._profile = profile
         self._max_request_tokens = max_request_tokens
-        # Persistent client for connection reuse.
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
 
@@ -267,68 +224,69 @@ class _GeminiModel:
 
     @property
     def max_request_tokens(self) -> int:
-        """Max input tokens for this model."""
+        """Maximum input tokens the model accepts."""
         return self._max_request_tokens
 
     @property
     def model_id(self) -> str:
-        """Gemini model identifier string."""
+        """Provider-specific model identifier."""
         return self._model_id
 
     @property
     def max_response_tokens(self) -> int:
-        """Max output tokens for this model."""
+        """Maximum output tokens the model can generate."""
         return self._profile.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
-        """Whether this backend supports streaming responses."""
+        """Whether the model supports token-by-token streaming."""
         return True
 
     @property
     def supports_thinking(self) -> bool:
-        """Whether this backend supports extended thinking."""
+        """Whether the model supports extended thinking."""
         return False
 
     @property
     def supports_effort(self) -> bool:
-        """Whether this backend supports effort-level control."""
+        """Whether the model accepts an effort hint."""
         return False
 
     @property
     def supports_cache_control(self) -> bool:
-        """Whether this backend supports prompt caching directives."""
+        """Whether the provider supports prompt caching."""
         return False
 
     @property
     def supports_context_management(self) -> bool:
-        """Whether this backend supports context-window management."""
+        """Whether the provider manages context overflow internally."""
         return False
 
     @property
     def supports_persistent_retry(self) -> bool:
-        """Whether this backend supports persistent server-side retry."""
+        """Whether the provider retries internally on transient failures."""
         return False
 
     @property
     def supports_account_auth(self) -> bool:
-        """Whether this backend uses account-based authentication."""
+        """Whether the provider uses account-based authentication."""
         return False
 
     def estimate_text_token_count(self, text: str) -> int:
-        """Estimate token count for text using 4 chars/token heuristic.
+        """Estimate input token count for a text string.
 
         Args:
-          text: Input text to estimate.
+          text: Text to score.
 
         Returns:
-          count: Approximate token count.
+          tokens: Approximate input token count (``len(text) // 4``).
 
         """
         return len(text) // 4
 
     @property
     def pricing(self) -> Pricing:
+        """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
     def estimate_image_token_count(self, data: bytes) -> int:
@@ -338,11 +296,10 @@ class _GeminiModel:
           data: Raw image bytes.
 
         Returns:
-          count: Approximate token count (258 per 512×512 tile).
+          tokens: Approximate input token count (``tiles * 258``).
 
         """
         # Gemini uses 258 tokens per tile (tile-based, similar to OpenAI).
-        # https://discuss.ai.google.dev/t/gemini-pro-image-pricing-by-tile-or-fixed/40839
         # Exact tile size undocumented; using OpenAI's 512x512 as proxy.
         dims = image_lib.get_dimensions(data)
         if dims is None:
@@ -352,32 +309,36 @@ class _GeminiModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Max image dimension in pixels (width or height)."""
+        """Maximum image dimension (pixels) accepted by the API."""
         return 3072
 
     @property
     def max_image_bytes(self) -> int:
-        """Max image size in bytes (20 MiB)."""
+        """Maximum image size (bytes) accepted by the API."""
         return 20 * 1024 * 1024
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Check whether an error indicates context-window overflow.
+        """Classify an error as a context-window overflow.
 
         Args:
-          error: Exception raised by an API call.
+          error: Exception raised by the provider call.
 
         Returns:
-          overflow: ``True`` if the error message indicates the prompt was too long.
+          overflow: True when ``error`` indicates context overflow.
 
         """
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
-        """No provider-specific transient cases beyond status codes.
+        """Classify an error using Google-specific retry heuristics.
 
-        Gemini errors are ``httpx.HTTPStatusError`` with a status code;
-        the shared status-code path in ``retry.py`` covers them.
+        Args:
+          error: Exception raised by the provider call.
+
+        Returns:
+          retryable: Always ``False`` (status-code dispatch covers retries).
+
         """
         del error
         return False
@@ -389,10 +350,14 @@ class _GeminiModel:
         """Send a buffered request to Gemini.
 
         Args:
-          request: Model request.
+          request: Fully-built model request.
 
         Returns:
-          response: Translated model response.
+          response: Parsed ``ModelResponse`` with usage and cost filled in.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
+          ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
         url = f"{_API_BASE}/models/{self._model_id}:generateContent"
@@ -428,17 +393,19 @@ class _GeminiModel:
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Stream via :streamGenerateContent (alt=sse).
+        """Stream via ``:streamGenerateContent`` (``alt=sse``).
 
         Args:
-          request: Model request.
-          on_text: Optional callback invoked with each text chunk as it arrives.
-          on_thinking: Optional callback for thinking chunks. Gemini's
-              streaming response surfaces thinking parts inline; this
-              wraps them so the renderer can show them as they arrive.
+          request: Fully-built model request.
+          on_text: Called per text chunk; ``None`` disables text streaming.
+          on_thinking: Ignored (Gemini streams thinking inline as text).
 
         Returns:
-          response: Translated model response assembled from streamed chunks.
+          response: Parsed ``ModelResponse`` with usage and cost filled in.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
+          ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
         del on_thinking  # gemini streams thinking inline as text; no separate hook
@@ -453,9 +420,6 @@ class _GeminiModel:
                 "Content-Type": "application/json",
                 "x-goog-api-key": self._provider.api_key,
             },
-            # Idle detection is handled by the asyncio watchdog
-            # inside ``_consume_gemini_stream``; give httpx a
-            # generous read deadline.
             timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
             if r.status_code == 400:
@@ -495,78 +459,66 @@ def _build_request(
     max_image_dim: int = 3072,
     max_image_bytes: int = 20 * 1024 * 1024,
 ) -> MutableJSON:
-    """Convert ModelRequest to Gemini API format."""
-    # Build tool_use_id → function name mapping from model responses.
-    call_names: dict[str, str] = {}
-    for msg in request.messages:
-        if msg.descriptor == "multipart/x-model-message":
-            for part in cast(tuple[Message, ...], msg.content):
-                if part.descriptor == "multipart/x-tool-call":
-                    qid = get_queue_id(part)
-                    if qid:
-                        call_names[qid] = get_tool_name(part)
+    """Convert history entries to the Gemini API request body.
+
+    Gemini groups consecutive ``functionResponse`` parts into one
+    ``role=user`` content. Tool results with image attachments emit
+    ``functionResponse`` + ``inlineData`` siblings in that same user
+    content per Gemini's rules.
+    """
+    # Build tool_use_id → function name mapping from prior model responses
+    # so we can echo the right name when emitting functionResponse parts.
+    call_names: dict[str, str] = {
+        tc.id: tc.name
+        for entry in request.messages
+        if isinstance(entry, AssistantMessage)
+        for tc in entry.tool_calls
+    }
 
     contents: list[MutableJSON] = []
     pending_tool_parts: list[MutableJSON] = []
-    for msg in request.messages:
-        if msg.descriptor == "text/x-user-message":
-            _flush_tool_parts(contents, pending_tool_parts)
-            contents.append(
-                cast(MutableJSON, {"role": "user", "parts": [{"text": msg.content}]})
-            )
-        elif msg.descriptor == "multipart/x-user-message":
+    for entry in request.messages:
+        if isinstance(entry, UserMessage):
             _flush_tool_parts(contents, pending_tool_parts)
             parts: list[MutableJSON] = []
-            for part in cast(tuple[Message, ...], msg.content):
-                if part.descriptor == "text/plain":
-                    parts.append({"text": cast(str, part.content)})
-                elif is_image(part.descriptor) or (
-                    part.descriptor == "application/pdf"
-                ):
-                    raw = cast(bytes, part.content)
-                    mime = part.descriptor
-                    if is_image(mime):
-                        raw, mime = image_lib.resize(
-                            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
-                        )
-                    b64 = base64.b64encode(raw).decode()
-                    parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+            if entry.text:
+                parts.append({"text": entry.text})
+            for att in entry.attachments:
+                block = _attachment_part(att, max_image_dim, max_image_bytes)
+                if block is not None:
+                    parts.append(block)
             if not parts:
                 parts.append({"text": ""})
             contents.append(cast(MutableJSON, {"role": "user", "parts": parts}))
-        elif msg.descriptor == "multipart/x-model-message":
+        elif isinstance(entry, AssistantMessage):
             _flush_tool_parts(contents, pending_tool_parts)
-            msg_parts = cast(tuple[Message, ...], msg.content)
-            parts = []
-            for part in msg_parts:
-                if part.descriptor == "text/plain":
-                    parts.append({"text": cast(str, part.content)})
-                elif part.descriptor == "multipart/x-tool-call":
-                    directive = get_directive(part)
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": get_tool_name(part),
-                                "args": json_unfreeze(directive),
-                            },
-                        }
-                    )
-            if parts:
-                contents.append(cast(MutableJSON, {"role": "model", "parts": parts}))
-        elif msg.descriptor == "multipart/x-tool-result":
-            qid = get_queue_id(msg)
-            func_name = call_names.get(qid, qid)
-            parts_tr = cast(tuple[Message, ...], msg.content)
-            text = "\n".join(
-                str(p.content)
-                for p in parts_tr
-                if p.descriptor in ("text/plain", "text/x-error")
+            model_parts: list[MutableJSON] = []
+            if entry.text:
+                model_parts.append({"text": entry.text})
+            model_parts.extend(
+                cast(
+                    MutableJSON,
+                    {
+                        "functionCall": {
+                            "name": tc.name,
+                            "args": dict(tc.args),
+                        },
+                    },
+                )
+                for tc in entry.tool_calls
             )
-            image_parts_res: list[Message] = [
-                p
-                for p in parts_tr
-                if is_image(p.descriptor) or p.descriptor == "application/pdf"
-            ]
+            if model_parts:
+                contents.append(
+                    cast(MutableJSON, {"role": "model", "parts": model_parts})
+                )
+        else:
+            # ToolResult: role=user with functionResponse part(s); image
+            # attachments emit as inlineData siblings in the same user
+            # content.
+            func_name = call_names.get(entry.call_id, entry.call_id)
+            text = entry.content
+            if entry.is_error and text:
+                text = f"[Error] {text}"
             pending_tool_parts.append(
                 {
                     "functionResponse": {
@@ -575,19 +527,10 @@ def _build_request(
                     },
                 }
             )
-            # Gemini accepts inlineData parts alongside functionResponse
-            # in the same user-role message.
-            for part in image_parts_res:
-                raw = cast(bytes, part.content)
-                mime_type = part.descriptor
-                if is_image(part.descriptor):
-                    raw, mime_type = image_lib.resize(
-                        raw, max_dim=max_image_dim, max_bytes=max_image_bytes
-                    )
-                b64 = base64.b64encode(raw).decode()
-                pending_tool_parts.append(
-                    {"inlineData": {"mimeType": mime_type, "data": b64}}
-                )
+            for att in entry.attachments:
+                block = _attachment_part(att, max_image_dim, max_image_bytes)
+                if block is not None:
+                    pending_tool_parts.append(block)
     _flush_tool_parts(contents, pending_tool_parts)
 
     gen_config: MutableJSON = cast(MutableJSON, {"temperature": request.temperature})
@@ -603,9 +546,7 @@ def _build_request(
     if request.system:
         body["systemInstruction"] = cast(
             MutableJSONValue,
-            {
-                "parts": [{"text": request.system}],
-            },
+            {"parts": [{"text": request.system}]},
         )
     if request.tools:
         body["tools"] = cast(
@@ -617,7 +558,9 @@ def _build_request(
                             "name": t.name,
                             "description": t.description,
                             "parameters": _strip_additional_properties(
-                                json_unfreeze(t.directive_schema)
+                                cast(
+                                    MutableJSONValue, json_unfreeze(t.directive_schema)
+                                )
                             ),
                         }
                         for t in request.tools
@@ -628,12 +571,35 @@ def _build_request(
     return body
 
 
-def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -> None:
-    """Emit buffered tool-response parts as a user message, then clear.
+def _attachment_part(
+    att: object,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> MutableJSON | None:
+    """Translate a ``BytesMessage`` attachment to a Gemini ``inlineData`` part."""
+    data = getattr(att, "data", None)
+    descriptor = getattr(att, "descriptor", "")
+    if not isinstance(data, bytes) or not isinstance(descriptor, str):
+        return None
+    is_image = descriptor.startswith("image/")
+    if not (is_image or descriptor == "application/pdf"):
+        logger.warning(
+            "Google: skipping attachment with unsupported mime=%s",
+            descriptor,
+        )
+        return None
+    raw = data
+    mime = descriptor
+    if is_image:
+        raw, mime = image_lib.resize(
+            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
+        )
+    b64 = base64.b64encode(raw).decode()
+    return {"inlineData": {"mimeType": mime, "data": b64}}
 
-    Gemini batches consecutive functionResponse (and tool-result
-    inlineData) parts into a single user-role content.
-    """
+
+def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -> None:
+    """Emit buffered tool-response parts as a user message, then clear."""
     if pending:
         contents.append({"role": "user", "parts": list(pending)})
         pending.clear()
@@ -651,21 +617,9 @@ async def _consume_gemini_stream(
     Each ``data:`` line is a full GenerateContentResponse JSON object
     with partial content; we accumulate text and tool calls across
     events.
-
-    Args:
-      r: The streaming httpx response.
-      on_text: Optional callback invoked with each text delta.
-      pricing: Pricing struct used to compute final cost.
-      chunk_unwrap: Optional transform applied to each parsed chunk
-        before consumption. Used by the Code Assist subscription
-        provider, whose chunks are wrapped as ``{"response": <Gemini-
-        chunk>, "traceId": ..., "consumedCredits": ...}``; passing
-        ``lambda c: c.get("response") or {}`` unwraps to the standard
-        Gemini shape this function expects.
-
     """
     text_chunks: list[str] = []
-    tool_parts: list[Message] = []
+    tool_calls: list[ToolCall] = []
     usage: MutableJSON = {}
     finish_reason: str | None = None
 
@@ -711,76 +665,73 @@ async def _consume_gemini_stream(
                     fc_args = cast(MutableJSON, fc.get("args") or {})
                     if isinstance(fc_name, str):
                         tc_id = f"call_{uuid.uuid4().hex[:24]}"
-                        tool_parts.append(
-                            tool_call_message(tc_id, fc_name, json_freeze(fc_args))
+                        tool_calls.append(
+                            ToolCall(
+                                id=tc_id,
+                                name=fc_name,
+                                args=cast(Mapping[str, object], fc_args),
+                            )
                         )
 
-    input_tokens = int_val(usage.get("promptTokenCount"), 0)
-    output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
-    cache_read = int_val(usage.get("cachedContentTokenCount"), 0)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        max(0, input_tokens - cache_read),
-        output_tokens,
-        cache_read=cache_read,
-    )
-    message_id = f"gemini_{uuid.uuid4().hex[:16]}"
-    msg_parts: list[Message] = []
-    if text_chunks:
-        msg_parts.append(TextMessage("".join(text_chunks), "text/plain"))
-    msg_parts.extend(tool_parts)
-    has_tool_use = bool(tool_parts)
-    all_parts_g: list[Message] = [
-        TextMessage(message_id, "text/x-queue-id"),
-        *msg_parts,
-    ]
-    return ModelResponse(
-        content=MultipartMessage(
-            tuple(all_parts_g),
-            "multipart/x-model-message",
-        ),
-        tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-        ),
-        stop_reason=normalize_stop_reason(
-            finish_reason,
-            kind="google",
-            has_tool_use=has_tool_use,
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
+    return _build_response(
+        text="".join(text_chunks),
+        tool_calls=tool_calls,
+        usage=usage,
+        finish_reason=finish_reason,
+        pricing=pricing,
     )
 
 
 def _parse_response(data: MutableJSON, pricing: Pricing) -> ModelResponse:
-    """Convert Gemini response to ModelResponse."""
+    """Convert Gemini's non-streaming response body to ModelResponse."""
     candidates_raw = cast(list[MutableJSON], data.get("candidates") or [])
     if not candidates_raw:
         raise ValueError("Gemini response contains no candidates.")
     candidate = candidates_raw[0]
     content_obj = cast(MutableJSON, candidate.get("content") or {})
     raw_parts = cast(list[MutableJSON], content_obj.get("parts") or [])
-    msg_parts: list[Message] = []
 
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
     for part in raw_parts:
         if "text" in part:
-            msg_parts.append(TextMessage(str(part["text"]), "text/plain"))
+            text_parts.append(str(part["text"]))
         elif "functionCall" in part:
             fc = cast(MutableJSON, part["functionCall"])
             fc_name = str(fc.get("name") or "")
             tc_id = f"call_{uuid.uuid4().hex[:24]}"
-            msg_parts.append(
-                tool_call_message(
-                    tc_id, fc_name, json_freeze(cast(MutableJSON, fc.get("args") or {}))
+            tool_calls.append(
+                ToolCall(
+                    id=tc_id,
+                    name=fc_name,
+                    args=cast(
+                        Mapping[str, object],
+                        cast(MutableJSON, fc.get("args") or {}),
+                    ),
                 )
             )
 
-    usage = cast(MutableJSON, data.get("usageMetadata") or {})
+    finish_reason_raw = candidate.get("finishReason")
+    return _build_response(
+        text="".join(text_parts),
+        tool_calls=tool_calls,
+        usage=cast(MutableJSON, data.get("usageMetadata") or {}),
+        finish_reason=(
+            finish_reason_raw if isinstance(finish_reason_raw, str) else None
+        ),
+        pricing=pricing,
+    )
+
+
+def _build_response(
+    *,
+    text: str,
+    tool_calls: list[ToolCall],
+    usage: MutableJSON,
+    finish_reason: str | None,
+    pricing: Pricing,
+) -> ModelResponse:
+    """Shared ModelResponse construction for buffer + stream."""
     input_tokens = int_val(usage.get("promptTokenCount"), 0)
     output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
     cache_read = int_val(usage.get("cachedContentTokenCount"), 0)
@@ -792,26 +743,17 @@ def _parse_response(data: MutableJSON, pricing: Pricing) -> ModelResponse:
     )
     # Gemini doesn't expose a stable message id - synthesize one.
     message_id = f"gemini_{uuid.uuid4().hex[:16]}"
-    finish_reason = candidate.get("finishReason")
-    has_tool_use = any(p.descriptor == "multipart/x-tool-call" for p in msg_parts)
-    all_parts_nr: list[Message] = [
-        TextMessage(message_id, "text/x-queue-id"),
-        *msg_parts,
-    ]
     return ModelResponse(
-        content=MultipartMessage(
-            tuple(all_parts_nr),
-            "multipart/x-model-message",
-        ),
+        message=AssistantMessage(text=text, tool_calls=tuple(tool_calls)),
         tokens=TokenCount(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
         ),
         stop_reason=normalize_stop_reason(
-            finish_reason if isinstance(finish_reason, str) else None,
+            finish_reason,
             kind="google",
-            has_tool_use=has_tool_use,
+            has_tool_use=bool(tool_calls),
         ),
         message_id=message_id,
         request_id=message_id,
@@ -819,3 +761,9 @@ def _parse_response(data: MutableJSON, pricing: Pricing) -> ModelResponse:
         output_cost=out_cost,
         total_cost=total_cost,
     )
+
+
+# Force ToolResult into the import graph so attachment translation works when
+# we add full ToolResult-driven plumbing in step 5; the type itself is the
+# attachments container the Read tool produces.
+_ = ToolResult

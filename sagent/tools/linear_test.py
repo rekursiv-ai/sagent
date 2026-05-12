@@ -1,277 +1,338 @@
-# pytest fixtures look unused to pyright; pytest wires them by name
-"""Tests for tools.linear.
-
-All tests mock the HTTP layer - no network calls.
-"""
+"""Tests for ``tools.linear``: Linear issue tracker via GraphQL."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
-import json as _json
+import asyncio
+import json
 
-import pytest
-
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, json_freeze
-from sagent.tools import linear as linear_mod
+from sagent.agent.runtime import ToolResult
+from sagent.lib.web.fetch import FetchError
+from sagent.tools.linear import Linear
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-linear"),),
-        "multipart/x-tool-call",
+if TYPE_CHECKING:
+    import pytest
+
+
+def _gql_response(data: object) -> bytes:
+    return json.dumps({"data": data}).encode()
+
+
+def test_linear_metadata() -> None:
+    t = Linear()
+    assert t.name == "Linear"
+    assert t.tool_id == "application/x-tool-linear"
+    assert t.supports_microcompaction is False
+
+
+def test_summary_with_id() -> None:
+    t = Linear()
+    assert t.summary({"operation": "get_issue", "id": "ENG-42"}) == (
+        "Linear get_issue:ENG-42"
     )
 
 
-def _txt(msg: Message) -> str:
-    if isinstance(msg, TextMessage):
-        return msg.content
-    if isinstance(msg, MultipartMessage):
-        for p in msg.content:
-            if isinstance(p, TextMessage):
-                return p.content
-    return ""
+def test_summary_without_id() -> None:
+    t = Linear()
+    assert t.summary({"operation": "list_issues"}) == "Linear list_issues"
 
 
-def _patch_client(
-    monkeypatch: pytest.MonkeyPatch,
-    canned: dict[str, dict[str, Any]],
-) -> None:
-    """Mock ``fetch`` for Linear's GraphQL POST calls."""
-
-    def _mock_fetch(
-        url: str, *, method: str = "GET", json: Any = None, **kwargs: object
-    ) -> bytes:
-        del url, method, kwargs
-        body: dict[str, Any] = json or {}
-        query: str = body.get("query", "")
-        for marker, data in canned.items():
-            if marker in query:
-                return _json.dumps({"data": data}).encode()
-        return _json.dumps({"errors": [{"message": "no canned response"}]}).encode()
-
-    monkeypatch.setattr("sagent.tools.linear.fetch", _mock_fetch)
+def test_summary_result_returns_none() -> None:
+    t = Linear()
+    assert t.summary_result(ToolResult(call_id="", content="x")) is None
 
 
-@pytest.fixture
-def _with_key(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
-    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_test")
+def test_prompt_empty() -> None:
+    t = Linear()
+    assert t.prompt() == ""
 
 
-class TestAuth:
-    @pytest.mark.anyio
-    async def test_missing_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("LINEAR_API_KEY", raising=False)
-        tool = linear_mod.Linear()
-        resp = await tool.run(_msg(json_freeze({"operation": "list_issues"})))
-        assert resp.descriptor == "text/x-error"
-        assert "not configured" in _txt(resp)
+def test_run_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LINEAR_API_KEY", raising=False)
+    t = Linear()
+    result = asyncio.run(t.run({"operation": "list_issues"}))
+    assert result.is_error
+    assert "not configured" in result.content
 
 
-@pytest.mark.usefixtures("_with_key")
-class TestListIssues:
-    @pytest.mark.anyio
-    async def test_returns_summary(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "ListIssues": {
-                    "issues": {
-                        "nodes": [
-                            {
-                                "identifier": "ENG-1",
-                                "title": "First bug",
-                                "state": {"name": "In Progress"},
-                            },
-                        ]
-                    }
+def test_list_issues_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
+    payload = _gql_response({"issues": {"nodes": []}})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(Linear().run({"operation": "list_issues"}))
+    assert not result.is_error
+    assert result.content == "(no issues)"
+
+
+def test_list_issues_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
+    nodes = [
+        {
+            "identifier": "ENG-1",
+            "title": "Foo",
+            "state": {"name": "Todo"},
+            "assignee": None,
+            "priority": 2,
+            "url": "https://linear.app/x",
+            "updatedAt": "2024-01-01",
+        },
+    ]
+    payload = _gql_response({"issues": {"nodes": nodes}})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run(
+                {
+                    "operation": "list_issues",
+                    "team": "ENG",
+                    "assignee_email": "x@y",
+                    "limit": 5,
                 }
-            },
+            )
         )
-        tool = linear_mod.Linear()
-        resp = await tool.run(_msg(json_freeze({"operation": "list_issues"})))
-        assert "ENG-1" in _txt(resp)
-        assert "First bug" in _txt(resp)
+    assert "[ENG-1] [Todo] Foo" in result.content
 
-    @pytest.mark.anyio
-    async def test_empty(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {"ListIssues": {"issues": {"nodes": []}}},
+
+def test_get_issue_requires_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(Linear().run({"operation": "get_issue"}))
+    assert result.is_error
+    assert "'id' required" in result.content
+
+
+def test_get_issue_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response({"issue": None})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "get_issue", "id": "ENG-9999"}),
         )
-        tool = linear_mod.Linear()
-        resp = await tool.run(_msg(json_freeze({"operation": "list_issues"})))
-        assert _txt(resp) == "(no issues)"
+    assert "No such issue" in result.content
 
 
-@pytest.mark.usefixtures("_with_key")
-class TestGetIssue:
-    @pytest.mark.anyio
-    async def test_requires_id(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        tool = linear_mod.Linear()
-        resp = await tool.run(_msg(json_freeze({"operation": "get_issue"})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in _txt(resp)
+def test_get_issue_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    issue = {
+        "identifier": "ENG-1",
+        "title": "Foo",
+        "description": "Body text",
+        "state": {"name": "Todo"},
+        "assignee": {"name": "Alice", "email": "a@x"},
+        "priority": 2,
+        "url": "u",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "comments": {
+            "nodes": [
+                {
+                    "body": "Hi",
+                    "user": {"name": "Bob"},
+                    "createdAt": "t2",
+                },
+            ]
+        },
+    }
+    payload = _gql_response({"issue": issue})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "get_issue", "id": "ENG-1"}),
+        )
+    assert "# [ENG-1] Foo" in result.content
+    assert "Assignee: Alice (a@x)" in result.content
+    assert "Body text" in result.content
+    assert "Bob @ t2: Hi" in result.content
 
-    @pytest.mark.anyio
-    async def test_renders(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
+
+def test_create_issue_requires_team_and_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(Linear().run({"operation": "create_issue"}))
+    assert result.is_error
+    assert "'team' and 'title' required" in result.content
+
+
+def test_create_issue_team_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response({"teams": {"nodes": []}})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "create_issue", "team": "NOPE", "title": "x"}),
+        )
+    assert result.is_error
+    assert "No team with key" in result.content
+
+
+def test_create_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    responses = [
+        _gql_response({"teams": {"nodes": [{"id": "team-id"}]}}),
+        _gql_response(
             {
-                "GetIssue": {
+                "issueCreate": {
+                    "success": True,
                     "issue": {
-                        "identifier": "ENG-42",
-                        "title": "A bug",
-                        "description": "Reproduces on Tuesdays.",
-                        "state": {"name": "Todo"},
-                        "url": "https://linear.app/x/ENG-42",
-                        "priority": 2,
-                        "comments": {"nodes": []},
-                    }
+                        "identifier": "ENG-5",
+                        "title": "T",
+                        "url": "u",
+                    },
                 }
-            },
-        )
-        tool = linear_mod.Linear()
-        resp = await tool.run(
-            _msg(json_freeze({"operation": "get_issue", "id": "ENG-42"}))
-        )
-        assert "ENG-42" in _txt(resp)
-        assert "Tuesdays" in _txt(resp)
-
-
-@pytest.mark.usefixtures("_with_key")
-class TestCreateUpdateComment:
-    @pytest.mark.anyio
-    async def test_create_requires_team_title(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        tool = linear_mod.Linear()
-        resp = await tool.run(_msg(json_freeze({"operation": "create_issue"})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_create_success(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "TeamByKey": {"teams": {"nodes": [{"id": "team-id"}]}},
-                "CreateIssue": {
-                    "issueCreate": {
-                        "success": True,
-                        "issue": {
-                            "identifier": "ENG-5",
-                            "title": "New",
-                            "url": "u",
-                        },
-                    }
-                },
-            },
-        )
-        tool = linear_mod.Linear()
-        resp = await tool.run(
-            _msg(
-                json_freeze(
-                    {"operation": "create_issue", "team": "ENG", "title": "New"}
-                )
-            )
-        )
-        assert "ENG-5" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_update_requires_fields(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        tool = linear_mod.Linear()
-        resp = await tool.run(
-            _msg(json_freeze({"operation": "update_issue", "id": "ENG-1"}))
-        )
-        assert resp.descriptor == "text/x-error"
-        assert "no fields" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_update_success(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "UpdateIssue": {
-                    "issueUpdate": {
-                        "success": True,
-                        "issue": {
-                            "identifier": "ENG-1",
-                            "title": "Updated",
-                            "url": "u",
-                            "state": {"name": "Done"},
-                        },
-                    }
-                },
-            },
-        )
-        tool = linear_mod.Linear()
-        resp = await tool.run(
-            _msg(
-                json_freeze(
-                    {"operation": "update_issue", "id": "ENG-1", "title": "Updated"}
-                )
-            )
-        )
-        assert "Updated" in _txt(resp)
-
-    @pytest.mark.anyio
-    async def test_comment_success(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "AddComment": {
-                    "commentCreate": {
-                        "success": True,
-                        "comment": {"id": "c-1"},
-                    }
+            }
+        ),
+    ]
+    with patch("sagent.tools.linear.fetch", side_effect=responses):
+        result = asyncio.run(
+            Linear().run(
+                {
+                    "operation": "create_issue",
+                    "team": "ENG",
+                    "title": "T",
+                    "description": "D",
                 }
-            },
+            ),
         )
-        tool = linear_mod.Linear()
-        resp = await tool.run(
-            _msg(
-                json_freeze(
-                    {"operation": "add_comment", "id": "ENG-1", "body": "Looks fine."}
-                )
-            )
+    assert result.content == "Created ENG-5: T - u"
+
+
+def test_create_issue_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    responses = [
+        _gql_response({"teams": {"nodes": [{"id": "team-id"}]}}),
+        _gql_response({"issueCreate": {"success": False}}),
+    ]
+    with patch("sagent.tools.linear.fetch", side_effect=responses):
+        result = asyncio.run(
+            Linear().run({"operation": "create_issue", "team": "ENG", "title": "T"}),
         )
-        assert "added" in _txt(resp).lower()
+    assert "Create failed" in result.content
+
+
+def test_update_issue_requires_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(Linear().run({"operation": "update_issue"}))
+    assert result.is_error
+
+
+def test_update_issue_needs_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(
+        Linear().run({"operation": "update_issue", "id": "ENG-1"}),
+    )
+    assert result.is_error
+    assert "no fields to update" in result.content
+
+
+def test_update_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response(
+        {
+            "issueUpdate": {
+                "success": True,
+                "issue": {
+                    "identifier": "ENG-1",
+                    "title": "NewT",
+                    "url": "u",
+                    "state": {"name": "Done"},
+                },
+            }
+        }
+    )
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run(
+                {
+                    "operation": "update_issue",
+                    "id": "ENG-1",
+                    "title": "NewT",
+                    "description": "D",
+                    "state_id": "s",
+                }
+            ),
+        )
+    assert "Updated ENG-1: NewT" in result.content
+
+
+def test_update_issue_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response({"issueUpdate": {"success": False}})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "update_issue", "id": "ENG-1", "title": "T"}),
+        )
+    assert result.is_error
+    assert "Update failed" in result.content
+
+
+def test_add_comment_requires_id_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(
+        Linear().run({"operation": "add_comment", "id": "ENG-1"}),
+    )
+    assert result.is_error
+
+
+def test_add_comment_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response(
+        {"commentCreate": {"success": True, "comment": {"id": "c1"}}}
+    )
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "add_comment", "id": "ENG-1", "body": "Hi"}),
+        )
+    assert "Comment added" in result.content
+
+
+def test_add_comment_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = _gql_response({"commentCreate": {"success": False}})
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(
+            Linear().run({"operation": "add_comment", "id": "ENG-1", "body": "Hi"}),
+        )
+    assert result.is_error
+
+
+def test_unknown_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    result = asyncio.run(Linear().run({"operation": "frobnicate"}))
+    assert result.is_error
+    assert "Unknown operation" in result.content
+
+
+def test_http_error_returns_tool_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    err = FetchError(
+        url="https://api.linear.app/graphql",
+        status=500,
+        headers={},
+        body=b"boom",
+    )
+    with patch("sagent.tools.linear.fetch", side_effect=err):
+        result = asyncio.run(Linear().run({"operation": "list_issues"}))
+    assert result.is_error
+    assert "Linear API HTTP 500" in result.content
+
+
+def test_graphql_errors_returns_tool_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = json.dumps({"errors": [{"message": "bad"}]}).encode()
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(Linear().run({"operation": "list_issues"}))
+    assert result.is_error
+    assert "GraphQL errors" in result.content
+
+
+def test_response_missing_data_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "k")
+    payload = json.dumps({}).encode()
+    with patch("sagent.tools.linear.fetch", return_value=payload):
+        result = asyncio.run(Linear().run({"operation": "list_issues"}))
+    assert result.is_error
+    assert "no data" in result.content
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

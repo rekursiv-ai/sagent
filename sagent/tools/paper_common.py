@@ -26,7 +26,7 @@ import json
 import os
 import re
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import MutableJSON
 from sagent.lib.web.fetch import FetchError, fetch
 
@@ -63,8 +63,6 @@ def clamp_limit(limit: int | None, default: int) -> int:
     return max(1, min(int(limit), _LIMIT_MAX))
 
 
-# -- Identifier detection --------------------------------------------------
-
 # DOI shape: 10.<registrant>/<suffix>. Registrant is 4+ digits (ISO 26324).
 # Suffix is opaque; may contain slashes, dots, colons, etc.
 _DOI_RE = re.compile(r"^(10\.\d{4,})/(\S+)$")
@@ -76,11 +74,10 @@ _ARXIV_NEW_RE = re.compile(r"^(\d{4}\.\d{4,5})(v\d+)?$")
 # S2 and arXiv both still honor these for papers pre-April-2007.
 _ARXIV_OLD_RE = re.compile(r"^([a-z-]+(?:\.[A-Z]{2})?)/(\d{7})(v\d+)?$")
 
-
 IdType = Literal["doi", "arxiv"]
 
 
-def normalize_id(raw: str) -> tuple[IdType, str] | Message:
+def normalize_id(raw: str) -> tuple[IdType, str] | ToolResult:
     """Parse a user-supplied identifier into (type, canonical).
 
     Accepts DOIs with or without the ``https://doi.org/`` / ``doi:``
@@ -93,14 +90,14 @@ def normalize_id(raw: str) -> tuple[IdType, str] | Message:
 
     Returns:
       kind: ``"doi"`` or ``"arxiv"``.
-      canonical: Bare identifier with no prefix. Returns a ``Message``
-        with ``text/x-error`` descriptor when the shape matches
-        neither DOI nor arXiv.
+      canonical: Bare identifier with no prefix. Returns a ``ToolResult``
+        with ``is_error=True`` when the shape matches neither DOI nor
+        arXiv.
 
     """
     s = raw.strip()
     if not s:
-        return TextMessage("Empty identifier.", "text/x-error")
+        return ToolResult(call_id="", content="Empty identifier.", is_error=True)
 
     # Strip common URL / scheme wrappers.
     lower = s.lower()
@@ -136,13 +133,14 @@ def normalize_id(raw: str) -> tuple[IdType, str] | Message:
         return "arxiv", s
     if _ARXIV_OLD_RE.match(s):
         return "arxiv", s
-    return TextMessage(
-        (
+    return ToolResult(
+        call_id="",
+        content=(
             f"Unrecognized identifier shape: {raw!r}. "
             "Expected DOI (10.xxxx/yyy) or arXiv id (NNNN.NNNNN, "
             "arXiv:NNNN.NNNNN, or hep-th/NNNNNNN)."
         ),
-        "text/x-error",
+        is_error=True,
     )
 
 
@@ -186,9 +184,6 @@ def papers_cache_dir() -> Path:
     return Path.home() / ".sagent" / "papers"
 
 
-# -- Common paper record ---------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PaperRecord:
     """Backend-agnostic paper record.
@@ -199,21 +194,42 @@ class PaperRecord:
     """
 
     title: str
+    """Paper title."""
+
     authors: tuple[str, ...] = ()
+    """Author display names in publication order."""
+
     year: int | None = None
+    """Publication year."""
+
     venue: str | None = None
+    """Publication venue (journal or conference)."""
+
     doi: str | None = None
+    """DOI identifier (no prefix)."""
+
     arxiv_id: str | None = None
+    """arXiv identifier (no prefix)."""
+
     abstract: str | None = None
+    """Abstract text."""
+
     citation_count: int | None = None
+    """Number of citing papers reported by the backend."""
+
     reference_count: int | None = None
+    """Number of references reported by the backend."""
+
     open_access_pdf: str | None = None
-    # Backends that returned this record, e.g. ``("s2",)`` or
-    # ``("s2", "openalex")``. Emitted as ``sources: s2,openalex`` in the
-    # formatted output when non-empty.
+    """URL of an open-access PDF, when available."""
+
     sources: tuple[str, ...] = field(default_factory=tuple)
-    # Citation-only: S2's isInfluential flag. ``None`` when unknown.
+    """Backends that returned this record (e.g. ``("s2",)`` or
+    ``("s2", "openalex")``). Emitted as ``sources: s2,openalex`` in the
+    formatted output when non-empty."""
+
     is_influential: bool | None = None
+    """Citation-only: S2's ``isInfluential`` flag (``None`` when unknown)."""
 
 
 def _format_authors(authors: tuple[str, ...], limit: int = 3) -> str:
@@ -338,9 +354,6 @@ def format_block(
     return "\n".join(lines)
 
 
-# -- Author record --------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AuthorRecord:
     """Backend-agnostic author record.
@@ -351,13 +364,28 @@ class AuthorRecord:
     """
 
     author_id: str
+    """Semantic Scholar opaque integer id, as a string."""
+
     name: str
+    """Display name."""
+
     aliases: tuple[str, ...] = ()
+    """Alternate name spellings reported by the backend."""
+
     affiliations: tuple[str, ...] = ()
+    """Institutional affiliations in backend-provided order."""
+
     homepage: str | None = None
+    """Homepage URL, when available."""
+
     h_index: int | None = None
+    """h-index reported by the backend."""
+
     citation_count: int | None = None
+    """Total citations across the author's published work."""
+
     paper_count: int | None = None
+    """Total published papers attributed to the author."""
 
 
 def format_author_line(rec: AuthorRecord) -> str:
@@ -421,9 +449,6 @@ def format_author_block(rec: AuthorRecord) -> str:
     return "\n".join(lines)
 
 
-# -- OpenAlex abstract reconstruction -------------------------------------
-
-
 def openalex_reconstruct_abstract(
     inverted: dict[str, list[int]] | None,
 ) -> str | None:
@@ -450,9 +475,6 @@ def openalex_reconstruct_abstract(
     return " ".join(positions[i] for i in sorted(positions))
 
 
-# -- Truncation notice -----------------------------------------------------
-
-
 def truncation_notice(shown: int, total: int) -> str:
     """Build a ``... showing N of M`` suffix for paginated output.
 
@@ -471,13 +493,12 @@ def truncation_notice(shown: int, total: int) -> str:
     return ""
 
 
-# -- Semantic Scholar Graph API client ------------------------------------
-
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_TIMEOUT = 60.0
 
 
 def _s2_headers() -> dict[str, str]:
+    """Build S2 request headers, injecting ``x-api-key`` when present in env."""
     headers: dict[str, str] = {"Accept": "application/json"}
     key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
     if key:
@@ -485,7 +506,7 @@ def _s2_headers() -> dict[str, str]:
     return headers
 
 
-async def s2_get(path: str, params: dict[str, str | int]) -> MutableJSON | Message:
+async def s2_get(path: str, params: dict[str, str | int]) -> MutableJSON | ToolResult:
     """GET an S2 Graph API path, injecting API key and normalizing errors.
 
     Args:
@@ -510,16 +531,20 @@ async def s2_get(path: str, params: dict[str, str | int]) -> MutableJSON | Messa
         )
     except FetchError as e:
         if e.status == 404:
-            return TextMessage(f"Not found: {path}", "text/x-error")
+            return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)
         if e.status == 429:
-            return TextMessage(
-                "Semantic Scholar rate limit hit. Retry shortly.",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content="Semantic Scholar rate limit hit. Retry shortly.",
+                is_error=True,
             )
-        return TextMessage(
-            f"Semantic Scholar HTTP {e.status}: "
-            f"{e.body[:200].decode(errors='replace')}",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=(
+                f"Semantic Scholar HTTP {e.status}: "
+                f"{e.body[:200].decode(errors='replace')}"
+            ),
+            is_error=True,
         )
     return cast(MutableJSON, json.loads(raw))
 

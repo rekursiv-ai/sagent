@@ -120,6 +120,7 @@ class LlamaCpp(OpenAICompat):
         model_path: str = "",
         base_url: str | None = None,
     ) -> Self:
+        """Construct provider, defaulting unset values from environment variables."""
         return cls(
             api_key=api_key or os.environ.get(cls.ENV_VAR, "local") or "local",
             base_url=base_url,
@@ -168,6 +169,7 @@ class LlamaCpp(OpenAICompat):
             proc.wait(timeout=10)
 
     def _ensure_started(self) -> None:
+        """Launch llama-server if not already running and wait for readiness."""
         if self._started:
             proc = self._process
             if proc is None or proc.poll() is None:
@@ -200,6 +202,7 @@ class LlamaCpp(OpenAICompat):
         self._started = True
 
     def _argv(self, port: int) -> list[str]:
+        """Build the llama-server command-line argv for the configured model."""
         server = self._server_bin or shutil.which("llama-server") or _docker_server()
         if server is None:
             raise RuntimeError("llama-server not found; set LLAMA_CPP_SERVER.")
@@ -241,6 +244,7 @@ class LlamaCpp(OpenAICompat):
         return argv
 
     def _wait_ready(self) -> None:
+        """Poll the server's /models endpoint until it responds or timeout fires."""
         deadline = time.monotonic() + self._startup_timeout_sec
         while time.monotonic() < deadline:
             self._drain_log()
@@ -256,6 +260,7 @@ class LlamaCpp(OpenAICompat):
         )
 
     def _drain_log(self) -> None:
+        """Drain queued server log lines into the bounded tail buffer."""
         while True:
             try:
                 line = self._log_queue.get_nowait()
@@ -267,11 +272,13 @@ class LlamaCpp(OpenAICompat):
 
 
 def _start_log_reader(proc: subprocess.Popen[str], out: Queue[str]) -> None:
+    """Spawn a daemon thread that copies the process stdout into ``out``."""
     stream = proc.stdout
     if stream is None:
         return
 
     def read_lines() -> None:
+        """Forward each stripped line from the subprocess stream to ``out``."""
         for line in stream:
             out.put(line.rstrip())
 
@@ -279,21 +286,25 @@ def _start_log_reader(proc: subprocess.Popen[str], out: Queue[str]) -> None:
 
 
 def _looks_like_path(value: str) -> bool:
+    """True if ``value`` looks like a filesystem path or a GGUF model file."""
     return value.startswith(("/", "./", "../", "~/")) or value.endswith(".gguf")
 
 
 def _docker_server() -> str | None:
+    """Return Docker Desktop's bundled llama-server path if present."""
     path = Path.home() / ".docker/bin/inference/llama-server"
     return str(path) if path.exists() else None
 
 
 def _free_port() -> int:
+    """Return an OS-assigned free localhost TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return cast(int, sock.getsockname()[1])
 
 
 def _http_ok(url: str) -> bool:
+    """True if a GET on ``url`` returns a 2xx response within 200ms."""
     try:
         with urllib.request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
             return 200 <= response.status < 300
@@ -302,6 +313,7 @@ def _http_ok(url: str) -> bool:
 
 
 def _startup_error(prefix: str, lines: Sequence[str]) -> str:
+    """Format a startup-failure message with the last 20 log lines appended."""
     if not lines:
         return prefix
     tail = "\n".join(lines[-20:])

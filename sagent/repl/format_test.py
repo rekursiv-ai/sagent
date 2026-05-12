@@ -1,9 +1,14 @@
-"""Tests for repl.format."""
+"""Tests for ``repl.format``: terminal-formatting helpers."""
 
 from __future__ import annotations
 
-from io import StringIO
-from unittest.mock import MagicMock, patch
+from typing import cast, override
+
+import io
+
+from rich.console import Console
+
+import pytest
 
 from sagent.repl.format import (
     format_count,
@@ -13,102 +18,147 @@ from sagent.repl.format import (
 )
 
 
-class TestPrintUserBar:
-    def test_narrow_terminal_falls_back(self) -> None:
-        out = MagicMock()
-        out.width = 2
-        print_user_bar(out, "hello")
-        out.print.assert_called()
+class _TtyBuf(io.StringIO):
+    """``StringIO`` that reports itself as a TTY for OSC-title tests."""
 
-    def test_non_integer_width_treated_as_zero(self) -> None:
-        out = MagicMock()
-        out.width = "not-a-number"
-        print_user_bar(out, "hi")
-        out.print.assert_called()
+    @override
+    def isatty(self) -> bool:
+        return True
 
 
-class TestSetTerminalTitle:
-    def test_writes_osc_on_tty(self) -> None:
-        fake = StringIO()
-        fake.isatty = lambda: True  # ty: ignore[invalid-assignment] -- test mock
-        with patch("sagent.repl.format.sys.stderr", fake):
-            set_terminal_title("hello")
-        assert fake.getvalue() == "\x1b]0;hello\x07"
-
-    def test_noop_when_not_tty(self) -> None:
-        fake = StringIO()
-        fake.isatty = lambda: False  # ty: ignore[invalid-assignment] -- test mock
-        with patch("sagent.repl.format.sys.stderr", fake):
-            set_terminal_title("hello")
-        assert fake.getvalue() == ""
-
-    def test_collapses_newlines(self) -> None:
-        fake = StringIO()
-        fake.isatty = lambda: True  # ty: ignore[invalid-assignment] -- test mock
-        with patch("sagent.repl.format.sys.stderr", fake):
-            set_terminal_title("line one\nline two")
-        assert "\n" not in fake.getvalue()
-        assert "line one line two" in fake.getvalue()
-
-    def test_truncates_long(self) -> None:
-        fake = StringIO()
-        fake.isatty = lambda: True  # ty: ignore[invalid-assignment] -- test mock
-        with patch("sagent.repl.format.sys.stderr", fake):
-            set_terminal_title("x" * 500)
-        out = fake.getvalue()
-        assert out.endswith("\x07")
-        assert "…" in out
-        payload = out[len("\x1b]0;") : -len("\x07")]
-        assert len(payload) == 80
+def _capture_console(width: int = 80) -> tuple[Console, io.StringIO]:
+    buf = io.StringIO()
+    return (
+        Console(
+            file=buf,
+            width=width,
+            force_terminal=False,
+            color_system=None,
+            highlight=False,
+        ),
+        buf,
+    )
 
 
-class TestFormatElapsed:
-    def test_under_60s_integer(self) -> None:
-        assert format_elapsed(0.3) == "0s"
-        assert format_elapsed(2.5) == "2s"
-        assert format_elapsed(12.0) == "12s"
-        assert format_elapsed(59.9) == "59s"
-
-    def test_rolls_at_60s(self) -> None:
-        assert format_elapsed(60.0) == "1m 0s"
-        assert format_elapsed(91.0) == "1m 31s"
-        assert format_elapsed(3599.0) == "59m 59s"
-
-    def test_rolls_at_60min(self) -> None:
-        assert format_elapsed(3600.0) == "1h 0m 0s"
-        assert format_elapsed(3600.0 + 23 * 60.0 + 7) == "1h 23m 7s"
-        assert format_elapsed(2 * 3600.0 + 17 * 60.0 + 42) == "2h 17m 42s"
-
-    def test_rolls_at_24h(self) -> None:
-        assert format_elapsed(86_400.0) == "1d 0h 0m 0s"
-        assert format_elapsed(2 * 86_400 + 3 * 3600 + 5 * 60 + 9) == "2d 3h 5m 9s"
+def test_print_user_bar_one_line() -> None:
+    con, buf = _capture_console()
+    print_user_bar(con, "hello")
+    out = buf.getvalue()
+    assert "> hello" in out
 
 
-class TestFormatCount:
-    def test_sub_10k_verbatim(self) -> None:
-        assert format_count(0) == "0"
-        assert format_count(7) == "7"
-        assert format_count(412) == "412"
-        assert format_count(9999) == "9999"
+def test_print_user_bar_multi_line() -> None:
+    con, buf = _capture_console()
+    print_user_bar(con, "line 1\nline 2")
+    out = buf.getvalue()
+    assert "> line 1" in out
+    assert "  line 2" in out
 
-    def test_thousands(self) -> None:
-        assert format_count(10_000) == "10K"
-        assert format_count(12_000) == "12K"
-        assert format_count(412_000) == "412K"
-        assert format_count(999_499) == "999K"
 
-    def test_no_1000k_artifact_at_1m_boundary(self) -> None:
-        """Regression: banker's-rounded ``f"{n/1000:.0f}K"`` produces
-        ``"1000K"`` for ``n in [999_500, 999_999]``. The threshold must
-        step to the M scale before that band.
-        """
-        assert format_count(999_500) == "1.0M"
-        assert format_count(999_999) == "1.0M"
+def test_print_user_bar_narrow_terminal_path() -> None:
+    # The ``width <= 2`` path uses a single ``console.print(Text(...))``.
+    # Verify by mocking a console with an invalid width attribute -- the
+    # ``int(out.width)`` cast raises and the function falls into the
+    # ``width = 0`` early-exit branch.
+    captured: list[str] = []
 
-    def test_millions(self) -> None:
-        assert format_count(1_000_000) == "1.0M"
-        assert format_count(1_800_000) == "1.8M"
-        assert format_count(241_000_000) == "241.0M"
+    class Stub:
+        width: object = "not-an-int"
+
+        def print(
+            self,
+            text: object,
+            style: str = "",
+        ) -> None:
+            del style
+            captured.append(str(text))
+
+    print_user_bar(cast("Console", Stub()), "hi")
+    assert any("> hi" in line for line in captured)
+
+
+def test_print_user_bar_wraps_long_lines() -> None:
+    con, buf = _capture_console(width=10)
+    print_user_bar(con, "abcdefghijklmnop")
+    out = buf.getvalue()
+    # Output split across multiple lines.
+    assert out.count("\n") >= 2
+
+
+def test_set_terminal_title_noop_when_not_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Capture stderr writes; isatty returns False by default for StringIO.
+    sio = io.StringIO()
+    monkeypatch.setattr("sys.stderr", sio)
+    set_terminal_title("title")
+    assert sio.getvalue() == ""
+
+
+def test_set_terminal_title_writes_on_tty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sio = _TtyBuf()
+    monkeypatch.setattr("sys.stderr", sio)
+    set_terminal_title("hello world")
+    assert "\x1b]0;hello world\x07" in sio.getvalue()
+
+
+def test_set_terminal_title_truncates_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sio = _TtyBuf()
+    monkeypatch.setattr("sys.stderr", sio)
+    set_terminal_title("x" * 200, max_len=20)
+    written = sio.getvalue()
+    # The OSC-0 escape contains a truncated 20-char title.
+    assert "\x1b]0;" in written
+    # 19 x's plus ellipsis = 20 chars.
+    assert "xxxxxxxxxxxxxxxxxxx…" in written
+
+
+def test_set_terminal_title_replaces_newlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sio = _TtyBuf()
+    monkeypatch.setattr("sys.stderr", sio)
+    set_terminal_title("first\nsecond")
+    assert "\nfirst" not in sio.getvalue()
+    assert "first second" in sio.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0.0, "0s"),
+        (0.4, "0s"),
+        (12.0, "12s"),
+        (83.0, "1m 23s"),
+        (3_600.0, "1h 0m 0s"),
+        (3_904.0, "1h 5m 4s"),
+        (86_400.0, "1d 0h 0m 0s"),
+        (90_125.0, "1d 1h 2m 5s"),
+    ],
+)
+def test_format_elapsed(seconds: float, expected: str) -> None:
+    assert format_elapsed(seconds) == expected
+
+
+@pytest.mark.parametrize(
+    ("n", "expected"),
+    [
+        (0, "0"),
+        (412, "412"),
+        (9_999, "9999"),
+        (10_000, "10K"),
+        (12_345, "12K"),
+        (999_499, "999K"),
+        (999_500, "1.0M"),
+        (1_800_000, "1.8M"),
+    ],
+)
+def test_format_count(n: int, expected: str) -> None:
+    assert format_count(n) == expected
 
 
 if __name__ == "__main__":

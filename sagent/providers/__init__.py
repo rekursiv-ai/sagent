@@ -44,7 +44,6 @@ ProviderName = Literal[
 
 PROVIDER_NAMES: tuple[ProviderName, ...] = get_args(ProviderName)
 
-
 __all__ = [
     "PROVIDER_NAMES",
     "Anthropic",

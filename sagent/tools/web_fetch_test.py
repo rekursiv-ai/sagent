@@ -1,581 +1,534 @@
-"""Tests for WebFetch tool."""
+"""Tests for ``tools.web_fetch``: URL fetcher with SSRF guard + cache."""
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager
-from unittest.mock import patch
+from types import ModuleType
+from typing import cast
+from unittest.mock import MagicMock, patch
 
-import importlib
-import json
+import asyncio
 import socket
+import sys
 
-import pytest
 
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, JSONValue, json_freeze
+# Install a stub for ``trafilatura`` BEFORE importing the production module
+# so the lazy import never pays the real package's import cost (~150ms).
+# The tests patch ``...trafilatura.extract`` explicitly when needed.
+if "trafilatura" not in sys.modules:
+    _stub = ModuleType("trafilatura")
+    # Set extract via __dict__ to avoid basedpyright's "unknown attr" complaint
+    # about ModuleType.
+    _stub.__dict__["extract"] = MagicMock(return_value="")
+    sys.modules["trafilatura"] = _stub
+
+from sagent.agent.runtime import ToolResult
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.lib.bash import parse_bash
-from sagent.tools.web_fetch import WebFetch
+from sagent.tools.web_fetch import (
+    WebFetch,
+    _is_reddit_url,
+    _match_http_fetch,
+    _url_is_safe,
+)
 
-import sagent.tools.web_fetch as wfm
+
+def test_webfetch_metadata() -> None:
+    t = WebFetch()
+    assert t.name == "WebFetch"
+    assert t.tool_id == "application/x-tool-webfetch"
+    assert t.supports_microcompaction is True
 
 
-fetch_mod = importlib.import_module("sagent.lib.web.fetch")
+def test_summary_short_url() -> None:
+    t = WebFetch()
+    assert t.summary({"url": "https://example.com"}) == "WebFetch https://example.com"
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-webfetch"),),
-        "multipart/x-tool-call",
+def test_summary_long_url_truncates() -> None:
+    t = WebFetch()
+    long_url = "https://example.com/" + ("x" * 100)
+    out = t.summary({"url": long_url})
+    assert out.endswith("...")
+    assert len(out) <= 100
+
+
+def test_summary_result_none() -> None:
+    assert WebFetch().summary_result(ToolResult(call_id="", content="x")) is None
+
+
+def test_prompt_empty() -> None:
+    assert WebFetch().prompt() == ""
+
+
+def test_url_is_safe_bad_scheme() -> None:
+    err = _url_is_safe("ftp://example.com")
+    assert err is not None
+    assert "Unsupported scheme" in err
+
+
+def test_url_is_safe_no_host() -> None:
+    err = _url_is_safe("https:///abc")
+    assert err is not None
+    assert "no host" in err
+
+
+def test_url_is_safe_dns_failure() -> None:
+    with patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")):
+        err = _url_is_safe("https://does-not-exist.invalid")
+    assert err is not None
+    assert "DNS" in err
+
+
+def test_url_is_safe_localhost_rejected() -> None:
+    with patch(
+        "socket.getaddrinfo",
+        return_value=[(0, 0, 0, "", ("127.0.0.1", 0))],
+    ):
+        err = _url_is_safe("https://localhost")
+    assert err is not None
+    assert "non-public" in err
+
+
+def test_url_is_safe_public_passes() -> None:
+    with patch(
+        "socket.getaddrinfo",
+        return_value=[(0, 0, 0, "", ("8.8.8.8", 0))],
+    ):
+        err = _url_is_safe("https://example.com")
+    assert err is None
+
+
+def test_is_reddit_url_canonical() -> None:
+    assert _is_reddit_url("https://reddit.com/r/x") is True
+
+
+def test_is_reddit_url_subdomain() -> None:
+    assert _is_reddit_url("https://www.reddit.com/r/x") is True
+    assert _is_reddit_url("https://old.reddit.com/r/x") is True
+
+
+def test_is_reddit_url_non_reddit() -> None:
+    assert _is_reddit_url("https://example.com") is False
+
+
+def test_match_http_fetch_simple_curl() -> None:
+    assert _match_http_fetch("curl", ("https://example.com",)) is not None
+
+
+def test_match_http_fetch_simple_wget() -> None:
+    assert _match_http_fetch("wget", ("https://example.com",)) is not None
+
+
+def test_match_http_fetch_no_url_returns_none() -> None:
+    assert _match_http_fetch("curl", ("-v",)) is None
+
+
+def test_match_http_fetch_two_urls_returns_none() -> None:
+    assert _match_http_fetch("curl", ("https://a", "https://b")) is None
+
+
+def test_match_http_fetch_output_flag_bails() -> None:
+    assert _match_http_fetch("curl", ("-o", "f.txt", "https://x")) is None
+
+
+def test_bash_match_simple_curl() -> None:
+    trees = parse_bash("curl https://example.com")
+    assert trees is not None
+    assert WebFetch().bash_match(trees) is not None
+
+
+def test_bash_match_with_cd_prefix() -> None:
+    trees = parse_bash("cd /tmp && curl https://example.com")
+    assert trees is not None
+    assert WebFetch().bash_match(trees) is not None
+
+
+def test_bash_match_with_env_prefix_rejected() -> None:
+    trees = parse_bash("FOO=1 curl https://example.com")
+    assert trees is not None
+    # env_prefix kills the match.
+    assert WebFetch().bash_match(trees) is None
+
+
+def test_bash_match_non_curl_command_rejected() -> None:
+    trees = parse_bash("ls -la")
+    assert trees is not None
+    assert WebFetch().bash_match(trees) is None
+
+
+def test_bash_match_pipeline_rejected() -> None:
+    trees = parse_bash("curl https://x | grep y")
+    assert trees is not None
+    # Unwrap fails; bash_match returns None.
+    assert WebFetch().bash_match(trees) is None
+
+
+def test_run_rejects_bad_method() -> None:
+    result = asyncio.run(
+        WebFetch().run({"url": "https://x", "method": "PUT"}),
+    )
+    assert result.is_error
+    assert "Unsupported method" in result.content
+
+
+def test_run_post_rejects_both_json_and_form() -> None:
+    result = asyncio.run(
+        WebFetch().run(
+            {
+                "url": "https://x",
+                "method": "POST",
+                "json": {"a": 1},
+                "form": {"b": "2"},
+            }
+        ),
+    )
+    assert result.is_error
+    assert "mutually exclusive" in result.content
+
+
+def test_run_fetch_error_returns_tool_result_error() -> None:
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=ValueError("bad url"),
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://x"}))
+    assert result.is_error
+    assert "Fetch failed" in result.content
+
+
+def test_run_json_response_skips_extraction() -> None:
+    """JSON-looking content is returned as-is (no trafilatura involvement)."""
+    body = b'{"hello": "world"}'
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, bool]:
+        del raw_url, method, json_body, form_body
+        return body, False
+
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://api/json"}))
+    assert '"hello"' in result.content
+
+
+def test_run_cache_hit_skips_second_fetch() -> None:
+    html = b"<html><body>cached body</body></html>"
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, bool]:
+        del raw_url, method, json_body, form_body
+        return html, False
+
+    tool = WebFetch()
+    with (
+        patch(
+            "sagent.tools.web_fetch._fetch_body",
+            side_effect=fake_fetch_body,
+        ) as mock_body,
+        patch(
+            "sagent.tools.web_fetch.trafilatura.extract",
+            return_value="extracted",
+        ),
+    ):
+        _ = asyncio.run(tool.run({"url": "https://example.com"}))
+        _ = asyncio.run(tool.run({"url": "https://example.com"}))
+    assert mock_body.call_count == 1
+
+
+def test_run_post_json_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, bool]:
+        captured["method"] = method
+        captured["json_body"] = json_body
+        captured["form_body"] = form_body
+        del raw_url
+        return b'{"ok": 1}', False
+
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        result = asyncio.run(
+            WebFetch().run(
+                {
+                    "url": "https://api/x",
+                    "method": "POST",
+                    "json": {"q": "test"},
+                }
+            ),
+        )
+    assert captured["method"] == "POST"
+    assert captured["json_body"] == {"q": "test"}
+    assert "ok" in result.content
+
+
+def test_run_post_form_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, bool]:
+        captured["form_body"] = form_body
+        del raw_url, method, json_body
+        return b"ok", False
+
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        _ = asyncio.run(
+            WebFetch().run(
+                {
+                    "url": "https://api/x",
+                    "method": "POST",
+                    "form": {"a": "b"},
+                }
+            ),
+        )
+    form_body = captured["form_body"]
+    assert isinstance(form_body, dict)
+    body = cast(dict[str, str], form_body)
+    assert body["a"] == "b"
+
+
+def test_run_handles_reddit_thread_format() -> None:
+    """Reddit thread JSON triggers _format_reddit_json."""
+    json_bytes = (
+        b'[{"kind":"Listing","data":{"children":[{"data":{"title":"T","author":"u",'
+        b'"score":10,"selftext":"body"}}]}},'
+        b'{"kind":"Listing","data":{"children":['
+        b'{"kind":"t1","data":{"author":"u2","score":5,"body":"hi"}}'
+        b"]}}]"
     )
 
-
-class _FetchRouter:
-    """Mock fetch() that returns bytes by URL pattern."""
-
-    def __init__(
-        self,
-        responses: dict[str, bytes | Exception] | None = None,
+    async def fake_fetch_body(
+        raw_url: str,
         *,
-        default: bytes | None = None,
-    ) -> None:
-        self._responses = responses or {}
-        self._default = default
-        self.calls: list[tuple[str, str, JSONValue, dict[str, str] | None]] = []
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, bool]:
+        del raw_url, method, json_body, form_body
+        return json_bytes, True
 
-    def __call__(
-        self,
-        url: str,
-        *,
-        method: str = "GET",
-        json_body: JSONValue = None,
-        form_body: dict[str, str] | None = None,
-    ) -> bytes:
-        self.calls.append((url, method, json_body, form_body))
-        for pattern, val in self._responses.items():
-            if pattern in url:
-                if isinstance(val, Exception):
-                    raise val
-                return val
-        if self._default is not None:
-            return self._default
-        raise FetchError(url, 404, {}, b"not found")
-
-
-@contextmanager
-def _patch_fetch(
-    responses: dict[str, bytes | Exception] | None = None,
-    *,
-    default: bytes | None = None,
-) -> Generator[_FetchRouter]:
-    router = _FetchRouter(responses, default=default)
-    with patch.object(wfm, "_safe_fetch", side_effect=router):
-        yield router
-
-
-class TestWebfetch:
-    @pytest.fixture(autouse=True)
-    def _reset(self) -> Iterator[None]:
-        with patch.object(wfm, "_url_is_safe", return_value=None):
-            yield
-
-    @pytest.fixture
-    def webfetch(self) -> WebFetch:
-        return WebFetch()
-
-    @pytest.mark.anyio
-    async def test_html_extraction(self, webfetch: WebFetch) -> None:
-        html = b"""<html><body>
-        <nav>Menu</nav>
-        <article><p>Main content here.</p></article>
-        <footer>Footer</footer>
-        </body></html>"""
-        with _patch_fetch(default=html):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com"}))
-            )
-        assert isinstance(result, TextMessage)
-        assert len(result.content) > 0
-
-    @pytest.mark.anyio
-    async def test_plain_text_passthrough(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b"Plain text content"):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com/file.txt"}))
-            )
-        assert isinstance(result, TextMessage)
-        assert "Plain text content" in result.content
-
-    @pytest.mark.anyio
-    async def test_empty_response(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b""):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com/empty"}))
-            )
-        assert isinstance(result, TextMessage)
-
-    @pytest.mark.anyio
-    async def test_http_error(self, webfetch: WebFetch) -> None:
-        err = FetchError("https://example.com/404", 404, {}, b"not found")
-        with _patch_fetch({"example.com": err}):
-            r = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com/404"}))
-            )
-        assert r.descriptor == "text/x-error"
-        assert "404" in str(r.content)
-
-    @pytest.mark.anyio
-    async def test_html_fallback_when_extraction_empty(
-        self, webfetch: WebFetch
-    ) -> None:
-        html = b"<html><body><div>Raw content</div></body></html>"
-        with (
-            _patch_fetch(default=html),
-            patch("trafilatura.extract", return_value=None),
-        ):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com"}))
-            )
-        assert isinstance(result, TextMessage)
-        assert "Raw content" in result.content
-
-
-class TestRedditJson:
-    @pytest.fixture(autouse=True)
-    def _reset(self) -> Iterator[None]:
-        with patch.object(wfm, "_url_is_safe", return_value=None):
-            yield
-
-    @pytest.fixture
-    def webfetch(self) -> WebFetch:
-        return WebFetch()
-
-    @pytest.mark.anyio
-    async def test_reddit_thread_uses_json_endpoint(self, webfetch: WebFetch) -> None:
-        reddit_json = [
-            {
-                "kind": "Listing",
-                "data": {
-                    "children": [
-                        {
-                            "kind": "t3",
-                            "data": {
-                                "title": "Test Post",
-                                "selftext": "Post body here.",
-                                "author": "testuser",
-                                "score": 42,
-                            },
-                        }
-                    ]
-                },
-            },
-            {
-                "kind": "Listing",
-                "data": {
-                    "children": [
-                        {
-                            "kind": "t1",
-                            "data": {
-                                "author": "commenter1",
-                                "score": 10,
-                                "body": "Great post!",
-                                "replies": "",
-                            },
-                        }
-                    ]
-                },
-            },
-        ]
-        with _patch_fetch(default=json.dumps(reddit_json).encode()):
-            result = await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://www.reddit.com/r/Masks4All/comments/1jibbc7/which_one_to_use_in_a_riot/"
-                        }
-                    )
-                )
-            )
-        assert isinstance(result, TextMessage)
-        assert "Test Post" in result.content
-        assert "Post body here" in result.content
-        assert "commenter1" in result.content
-        assert "Great post!" in result.content
-
-    @pytest.mark.anyio
-    async def test_non_thread_reddit_url_uses_canonical_first(
-        self, webfetch: WebFetch
-    ) -> None:
-        html = b"<html><body><article><p>Rules text.</p></article></body></html>"
-        with _patch_fetch(default=html) as router:
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://www.reddit.com/r/LocalLLaMA/about/"}))
-            )
-        assert router.calls[0][0] == "https://www.reddit.com/r/LocalLLaMA/about/"
-        assert len(router.calls) == 1
-        assert isinstance(result, TextMessage)
-        assert "Rules text" in result.content
-
-    @pytest.mark.anyio
-    async def test_reddit_verification_falls_back_to_old_reddit(
-        self, webfetch: WebFetch
-    ) -> None:
-        verification = b"""
-        <html><title>Reddit - Please wait for verification</title>
-        <input type="hidden" name="js_challenge" value="1"/>
-        </html>
-        """
-        html = b"<html><body><article><p>Old Reddit text.</p></article></body></html>"
-        with _patch_fetch(
-            {
-                "www.reddit.com/r/LocalLLaMA/about/": verification,
-                "old.reddit.com/r/LocalLLaMA/about/": html,
-            }
-        ) as router:
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://www.reddit.com/r/LocalLLaMA/about/"}))
-            )
-        assert router.calls[0][0] == "https://www.reddit.com/r/LocalLLaMA/about/"
-        assert router.calls[1][0] == "https://old.reddit.com/r/LocalLLaMA/about/"
-        assert isinstance(result, TextMessage)
-        assert "Old Reddit text" in result.content
-
-    @pytest.mark.anyio
-    async def test_reddit_error_verification_falls_back_to_old_reddit(
-        self, webfetch: WebFetch
-    ) -> None:
-        verification = b"""
-        <html><title>Reddit - Please wait for verification</title>
-        <input type="hidden" name="js_challenge" value="1"/>
-        </html>
-        """
-        html = b"<html><body><article><p>Old Reddit text.</p></article></body></html>"
-        err = FetchError(
-            "https://www.reddit.com/r/LocalLLaMA/about/", 403, {}, verification
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        result = asyncio.run(
+            WebFetch().run({"url": "https://reddit.com/r/foo/comments/abc"}),
         )
-        with _patch_fetch(
-            {
-                "www.reddit.com/r/LocalLLaMA/about/": err,
-                "old.reddit.com/r/LocalLLaMA/about/": html,
-            }
-        ) as router:
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://www.reddit.com/r/LocalLLaMA/about/"}))
-            )
-        assert router.calls[0][0] == "https://www.reddit.com/r/LocalLLaMA/about/"
-        assert router.calls[1][0] == "https://old.reddit.com/r/LocalLLaMA/about/"
-        assert isinstance(result, TextMessage)
-        assert "Old Reddit text" in result.content
-
-    @pytest.mark.anyio
-    async def test_reddit_verification_fallback_failure_mentions_both(
-        self, webfetch: WebFetch
-    ) -> None:
-        verification = b"""
-        <html><title>Reddit - Please wait for verification</title>
-        <input type="hidden" name="js_challenge" value="1"/>
-        </html>
-        """
-        err = FetchError("https://old.reddit.com/r/LocalLLaMA/about/", 404, {}, b"")
-        with _patch_fetch(
-            {
-                "www.reddit.com/r/LocalLLaMA/about/": verification,
-                "old.reddit.com/r/LocalLLaMA/about/": err,
-            }
-        ):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://www.reddit.com/r/LocalLLaMA/about/"}))
-            )
-        assert result.descriptor == "text/x-error"
-        assert isinstance(result, TextMessage)
-        assert "JavaScript verification" in result.content
-        assert "old Reddit fallback failed" in result.content
-
-    @pytest.mark.anyio
-    async def test_non_reddit_url_unchanged(self, webfetch: WebFetch) -> None:
-        html = b"<html><body><article><p>Article text.</p></article></body></html>"
-        with _patch_fetch(default=html):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://example.com/article"}))
-            )
-        assert isinstance(result, TextMessage)
-        assert len(result.content) > 0
+    assert "# T" in result.content
+    assert "u/u2" in result.content
 
 
-class TestSSRFGuard:
-    def test_rejects_unsupported_scheme(self) -> None:
-        assert wfm._url_is_safe("file:///etc/passwd") is not None
-        assert wfm._url_is_safe("ftp://host/x") is not None
+def test_run_fetch_error_oserror() -> None:
+    err = FetchError(url="https://x", status=500, headers={}, body=b"boom")
+    with patch("sagent.tools.web_fetch._fetch_body", side_effect=err):
+        result = asyncio.run(WebFetch().run({"url": "https://x"}))
+    assert result.is_error
 
-    def test_rejects_missing_host(self) -> None:
-        assert wfm._url_is_safe("http:///path") is not None
 
-    def test_rejects_loopback(self) -> None:
-        err = wfm._url_is_safe("http://127.0.0.1:8080/")
-        assert err is not None
-        assert "non-public" in err
+def test_fetch_body_non_reddit_path() -> None:
+    """Non-Reddit URLs take the simple ``_safe_fetch`` path."""
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
 
-    def test_rejects_cloud_metadata(self) -> None:
-        err = wfm._url_is_safe("http://169.254.169.254/latest/meta-data/")
-        assert err is not None
-        assert "non-public" in err
-
-    def test_rejects_rfc1918(self) -> None:
-        assert wfm._url_is_safe("http://192.168.1.1/") is not None
-        assert wfm._url_is_safe("http://10.0.0.1/") is not None
-
-    @pytest.mark.anyio
-    async def test_blocks_fetch_to_private(self) -> None:
-        result = await WebFetch().run(_msg(json_freeze({"url": "http://127.0.0.1:1/"})))
-        assert result.descriptor == "text/x-error"
-        assert isinstance(result, TextMessage)
-        assert "non-public" in result.content
-
-    @pytest.mark.anyio
-    async def test_ssrf_callback_blocks_redirect(self) -> None:
-        """_check_ssrf raises on private IPs, which on_redirect propagates."""
-        with pytest.raises(ValueError, match="non-public"):
-            wfm._check_ssrf("http://127.0.0.1:1/")
-
-    def test_safe_fetch_connects_to_validated_ip(self) -> None:
-        class FakeConnection:
-            def __init__(self, host: str, timeout: float) -> None:
-                self.host = host
-                self.timeout = timeout
-
-        def fake_http_connection(host: str, timeout: float) -> FakeConnection:
-            return FakeConnection(host, timeout)
-
-        with (
-            patch.object(
-                socket,
-                "getaddrinfo",
-                return_value=[(0, 0, 0, "", ("93.184.216.34", 0))],
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        return_value=b"hello",
+    ):
+        body, is_reddit = asyncio.run(
+            _fetch_body(
+                "https://example.com",
+                method="GET",
+                json_body=None,
+                form_body=None,
             ),
-            patch.object(
-                fetch_mod.http.client,
-                "HTTPConnection",
-                side_effect=fake_http_connection,
-            ),
-        ):
-            conn = fetch_mod._open_connection(
-                "http",
-                "example.com",
-                timeout_sec=15,
-                resolved_ip="93.184.216.34",
-            )
-
-        assert isinstance(conn, FakeConnection)
-        assert conn.host == "93.184.216.34"
-
-
-class TestPostSupport:
-    @pytest.fixture(autouse=True)
-    def _reset(self) -> Iterator[None]:
-        with patch.object(wfm, "_url_is_safe", return_value=None):
-            yield
-
-    @pytest.fixture
-    def webfetch(self) -> WebFetch:
-        return WebFetch()
-
-    @pytest.mark.anyio
-    async def test_post_with_json_body(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b'{"ok":true}') as router:
-            result = await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://api.example.com/search",
-                            "method": "POST",
-                            "json": {"q": "openai", "limit": 10},
-                        }
-                    )
-                )
-            )
-        assert isinstance(result, TextMessage)
-        assert '"ok":true' in result.content
-        assert len(router.calls) == 1
-        url, method, json_body, form_body = router.calls[0]
-        assert url == "https://api.example.com/search"
-        assert method == "POST"
-        assert json_body == {"q": "openai", "limit": 10}
-        assert form_body is None
-
-    @pytest.mark.anyio
-    async def test_post_with_form_body(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b"submitted") as router:
-            await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://example.com/submit",
-                            "method": "POST",
-                            "form": {"name": "alice", "x": "1"},
-                        }
-                    )
-                )
-            )
-        _, method, json_body, form_body = router.calls[0]
-        assert method == "POST"
-        assert json_body is None
-        assert form_body == {"name": "alice", "x": "1"}
-
-    @pytest.mark.anyio
-    async def test_post_response_passthrough_no_extract(
-        self, webfetch: WebFetch
-    ) -> None:
-        # An HTML-shaped POST response should NOT be run through trafilatura.
-        body = b"<html><body><p>do not extract me</p></body></html>"
-        with _patch_fetch(default=body):
-            result = await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://example.com/x",
-                            "method": "POST",
-                            "json": {"a": 1},
-                        }
-                    )
-                )
-            )
-        assert isinstance(result, TextMessage)
-        assert "<html>" in result.content  # raw, not extracted
-
-    @pytest.mark.anyio
-    async def test_post_not_cached(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b'{"v":1}') as router:
-            await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://api.example.com/q",
-                            "method": "POST",
-                            "json": {"x": 1},
-                        }
-                    )
-                )
-            )
-            await webfetch.run(
-                _msg(
-                    json_freeze(
-                        {
-                            "url": "https://api.example.com/q",
-                            "method": "POST",
-                            "json": {"x": 1},
-                        }
-                    )
-                )
-            )
-        # Both calls hit the network; no cache shortcut.
-        assert len(router.calls) == 2
-
-    @pytest.mark.anyio
-    async def test_get_still_cached(self, webfetch: WebFetch) -> None:
-        with _patch_fetch(default=b"<p>x</p>") as router:
-            await webfetch.run(_msg(json_freeze({"url": "https://example.com/g"})))
-            await webfetch.run(_msg(json_freeze({"url": "https://example.com/g"})))
-        assert len(router.calls) == 1
-
-    @pytest.mark.anyio
-    async def test_unsupported_method_rejected(self, webfetch: WebFetch) -> None:
-        result = await webfetch.run(
-            _msg(json_freeze({"url": "https://example.com/", "method": "DELETE"}))
         )
-        assert result.descriptor == "text/x-error"
-        assert isinstance(result, TextMessage)
-        assert "Unsupported method" in result.content
+    assert body == b"hello"
+    assert is_reddit is False
 
-    @pytest.mark.anyio
-    async def test_json_and_form_mutually_exclusive(self, webfetch: WebFetch) -> None:
-        result = await webfetch.run(
-            _msg(
-                json_freeze(
+
+def test_fetch_body_reddit_thread_takes_json_path() -> None:
+    """Reddit comments URL is rewritten to a ``.json`` endpoint."""
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
+        captured["url"] = url
+        return b'[{"kind":"Listing","data":{"children":[]}}]'
+
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        side_effect=fake_safe_fetch,
+    ):
+        body, is_reddit = asyncio.run(
+            _fetch_body(
+                "https://reddit.com/r/foo/comments/abc",
+                method="GET",
+                json_body=None,
+                form_body=None,
+            ),
+        )
+    url = captured["url"]
+    assert isinstance(url, str)
+    assert url.endswith(".json")
+    assert "www.reddit.com" in url
+    assert is_reddit is True
+    assert body.startswith(b"[")
+
+
+def test_fetch_body_reddit_root_no_thread_pattern() -> None:
+    """Reddit non-thread URL: simple GET, not JSON-mode."""
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
+
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        return_value=b"<html>regular page</html>",
+    ):
+        body, is_reddit = asyncio.run(
+            _fetch_body(
+                "https://reddit.com/r/foo",
+                method="GET",
+                json_body=None,
+                form_body=None,
+            ),
+        )
+    assert is_reddit is False
+    assert b"regular" in body
+
+
+def test_extract_text_html_path_uses_trafilatura() -> None:
+    """``_extract_text`` for HTML goes through trafilatura.extract."""
+    from sagent.tools.web_fetch import (  # noqa: PLC0415
+        _extract_text,
+    )
+
+    with patch(
+        "sagent.tools.web_fetch.trafilatura.extract",
+        return_value="cleaned text",
+    ):
+        out = asyncio.run(
+            _extract_text(
+                b"<html><body><p>Hi</p></body></html>",
+                reddit_thread=False,
+                method="GET",
+            ),
+        )
+    assert out == "cleaned text"
+
+
+def test_extract_text_html_fallback_when_extract_none() -> None:
+    """When trafilatura returns nothing, the raw decoded content is returned."""
+    from sagent.tools.web_fetch import (  # noqa: PLC0415
+        _extract_text,
+    )
+
+    with patch(
+        "sagent.tools.web_fetch.trafilatura.extract",
+        return_value=None,
+    ):
+        out = asyncio.run(
+            _extract_text(
+                b"<html><body>raw fallback</body></html>",
+                reddit_thread=False,
+                method="GET",
+            ),
+        )
+    assert "raw fallback" in out
+
+
+def test_extract_text_reddit_invalid_json_returns_truncated_content() -> None:
+    """Reddit JSON parse failure falls back to raw content slice."""
+    from sagent.tools.web_fetch import (  # noqa: PLC0415
+        _extract_text,
+    )
+
+    out = asyncio.run(
+        _extract_text(b"not json at all", reddit_thread=True, method="GET"),
+    )
+    assert out == "not json at all"
+
+
+def test_format_reddit_comments_handles_nested_replies() -> None:
+    """Nested ``replies`` recursion produces an indented child line."""
+    from sagent.tools.web_fetch import (  # noqa: PLC0415
+        _format_reddit_json,
+    )
+
+    payload: list[object] = [
+        {
+            "kind": "Listing",
+            "data": {
+                "children": [
                     {
-                        "url": "https://example.com/",
-                        "method": "POST",
-                        "json": {"a": 1},
-                        "form": {"a": "1"},
+                        "data": {
+                            "title": "Top",
+                            "author": "u1",
+                            "score": 5,
+                            "selftext": "",
+                        }
                     }
-                )
-            )
-        )
-        assert result.descriptor == "text/x-error"
-        assert isinstance(result, TextMessage)
-        assert "mutually exclusive" in result.content
-
-    @pytest.mark.anyio
-    async def test_json_response_for_get_passes_through(
-        self, webfetch: WebFetch
-    ) -> None:
-        # A GET that returns JSON should also bypass trafilatura.
-        with _patch_fetch(default=b'{"id":42,"name":"x"}'):
-            result = await webfetch.run(
-                _msg(json_freeze({"url": "https://api.example.com/data"}))
-            )
-        assert isinstance(result, TextMessage)
-        assert '"id":42' in result.content
-
-
-_NUDGE = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
-
-
-class TestBashMatch:
-    """Verify ``WebFetch.bash_match`` flags curl/wget HTTP fetches."""
-
-    @staticmethod
-    def _match(command: str) -> str | None:
-        trees = parse_bash(command)
-        assert trees is not None, command
-        return WebFetch().bash_match(trees)
-
-    def test_curl_simple_get(self) -> None:
-        assert self._match("curl https://example.com/") == _NUDGE
-
-    def test_curl_with_flags(self) -> None:
-        assert self._match("curl -L --compressed https://example.com/") == _NUDGE
-
-    def test_wget_simple(self) -> None:
-        assert self._match("wget https://example.com/") == _NUDGE
-
-    def test_cd_prefix(self) -> None:
-        assert self._match("cd /tmp && curl https://example.com/") == _NUDGE
-
-    def test_curl_to_file_bails(self) -> None:
-        # ``-o file`` writes to disk; WebFetch can't replace this.
-        assert self._match("curl -o out.html https://example.com/") is None
-        assert self._match("curl --output out.html https://example.com/") is None
-        assert self._match("curl -O https://example.com/file.tar") is None
-
-    def test_pipeline_bails(self) -> None:
-        # Output piped into another command - WebFetch returns text, not a stream.
-        assert self._match("curl https://example.com/ | jq .") is None
-
-    def test_redirect_bails(self) -> None:
-        assert self._match("curl https://example.com/ > out.html") is None
-
-    def test_no_url_bails(self) -> None:
-        # ``curl --version`` or ``curl --help`` are not fetches.
-        assert self._match("curl --version") is None
-
-    def test_non_http_url_bails(self) -> None:
-        # ``curl ftp://...`` or ``curl localhost:8080`` (no scheme) - skip.
-        assert self._match("curl ftp://example.com/file") is None
-        assert self._match("curl localhost:8080") is None
-
-    def test_file_upload_bails(self) -> None:
-        assert self._match("curl --data-binary @body.json https://example.com/") is None
-        assert self._match("curl -F file=@x.png https://example.com/") is None
-
-    def test_unrelated_command(self) -> None:
-        assert self._match("ls -la") is None
-        assert self._match("echo hello") is None
+                ]
+            },
+        },
+        {
+            "kind": "Listing",
+            "data": {
+                "children": [
+                    {
+                        "kind": "t1",
+                        "data": {
+                            "author": "p",
+                            "score": 1,
+                            "body": "parent\nline2",
+                            "replies": {
+                                "data": {
+                                    "children": [
+                                        {
+                                            "kind": "t1",
+                                            "data": {
+                                                "author": "c",
+                                                "score": 2,
+                                                "body": "child",
+                                            },
+                                        }
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                ]
+            },
+        },
+    ]
+    out = _format_reddit_json(payload)
+    assert "**u/p**" in out
+    assert "**u/c**" in out
 
 
 if __name__ == "__main__":

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
 from sagent.lib.json import json_freeze
-from sagent.lib.message import get_directive, response_text
 from sagent.providers import Google
 
 
@@ -32,23 +37,51 @@ class CharacterCount:
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        """Return a compact status label for this invocation."""
-        text = str(get_directive(msg).get("text", ""))
-        return f"CharacterCount {len(text)} chars"
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a compact status label for this invocation.
 
-    def summary_result(self, result: Message) -> str | None:
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          label: Single-line summary including the character count.
+
+        """
+        return f"CharacterCount {len(str(args.get('text', '')))} chars"
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Return an optional one-line receipt for the tool result.
+
+        Args:
+          result: Tool result to summarize.
+
+        Returns:
+          receipt: Always ``None`` (no receipt line emitted).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return optional tool-specific system prompt text."""
+        """Return optional tool-specific system prompt text.
+
+        Returns:
+          prompt: Empty string (no extra prompt section).
+
+        """
         return ""
 
-    async def run(self, msg: Message) -> Message:
-        """Run the tool and return a conversation-visible result."""
-        text = str(get_directive(msg).get("text", ""))
-        return TextMessage(str(len(text)), "text/plain", parent_id=msg.id)
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Run the tool and return a ToolResult.
+
+        Args:
+          args: Tool invocation arguments containing ``text``.
+
+        Returns:
+          result: Tool result whose content is the character count.
+
+        """
+        return ToolResult(call_id="", content=str(len(str(args.get("text", "")))))
 
 
 async def main() -> None:
@@ -62,11 +95,11 @@ async def main() -> None:
         "How many characters are in 'agentic systems'? Use the"
         " tool, then answer in one sentence."
     )
-    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+    async for _event in agent.run(UserMessage(text=prompt)):
         pass
     for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            sys.stdout.write(f"{response_text(m)}\n")
+        if isinstance(m, AssistantMessage) and m.text:
+            sys.stdout.write(f"{m.text}\n")
             return
 
 

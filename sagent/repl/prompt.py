@@ -2,17 +2,27 @@
 
 Wraps a :class:`prompt_toolkit.PromptSession` and yields lines via
 ``next_line()``. Returns ``None`` when the user types ``exit`` or
-``quit`` (lowercase) so the REPL input pump shuts the loop
-down cleanly. Other exit signals (Ctrl-D / EOFError, Ctrl-C while
-idle / KeyboardInterrupt) also map to ``None``.
+``quit`` (lowercase) so the REPL input pump shuts the loop down
+cleanly. Other exit signals (Ctrl-D / EOFError, Ctrl-C while idle /
+KeyboardInterrupt) also map to ``None``.
 
-Drain on quit: when the user types ``quit``/``exit`` we drain any
-queued (uncommitted) inbox text first and surface a one-line preview
-so the user sees what got discarded before the session closes.
+Pending-user buffer
+~~~~~~~~~~~~~~~~~~~
 
-Also exposes :func:`dynamic_prompt` -- the callable handed to
-``PromptSession`` so the prompt shows a dim preview of any
-queued-tail follow-ups still in the inbox.
+The runtime's ``GatedDeque`` doesn't support tag-based peek / pop,
+so the REPL keeps its own ``list[str]`` of texts the user typed while
+the runtime was busy. New input either commits-now (push
+``UserMessage`` to ``agent.runtime.inbox``) or queues into this list
+depending on whether the agent has foreground work in flight. Up
+arrow pops the latest entry; the dynamic prompt shows it as a dim
+preview while the agent is busy.
+
+Drain on quit
+~~~~~~~~~~~~~
+
+When the user types ``quit`` / ``exit`` we surface the most recent
+pending text (if any) so they see what got discarded before the
+session closes.
 """
 
 from __future__ import annotations
@@ -22,7 +32,6 @@ from typing import TYPE_CHECKING, override
 from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
 
-from sagent.agent.inbox import USER_SOURCE
 from sagent.repl.input import InputSource
 from sagent.repl.slash import QUIT_WORDS
 
@@ -35,24 +44,21 @@ if TYPE_CHECKING:
 
 
 class PromptToolkitInputSource(InputSource):
-    """Async input source backed by a :class:`prompt_toolkit.PromptSession`.
+    """Async input source backed by a :class:`prompt_toolkit.PromptSession`."""
 
-    Attributes:
-      session: The owning prompt-toolkit session.
-      agent: Agent whose inbox to drain on quit (optional).
-      console: Console used for the discard-preview line on quit.
-
-    """
+    pending: list[str]
+    """List of texts the user typed while the agent was busy. New input
+    appends; Up pops the latest; the dynamic prompt previews the tail."""
 
     def __init__(
         self,
         session: PromptSession[str],
         *,
-        agent: Agent | None = None,
+        pending: list[str],
         console: Console | None = None,
     ) -> None:
         self._session = session
-        self._agent = agent
+        self.pending = pending
         self._console = console
 
     @override
@@ -61,49 +67,50 @@ class PromptToolkitInputSource(InputSource):
         try:
             text = await self._session.prompt_async()
         except (EOFError, KeyboardInterrupt):
-            self._drain_for_quit()
+            self._surface_pending_on_quit()
             return None
         stripped = text.strip()
         if stripped.lower() in QUIT_WORDS:
-            self._drain_for_quit()
+            self._surface_pending_on_quit()
             return None
         return text
 
-    def _drain_for_quit(self) -> None:
-        """Surface and drain any queued inbox text before the loop ends."""
-        if self._agent is None:
+    def _surface_pending_on_quit(self) -> None:
+        """Surface the tail of the pending buffer before the loop ends."""
+        if not self.pending or self._console is None:
             return
-        items = self._agent.inbox.drain_nowait()
-        if not items or self._console is None:
-            return
-        tail = items[-1].msg
-        preview = str(tail.content).replace("\n", " ")[:80]
+        tail = self.pending[-1]
+        preview = tail.replace("\n", " ")[:80]
         self._console.print(
             Text(f"[discarding queued message: {preview}]", style="dim yellow"),
         )
+        self.pending.clear()
 
 
-def dynamic_prompt(agent: Agent) -> FormattedText:
-    """Build the dynamic prompt with a dim preview of the most recent queued msg.
+def dynamic_prompt(agent: Agent, pending: list[str]) -> FormattedText:
+    """Build the dynamic prompt with a dim preview of the tail pending text.
 
-    Only renders when the agent is *busy* (a round is in flight or a
-    cohort hasn't emitted): then the user's typed message is genuinely
-    waiting and the preview is honest UX. When idle, the inbox is being
-    drained immediately and surfacing the message as "queued" during
-    that brief race window is misleading.
+    Only renders when the agent is *busy* (a model call or compaction
+    is in flight, or a tool cohort is outstanding): then the user's
+    typed message is genuinely waiting and the preview is honest UX.
+    When idle, the text is about to be committed and surfacing it as
+    "queued" during that brief race window is misleading.
 
     ``Up`` lifts the preview message back into the buffer for editing.
+
+    Args:
+      agent: Agent whose busy state gates the preview.
+      pending: REPL-local pending-text buffer (tail is previewed).
+
+    Returns:
+      formatted: The prompt's formatted text.
+
     """
     parts: list[tuple[str, str]] = []
-    is_busy = agent.work is not None or any(
-        not c.emitted
-        for c in agent._active_cohorts  # noqa: SLF001 -- intentional view
-    )
-    if is_busy:
-        item = agent.inbox.peek_by_source(USER_SOURCE)
-        if item is not None and isinstance(item.msg.content, str):
-            parts.append(("class:queued", _collapse_preview(item.msg.content)))
-            parts.append(("", "\n"))
+    is_busy = agent.work is not None or bool(agent.runtime.cohort)
+    if is_busy and pending:
+        parts.append(("class:queued", _collapse_preview(pending[-1])))
+        parts.append(("", "\n"))
     parts.append(("class:prompt", "> "))
     return FormattedText(parts)
 

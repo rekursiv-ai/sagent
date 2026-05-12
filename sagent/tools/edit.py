@@ -3,49 +3,33 @@
 Unlike Write, Edit intentionally does not require a prior Read. The
 ``old_string`` exact match is the operation's safety gate, which keeps
 sed-like replacements cheap when the caller already knows the target text.
-
-Tradeoff:
-- Pro: avoids spending context on a full file read for simple, precise edits.
-- Pro: still fails closed when ``old_string`` is absent or ambiguous unless
-  ``replace_all`` is explicitly enabled.
-- Con: stale-file detection is only meaningful when the file has previously
-  been read or written in this session.
-- Con: callers can perform blind exact replacements, so unclear edits should
-  still use Read first for context.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import asyncio
 import difflib
 import re
 
-from sagent.custom_types import (
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
+from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, bool_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_file_write_lock,
     get_tool_state,
     load_tool_description,
     resolve_tool_path,
-    run_sync,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
-from sagent.tools.lib.state_parts import file_stat_part
 
 
 # Simple ``s/OLD/NEW/[g]`` - no escaped delimiters, no alternate
 # delimiter, no address ranges. If the sed script is more complex
 # than this, we bail.
 _SED_S_PATTERN = re.compile(r"^s/([^/\\]*)/([^/\\]*)/([gi]*)$")
-
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@")
 
@@ -54,12 +38,14 @@ def make_diff(old: str, new: str, offset: int) -> str:
     """Produce a unified diff with absolute line numbers.
 
     Args:
-      old: Original text.
-      new: Replacement text.
-      offset: Line offset applied to @@ hunk headers.
+      old: Original text fragment.
+      new: Replacement text fragment.
+      offset: Line offset (0-based) within the containing file at which
+        ``old`` begins, added to each hunk header so the diff reflects
+        absolute file line numbers rather than fragment-relative ones.
 
     Returns:
-      diff: Unified diff string with adjusted line numbers.
+      diff: Unified-diff string with ``---``/``+++`` headers stripped.
 
     """
     lines = list(
@@ -113,95 +99,108 @@ class Edit:
         }
     )
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Apply an exact-string replacement to a file.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Directive with ``file_path``, ``old_string``, ``new_string``,
+              and optional ``replace_all``.
 
         Returns:
-          result: Tool result Message confirming the edit.
+          result: Replacement confirmation with a unified diff, or an
+              error when validation fails or no match is found.
 
         """
-        directive = get_directive(msg)
-        file_path = resolve_tool_path(str(directive.get("file_path", "")))
-        old_string = str(directive.get("old_string", ""))
-        new_string = str(directive.get("new_string", ""))
-        replace_all = bool_val(directive.get("replace_all"), False)
+        file_path = resolve_tool_path(str(args.get("file_path", "")))
+        old_string = str(args.get("old_string", ""))
+        new_string = str(args.get("new_string", ""))
+        replace_all = bool_val(args.get("replace_all"), False)
         # Serialize against any other mutating tool on the same file.
-        # Different files → different locks → parallel subagents editing
-        # disjoint files don't queue. Same file → atomic read-modify-write.
         async with get_file_write_lock(file_path):
-            return await run_sync(
+            return await asyncio.to_thread(
                 self._run,
-                parent_id=msg.id,
-                file_path=file_path,
-                old_string=old_string,
-                new_string=new_string,
-                replace_all=replace_all,
+                file_path,
+                old_string,
+                new_string,
+                replace_all,
             )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this edit.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Directive carrying ``file_path``.
 
         Returns:
-          label: ``"Edit <filename>"``.
+          label: ``Edit <basename>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        file_path = resolve_tool_path(str(directive.get("file_path", "")))
+        file_path = resolve_tool_path(str(args.get("file_path", "")))
         fname = Path(file_path).name if file_path else "?"
         return f"Edit {fname}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for Edit.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
+        """Return no supplemental system-prompt text for Edit.
 
         Returns:
-          prompt: Always empty.
+          contribution: Empty string.
 
         """
         return ""
 
-    def _validate(self, file_path: str, old_string: str) -> Message | None:
-        """Return an error ``Message`` on invalid inputs, else ``None``."""
+    def _validate(self, file_path: str, old_string: str) -> ToolResult | None:
+        """Return an error ``ToolResult`` on invalid inputs, else ``None``."""
         if not old_string:
             # text.count("") returns len+1; text.replace("", …) inserts
             # between every char. Silently destroys the file - reject.
-            return TextMessage("old_string cannot be empty.", "text/x-error")
+            return ToolResult(
+                call_id="", content="old_string cannot be empty.", is_error=True
+            )
         p = Path(file_path)
         if not p.exists():
-            return TextMessage(f"File not found: {file_path}", "text/x-error")
+            return ToolResult(
+                call_id="", content=f"File not found: {file_path}", is_error=True
+            )
         if p.is_dir():
-            return TextMessage(
-                f"{file_path} is a directory, not a file.", "text/x-error"
+            return ToolResult(
+                call_id="",
+                content=f"{file_path} is a directory, not a file.",
+                is_error=True,
             )
         state = get_tool_state()
         if state.check_stale(file_path):
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     "File has been modified since read, either by the user, a"
                     " linter, or another agent. Read it again before attempting"
                     " to edit it."
                 ),
-                "text/x-error",
+                is_error=True,
             )
         return None
 
     def _run(
         self,
-        *,
         file_path: str,
         old_string: str,
         new_string: str,
-        replace_all: bool = False,
-    ) -> str | Message:
+        replace_all: bool,
+    ) -> ToolResult:
+        """Run the validated edit synchronously and return the result."""
         err = self._validate(file_path, old_string)
         if err is not None:
             return err
@@ -210,26 +209,25 @@ class Edit:
         text = p.read_text(encoding="utf-8")
         count = text.count(old_string)
         if count == 0:
-            return TextMessage("old_string not found in file.", "text/x-error")
+            return ToolResult(
+                call_id="", content="old_string not found in file.", is_error=True
+            )
         if count > 1 and not replace_all:
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     f"old_string found {count} times."
                     f" Use replace_all=True or provide more context."
                 ),
-                "text/x-error",
+                is_error=True,
             )
         new_text = (
             text.replace(old_string, new_string)
             if replace_all
             else text.replace(old_string, new_string, 1)
         )
-        # Atomic write (tmp + rename). Without this a concurrent Read
-        # on the same file could observe a torn state between
-        # ``write_text``'s truncate and its rewrite. The tmp+rename
-        # creates a fresh inode, which by default picks up umask
-        # permissions; forward the original file mode so Edit doesn't
-        # silently flip a ``0o600`` file to ``0o644``.
+        # Atomic write (tmp + rename). Forward the original file mode so
+        # Edit doesn't silently flip a ``0o600`` file to ``0o644``.
         file_mode = p.stat().st_mode & 0o777
         atomic_write_bytes(p, new_text.encode("utf-8"), file_mode=file_mode)
         state.mark_written(file_path)
@@ -241,28 +239,21 @@ class Edit:
         offset = text[:idx].count("\n") if idx >= 0 else 0
         diff = make_diff(old_string, new_string, offset)
 
-        parts: list[Message] = [
-            TextMessage(confirmation, "text/plain"),
-            TextMessage(diff, "text/x-diff"),
-        ]
-        stat = file_stat_part(file_path)
-        if stat is not None:
-            parts.append(stat)
-        return MultipartMessage(tuple(parts), "multipart/x-tool-result")
+        return ToolResult(
+            call_id="",
+            content=confirmation,
+            diff=diff,
+            diff_file_path=file_path,
+        )
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a hint if the command is a simple ``sed -i 's/X/Y/g' FILE``.
 
-        Accepts ``cd PATH && CMD`` compounds via ``unwrap_cd_prefix``.
-        Only matches trivial ``s/OLD/NEW/[g]`` with ``-i``; anything
-        more complex (address ranges, multiple commands, alternate
-        delimiters, escaped slashes) bails.
-
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bashlex command trees from the active Bash call.
 
         Returns:
-          hint: Suggested Edit invocation, or ``None`` if no match.
+          hint: Nudge string redirecting to the Edit tool, or ``None``.
 
         """
         unwrapped = unwrap_cd_prefix(trees)
@@ -275,6 +266,7 @@ class Edit:
 
 
 def _match_sed(cwd: str | None, args: tuple[str, ...]) -> str | None:
+    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge."""
     del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     in_place = False
     script: str | None = None

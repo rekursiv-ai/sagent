@@ -1,4 +1,4 @@
-"""Tests for sagent.providers.moonshot."""
+"""Tests for ``providers.moonshot``: Moonshot OpenAI-compat surface."""
 
 from __future__ import annotations
 
@@ -7,30 +7,56 @@ import pytest
 from sagent.providers.moonshot import Moonshot
 
 
-class TestMoonshot:
-    def test_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("MOONSHOT_API_KEY", "mk-test")
-        p = Moonshot.from_env()
-        assert p.api_key == "mk-test"
-        assert p.base_url.endswith("moonshot.ai/v1")
+def test_moonshot_from_key() -> None:
+    p = Moonshot.from_key("sk-moon-test")
+    assert isinstance(p, Moonshot)
+    assert p.api_key == "sk-moon-test"
+    assert p.base_url == "https://api.moonshot.ai/v1"
 
-    def test_from_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-        with pytest.raises(RuntimeError, match="API key not configured"):
-            Moonshot.from_env()
 
-    def test_default_model(self) -> None:
-        m = Moonshot.from_key("mk-x").model()
-        assert m.model_id == Moonshot.DEFAULT_MODEL
+def test_moonshot_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="API key not configured"):
+        Moonshot.from_env()
 
-    def test_thinking_surface(self) -> None:
-        m = Moonshot.from_key("mk-x").model()
-        assert m.supports_thinking is True
 
-    def test_self_hosted_base_url(self) -> None:
-        p = Moonshot.from_key("empty", base_url="http://localhost:8000/v1")
-        m = p.model()
-        assert m._endpoint == "http://localhost:8000/v1/chat/completions"
+def test_moonshot_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-moon-env")
+    p = Moonshot.from_env()
+    assert p.api_key == "sk-moon-env"
+
+
+def test_moonshot_default_model() -> None:
+    p = Moonshot.from_key("k")
+    m = p.model()
+    assert m.model_id == Moonshot.DEFAULT_MODEL
+    # Kimi surfaces reasoning via ``reasoning_content``.
+    assert m.supports_thinking is True
+
+
+def test_moonshot_unknown_model_raises() -> None:
+    p = Moonshot.from_key("k")
+    with pytest.raises(ValueError, match="Unknown model"):
+        _ = p.model("not-kimi")
+
+
+def test_moonshot_known_models_have_pricing_and_limits() -> None:
+    p = Moonshot.from_key("k")
+    for mid in Moonshot.KNOWN_MODELS:
+        m = p.model(mid)
+        assert m.max_request_tokens > 0
+        assert m.max_response_tokens > 0
+
+
+def test_moonshot_base_url_override_via_from_key() -> None:
+    p = Moonshot.from_key("k", base_url="http://localhost:8000/v1")
+    assert p.base_url == "http://localhost:8000/v1"
+
+
+def test_moonshot_supports_cache_control_false() -> None:
+    p = Moonshot.from_key("k")
+    m = p.model("kimi-k2.6")
+    assert m.supports_cache_control is False
 
 
 if __name__ == "__main__":

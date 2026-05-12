@@ -1,1066 +1,489 @@
-"""Tests for sagent.providers.anthropic."""
+"""Tests for ``providers.anthropic``: wire-format translation + response parse."""
 
 from __future__ import annotations
 
-from types import MappingProxyType
-from typing import Any, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import cast
+from unittest.mock import MagicMock
 
-import anthropic
-import httpx
+import anthropic as anthropic_sdk
 import pytest
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from sagent.custom_exceptions import (
     PromptTooLongError,
     StreamInterruptedError,
 )
 from sagent.custom_types import (
-    BytesMessage,
-    JsonMessage,
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    Provider,
-    TextMessage,
+    Pricing,
     TokenCount,
 )
-from sagent.lib.json import json_freeze
-from sagent.lib.message import tool_call_message
 from sagent.providers.anthropic import (
     Anthropic,
-    _add_cache_breakpoint,
+    _assistant_blocks,
     _build_messages,
     _guard_stream_interrupt,
+    _is_prompt_too_long_text,
     _parse_response,
-    _raise_if_prompt_too_long,
+    _strip_context_tag,
+    _tool_result_block,
+    _tool_use_block,
+    context_betas,
 )
-from sagent.providers.lib.cost import Pricing
+from sagent.providers.lib.id_remap import IdRemapper
 
 
-def _user(text: str) -> Message:
-    return TextMessage(text, "text/x-user-message")
+def _make_request(messages: list[HistoryEntry]) -> ModelRequest:
+    return ModelRequest(messages=messages)
 
 
-def _assistant(
-    text: str = "",
-    *,
-    tool_calls: list[Message] | None = None,
-    thinking_blocks: list[dict[str, Any]] | None = None,
-) -> Message:
-    parts: list[Message] = [
-        JsonMessage(json_freeze(tb), "application/x-thinking-structured")
-        for tb in thinking_blocks or []
-    ]
-    if text:
-        parts.append(TextMessage(text, "text/plain"))
-    parts.extend(tool_calls or [])
-    return MultipartMessage(tuple(parts), "multipart/x-model-message")
+@pytest.mark.parametrize(
+    ("model_id", "stripped"),
+    [
+        ("claude-opus-4-7+1m", "claude-opus-4-7"),
+        ("claude-opus-4-7+200k", "claude-opus-4-7"),
+        ("claude-opus-4-7", "claude-opus-4-7"),
+        ("Claude-Opus-4-7+1M", "Claude-Opus-4-7"),
+    ],
+)
+def test_strip_context_tag(model_id: str, stripped: str) -> None:
+    assert _strip_context_tag(model_id) == stripped
 
 
-def _tool_result(queue_id: str, text: str, *, is_error: bool = False) -> Message:
-    desc = "text/x-error" if is_error else "text/plain"
-    return MultipartMessage(
-        (
-            TextMessage(queue_id, "text/x-queue-id"),
-            TextMessage(text, desc),
-        ),
-        "multipart/x-tool-result",
+def test_context_betas_one_million_emits_beta() -> None:
+    assert context_betas("claude-opus-4-7+1m") == ["context-1m-2025-08-07"]
+
+
+def test_context_betas_no_tag_returns_empty() -> None:
+    assert context_betas("claude-haiku-4-5") == []
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "prompt is too long: 123",
+        "Request exceeded context window",
+        "PROMPT_TOO_LONG",
+    ],
+)
+def test_is_prompt_too_long_text_positive(msg: str) -> None:
+    assert _is_prompt_too_long_text(msg) is True
+
+
+def test_is_prompt_too_long_text_negative() -> None:
+    assert _is_prompt_too_long_text("rate limited") is False
+
+
+def test_build_messages_user_text_only() -> None:
+    msgs = _build_messages(_make_request([UserMessage(text="hi")]))
+    assert len(msgs) == 1
+    assert msgs[0]["role"] == "user"
+    blocks = cast(list[dict[str, object]], msgs[0]["content"])
+    # Cache breakpoint may have rewritten the last block to add cache_control;
+    # ensure the underlying text payload is preserved.
+    assert any(b.get("text") == "hi" for b in blocks)
+
+
+def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
+    asst = AssistantMessage(
+        text="thinking",
+        tool_calls=(ToolCall(id="orig-9", name="Bash", args={"cmd": "ls"}),),
     )
+    msgs = _build_messages(_make_request([asst]))
+    assert msgs[0]["role"] == "assistant"
+    blocks = cast(list[dict[str, object]], msgs[0]["content"])
+    # First block is the text, second is tool_use with the remapped id.
+    assert blocks[0]["type"] == "text"
+    assert blocks[1]["type"] == "tool_use"
+    assert blocks[1]["id"] == "toolu_0"
+    assert blocks[1]["name"] == "Bash"
 
 
-def _resp_text(resp: ModelResponse) -> str | None:
-    if not isinstance(resp.content, MultipartMessage):
-        return None
-    for p in resp.content.content:
-        if p.descriptor == "text/plain" and isinstance(p, TextMessage):
-            return p.content
-    return None
+def test_build_messages_consecutive_tool_results_batched_into_single_user() -> None:
+    asst = AssistantMessage(
+        tool_calls=(
+            ToolCall(id="c1", name="N", args={}),
+            ToolCall(id="c2", name="N", args={}),
+        ),
+    )
+    res1 = ToolResult(call_id="c1", content="r1")
+    res2 = ToolResult(call_id="c2", content="r2")
+    msgs = _build_messages(_make_request([asst, res1, res2]))
+    # [assistant, user(with 2 tool_results)].
+    assert len(msgs) == 2
+    assert msgs[-1]["role"] == "user"
+    content = cast(list[dict[str, object]], msgs[-1]["content"])
+    # Both tool_results in one batch (last has cache_control sidecar).
+    tool_results = [b for b in content if b.get("type") == "tool_result"]
+    assert len(tool_results) == 2
 
 
-def _resp_thinking(resp: ModelResponse) -> str | None:
-    if not isinstance(resp.content, MultipartMessage):
-        return None
-    for p in resp.content.content:
-        if p.descriptor == "application/x-thinking-structured" and isinstance(
-            p.content, MappingProxyType
-        ):
-            thinking = p.content.get("thinking")
-            if isinstance(thinking, str):
-                return thinking
-    return None
+def test_build_messages_tool_result_id_pairs_with_call() -> None:
+    asst = AssistantMessage(
+        tool_calls=(ToolCall(id="orig-X", name="N", args={}),),
+    )
+    msgs = _build_messages(
+        _make_request([asst, ToolResult(call_id="orig-X", content="ok")])
+    )
+    blocks = cast(list[dict[str, object]], msgs[0]["content"])
+    tool_use = next(b for b in blocks if b.get("type") == "tool_use")
+    tool_result_block_msg = cast(list[dict[str, object]], msgs[1]["content"])
+    tool_result = next(
+        b for b in tool_result_block_msg if b.get("type") == "tool_result"
+    )
+    assert tool_use["id"] == tool_result["tool_use_id"]
 
 
-def _resp_tool_calls(resp: ModelResponse) -> list[Message]:
-    if not isinstance(resp.content, MultipartMessage):
-        return []
-    result: list[Message] = []
-    for p in resp.content.content:
-        if p.descriptor == "multipart/x-tool-call" and isinstance(p, MultipartMessage):
-            result.extend(
-                inner
-                for inner in p.content
-                if inner.descriptor.startswith("application/x-tool-")
-            )
-    return result
+def test_build_messages_empty_history_no_messages() -> None:
+    assert _build_messages(_make_request([])) == []
 
 
-# ------------------------------------------------------------------
-# Provider construction
-# ------------------------------------------------------------------
+def test_assistant_blocks_thinking_only_appends_placeholder() -> None:
+    """Thinking-only assistant gets a trailing ``.`` text block."""
+    asst = AssistantMessage(
+        thinking_blocks=({"type": "thinking", "thinking": "..."},),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert blocks[-1] == {"type": "text", "text": "."}
 
 
-class TestProviderConstruction:
-    def test_from_key(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        assert provider._api_key == "sk-ant-test"
-
-    def test_model_creation(self) -> None:
-        provider: Provider = Anthropic.from_key("sk-ant-test")
-        m = provider.model("claude-sonnet-4-6")
-        assert m.model_id == "claude-sonnet-4-6"
-        assert m.max_request_tokens == 200_000
-
-    def test_model_creation_1m_tag(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        m = provider.model("claude-sonnet-4-6+1m")
-        assert m.max_request_tokens == 1_000_000
-
-    def test_model_creation_200k_tag(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        m = provider.model("claude-sonnet-4-6+200k")
-        assert m.max_request_tokens == 200_000
+def test_assistant_blocks_text_only() -> None:
+    asst = AssistantMessage(text="hello")
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert blocks == [{"type": "text", "text": "hello"}]
 
 
-# ------------------------------------------------------------------
-# System prompt injection
-# ------------------------------------------------------------------
+def test_assistant_blocks_thinking_text_tool() -> None:
+    asst = AssistantMessage(
+        text="answer",
+        thinking_blocks=({"type": "thinking", "thinking": "..."},),
+        tool_calls=(ToolCall(id="x", name="N", args={"a": 1}),),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert blocks[0]["type"] == "thinking"
+    assert blocks[1] == {"type": "text", "text": "answer"}
+    assert blocks[2]["type"] == "tool_use"
 
 
-class TestSystemPrompt:
-    def test_plain_mode_none_omits_system(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        result = provider.build_system(None)
-        assert result is anthropic.NOT_GIVEN
-
-    def test_plain_mode_passes_through(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        assert provider.build_system("Do X.") == "Do X."
-
-
-# ------------------------------------------------------------------
-# _build_messages
-# ------------------------------------------------------------------
+def test_tool_use_block_remaps_id_through_remapper() -> None:
+    ids = IdRemapper("toolu_")
+    out = _tool_use_block(ToolCall(id="ext", name="N", args={"k": "v"}), ids)
+    assert out == {
+        "type": "tool_use",
+        "id": "toolu_0",
+        "name": "N",
+        "input": {"k": "v"},
+    }
 
 
-class TestBuildMessages:
-    def test_user_message(self) -> None:
-        request = ModelRequest(messages=[_user("hello")])
-        msgs = _build_messages(request)
-        assert len(msgs) == 1
-        assert msgs[0]["role"] == "user"
+def test_tool_result_block_plain_text() -> None:
+    ids = IdRemapper("toolu_")
+    out = _tool_result_block(
+        ToolResult(call_id="ext-1", content="done"),
+        ids,
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
+    )
+    assert out == {
+        "type": "tool_result",
+        "tool_use_id": "toolu_0",
+        "content": "done",
+        "is_error": False,
+    }
 
-    def test_empty_user_skipped(self) -> None:
-        msgs = _build_messages(ModelRequest(messages=[_user("")]))
-        assert len(msgs) == 0
 
-    def test_assistant_with_tools(self) -> None:
-        request = ModelRequest(
-            messages=[
-                _assistant(
-                    "Calling.",
-                    tool_calls=[
-                        tool_call_message("t1", "bash", json_freeze({"command": "ls"}))
-                    ],
-                ),
-            ],
-        )
-        msgs = _build_messages(request)
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        assert isinstance(content[0], dict)
-        assert cast(dict[str, Any], content[0])["type"] == "text"
-        assert isinstance(content[1], dict)
-        assert cast(dict[str, Any], content[1])["type"] == "tool_use"
+def test_tool_result_block_is_error_flag_propagates() -> None:
+    ids = IdRemapper("toolu_")
+    out = _tool_result_block(
+        ToolResult(call_id="x", content="oops", is_error=True),
+        ids,
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
+    )
+    assert out["is_error"] is True
 
-    def test_empty_assistant_skipped(self) -> None:
-        msgs = _build_messages(ModelRequest(messages=[_assistant("")]))
-        assert len(msgs) == 0
 
-    def test_thinking_only_gets_placeholder(self) -> None:
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _user("hi"),
-                    _assistant(
-                        "",
-                        thinking_blocks=[{"type": "thinking", "thinking": "hmm"}],
-                    ),
-                    _user("You produced no output."),
-                ]
-            )
-        )
-        assert len(msgs) == 3
-        assert msgs[0]["role"] == "user"
-        assert msgs[1]["role"] == "assistant"
-        assert msgs[2]["role"] == "user"
-        content = msgs[1]["content"]
-        assert isinstance(content, list)
-        last_block = cast(dict[str, Any], content[-1])
-        assert last_block.get("type") == "text"
-        assert last_block.get("text") == "."
-
-    def test_thinking_plus_text_no_placeholder(self) -> None:
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _assistant(
-                        "I see.",
-                        thinking_blocks=[{"type": "thinking", "thinking": "hmm"}],
-                    ),
-                ]
+def _build_anthropic_message(
+    *,
+    text: str = "",
+    tool_calls: tuple[tuple[str, str, dict[str, object]], ...] = (),
+    stop_reason: str = "end_turn",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation: int = 0,
+    cache_read: int = 0,
+) -> object:
+    """Return a duck-typed object mimicking ``anthropic.types.Message``."""
+    # Use the real anthropic SDK classes via the lazy-imported module so
+    # ``isinstance`` checks inside ``_parse_response`` succeed.
+    text_blocks: list[object] = []
+    if text:
+        text_blocks.append(anthropic_sdk.types.TextBlock(type="text", text=text))
+    for tc_id, tc_name, args in tool_calls:
+        text_blocks.append(
+            anthropic_sdk.types.ToolUseBlock(
+                type="tool_use", id=tc_id, name=tc_name, input=args
             )
         )
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        text_blocks = [
-            b for b in content if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        assert any(b.get("text") == "I see." for b in text_blocks)
-
-    def test_thinking_plus_tool_use_no_placeholder(self) -> None:
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _assistant(
-                        "",
-                        thinking_blocks=[{"type": "thinking", "thinking": "hmm"}],
-                        tool_calls=[
-                            tool_call_message(
-                                "t1", "Bash", json_freeze({"command": "ls"})
-                            )
-                        ],
-                    ),
-                ]
-            )
-        )
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        last_block = cast(dict[str, Any], content[-1])
-        assert last_block.get("type") == "tool_use"
-
-    def test_tool_results_batched(self) -> None:
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _tool_result("t1", "out1"),
-                    _tool_result("t2", "out2"),
-                ],
-            ),
-        )
-        assert len(msgs) == 1
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        assert len(content) == 2
-
-    def test_tool_result_is_error(self) -> None:
-        msgs = _build_messages(
-            ModelRequest(messages=[_tool_result("t1", "err", is_error=True)]),
-        )
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        block = content[0]
-        assert isinstance(block, dict)
-        assert cast(dict[str, Any], block).get("is_error") is True
-
-    def test_user_after_tool_results_coalesces_into_same_wire_msg(self) -> None:
-        """Next-priority drain: a text-only user message placed after a
-        run of tool results merges onto the same wire user message so
-        the tool_results batch and the injected text share one API
-        round-trip (no extra assistant bounce).
-        """
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _tool_result("t1", "out1"),
-                    _tool_result("t2", "out2"),
-                    _user("by the way, also do Y"),
-                ],
-            ),
-        )
-        assert len(msgs) == 1
-        assert msgs[0]["role"] == "user"
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        types = [cast(dict[str, Any], b).get("type") for b in content]
-        assert types == ["tool_result", "tool_result", "text"]
-        text_block = cast(dict[str, Any], content[-1])
-        assert text_block.get("text") == "by the way, also do Y"
-
-    def test_user_with_attachments_does_not_coalesce(self) -> None:
-        """Attachment-bearing user messages (tuple content) keep their own
-        wire message so the attachment layout (image / document blocks)
-        stays intact.
-        """
-        msgs = _build_messages(
-            ModelRequest(
-                messages=[
-                    _tool_result("t1", "out1"),
-                    MultipartMessage(
-                        (
-                            BytesMessage(b"%PDF-1.4\n", "application/pdf"),
-                            TextMessage("with pdf", "text/plain"),
-                        ),
-                        "multipart/x-user-message",
-                    ),
-                ],
-            ),
-        )
-        assert len(msgs) == 2
-        assert msgs[0]["role"] == "user"
-        assert msgs[1]["role"] == "user"
-        first_content = msgs[0]["content"]
-        assert isinstance(first_content, list)
-        assert cast(dict[str, Any], first_content[0]).get("type") == "tool_result"
-        second_content = msgs[1]["content"]
-        assert isinstance(second_content, list)
-        types = [cast(dict[str, Any], b).get("type") for b in second_content]
-        assert "document" in types
-        assert "text" in types
-
-
-# ------------------------------------------------------------------
-# _parse_response
-# ------------------------------------------------------------------
-
-
-class TestParseResponse:
-    def test_text_only(self) -> None:
-        text_block = anthropic.types.TextBlock(type="text", text="Hello")
-        raw = MagicMock()
-        raw.model = "claude-sonnet-4-6"
-        raw.content = [text_block]
-        raw.usage.input_tokens = 10
-        raw.usage.output_tokens = 5
-        raw.usage.cache_creation_input_tokens = 0
-        raw.usage.cache_read_input_tokens = 0
-        raw.stop_reason = "end_turn"
-        resp = _parse_response(raw, Pricing())
-        assert _resp_text(resp) == "Hello"
-
-    def test_tool_use(self) -> None:
-        tool_block = anthropic.types.ToolUseBlock(
-            type="tool_use", id="t1", name="bash", input={"command": "ls"}
-        )
-        raw = MagicMock()
-        raw.model = "claude-sonnet-4-6"
-        raw.content = [tool_block]
-        raw.usage.input_tokens = 20
-        raw.usage.output_tokens = 10
-        raw.usage.cache_creation_input_tokens = 0
-        raw.usage.cache_read_input_tokens = 0
-        raw.stop_reason = "tool_use"
-        resp = _parse_response(raw, Pricing())
-        tcs = _resp_tool_calls(resp)
-        assert len(tcs) == 1
-        assert tcs[0].descriptor == "application/x-tool-bash"
-
-    def test_thinking_block(self) -> None:
-        text_block = anthropic.types.TextBlock(type="text", text="Answer")
-        thinking = anthropic.types.ThinkingBlock(
-            type="thinking",
-            thinking="deep thoughts",
-            signature="sig",
-        )
-        raw = MagicMock()
-        raw.model = "claude-sonnet-4-6"
-        raw.content = [text_block, thinking]
-        raw.usage.input_tokens = 30
-        raw.usage.output_tokens = 15
-        raw.usage.cache_creation_input_tokens = 0
-        raw.usage.cache_read_input_tokens = 0
-        raw.stop_reason = "end_turn"
-        resp = _parse_response(raw, Pricing())
-        assert _resp_text(resp) == "Answer"
-        assert _resp_thinking(resp) == "deep thoughts"
-
-
-# ------------------------------------------------------------------
-# _raise_if_prompt_too_long
-# ------------------------------------------------------------------
-
-
-class TestGuardStreamInterrupt:
-    """``_guard_stream_interrupt`` encodes the "``stop_reason`` is
-    unreliable" rule - gate on content (tool call parts), not on
-    ``stop_reason``.
-    """
-
-    def _resp(
-        self,
-        *,
-        stop_reason: str,
-        tool_calls: list[Message] | None = None,
-        text: str | None = None,
-    ) -> ModelResponse:
-        parts: list[Message] = []
-        if text:
-            parts.append(TextMessage(text, "text/plain"))
-        parts.extend(tool_calls or [])
-        return ModelResponse(
-            content=MultipartMessage(
-                tuple(parts),
-                "multipart/x-model-message",
-            ),
-            stop_reason=stop_reason,
-            tokens=TokenCount(),
-        )
-
-    def test_raises_when_model_tool_use_claimed_but_no_blocks(self) -> None:
-        """The actual failure mode: API says ``model_tool_use`` but parse
-        produced no tool call parts.
-        """
-        resp = self._resp(stop_reason="model_tool_use", tool_calls=[], text="partial")
-        with pytest.raises(StreamInterruptedError) as exc:
-            _guard_stream_interrupt(resp, kind="stream", model_id="mock")
-        assert exc.value.response is resp
-
-    def test_no_raise_when_model_tool_use_has_blocks(self) -> None:
-        """Normal ``model_tool_use`` response - guard is a no-op."""
-        resp = self._resp(
-            stop_reason="model_tool_use",
-            tool_calls=[tool_call_message("t1", "echo", json_freeze({}))],
-        )
-        _guard_stream_interrupt(resp, kind="stream", model_id="mock")
-
-    def test_no_raise_when_model_finished_with_no_tools(self) -> None:
-        """``model_finished`` with no tools is a legitimate final response,
-        not a stream interrupt.
-        """
-        resp = self._resp(stop_reason="model_finished", tool_calls=[], text="done")
-        _guard_stream_interrupt(resp, kind="stream", model_id="mock")
-
-    def test_no_raise_when_model_finished_with_tools(self) -> None:
-        """``model_finished`` with tools (unusual but legal) is not an interrupt."""
-        resp = self._resp(
-            stop_reason="model_finished",
-            tool_calls=[tool_call_message("t1", "echo", json_freeze({}))],
-        )
-        _guard_stream_interrupt(resp, kind="stream", model_id="mock")
-
-    def test_no_raise_on_other_stop_reasons(self) -> None:
-        """``max_tokens`` / ``stop_sequence`` / etc. aren't interrupts
-        even with empty tool_calls.
-        """
-        for reason in ("max_tokens", "stop_sequence", "model_continuing"):
-            resp = self._resp(stop_reason=reason, tool_calls=[])
-            _guard_stream_interrupt(resp, kind="stream", model_id="mock")
-
-
-class TestRaiseIfPromptTooLong:
-    def test_too_long(self) -> None:
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "prompt is too long", response=httpx.Response(400, request=req), body=None
-        )
-        with pytest.raises(PromptTooLongError):
-            _raise_if_prompt_too_long(e)
-
-    def test_extracts_token_counts(self) -> None:
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "prompt is too long: 150000 tokens > 100000 token maximum",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        with pytest.raises(PromptTooLongError) as exc_info:
-            _raise_if_prompt_too_long(e)
-        assert exc_info.value.actual_tokens == 150_000
-        assert exc_info.value.limit_tokens == 100_000
-        assert exc_info.value.token_gap == 50_000
-
-    def test_no_token_counts_when_unparseable(self) -> None:
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "prompt is too long",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        with pytest.raises(PromptTooLongError) as exc_info:
-            _raise_if_prompt_too_long(e)
-        assert exc_info.value.actual_tokens is None
-        assert exc_info.value.token_gap is None
-
-    def test_unrelated_error(self) -> None:
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "invalid model", response=httpx.Response(400, request=req), body=None
-        )
-        _raise_if_prompt_too_long(e)
-
-    def test_exceeds_model_context_window_message(self) -> None:
-        """``Request size exceeds model context window`` is the new 4xx body
-        text Anthropic returns; the older ``too long`` matchers miss it.
-        """
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "Request size exceeds model context window",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        with pytest.raises(PromptTooLongError):
-            _raise_if_prompt_too_long(e)
-
-    def test_request_too_large_error_413(self) -> None:
-        """413 ``RequestTooLargeError`` (sibling of ``BadRequestError``) for
-        context overflow also normalizes to ``PromptTooLongError``.
-        """
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic._exceptions.RequestTooLargeError(
-            "Request size exceeds model context window",
-            response=httpx.Response(413, request=req),
-            body=None,
-        )
-        with pytest.raises(PromptTooLongError):
-            _raise_if_prompt_too_long(e)
-
-
-# ------------------------------------------------------------------
-# is_context_overflow
-# ------------------------------------------------------------------
-
-
-class TestIsContextOverflow:
-    def test_prompt_too_long_error(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        assert model.is_context_overflow(PromptTooLongError("too long"))
-
-    def test_bad_request_too_long(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "prompt is too long",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        assert model.is_context_overflow(e)
-
-    def test_bad_request_exceeds_context_window(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "Request size exceeds model context window",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        assert model.is_context_overflow(e)
-
-    def test_request_too_large_413(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic._exceptions.RequestTooLargeError(
-            "Request size exceeds model context window",
-            response=httpx.Response(413, request=req),
-            body=None,
-        )
-        assert model.is_context_overflow(e)
-
-    def test_unrelated_bad_request(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.BadRequestError(
-            "invalid model parameter",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        assert not model.is_context_overflow(e)
-
-    def test_rate_limit_error(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        e = anthropic.RateLimitError(
-            "too many requests",
-            response=httpx.Response(429, request=req),
-            body=None,
-        )
-        assert not model.is_context_overflow(e)
-
-    def test_generic_exception(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        assert not model.is_context_overflow(RuntimeError("context boom"))
-
-
-# ------------------------------------------------------------------
-# _build_kwargs
-# ------------------------------------------------------------------
-
-
-class TestBuildKwargs:
-    def test_basic(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        request = ModelRequest(messages=[_user("hello")], system="Be concise.")
-        kwargs = model._build_kwargs(request, _build_messages(request))
-        assert kwargs["model"] == "claude-sonnet-4-6"
-        assert "tools" not in kwargs
-
-    def test_with_thinking(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        request = ModelRequest(messages=[_user("hello")], thinking="adaptive")
-        kwargs = model._build_kwargs(request, _build_messages(request))
-        assert "thinking" in kwargs
-        assert kwargs["temperature"] == 1.0
-
-
-# ------------------------------------------------------------------
-# get_sdk
-# ------------------------------------------------------------------
-
-
-class TestGetSdk:
-    @pytest.mark.anyio
-    async def test_api_key_creates_sdk(self) -> None:
-        provider = Anthropic.from_key("sk-ant-test")
-        sdk = await provider.get_sdk()
-        assert sdk is not None
-        sdk2 = await provider.get_sdk()
-        assert sdk is sdk2
-        await sdk.close()
-
-
-# ------------------------------------------------------------------
-# send with mock SDK
-# ------------------------------------------------------------------
-
-
-class TestAnthropicModelSend:
-    @pytest.mark.anyio
-    async def test_send(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        text_block = anthropic.types.TextBlock(type="text", text="Hi!")
-        mock_msg = MagicMock()
-        mock_msg.model = "claude-sonnet-4-6"
-        mock_msg.content = [text_block]
-        mock_msg.usage.input_tokens = 10
-        mock_msg.usage.output_tokens = 5
-        mock_msg.usage.cache_creation_input_tokens = 0
-        mock_msg.usage.cache_read_input_tokens = 0
-        mock_msg.stop_reason = "end_turn"
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.create = AsyncMock(return_value=mock_msg)
-        with patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)):
-            resp = await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-        assert _resp_text(resp) == "Hi!"
-        assert resp.tokens.input_tokens == 10
-
-    @pytest.mark.anyio
-    async def test_buffer_prompt_too_long(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        mock_sdk = AsyncMock()
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        mock_sdk.messages.create = AsyncMock(
-            side_effect=anthropic.BadRequestError(
-                "prompt is too long",
-                response=httpx.Response(400, request=req),
-                body=None,
-            ),
-        )
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(PromptTooLongError),
-        ):
-            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-
-
-# ------------------------------------------------------------------
-# _build_kwargs: thinking=enabled + tools
-# ------------------------------------------------------------------
-
-
-class TestBuildKwargsThinkingAndTools:
-    def test_haiku_does_not_support_thinking(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        assert not provider.model("claude-haiku-4-5").supports_thinking
-
-    def test_sonnet_supports_thinking(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        assert provider.model("claude-sonnet-4-6").supports_thinking
-
-    def test_haiku_omits_thinking_even_when_request_sets_it(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-haiku-4-5")
-        request = ModelRequest(
-            messages=[_user("think hard")],
-            thinking="adaptive",
-        )
-        kwargs = m._build_kwargs(request, _build_messages(request))
-        assert "thinking" not in kwargs
-
-    def test_thinking_enabled(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-        request = ModelRequest(
-            messages=[_user("think hard")],
-            thinking="enabled",
-        )
-        kwargs = m._build_kwargs(request, _build_messages(request))
-        thinking = cast(dict[str, object], kwargs["thinking"])
-        assert thinking["type"] == "enabled"
-        assert thinking["budget_tokens"] == m.max_response_tokens
-        assert kwargs["max_tokens"] == m.max_response_tokens * 2
-
-    def test_with_tools(self) -> None:
-        class _FakeTool:
-            def __init__(self) -> None:
-                self.name = "bash"
-                self.tool_id = "application/x-tool-bash"
-                self.description = "Run bash."
-                self.supports_microcompaction = False
-                self.directive_schema = json_freeze(
-                    {"type": "object", "properties": {}}
-                )
-
-            def summary(self, msg: Message) -> str:
-                del msg
-                return self.name
-
-            def summary_result(self, result: Message) -> str | None:
-                del result
-                return None
-
-            def prompt(self) -> str | None:
-                return None
-
-            async def run(self, msg: Message) -> Message:
-                del msg
-                return TextMessage("", "text/plain")
-
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-        request = ModelRequest(
-            messages=[_user("run it")],
-            tools=[_FakeTool()],
-        )
-        kwargs = m._build_kwargs(request, _build_messages(request))
-        assert "tools" in kwargs
-        assert cast(list[dict[str, object]], kwargs["tools"])[0]["name"] == "bash"
-
-
-# ------------------------------------------------------------------
-# _AnthropicModel.stream
-# ------------------------------------------------------------------
-
-
-class TestAnthropicModelStream:
-    @pytest.mark.anyio
-    async def test_stream(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-
-        text_block = anthropic.types.TextBlock(type="text", text="Streamed!")
-        mock_final = MagicMock()
-        mock_final.model = "claude-sonnet-4-6"
-        mock_final.content = [text_block]
-        mock_final.usage.input_tokens = 5
-        mock_final.usage.output_tokens = 3
-        mock_final.usage.cache_creation_input_tokens = 0
-        mock_final.usage.cache_read_input_tokens = 0
-        mock_final.stop_reason = "end_turn"
-
-        events: list[object] = [_text_delta_event("Stream"), _text_delta_event("ed!")]
-        mock_stream = _AsyncIterator(events)
-        mock_stream.get_final_message = AsyncMock(return_value=mock_final)
-
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.stream = MagicMock(return_value=mock_stream)
-
-        chunks: list[str] = []
-        with patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)):
-            resp = await m.stream(
-                request=ModelRequest(messages=[_user("hi")]),
-                on_text=chunks.append,
-            )
-        assert _resp_text(resp) == "Streamed!"
-        assert "Stream" in chunks
-
-    @pytest.mark.anyio
-    async def test_stream_prompt_too_long(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        exc = anthropic.BadRequestError(
-            "prompt is too long",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-
-        mock_stream = AsyncMock()
-        mock_stream.__aenter__ = AsyncMock(side_effect=exc)
-        mock_stream.__aexit__ = AsyncMock(return_value=False)
-
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.stream = MagicMock(return_value=mock_stream)
-
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(PromptTooLongError),
-        ):
-            await m.stream(
-                request=ModelRequest(messages=[_user("hi")]),
-            )
-
-
-# -- Helper for async iteration ----------------------------------------
-
-
-class _AsyncIterator:
-    def __init__(self, items: list[object]) -> None:
-        self._items = items
-        self._i = 0
-        self.get_final_message: AsyncMock | None = None
-
-    def __aiter__(self) -> _AsyncIterator:
-        return self
-
-    async def __anext__(self) -> object:
-        if self._i >= len(self._items):
-            raise StopAsyncIteration
-        val = self._items[self._i]
-        self._i += 1
-        return val
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        pass
-
-
-def _text_delta_event(text: str) -> MagicMock:
-    """Create a mock stream event for a text delta."""
-    event = MagicMock()
-    event.type = "content_block_delta"
-    event.delta.type = "text_delta"
-    event.delta.text = text
-    return event
-
-
-# ------------------------------------------------------------------
-# send: non-prompt-too-long BadRequestError re-raises
-# ------------------------------------------------------------------
-
-
-class TestSendNonPromptTooLongError:
-    @pytest.mark.anyio
-    async def test_non_prompt_too_long_bad_request_reraises(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        mock_sdk = AsyncMock()
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        mock_sdk.messages.create = AsyncMock(
-            side_effect=anthropic.BadRequestError(
-                "invalid model parameter",
-                response=httpx.Response(400, request=req),
-                body=None,
-            ),
-        )
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(anthropic.BadRequestError, match="invalid model"),
-        ):
-            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-
-
-# ------------------------------------------------------------------
-# stream: non-prompt-too-long BadRequestError re-raises
-# ------------------------------------------------------------------
-
-
-class TestStreamNonPromptTooLongError:
-    @pytest.mark.anyio
-    async def test_non_prompt_too_long_bad_request_reraises_stream(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        exc = anthropic.BadRequestError(
-            "invalid model parameter",
-            response=httpx.Response(400, request=req),
-            body=None,
-        )
-        mock_stream = AsyncMock()
-        mock_stream.__aenter__ = AsyncMock(side_effect=exc)
-        mock_stream.__aexit__ = AsyncMock(return_value=False)
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.stream = MagicMock(return_value=mock_stream)
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(anthropic.BadRequestError, match="invalid model"),
-        ):
-            await m.stream(
-                request=ModelRequest(messages=[_user("hi")]),
-            )
-
-
-# ------------------------------------------------------------------
-# estimate_text_token_count: per-model multiplier
-# ------------------------------------------------------------------
-
-
-class TestEstimateTextTokenCount:
-    def test_opus_4_7_uses_2_83(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-opus-4-7")
-        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 2.83)
-
-    def test_opus_4_7_1m_inherits_opus_4_7_ratio(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-opus-4-7+1m")
-        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 2.83)
-
-    def test_sonnet_4_6_uses_3_66(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 3.66)
-
-    def test_haiku_4_5_uses_4_83(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-haiku-4-5")
-        assert model.estimate_text_token_count("x" * 1000) == int(1000 / 4.83)
-
-
-# ------------------------------------------------------------------
-# buffer/stream: 413 RequestTooLargeError normalizes to PromptTooLongError
-# ------------------------------------------------------------------
-
-
-class TestSend413NormalizesToPromptTooLong:
-    @pytest.mark.anyio
-    async def test_buffer_413_normalizes(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        model = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.create = AsyncMock(
-            side_effect=anthropic._exceptions.RequestTooLargeError(
-                "Request size exceeds model context window",
-                response=httpx.Response(413, request=req),
-                body=None,
-            ),
-        )
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(PromptTooLongError),
-        ):
-            await model.buffer(request=ModelRequest(messages=[_user("hello")]))
-
-    @pytest.mark.anyio
-    async def test_stream_413_normalizes(self) -> None:
-        provider = Anthropic.from_key("sk-test")
-        m = provider.model("claude-sonnet-4-6")
-        req = httpx.Request("POST", "https://api.anthropic.com")
-        exc = anthropic._exceptions.RequestTooLargeError(
-            "Request size exceeds model context window",
-            response=httpx.Response(413, request=req),
-            body=None,
-        )
-        mock_stream = AsyncMock()
-        mock_stream.__aenter__ = AsyncMock(side_effect=exc)
-        mock_stream.__aexit__ = AsyncMock(return_value=False)
-        mock_sdk = AsyncMock()
-        mock_sdk.messages.stream = MagicMock(return_value=mock_stream)
-        with (
-            patch.object(provider, "get_sdk", AsyncMock(return_value=mock_sdk)),
-            pytest.raises(PromptTooLongError),
-        ):
-            await m.stream(request=ModelRequest(messages=[_user("hi")]))
-
-
-# ------------------------------------------------------------------
-# _add_cache_breakpoint: list content with thinking blocks
-# ------------------------------------------------------------------
-
-
-class TestAddCacheBreakpoint:
-    def test_skips_thinking_blocks(self) -> None:
-        messages: list[anthropic.types.MessageParam] = [
-            cast(
-                anthropic.types.MessageParam,
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "hi"},
-                        {"type": "thinking", "thinking": "deep"},
-                    ],
-                },
-            )
-        ]
-        _add_cache_breakpoint(messages)
-        content = messages[0]["content"]
-        assert isinstance(content, list)
-        b0 = cast(dict[str, Any], content[0])
-        b1 = cast(dict[str, Any], content[1])
-        assert "cache_control" in b0
-        assert "cache_control" not in b1
-
-    def test_default_ttl_is_5m_omits_field(self) -> None:
-        messages: list[anthropic.types.MessageParam] = [
-            cast(
-                anthropic.types.MessageParam,
-                {"role": "user", "content": "hi"},
-            )
-        ]
-        _add_cache_breakpoint(messages)
-        content = messages[0]["content"]
-        assert isinstance(content, list)
-        block = cast(dict[str, Any], content[0])
-        cache = cast(dict[str, str], block["cache_control"])
-        assert cache == {"type": "ephemeral"}
-
-    def test_1h_ttl_sets_extended_marker(self) -> None:
-        messages: list[anthropic.types.MessageParam] = [
-            cast(
-                anthropic.types.MessageParam,
-                {"role": "user", "content": "hi"},
-            )
-        ]
-        _add_cache_breakpoint(messages, "1h")
-        content = messages[0]["content"]
-        assert isinstance(content, list)
-        block = cast(dict[str, Any], content[0])
-        cache = cast(dict[str, str], block["cache_control"])
-        assert cache == {"type": "ephemeral", "ttl": "1h"}
-
-    def test_build_messages_propagates_request_cache_ttl(self) -> None:
-        """Regression: ``ModelRequest.cache_ttl`` must reach
-        ``_add_cache_breakpoint`` via ``_build_messages``. Removing the
-        ``cache_ttl=request.cache_ttl`` argument silently drops the
-        agent's setting.
-        """
-        request = ModelRequest(messages=[_user("hi")], cache_ttl="1h")
-        msgs = _build_messages(request)
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        block = cast(dict[str, Any], content[0])
-        assert block["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
-
-    def test_build_messages_default_cache_ttl_is_5m(self) -> None:
-        request = ModelRequest(messages=[_user("hi")])
-        msgs = _build_messages(request)
-        content = msgs[0]["content"]
-        assert isinstance(content, list)
-        block = cast(dict[str, Any], content[0])
-        assert block["cache_control"] == {"type": "ephemeral"}
+    usage = MagicMock()
+    usage.input_tokens = input_tokens
+    usage.output_tokens = output_tokens
+    usage.cache_creation_input_tokens = cache_creation
+    usage.cache_read_input_tokens = cache_read
+    msg = MagicMock()
+    msg.content = text_blocks
+    msg.usage = usage
+    msg.stop_reason = stop_reason
+    msg.stop_sequence = None
+    msg.id = "msg_xyz"
+    msg._request_id = "req_xyz"
+    return msg
+
+
+def test_parse_response_text_only() -> None:
+    raw = _build_anthropic_message(text="hi", input_tokens=5, output_tokens=2)
+    resp = _parse_response(raw, Pricing())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert resp.message.text == "hi"
+    assert resp.stop_reason == "model_finished"
+    assert resp.tokens.input_tokens == 5
+    assert resp.tokens.output_tokens == 2
+
+
+def test_parse_response_tool_call_extracted() -> None:
+    raw = _build_anthropic_message(
+        tool_calls=(("toolu_xyz", "Bash", {"cmd": "ls"}),),
+        stop_reason="tool_use",
+    )
+    resp = _parse_response(raw, Pricing())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert len(resp.message.tool_calls) == 1
+    call = resp.message.tool_calls[0]
+    assert call.id == "toolu_xyz"
+    assert call.name == "Bash"
+    assert dict(call.args) == {"cmd": "ls"}
+    assert resp.stop_reason == "model_tool_use"
+
+
+def test_parse_response_cache_tokens_split_correctly() -> None:
+    raw = _build_anthropic_message(
+        input_tokens=1000,
+        output_tokens=100,
+        cache_creation=200,
+        cache_read=400,
+    )
+    pricing = Pricing(request=1.0, response=2.0, cache_write=4.0, cache_read=0.5)
+    resp = _parse_response(raw, pricing)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert resp.tokens.cache_creation_tokens == 200
+    assert resp.tokens.cache_read_tokens == 400
+    # input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
+    assert resp.input_cost == pytest.approx(0.002)
+
+
+def test_parse_response_carries_message_and_request_ids() -> None:
+    raw = _build_anthropic_message()
+    resp = _parse_response(raw, Pricing())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert resp.message_id == "msg_xyz"
+    assert resp.request_id == "req_xyz"
+
+
+def test_guard_stream_interrupt_raises_when_tool_use_without_calls() -> None:
+    resp = ModelResponse(
+        message=AssistantMessage(text="partial"),
+        stop_reason="model_tool_use",
+    )
+    with pytest.raises(StreamInterruptedError):
+        _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
+
+
+def test_guard_stream_interrupt_silent_when_calls_present() -> None:
+    resp = ModelResponse(
+        message=AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="x", name="N", args={}),),
+        ),
+        stop_reason="model_tool_use",
+    )
+    _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
+
+
+def test_guard_stream_interrupt_silent_when_not_tool_use() -> None:
+    resp = ModelResponse(
+        message=AssistantMessage(text="done"),
+        stop_reason="model_finished",
+    )
+    _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
+
+
+def test_anthropic_from_key() -> None:
+    p = Anthropic.from_key("sk-ant-test")
+    assert isinstance(p, Anthropic)
+
+
+def test_anthropic_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="API key not configured"):
+        Anthropic.from_env()
+
+
+def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
+    p = Anthropic.from_env()
+    assert isinstance(p, Anthropic)
+
+
+def test_anthropic_model_known_id_returns_backend() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-haiku-4-5")
+    assert m.model_id == "claude-haiku-4-5"
+    assert m.supports_thinking is False  # haiku profile.
+    assert m.max_request_tokens == 200_000
+
+
+def test_anthropic_model_unknown_id_raises() -> None:
+    p = Anthropic.from_key("k")
+    with pytest.raises(ValueError, match="Unknown model"):
+        _ = p.model("unknown-claude")
+
+
+def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
+    """``claude-sonnet-4-5+1m`` should resolve to the +1m profile entry."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-sonnet-4-5+1m")
+    assert m.max_request_tokens == 1_000_000
+
+
+def test_anthropic_default_model_resolves() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model()
+    assert m.model_id == Anthropic.DEFAULT_MODEL
+
+
+def test_anthropic_utility_model_uses_haiku() -> None:
+    p = Anthropic.from_key("k")
+    m = p.utility_model()
+    assert m.model_id == "claude-haiku-4-5"
+
+
+def test_anthropic_subscription_property_false_on_api_key() -> None:
+    assert Anthropic.from_key("k").subscription is False
+
+
+def test_anthropic_model_is_context_overflow_via_prompt_too_long() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-haiku-4-5")
+    assert m.is_context_overflow(PromptTooLongError("too long")) is True
+
+
+def test_anthropic_model_token_estimate_uses_profile_chars_per_token() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    # chars_per_token = 2.83; 28 chars / 2.83 ≈ 9.89 → int → 9.
+    assert m.estimate_text_token_count("a" * 28) == 9
+
+
+def test_anthropic_model_pricing_exposed() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-haiku-4-5")
+    assert m.pricing.request > 0
+
+
+def test_anthropic_token_count_default_typing() -> None:
+    # ``TokenCount`` from the model module must accept keyword construction.
+    t = TokenCount(input_tokens=1, output_tokens=2)
+    assert t.input_tokens == 1
+    assert t.output_tokens == 2
+
+
+def test_anthropic_model_supports_flags() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.supports_streaming is True
+    assert m.supports_effort is True
+    assert m.supports_cache_control is True
+    assert m.supports_persistent_retry is True
+    assert m.supports_context_management is False  # API-key, not sub.
+    assert m.supports_account_auth is False
+
+
+def test_anthropic_model_image_limits() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.max_image_dim == 8000
+    assert m.max_image_bytes == 5 * 1024 * 1024
+
+
+def test_anthropic_model_is_context_overflow_non_api_status_error() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.is_context_overflow(RuntimeError("anything")) is False
+
+
+def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = RuntimeError("x")
+    err.body = {"type": "rate_limit_error"}  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[unresolved-attribute] -- attached for the test
+    assert m.is_retryable_provider_error(err) is True
+
+
+def test_anthropic_model_is_retryable_provider_error_unrelated_type() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = RuntimeError("x")
+    err.body = {"type": "permanent_error"}  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[unresolved-attribute] -- attached for the test
+    assert m.is_retryable_provider_error(err) is False
+
+
+def test_anthropic_model_is_retryable_provider_error_no_body_attr() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.is_retryable_provider_error(RuntimeError("x")) is False
+
+
+def test_anthropic_provider_extra_headers_for_1m_includes_beta() -> None:
+    p = Anthropic.from_key("k")
+    headers = p.extra_headers("claude-opus-4-7+1m")
+    assert headers.get("anthropic-beta", "").startswith("context-1m")
+
+
+def test_anthropic_provider_extra_headers_no_tag_empty() -> None:
+    p = Anthropic.from_key("k")
+    assert p.extra_headers("claude-haiku-4-5") == {}
+
+
+def test_anthropic_provider_extra_body_default_none() -> None:
+    p = Anthropic.from_key("k")
+    assert p.extra_body(has_thinking=False, cache_cold=False) is None
+
+
+def test_anthropic_provider_build_system_passthrough() -> None:
+    p = Anthropic.from_key("k")
+    assert p.build_system("hello") == "hello"
+
+
+def test_anthropic_provider_build_system_none_returns_not_given() -> None:
+    p = Anthropic.from_key("k")
+    out = p.build_system(None)
+    # ``anthropic.NOT_GIVEN`` is a sentinel; type is anthropic.NotGiven.
+    assert out is anthropic_sdk.NOT_GIVEN
+
+
+def test_anthropic_model_max_request_tokens_override() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7", max_request_tokens=10_000)
+    assert m.max_request_tokens == 10_000
+
+
+def test_anthropic_model_max_response_tokens_from_profile() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.max_response_tokens == 128_000
 
 
 if __name__ == "__main__":

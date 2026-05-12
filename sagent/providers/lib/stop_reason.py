@@ -31,7 +31,6 @@ from typing import Literal
 
 ProviderKind = Literal["anthropic", "openai", "google"]
 
-
 # Stop reasons we consider a normal response termination. Anything else
 # means the model stopped for a non-happy-path reason (token cap,
 # refusal, context overflow) and any tool calls in the response may
@@ -44,7 +43,6 @@ BENIGN_STOP_REASONS: frozenset[str] = frozenset(
     },
 )
 
-
 _ANTHROPIC_MAP: dict[str, str] = {
     "end_turn": "model_finished",
     "pause_turn": "model_continuing",
@@ -54,7 +52,6 @@ _ANTHROPIC_MAP: dict[str, str] = {
     "max_tokens": "max_tokens",
 }
 
-
 # OpenAI ``finish_reason`` → canonical vocabulary.
 _OPENAI_MAP: dict[str, str] = {
     "stop": "model_finished",
@@ -63,7 +60,6 @@ _OPENAI_MAP: dict[str, str] = {
     "function_call": "model_tool_use",  # legacy
     "content_filter": "model_refusal",
 }
-
 
 # Google ``finishReason`` (Gemini) → canonical.
 _GOOGLE_MAP: dict[str, str] = {

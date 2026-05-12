@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import asyncio
 import time
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
-    run_sync,
 )
 from sagent.tools.lib.bash import (
     Node,
@@ -37,11 +36,7 @@ _DEFAULT_SORT = "name"
 
 
 class List:
-    """List directory contents.
-
-    See :class:`Glob` for behavioral differences when both tools could
-    apply to "what's in DIR?".
-    """
+    """List directory contents."""
 
     name: str = "List"
     tool_id: str = "application/x-tool-list"
@@ -71,98 +66,105 @@ class List:
                     "enum": list(SORT_VALUES),
                     "description": (
                         "Result ordering. Default 'name' (alphabetical)."
-                        " 'mtime_desc' = newest first (``ls -t``);"
-                        " 'size_desc' = largest first (``ls -S``)."
+                        " 'mtime_desc' = newest first; 'size_desc' = largest first."
                     ),
                 },
                 "max_results": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum number of entries. Default 500. Must be ≥ 1.",
+                    "description": "Maximum number of entries. Default 500.",
                 },
             },
             "required": ["path"],
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label for this tool invocation.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short label for this directory listing.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Directive carrying ``path``.
 
         Returns:
-          label: Human-readable summary with directory path.
+          label: ``List <path>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        path = str(directive.get("path", "")) or "."
+        path = str(args.get("path", "")) or "."
         return f"List {path}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for List.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
+        """Return no supplemental system-prompt text for List.
 
         Returns:
-          prompt: Always empty.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
-        """List entries in a directory.
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """List directory entries with optional sort and long-format details.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Directive with ``path`` and optional ``show_hidden`` /
+              ``long`` / ``sort`` / ``max_results``.
 
         Returns:
-          result: Tool result Message with directory listing.
+          result: Entry listing (one per line), or an error when the
+              target is missing or not a directory.
 
         """
-        directive = get_directive(msg)
-        path = str(directive.get("path", ".") or ".")
-        show_hidden = bool_val(directive.get("show_hidden"), False)
-        long = bool_val(directive.get("long"), False)
-        sort = str(directive.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
-        max_results = int_val(directive.get("max_results"), 500)
-        return await run_sync(
-            self._run,
-            parent_id=msg.id,
-            path=path,
-            show_hidden=show_hidden,
-            long=long,
-            sort=sort,
-            max_results=max_results,
+        path = str(args.get("path", ".") or ".")
+        show_hidden = bool_val(args.get("show_hidden"), False)
+        long = bool_val(args.get("long"), False)
+        sort = str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
+        max_results = int_val(args.get("max_results"), 500)
+        return await asyncio.to_thread(
+            self._run, path, show_hidden, long, sort, max_results
         )
 
     def _run(
         self,
-        *,
-        path: str = ".",
-        show_hidden: bool = False,
-        long: bool = False,
-        sort: str = _DEFAULT_SORT,
-        max_results: int = 500,
-    ) -> str | Message:
+        path: str,
+        show_hidden: bool,
+        long: bool,
+        sort: str,
+        max_results: int,
+    ) -> ToolResult:
+        """Run the directory listing synchronously and return the result."""
         if sort not in SORT_VALUES:
-            return TextMessage(
-                f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
+                is_error=True,
             )
         if not Path(path).is_absolute():
             path = str(Path(get_tool_state().bash_cwd) / path)
         p = Path(path)
         if not p.exists():
-            return TextMessage(f"Not found: {path}", "text/x-error")
+            return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)
         if not p.is_dir():
-            return TextMessage(f"Not a directory: {path}", "text/x-error")
+            return ToolResult(
+                call_id="", content=f"Not a directory: {path}", is_error=True
+            )
         try:
             entries = list(p.iterdir())
         except OSError as err:
-            return TextMessage(f"Error reading {path}: {err}", "text/x-error")
+            return ToolResult(
+                call_id="", content=f"Error reading {path}: {err}", is_error=True
+            )
         if not show_hidden:
             entries = [e for e in entries if not e.name.startswith(".")]
         sort_paths(entries, sort)
@@ -185,29 +187,16 @@ class List:
         out = "\n".join(lines) or "(empty directory)"
         if total > max_results:
             out += f"\n... ({total - max_results} more)"
-        return out
+        return ToolResult(call_id="", content=out)
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a hint when the command is an ``ls`` invocation.
 
-        Recognized shapes (``cd PATH &&`` prefix accepted on either
-        the bare command or the pipeline):
-          * ``ls [-laAtSr]+ [DIR]`` -- direct listing
-          * ``ls ... | head [-n N | -N]`` -- truncated listing
-          * ``ls ... | tail [-n N | -N]`` -- truncated listing,
-            sort direction flipped (``tail`` of mtime_desc = oldest)
-
-        Flag map: ``l`` -> ``long``, ``a``/``A`` -> ``show_hidden``,
-        ``t`` -> ``sort='mtime_desc'``, ``S`` -> ``sort='size_desc'``,
-        ``r`` reverses any active sort. The pipe count becomes
-        ``max_results``. A positional containing glob metacharacters
-        routes to Glob.
-
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bashlex command trees from the active Bash call.
 
         Returns:
-          hint: Suggested List invocation, or ``None`` if no match.
+          hint: Nudge string redirecting to the List tool, or ``None``.
 
         """
         effective: Sequence[Node] = unwrap_cd_subtree(trees) or trees
@@ -237,9 +226,16 @@ class List:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _LsParse:
+    """Parsed ``ls`` flag state used to build a List-tool nudge."""
+
     long: bool
+    """``-l`` flag was present."""
+
     show_hidden: bool
+    """``-a`` / ``-A`` flag was present."""
+
     sort: str | None
+    """Sort key derived from ``-t`` / ``-S`` / ``-r``, or ``None``."""
 
 
 def _ls_to_hint(
@@ -331,13 +327,7 @@ def _parse_ls(args: tuple[str, ...]) -> _LsParse | None:
 
 
 def _parse_line_count(args: tuple[str, ...]) -> int | None:
-    """Extract line count from ``head``/``tail`` args.
-
-    Bails on byte mode (``-c``), follow (``-f``), extra positionals,
-    or counts with GNU sign modifiers (``head -n -N`` = "all but last
-    N", ``tail -n +N`` = "from line N") whose semantics don't map to
-    ``max_results``.
-    """
+    """Extract line count from ``head``/``tail`` args."""
     if not args:
         return 10
     count: int | None = None

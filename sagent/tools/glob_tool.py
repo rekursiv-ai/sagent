@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import time
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
@@ -97,67 +96,65 @@ class Glob:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Directive with ``pattern`` and optional ``path``.
 
         Returns:
-          label: Human-readable summary with pattern and path.
+          label: ``Glob <pattern>[ in <path>]`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        pattern = str(directive.get("pattern", ""))
-        path = str(directive.get("path", "")) or "."
+        pattern = str(args.get("pattern", ""))
+        path = str(args.get("path", "")) or "."
         suffix = f" in {path}" if path != "." else ""
         return f"Glob {pattern}{suffix}"
 
-    def summary_result(self, result: Message) -> str | None:
-        """One-line receipt: number of matches."""
-        if not self.emit_tool_summary:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """One-line receipt: number of matches.
+
+        Args:
+          result: Completed ``ToolResult`` from ``run``.
+
+        Returns:
+          receipt: ``N matches`` / ``no matches``, or ``None`` when suppressed.
+
+        """
+        if not self.emit_tool_summary or result.is_error:
             return None
-        if result.descriptor != "text/plain":
-            return None
-        text = str(result.content).strip()
+        text = result.content.strip()
         if not text or text.startswith("(no matches"):
             return "no matches"
-        # ``_run`` separates entries with newlines (one path per line).
         return f"{text.count(chr(10)) + 1} matches"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 
         Returns:
-          prompt: Always empty.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Match files against a glob pattern and return paths.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Directive with ``pattern`` and optional ``path`` / ``sort``
+              / ``long`` / ``max_results``.
 
         Returns:
-          result: Tool result Message with matching file paths.
+          result: One match per line (resolved paths), or ``(no matches)``.
 
         """
-        directive = get_directive(msg)
-        pattern = str(directive.get("pattern", ""))
-        path = str(directive.get("path", ".") or ".")
-        sort = str(directive.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
-        long = bool_val(directive.get("long"), False)
-        max_results = int_val(directive.get("max_results"), 200)
         return await run_sync(
             self._run,
-            parent_id=msg.id,
-            pattern=pattern,
-            path=path,
-            sort=sort,
-            long=long,
-            max_results=max_results,
+            pattern=str(args.get("pattern", "")),
+            path=str(args.get("path", ".") or "."),
+            sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
+            long=bool_val(args.get("long"), False),
+            max_results=int_val(args.get("max_results"), 200),
         )
 
     def _run(
@@ -168,11 +165,13 @@ class Glob:
         sort: str = _DEFAULT_SORT,
         long: bool = False,
         max_results: int = 200,
-    ) -> str | Message:
+    ) -> str | ToolResult:
+        """Run the glob synchronously and return formatted matches."""
         if sort not in SORT_VALUES:
-            return TextMessage(
-                f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
+                is_error=True,
             )
         # Python's Path.glob requires a relative pattern. If the
         # caller passes an absolute pattern (e.g. ``/abs/dir/*.py``),
@@ -217,10 +216,10 @@ class Glob:
         handled by the List tool, not Glob.
 
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bashlex command trees from the active Bash call.
 
         Returns:
-          nudge: Suggested Glob invocation, or ``None`` if no match.
+          hint: Nudge string redirecting to the Glob tool, or ``None``.
 
         """
         unwrapped = unwrap_cd_prefix(trees)
@@ -233,6 +232,7 @@ class Glob:
 
 
 def _long_line(p: Path) -> str:
+    """Render one ``ls -l``-style row: ``<size>  <mtime>  <path>``."""
     size = safe_size(p)
     mtime_raw = safe_mtime(p)
     mtime = (
@@ -242,6 +242,7 @@ def _long_line(p: Path) -> str:
 
 
 def _match_find(cwd: str | None, args: tuple[str, ...]) -> str | None:
+    """Match a ``find [PATH] [-type f|d] -name GLOB`` for a Glob nudge."""
     # Shape: ``find [PATH] [-type f|d] -name GLOB``. PATH is the first
     # non-flag arg (or "." if omitted). ``-type`` is accepted but not
     # translated. Whitelist-only parsing: any predicate outside the

@@ -24,7 +24,17 @@ def tool_input_error_text(
     *,
     required: tuple[str, ...] = (),
 ) -> str:
-    """Return a model-facing tool-input error for operation-specific fields."""
+    """Return a model-facing tool-input error for operation-specific fields.
+
+    Args:
+      tool_name: Name of the tool whose directive was malformed.
+      issue: Human description of what was missing or invalid.
+      required: Required parameter names to list in the recovery hint.
+
+    Returns:
+      message: Multi-paragraph error text including the recovery hint.
+
+    """
     parts = [f"{TOOL_INPUT_PREFIX} {tool_name} failed: {issue}"]
     if required:
         keys = ", ".join(f"`{k}`" for k in required)
@@ -34,4 +44,13 @@ def tool_input_error_text(
 
 
 def is_tool_input_error_text(text: str) -> bool:
+    """Return whether ``text`` is a tool-input or input-validation error.
+
+    Args:
+      text: Tool-result content to inspect.
+
+    Returns:
+      is_error: True when ``text`` starts with a known input-error prefix.
+
+    """
     return text.startswith((INPUT_VALIDATION_PREFIX, TOOL_INPUT_PREFIX))

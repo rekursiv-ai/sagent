@@ -25,19 +25,16 @@ import asyncio
 import json
 import logging
 
-from sagent.custom_types import Message, TextMessage, is_message
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
 
 
 logger = logging.getLogger(__name__)
 
-
 _API_BASE = "https://slack.com/api"
 _DEFAULT_TIMEOUT = 30.0
-
 
 _OPERATIONS = (
     "send",
@@ -54,12 +51,22 @@ async def _slack_call(
     params: Mapping[str, str | int],
     token: str,
     post: bool = False,
-) -> MutableJSON | Message:
-    """Call a Slack Web API method. Returns parsed JSON body.
+) -> MutableJSON | ToolResult:
+    """Call a Slack Web API method and parse the JSON response.
 
     POST methods use a JSON body + ``Authorization: Bearer``; GET
     methods send params in the query string. Slack returns
     ``{"ok": true, ...}`` or ``{"ok": false, "error": "..."}``.
+
+    Args:
+      method: Slack Web API method (e.g. ``chat.postMessage``).
+      params: Request parameters (body for POST, query for GET).
+      token: Bot user token (``xoxb-...``).
+      post: When True, send as ``POST`` with JSON body.
+
+    Returns:
+      body: Parsed JSON body on success, or a ``ToolResult`` error.
+
     """
     url = f"{_API_BASE}/{method}"
     headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
@@ -89,15 +96,17 @@ async def _slack_call(
                 ),
             )
     except FetchError as e:
-        return TextMessage(
-            f"Slack HTTP {e.status}: {e.body[:200].decode(errors='replace')}",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=(f"Slack HTTP {e.status}: {e.body[:200].decode(errors='replace')}"),
+            is_error=True,
         )
     body = cast(MutableJSON, json.loads(raw))
     if not body.get("ok"):
-        return TextMessage(
-            f"Slack API {method} failed: {body.get('error', 'unknown')}",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=f"Slack API {method} failed: {body.get('error', 'unknown')}",
+            is_error=True,
         )
     return body
 
@@ -143,58 +152,65 @@ class Slack:
         self._username = username
         self._icon_url = icon_url
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label for this Slack operation.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short display label for this invocation.
 
         Args:
-          msg: Tool call message.
+          args: Tool arguments.
 
         Returns:
-          label: "Slack <operation>:<channel>".
+          label: Human-readable summary string.
 
         """
-        directive = get_directive(msg)
-        operation = str(directive.get("operation", ""))
-        channel = str(directive.get("channel", ""))
+        operation = str(args.get("operation", ""))
+        channel = str(args.get("channel", ""))
         suffix = f":{channel}" if channel else ""
         return f"Slack {operation}{suffix}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for Slack.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return per-request system prompt text.
+        """Return supplemental system-prompt text.
 
         Returns:
-          prompt: Always empty for this tool.
+          prompt: Empty string; this tool adds no prompt.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Dispatch the requested Slack operation.
 
         Args:
-          msg: Tool call message with ``operation`` and operation-specific fields.
+          args: Tool arguments containing ``operation`` and op-specific fields.
 
         Returns:
-          result: Operation result or error message.
+          result: Operation output or an error message.
 
         """
-        directive = get_directive(msg)
-        operation = str(directive.get("operation", ""))
+        operation = str(args.get("operation", ""))
         result = await self._dispatch(
             operation=operation,
-            channel=str(directive.get("channel", "")),
-            channel_name=str(directive.get("channel_name", "")),
-            text=str(directive.get("text", "")),
-            thread_ts=str(directive.get("thread_ts", "")),
-            limit=int_val(directive.get("limit"), 25),
+            channel=str(args.get("channel", "")),
+            channel_name=str(args.get("channel_name", "")),
+            text=str(args.get("text", "")),
+            thread_ts=str(args.get("thread_ts", "")),
+            limit=int_val(args.get("limit"), 25),
         )
-        if is_message(result):
+        if isinstance(result, ToolResult):
             return result
-        return TextMessage(result, "text/plain")
+        return ToolResult(call_id="", content=result)
 
     async def _dispatch(
         self,
@@ -205,7 +221,8 @@ class Slack:
         text: str,
         thread_ts: str,
         limit: int,
-    ) -> str | Message:
+    ) -> str | ToolResult:
+        """Route ``operation`` to the matching private helper."""
         if operation == "send":
             return await self._send(channel, text=text, thread_ts=thread_ts)
         if operation == "list_channels":
@@ -218,16 +235,25 @@ class Slack:
             return await self._list_users(limit)
         if operation == "create_channel":
             return await self.create_channel(channel_name)
-        return TextMessage(f"Unknown operation: {operation}", "text/x-error")
+        return ToolResult(
+            call_id="",
+            content=f"Unknown operation: {operation}",
+            is_error=True,
+        )
 
     async def _send(
         self,
         channel: str,
         text: str,
         thread_ts: str,
-    ) -> str | Message:
+    ) -> str | ToolResult:
+        """Post one message to ``channel`` via ``chat.postMessage``."""
         if not channel or not text:
-            return TextMessage("'channel' and 'text' required.", "text/x-error")
+            return ToolResult(
+                call_id="",
+                content="'channel' and 'text' required.",
+                is_error=True,
+            )
         params: dict[str, str] = {"channel": channel, "text": text}
         if thread_ts:
             params["thread_ts"] = thread_ts
@@ -241,19 +267,20 @@ class Slack:
             token=self._token,
             post=True,
         )
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         sender = self._username or "bot"
         logger.info("[%s->%s] %s", sender, channel, text[:200])
         return f"Sent. ts={body.get('ts')} channel={body.get('channel')}"
 
-    async def _list_channels(self, limit: int) -> str | Message:
+    async def _list_channels(self, limit: int) -> str | ToolResult:
+        """Enumerate non-archived channels via ``conversations.list``."""
         params = {
             "limit": max(1, min(1000, limit)),
             "exclude_archived": "true",
         }
         body = await _slack_call("conversations.list", params=params, token=self._token)
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         channels = cast(list[MutableJSON], body.get("channels") or [])
         if not channels:
@@ -267,14 +294,19 @@ class Slack:
         self,
         channel: str,
         limit: int,
-    ) -> str | Message:
+    ) -> str | ToolResult:
+        """Render the last ``limit`` messages via ``conversations.history``."""
         if not channel:
-            return TextMessage("'channel' required.", "text/x-error")
+            return ToolResult(
+                call_id="",
+                content="'channel' required.",
+                is_error=True,
+            )
         params = {"channel": channel, "limit": max(1, min(200, limit))}
         body = await _slack_call(
             "conversations.history", params=params, token=self._token
         )
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         messages = cast(list[MutableJSON], body.get("messages") or [])
         logger.info("[list_messages] channel=%s count=%d", channel, len(messages))
@@ -285,9 +317,14 @@ class Slack:
         channel: str,
         thread_ts: str,
         limit: int,
-    ) -> str | Message:
+    ) -> str | ToolResult:
+        """Render replies for ``thread_ts`` via ``conversations.replies``."""
         if not channel or not thread_ts:
-            return TextMessage("'channel' and 'thread_ts' required.", "text/x-error")
+            return ToolResult(
+                call_id="",
+                content="'channel' and 'thread_ts' required.",
+                is_error=True,
+            )
         params = {
             "channel": channel,
             "ts": thread_ts,
@@ -296,7 +333,7 @@ class Slack:
         body = await _slack_call(
             "conversations.replies", params=params, token=self._token
         )
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         messages = cast(list[MutableJSON], body.get("messages") or [])
         logger.info(
@@ -307,10 +344,11 @@ class Slack:
         )
         return _render_messages(messages)
 
-    async def _list_users(self, limit: int) -> str | Message:
+    async def _list_users(self, limit: int) -> str | ToolResult:
+        """Enumerate non-deleted users via ``users.list``."""
         params = {"limit": max(1, min(1000, limit))}
         body = await _slack_call("users.list", params=params, token=self._token)
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         members = cast(list[MutableJSON], body.get("members") or [])
         if not members:
@@ -321,25 +359,29 @@ class Slack:
             if not m.get("deleted")
         )
 
-    async def create_channel(self, channel_name: str) -> str | Message:
+    async def create_channel(self, channel_name: str) -> str | ToolResult:
         """Create a Slack channel.
 
         Args:
-          channel_name: Name for the new channel.
+          channel_name: Channel name to create (no ``#`` prefix).
 
         Returns:
-          result: ``"id=C..."`` on success, or error message.
+          result: ``id=<channel-id>`` confirmation, or a ``ToolResult`` error.
 
         """
         if not channel_name:
-            return TextMessage("'channel_name' required.", "text/x-error")
+            return ToolResult(
+                call_id="",
+                content="'channel_name' required.",
+                is_error=True,
+            )
         body = await _slack_call(
             "conversations.create",
             params={"name": channel_name},
             token=self._token,
             post=True,
         )
-        if is_message(body):
+        if isinstance(body, ToolResult):
             return body
         ch = cast(MutableJSON, body.get("channel") or {})
         return f"id={ch.get('id')}"
@@ -349,22 +391,23 @@ class Slack:
         channel: str,
         text: str,
         thread_ts: str = "",
-    ) -> str | Message:
+    ) -> str | ToolResult:
         """Post a message to a Slack channel.
 
         Args:
-          channel: Channel ID to post to.
-          text: Message text.
-          thread_ts: Parent message timestamp for threading.
+          channel: Channel id or DM id.
+          text: Message body to post.
+          thread_ts: Optional parent ``ts`` to thread the reply under.
 
         Returns:
-          result: Confirmation string or error message.
+          result: ``Sent. ts=... channel=...`` line, or a ``ToolResult`` error.
 
         """
         return await self._send(channel, text=text, thread_ts=thread_ts)
 
 
 def _render_messages(messages: list[MutableJSON]) -> str:
+    """Render messages as ``[ts] <user> text`` lines with reaction tails."""
     if not messages:
         return "(no messages)"
     lines: list[str] = []

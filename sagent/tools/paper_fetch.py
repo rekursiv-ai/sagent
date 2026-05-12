@@ -19,10 +19,9 @@ import json
 import logging
 import os
 
-from sagent.custom_types import Message, TextMessage, is_message
+from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
@@ -37,7 +36,6 @@ from sagent.tools.paper_common import (
 
 
 logger = logging.getLogger(__name__)
-
 
 _ARXIV_PDF_BASE = "https://arxiv.org/pdf"
 
@@ -64,9 +62,6 @@ def _download_pdf(url: str, *, retries: int = _DOWNLOAD_RETRIES) -> bytes:
     return body
 
 
-# -- Source 1: arXiv direct -----------------------------------------------
-
-
 async def _fetch_arxiv(canonical: str) -> bytes | None:
     """Fetch ``https://arxiv.org/pdf/<id>`` - no intermediary."""
     url = f"{_ARXIV_PDF_BASE}/{canonical}"
@@ -75,9 +70,6 @@ async def _fetch_arxiv(canonical: str) -> bytes | None:
     except (FetchError, ValueError, OSError) as e:
         logger.debug("arXiv download failed: %s", e)
         return None
-
-
-# -- Source 2: Open-access URL via S2 ------------------------------------
 
 
 def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
@@ -123,13 +115,10 @@ async def _fetch_open_access(kind: IdType, canonical: str) -> bytes | None:
         return None
 
 
-# -- Cascade driver ------------------------------------------------------
-
-
 async def _fetch_cascade(
     kind: IdType,
     canonical: str,
-) -> tuple[bytes, str] | Message:
+) -> tuple[bytes, str] | ToolResult:
     """Try each enabled source; return ``(bytes, source_label)`` or an error."""
     if kind == "arxiv":
         body = await _fetch_arxiv(canonical)
@@ -139,9 +128,10 @@ async def _fetch_cascade(
     if body is not None:
         return body, "open_access"
 
-    return TextMessage(
-        f"No source returned a PDF for {kind}:{canonical}.",
-        "text/x-error",
+    return ToolResult(
+        call_id="",
+        content=f"No source returned a PDF for {kind}:{canonical}.",
+        is_error=True,
     )
 
 
@@ -172,22 +162,30 @@ class PaperFetch:
     def __init__(self, *, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir or papers_cache_dir()
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Tool arguments.
 
         Returns:
           label: Human-readable summary string.
 
         """
-        directive = get_directive(msg)
-        raw = str(directive.get("id", "")).strip()
+        raw = str(args.get("id", "")).strip()
         short = short_id(raw) if raw else "?"
         return f"PaperFetch {short}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for PaperFetch.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
@@ -200,33 +198,32 @@ class PaperFetch:
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Download a paper PDF by identifier, using a source cascade.
 
         Args:
-          msg: Directive message containing the paper ``id``.
+          args: Tool arguments containing the paper ``id``.
 
         Returns:
           result: Path to the cached PDF or an error message.
 
         """
-        directive = get_directive(msg)
-        raw = str(directive.get("id", "")).strip()
+        raw = str(args.get("id", "")).strip()
         if not raw:
-            return TextMessage("'id' is required.", "text/x-error")
+            return ToolResult(call_id="", content="'id' is required.", is_error=True)
         parsed = normalize_id(raw)
-        if is_message(parsed):
+        if isinstance(parsed, ToolResult):
             return parsed
         kind, canonical = parsed
 
         slug = id_slug(kind, canonical)
         cache_path = self._cache_dir / f"{slug}.pdf"
         if cache_path.exists() and cache_path.stat().st_size > _MIN_PDF_BYTES:
-            return TextMessage(f"Cached: {cache_path}", "text/plain")
+            return ToolResult(call_id="", content=f"Cached: {cache_path}")
 
         result = await _fetch_cascade(kind, canonical)
-        if is_message(result):
+        if isinstance(result, ToolResult):
             return result
         body, source = result
         atomic_write_bytes(cache_path, body)
-        return TextMessage(f"Downloaded via {source}: {cache_path}", "text/plain")
+        return ToolResult(call_id="", content=f"Downloaded via {source}: {cache_path}")

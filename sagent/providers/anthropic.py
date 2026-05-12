@@ -1,6 +1,7 @@
 """Anthropic provider (API key).
 
-Thin API-key client matching OpenAI/Google shape.
+Thin API-key client. Speaks history entries
+(``UserMessage`` / ``AssistantMessage`` / ``ToolResult``) directly.
 
 Usage::
 
@@ -35,33 +36,23 @@ else:
     anthropic = lazy_import("anthropic")  # 569ms cold
     image_lib = lazy_import("sagent.lib.image")
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from sagent.custom_exceptions import (
     PromptTooLongError,
     StreamInterruptedError,
 )
 from sagent.custom_types import (
-    JsonMessage,
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    TextMessage,
     TokenCount,
 )
 from sagent.lib import debug_log
-from sagent.lib.descriptors import has_error, is_image
-from sagent.lib.json import (
-    JSONValue,
-    MutableJSON,
-    json_freeze,
-    json_unfreeze,
-)
-from sagent.lib.message import (
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    tool_call_message,
-)
+from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -74,7 +65,6 @@ from sagent.providers.lib.stop_reason import normalize_stop_reason
 logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
-
 
 _CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
@@ -229,20 +219,20 @@ class Anthropic:
         """Create provider from an API key.
 
         Args:
-          api_key: Anthropic API key.
+          api_key: Anthropic API key (``sk-ant-...``).
 
         Returns:
-          provider: Anthropic provider instance.
+          provider: Configured Anthropic provider instance.
 
         """
         return cls(api_key=api_key)
 
     @classmethod
     def from_env(cls) -> Anthropic:
-        """Create provider from ANTHROPIC_API_KEY env var.
+        """Create provider from ``ANTHROPIC_API_KEY`` env var.
 
         Returns:
-          provider: Anthropic provider instance.
+          provider: Configured Anthropic provider instance.
 
         Raises:
           RuntimeError: If the API key is not configured.
@@ -295,7 +285,7 @@ class Anthropic:
         """Return the default utility (fast/cheap) model backend.
 
         Returns:
-          model: Anthropic model backend for ``DEFAULT_UTILITY_MODEL``.
+          model: Backend for ``DEFAULT_UTILITY_MODEL``.
 
         """
         return self.model(self.DEFAULT_UTILITY_MODEL)
@@ -311,7 +301,7 @@ class Anthropic:
         """Get or create the underlying Anthropic SDK client.
 
         Returns:
-          client: Async Anthropic SDK client.
+          client: Shared ``AsyncAnthropic`` instance.
 
         """
         if self._sdk is not None:
@@ -345,10 +335,10 @@ class Anthropic:
         """Return per-request extra headers.
 
         Args:
-          model_id: Model identifier for context-window beta selection.
+          model_id: Active model id used to derive beta opt-ins.
 
         Returns:
-          headers: Extra HTTP headers to include.
+          headers: Header dict (``anthropic-beta`` set when betas apply).
 
         """
         betas = context_betas(model_id)
@@ -363,11 +353,11 @@ class Anthropic:
         """Return per-request extra body fields.
 
         Args:
-          has_thinking: Whether thinking mode is active.
-          cache_cold: Whether the prompt cache TTL likely expired.
+          has_thinking: True when the request enables extended thinking.
+          cache_cold: True when the cache TTL likely expired.
 
         Returns:
-          body: Extra body fields, or ``None``.
+          body: Extra body payload, or ``None`` to skip.
 
         """
         del has_thinking, cache_cold
@@ -401,7 +391,7 @@ def _is_prompt_too_long_text(msg: str) -> bool:
 
 def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
     """Re-raise as PromptTooLongError if this is a prompt-too-long error."""
-    raw = str(e)  # anthropic types are annotation-only here
+    raw = str(e)
     if not _is_prompt_too_long_text(raw):
         return
     actual, limit = None, None
@@ -433,34 +423,24 @@ def _guard_stream_interrupt(
     kind: str,
     model_id: str,
 ) -> None:
-    """Raise ``StreamInterruptedError`` if a tool_use response arrived
-    without any ``ToolUseBlock``s.
+    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived
+    without any ``ToolCall``s.
 
-    Gates on *actual content* rather than the API's ``stop_reason``
-    field, which is unreliable (``stop_reason === 'model_tool_use'`` is not
-    always set correctly). When this invariant is violated the tool
-    block was almost certainly dropped mid-stream; retrying the request
-    usually recovers it. The parsed partial response is carried on the
-    error so the retry layer can fall back gracefully after exhausting
-    attempts.
+    Gates on actual content rather than the API's ``stop_reason``, which is
+    unreliable. When violated, the tool block was almost certainly dropped
+    mid-stream; retry usually recovers. The partial response is carried on
+    the error so the retry layer can fall back gracefully.
     """
-    parts = cast(tuple[Message, ...], resp.content.content)
-    has_tool_calls = any(p.descriptor == "multipart/x-tool-call" for p in parts)
+    has_tool_calls = bool(resp.message.tool_calls)
     if resp.stop_reason == "model_tool_use" and not has_tool_calls:
-        text_parts = [
-            cast(str, p.content) for p in parts if p.descriptor == "text/plain"
-        ]
-        thinking_count = sum(
-            1 for p in parts if p.descriptor == "application/x-thinking-structured"
-        )
-        text = "".join(text_parts)
+        text = resp.message.text
         debug_log.trace_error(
             "stream_interrupted",
             kind=kind,
             model=model_id,
             has_text=bool(text.strip()),
             text_len=len(text),
-            thinking_blocks=thinking_count,
+            thinking_blocks=len(resp.message.thinking_blocks),
             request_id=resp.request_id,
             message_id=resp.message_id,
         )
@@ -480,11 +460,6 @@ def _request_id(e: BaseException) -> str | None:
         except Exception:  # noqa: BLE001 -- best-effort, must not mask the original error
             return None
     return None
-
-
-# ==================================================================
-# Model backend
-# ==================================================================
 
 
 class _AnthropicModel:
@@ -510,68 +485,69 @@ class _AnthropicModel:
 
     @property
     def max_request_tokens(self) -> int:
-        """Maximum input tokens for this model."""
+        """Maximum input tokens the model accepts."""
         return self._max_request_tokens
 
     @property
     def model_id(self) -> str:
-        """Model identifier string."""
+        """Provider-specific model identifier."""
         return self._model_id
 
     @property
     def max_response_tokens(self) -> int:
-        """Maximum output tokens for this model."""
+        """Maximum output tokens the model can generate."""
         return self._profile.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
-        """Whether this model supports streaming responses."""
+        """Whether the model supports token-by-token streaming."""
         return True
 
     @property
     def supports_thinking(self) -> bool:
-        """Whether this model supports thinking mode."""
+        """Whether the model supports extended thinking."""
         return self._profile.supports_thinking
 
     @property
     def supports_effort(self) -> bool:
-        """Whether this model supports effort configuration."""
+        """Whether the model accepts an effort hint."""
         return True
 
     @property
     def supports_cache_control(self) -> bool:
-        """Whether this model supports prompt caching."""
+        """Whether the provider supports prompt caching."""
         return True
 
     @property
     def supports_context_management(self) -> bool:
-        """Whether server-side context management is available."""
+        """Whether the provider manages context overflow internally."""
         return self._provider.subscription
 
     @property
     def supports_persistent_retry(self) -> bool:
-        """Whether retries with persistent message IDs are supported."""
+        """Whether the provider retries internally on transient failures."""
         return True
 
     @property
     def supports_account_auth(self) -> bool:
-        """Whether this model uses account auth."""
+        """Whether the provider uses account-based authentication."""
         return self._provider.subscription
 
     def estimate_text_token_count(self, text: str) -> int:
-        """Estimate token count for text using the model's chars-per-token ratio.
+        """Estimate input token count for a text string.
 
         Args:
-          text: Input text to estimate.
+          text: Text to score.
 
         Returns:
-          tokens: Estimated token count.
+          tokens: Approximate input token count.
 
         """
         return int(len(text) / self._profile.chars_per_token)
 
     @property
     def pricing(self) -> Pricing:
+        """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
     def estimate_image_token_count(self, data: bytes) -> int:
@@ -581,8 +557,7 @@ class _AnthropicModel:
           data: Raw image bytes.
 
         Returns:
-          tokens: Estimated token count (width*height/750), or 0 if
-              dimensions cannot be read.
+          tokens: Approximate input token count (``width*height/750``).
 
         """
         # Anthropic: ~width*height/750 tokens.
@@ -592,22 +567,22 @@ class _AnthropicModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension (width or height) in pixels."""
+        """Maximum image dimension (pixels) accepted by the API."""
         return 8000
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size in bytes (5 MiB)."""
+        """Maximum image size (bytes) accepted by the API."""
         return 5 * 1024 * 1024
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Check whether an error indicates a context-window overflow.
+        """Classify an error as a context-window overflow.
 
         Args:
-          error: Exception raised by the API call.
+          error: Exception raised by the provider call.
 
         Returns:
-          overflow: ``True`` if the error is a context-window overflow.
+          overflow: True when ``error`` indicates context overflow.
 
         """
         if isinstance(error, PromptTooLongError):
@@ -621,10 +596,13 @@ class _AnthropicModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """Statusless Anthropic errors that still declare retryability.
 
-        The SDK sometimes raises errors without an HTTP status code while
-        the body's ``"type"`` field marks the failure as transient
-        (``"rate_limit_error"``, ``"server_error"``). Status-coded
-        variants are handled by ``retry.py``'s shared classifier.
+        Args:
+          error: Exception raised by the provider call.
+
+        Returns:
+          retryable: True when the response body declares a known
+              retryable ``type`` (e.g. ``overloaded_error``).
+
         """
         body = getattr(error, "body", None)
         if not isinstance(body, Mapping):
@@ -682,13 +660,16 @@ class _AnthropicModel:
         return kwargs
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a buffered request to Claude and return a ModelResponse.
+        """Send a buffered request to Claude and return a ``ModelResponse``.
 
         Args:
-          request: Model request to send.
+          request: Fully-built model request.
 
         Returns:
-          response: Parsed model response.
+          response: Parsed ``ModelResponse`` with usage and cost filled in.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
 
         """
         messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
@@ -756,15 +737,18 @@ class _AnthropicModel:
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Stream a request, calling on_text/on_thinking for each chunk.
+        """Stream a request, calling ``on_text`` / ``on_thinking`` per chunk.
 
         Args:
-          request: Model request to send.
-          on_text: Callback invoked with each streamed text delta.
-          on_thinking: Callback invoked with each streamed thinking delta.
+          request: Fully-built model request.
+          on_text: Called per text chunk; ``None`` disables text streaming.
+          on_thinking: Called per thinking chunk; ``None`` disables it.
 
         Returns:
-          response: Parsed model response after the stream completes.
+          response: Parsed ``ModelResponse`` with usage and cost filled in.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
 
         """
         messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
@@ -819,14 +803,7 @@ async def _stream_impl(
     """Run the streaming call and return the final message.
 
     Routes ``text_delta`` events to ``on_text`` and ``thinking_delta``
-    events to ``on_thinking`` as they arrive, so the renderer can
-    surface thinking content in real time (before the response text
-    starts streaming, as Anthropic emits thinking blocks first).
-
-    Returns:
-      message: Final assembled ``anthropic.types.Message`` after the
-          stream has closed.
-
+    events to ``on_thinking`` as they arrive.
     """
     async with sdk.messages.stream(**kwargs) as s:  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
         loop = asyncio.get_running_loop()
@@ -847,15 +824,8 @@ async def _stream_impl(
             return await s.get_final_message()
 
 
-# -- Translation helpers -----------------------------------------------
-
-
 def _cache_mark(ttl: str) -> dict[str, str]:
-    """Build the ``cache_control`` marker for the requested TTL.
-
-    ``"5m"`` omits the ``ttl`` field (Anthropic default); ``"1h"`` opts
-    into the extended-cache rate (2x input price to write, same read).
-    """
+    """Build the ``cache_control`` marker for the requested TTL."""
     if ttl == "1h":
         return {"type": "ephemeral", "ttl": "1h"}
     return {"type": "ephemeral"}
@@ -865,11 +835,7 @@ def _add_cache_breakpoint(
     messages: list[anthropic.types.MessageParam],
     ttl: str = "5m",
 ) -> None:
-    """Add cache_control to the last content block of the last message.
-
-    Places exactly one marker per request so the API can cache the
-    conversation prefix.
-    """
+    """Add cache_control to the last content block of the last message."""
     mark = _cache_mark(ttl)
     last = messages[-1]
     raw_content: object = last.get("content")
@@ -913,64 +879,23 @@ def _build_messages(
     max_image_dim: int = 8000,
     max_image_bytes: int = 5 * 1024 * 1024,
 ) -> list[anthropic.types.MessageParam]:
-    """Convert Message list to Anthropic message format.
+    """Convert history entries to Anthropic message format.
 
     Tool-call IDs are remapped to ``toolu_N`` so history from other
     providers (OpenAI ``fc_*``, etc.) is accepted by the Anthropic API.
 
     Anthropic uses alternating user/assistant messages with content
-    blocks. Tool results are content blocks inside user messages.
-    Consecutive tool results are batched into one user message.
+    blocks. Tool results are content blocks inside user messages;
+    consecutive tool results batch into one user message.
     """
     ids = IdRemapper("toolu_")
     messages: list[anthropic.types.MessageParam] = []
     pending_tool_results: list[dict[str, object]] = []
 
-    for msg in request.messages:
-        if msg.descriptor == "text/x-user-message":
-            if pending_tool_results and msg.content:
-                pending_tool_results.append({"type": "text", "text": msg.content})
-                continue
+    for entry in request.messages:
+        if isinstance(entry, UserMessage):
             _flush_tool_results(messages, pending_tool_results)
-            if msg.content:
-                messages.append(
-                    cast(
-                        anthropic.types.MessageParam,
-                        {"role": "user", "content": msg.content},
-                    )
-                )
-        elif msg.descriptor == "multipart/x-user-message":
-            _flush_tool_results(messages, pending_tool_results)
-            blocks: list[object] = []
-            for part in cast(tuple[Message, ...], msg.content):
-                if part.descriptor == "text/plain":
-                    blocks.append({"type": "text", "text": cast(str, part.content)})
-                elif is_image(part.descriptor) or (
-                    part.descriptor == "application/pdf"
-                ):
-                    raw = cast(bytes, part.content)
-                    img = is_image(part.descriptor)
-                    mime = part.descriptor
-                    if img:
-                        raw, mime = image_lib.resize(
-                            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
-                        )
-                    b64 = base64.b64encode(raw).decode()
-                    blocks.append(
-                        {
-                            "type": "image" if img else "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime,
-                                "data": b64,
-                            },
-                        }
-                    )
-                else:
-                    logger.warning(
-                        "Anthropic: skipping user attachment with unsupported mime=%s",
-                        part.descriptor,
-                    )
+            blocks = _user_blocks(entry, max_image_dim, max_image_bytes)
             if blocks:
                 messages.append(
                     cast(
@@ -978,90 +903,21 @@ def _build_messages(
                         {"role": "user", "content": blocks},
                     )
                 )
-        elif msg.descriptor == "multipart/x-model-message":
+        elif isinstance(entry, AssistantMessage):
             _flush_tool_results(messages, pending_tool_results)
-            parts_mm = cast(tuple[Message, ...], msg.content)
-            if not parts_mm:
-                continue
-            content: list[dict[str, object]] = []
-            for part in parts_mm:
-                if part.descriptor == "application/x-thinking-structured":
-                    content.append(
-                        cast(
-                            dict[str, object],
-                            json_unfreeze(cast(JSONValue, part.content)),
-                        )
-                    )
-                elif part.descriptor == "text/plain":
-                    content.append({"type": "text", "text": cast(str, part.content)})
-                elif part.descriptor == "multipart/x-tool-call":
-                    directive = get_directive(part)
-                    content.append(
-                        {
-                            "type": "tool_use",
-                            "id": ids.map(get_queue_id(part)),
-                            "name": get_tool_name(part),
-                            "input": json_unfreeze(directive),
-                        }
-                    )
-            # Anthropic rejects assistant messages whose final block is
-            # thinking/redacted_thinking. Append a placeholder text block
-            # when no text or tool_use follows the thinking blocks.
-            if content and content[-1].get("type") in ("thinking", "redacted_thinking"):
-                content.append({"type": "text", "text": "."})
-            if content:
+            blocks = _assistant_blocks(entry, ids)
+            if blocks:
                 messages.append(
                     cast(
                         anthropic.types.MessageParam,
-                        {"role": "assistant", "content": content},
+                        {"role": "assistant", "content": blocks},
                     )
                 )
-        elif msg.descriptor == "multipart/x-tool-result":
-            # tool_result content is a string when there are no image
-            # parts, or a list of text/image blocks when there are.
-            # Anthropic supports image blocks inside tool_result natively;
-            # PDFs are rasterized upstream (in Read) so we only handle
-            # image/* here.
-            parts_tr = cast(tuple[Message, ...], msg.content)
-            is_error = has_error(msg)
-            tool_result_content: object
-            text_parts_tr = [
-                str(p.content)
-                for p in parts_tr
-                if p.descriptor in ("text/plain", "text/x-error")
-            ]
-            image_parts_tr = [p for p in parts_tr if is_image(p.descriptor)]
-            if image_parts_tr:
-                blocks_tr: list[dict[str, object]] = []
-                if text_parts_tr:
-                    blocks_tr.append({"type": "text", "text": "\n".join(text_parts_tr)})
-                for part in image_parts_tr:
-                    raw, mime_type = image_lib.resize(
-                        cast(bytes, part.content),
-                        max_dim=max_image_dim,
-                        max_bytes=max_image_bytes,
-                    )
-                    b64 = base64.b64encode(raw).decode()
-                    blocks_tr.append(
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
-                                "data": b64,
-                            },
-                        }
-                    )
-                tool_result_content = blocks_tr
-            else:
-                tool_result_content = "\n".join(text_parts_tr)
+        else:
+            # HistoryEntry is the closed union {UserMessage, AssistantMessage,
+            # ToolResult}; the two branches above consume the first two.
             pending_tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": ids.map(get_queue_id(msg)),
-                    "content": tool_result_content,
-                    "is_error": is_error,
-                }
+                _tool_result_block(entry, ids, max_image_dim, max_image_bytes)
             )
 
     _flush_tool_results(messages, pending_tool_results)
@@ -1072,15 +928,130 @@ def _build_messages(
     return messages
 
 
+def _user_blocks(
+    entry: UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> list[object]:
+    """Build Anthropic content blocks from a UserMessage."""
+    blocks: list[object] = []
+    if entry.text:
+        blocks.append({"type": "text", "text": entry.text})
+    for att in entry.attachments:
+        block = _attachment_block(att, max_image_dim, max_image_bytes)
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def _assistant_blocks(
+    entry: AssistantMessage,
+    ids: IdRemapper,
+) -> list[dict[str, object]]:
+    """Build Anthropic content blocks from an AssistantMessage.
+
+    Thinking blocks are emitted verbatim (the wire dict from
+    ``block.model_dump()`` stored on the message). Anthropic rejects
+    assistant messages whose final block is thinking, so we append a
+    placeholder text block when no text or tool_use follows.
+    """
+    blocks: list[dict[str, object]] = [dict(tb) for tb in entry.thinking_blocks]
+    if entry.text:
+        blocks.append({"type": "text", "text": entry.text})
+    blocks.extend(_tool_use_block(tc, ids) for tc in entry.tool_calls)
+    if blocks and blocks[-1].get("type") in ("thinking", "redacted_thinking"):
+        blocks.append({"type": "text", "text": "."})
+    return blocks
+
+
+def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:
+    """Wire-shape a ``ToolCall`` for Anthropic's tool_use content block."""
+    return {
+        "type": "tool_use",
+        "id": ids.map(tc.id),
+        "name": tc.name,
+        "input": dict(tc.args),
+    }
+
+
+def _tool_result_block(
+    entry: ToolResult,
+    ids: IdRemapper,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> dict[str, object]:
+    """Build a single tool_result block for a ToolResult.
+
+    Image attachments inline as image blocks alongside the text.
+    """
+    image_attachments = [
+        att for att in entry.attachments if _is_image_mime(att.descriptor)
+    ]
+    tool_result_content: object
+    if image_attachments:
+        wire_blocks: list[dict[str, object]] = []
+        if entry.content:
+            wire_blocks.append({"type": "text", "text": entry.content})
+        for att in image_attachments:
+            block = _attachment_block(att, max_image_dim, max_image_bytes)
+            if block is not None:
+                wire_blocks.append(block)
+        tool_result_content = wire_blocks
+    else:
+        tool_result_content = entry.content
+    return {
+        "type": "tool_result",
+        "tool_use_id": ids.map(entry.call_id),
+        "content": tool_result_content,
+        "is_error": entry.is_error,
+    }
+
+
+def _attachment_block(
+    att: object,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> dict[str, object] | None:
+    """Translate a ``BytesMessage`` attachment to an Anthropic block."""
+    data = getattr(att, "data", None)
+    descriptor = getattr(att, "descriptor", "")
+    if not isinstance(data, bytes) or not isinstance(descriptor, str):
+        return None
+    is_image = _is_image_mime(descriptor)
+    is_pdf = descriptor == "application/pdf"
+    if not (is_image or is_pdf):
+        logger.warning(
+            "Anthropic: skipping attachment with unsupported mime=%s",
+            descriptor,
+        )
+        return None
+    raw = data
+    mime = descriptor
+    if is_image:
+        raw, mime = image_lib.resize(
+            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
+        )
+    b64 = base64.b64encode(raw).decode()
+    return {
+        "type": "image" if is_image else "document",
+        "source": {
+            "type": "base64",
+            "media_type": mime,
+            "data": b64,
+        },
+    }
+
+
+def _is_image_mime(descriptor: str) -> bool:
+    """True for image content types (no descriptor registry needed)."""
+    return descriptor.startswith("image/")
+
+
 def _flush_tool_results(
     messages: list[anthropic.types.MessageParam],
     pending: list[dict[str, object]],
 ) -> None:
-    """Emit buffered tool_result blocks as a user message, then clear.
-
-    Consecutive tool results must batch into one user message to keep
-    the API's role-alternation invariant happy.
-    """
+    """Emit buffered tool_result blocks as a user message, then clear."""
     if not pending:
         return
     messages.append(
@@ -1093,40 +1064,34 @@ def _flush_tool_results(
 
 
 def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResponse:
-    """Convert Anthropic Message to our ModelResponse."""
-    parts: list[Message] = []
+    """Convert Anthropic Message to ModelResponse with AssistantMessage."""
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    thinking_blocks: list[Mapping[str, object]] = []
 
     for block in raw.content:
         if isinstance(block, anthropic.types.TextBlock):
-            parts.append(TextMessage(block.text, "text/plain"))
+            text_parts.append(block.text)
         elif isinstance(block, anthropic.types.ToolUseBlock):
-            parts.append(
-                tool_call_message(
-                    block.id,
-                    block.name,
-                    json_freeze(cast(MutableJSON, dict(block.input))),
+            tool_calls.append(
+                ToolCall(
+                    id=block.id,
+                    name=block.name,
+                    args=cast(Mapping[str, object], dict(block.input)),
                 )
             )
         elif isinstance(
             block,
             anthropic.types.ThinkingBlock | anthropic.types.RedactedThinkingBlock,
         ):
-            parts.append(
-                JsonMessage(
-                    json_freeze(block.model_dump()),
-                    "application/x-thinking-structured",
-                )
-            )
+            thinking_blocks.append(block.model_dump())
 
-    msg_id = raw.id or ""
-    all_parts: list[Message] = []
-    if msg_id:
-        all_parts.append(TextMessage(msg_id, "text/x-queue-id"))
-    all_parts.extend(parts)
-    content = MultipartMessage(
-        tuple(all_parts),
-        "multipart/x-model-message",
+    message = AssistantMessage(
+        text="".join(text_parts),
+        thinking_blocks=tuple(thinking_blocks),
+        tool_calls=tuple(tool_calls),
     )
+
     cache_write = getattr(raw.usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(raw.usage, "cache_read_input_tokens", 0) or 0
     in_cost, out_cost, total_cost = compute_cost(
@@ -1136,9 +1101,8 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
         cache_write,
         cache_read,
     )
-    has_tool_use = any(p.descriptor == "multipart/x-tool-call" for p in parts)
     return ModelResponse(
-        content=content,
+        message=message,
         tokens=TokenCount(
             input_tokens=raw.usage.input_tokens,
             output_tokens=raw.usage.output_tokens,
@@ -1148,7 +1112,7 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
         stop_reason=normalize_stop_reason(
             raw.stop_reason,
             kind="anthropic",
-            has_tool_use=has_tool_use,
+            has_tool_use=bool(tool_calls),
         ),
         stop_sequence=raw.stop_sequence,
         message_id=raw.id or "",

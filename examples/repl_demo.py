@@ -26,11 +26,10 @@ import asyncio
 import sys
 
 from sagent.agent.agent import Agent
+from sagent.agent.runtime import AssistantMessage, UserMessage
 from sagent.custom_types import (
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    TextMessage,
     TokenCount,
 )
 from sagent.providers import build_provider
@@ -45,13 +44,24 @@ class _OfflineEcho(MockModelCaps):
 
     @property
     def max_request_tokens(self) -> int:
+        """Maximum request tokens."""
         return 100_000
 
     @property
     def model_id(self) -> str:
+        """Stable identifier for this offline model."""
         return "offline-echo"
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
+        """Echo the last user message in a single buffered response.
+
+        Args:
+          request: Model request containing the conversation history.
+
+        Returns:
+          response: Echo of the most recent user text.
+
+        """
         return await self._echo(request)
 
     async def stream(
@@ -60,6 +70,17 @@ class _OfflineEcho(MockModelCaps):
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
+        """Echo the last user message, streaming words to ``on_text``.
+
+        Args:
+          request: Model request containing the conversation history.
+          on_text: Optional callback invoked once per whitespace token.
+          on_thinking: Optional thinking callback (ignored).
+
+        Returns:
+          response: Echo of the most recent user text.
+
+        """
         del on_thinking
         if on_text is not None:
             for word in self._last_user(request).split():
@@ -68,24 +89,24 @@ class _OfflineEcho(MockModelCaps):
 
     @staticmethod
     def _last_user(request: ModelRequest) -> str:
+        """Return the text of the most recent ``UserMessage`` in ``request``."""
         for msg in reversed(request.messages):
-            if msg.descriptor == "text/x-user-message":
-                return str(msg.content)
+            if isinstance(msg, UserMessage):
+                return msg.text
         return ""
 
     async def _echo(self, request: ModelRequest) -> ModelResponse:
+        """Build a buffered echo response for the most recent user message."""
         text = self._last_user(request)
         return ModelResponse(
-            content=MultipartMessage(
-                (TextMessage(f"echo: {text}", "text/plain"),),
-                "multipart/x-model-message",
-            ),
+            message=AssistantMessage(text=f"echo: {text}"),
             tokens=TokenCount(input_tokens=len(text), output_tokens=len(text)),
             stop_reason="model_finished",
         )
 
 
 def main() -> None:
+    """Parse CLI flags and drive the REPL against the chosen model."""
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--offline", action="store_true")
     _ = parser.add_argument("--provider", default="Anthropic")

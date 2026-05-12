@@ -76,12 +76,25 @@ class AgentsMdConfig:
     """All tunables for AGENTS.md discovery."""
 
     system_dir: Path = field(default_factory=_default_system_dir)
+    """System-wide config root (``/etc/sagent`` or platform equivalent)."""
+
     user_dir: Path = field(default_factory=lambda: Path.home() / ".sagent")
+    """User config root (``~/.sagent``)."""
+
     additional_dirs: list[Path] = field(default_factory=list)
+    """Extra project roots to walk after cwd ancestors."""
+
     dot_dir: str = ".sagent"
+    """Dot-directory name searched at each project tier."""
+
     filename: str = "AGENTS.md"
+    """Per-directory directive filename."""
+
     max_depth: int = 5
+    """Recursion cap for ``@include`` resolution."""
+
     large_threshold: int = 40_000
+    """Char threshold above which a single file logs a warning."""
 
 
 def build_section(
@@ -275,13 +288,24 @@ class _AgentMdFile:
     """One discovered directive file with parsed content and metadata."""
 
     path: Path
+    """Resolved absolute path of the source file."""
+
     content: str
+    """Frontmatter-stripped, HTML-comment-stripped body."""
+
     memory_type: MemoryType
+    """Discovery tier this file came from."""
+
     parent: Path | None = None
+    """Including file when reached via ``@include``, else ``None``."""
+
     globs: list[str] = field(default_factory=list)
+    """Gitignore-style globs from ``paths:`` frontmatter; empty list
+    means the file is unconditional."""
 
     @property
     def description(self) -> str:
+        """Human-readable label for the memory tier (e.g. "user directives")."""
         return _DESCRIPTIONS[self.memory_type]
 
 

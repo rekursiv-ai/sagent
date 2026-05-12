@@ -14,17 +14,13 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Generator, Mapping
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Protocol, cast, get_type_hints, overload
+from typing import cast, get_type_hints, overload
 
 import asyncio
-import contextvars
 import dataclasses
-import difflib
 import inspect
-import itertools
 import logging
 import re
 import time
@@ -32,23 +28,26 @@ import typing
 
 import yaml
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
+from sagent.agent.state import (
+    AgentLike,
+    ReadCacheEntry,
+    ToolState,
+    agent_counter_var,
+    agent_label_var,
+    agent_path_var,
+    agent_registry,
+    cost_root_var,
+    current_agent_var,
+    get_tool_state,
+    max_depth_var,
+    tool_state_context,
+    tool_state_var,
+)
 from sagent.lib.json import JSON, int_val, json_freeze
-from sagent.lib.message import get_directive
-from sagent.tools.lib.bash import BashParseCache
-
-
-if TYPE_CHECKING:
-    from sagent.agent import Agent
-    from sagent.agent.cost_tracker import CostTracker
-    from sagent.agent.inbox import Inbox
-    from sagent.tools.background_task import BackgroundTaskEntry
 
 
 logger = logging.getLogger(__name__)
-
-
-# -- Recipe-based asset loader ----------------------------------------
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
 _NOW_PLACEHOLDER = "{{NOW}}"
@@ -64,6 +63,13 @@ def resolve_recipe(name_or_path: str) -> Path:
     Accepts either a bare name (looked up in ``assets/<name>.yaml``) or
     a filesystem path (anything containing ``/`` or ending in
     ``.yaml``/``.yml``). The path is expanded and resolved.
+
+    Args:
+      name_or_path: Recipe name or filesystem path.
+
+    Returns:
+      path: Expanded, resolved absolute path to the recipe yaml.
+
     """
     looks_like_path = "/" in name_or_path or name_or_path.endswith((".yaml", ".yml"))
     base = (
@@ -73,7 +79,12 @@ def resolve_recipe(name_or_path: str) -> Path:
 
 
 def set_recipe(name_or_path: str) -> None:
-    """Switch the active recipe; clears the load cache."""
+    """Switch the active recipe; clears the load cache.
+
+    Args:
+      name_or_path: Recipe name or filesystem path.
+
+    """
     global _recipe_path_override, _recipe_cache  # noqa: PLW0603 -- process-level state
     _recipe_path_override = resolve_recipe(name_or_path)
     _recipe_cache = None
@@ -192,8 +203,6 @@ def load_tool_description(name: str) -> str:
 # 100K tokens × ~4 chars/token.
 TOOL_RESULT_MAX_CHARS = 400_000
 
-# -- Python type → JSON Schema mapping --------------------------------
-
 _TYPE_MAP: dict[type[object], str] = {
     str: "string",
     int: "integer",
@@ -273,22 +282,22 @@ def truncate(text: str, max_chars: int) -> str:
     )
 
 
-def to_msg(result: str | Message) -> Message:
-    """Normalize a tool return value to a ``Message``.
+def to_result(result: str | ToolResult) -> ToolResult:
+    """Normalize a tool return value to a ``ToolResult``.
+
+    Strings wrap to ``ToolResult(call_id="", content=result)`` so the
+    runtime can stamp the call_id from the originating ``ToolCall``.
 
     Args:
-      result: Plain string or existing Message.
+      result: Plain string or existing ToolResult.
 
     Returns:
-      msg: A ``Message`` with ``text/plain`` descriptor if input was a string.
+      result: A ``ToolResult`` with the content set.
 
     """
     if isinstance(result, str):
-        return TextMessage(result, "text/plain")
+        return ToolResult(call_id="", content=result)
     return result
-
-
-# -- Optional directive-parse helpers ----------------------------------
 
 
 def opt_int(directive: Mapping[str, object], key: str) -> int | None:
@@ -334,6 +343,13 @@ def resolve_tool_path(path: str) -> str:
     model does not see one cwd for shell commands and another for file edits.
     Empty paths are left empty so required-argument validation and tool-specific
     errors still surface cleanly.
+
+    Args:
+      path: Tool-supplied filesystem path (relative or absolute).
+
+    Returns:
+      resolved: Absolute path string, or empty when ``path`` is empty.
+
     """
     if not path:
         return ""
@@ -343,50 +359,39 @@ def resolve_tool_path(path: str) -> str:
     return str(Path(get_tool_state().bash_cwd) / p)
 
 
-# -- Helper for sync tool dispatch --------------------------------------
-
-
 async def run_sync(
-    fn: Callable[..., str | Message],
-    *,
-    parent_id: int = -1,
+    fn: Callable[..., str | ToolResult],
     **kwargs: object,
-) -> Message:
-    """Run a sync function in a thread, truncating text/plain output.
+) -> ToolResult:
+    """Run a sync function in a thread, returning a normalized ToolResult.
 
-    ``fn`` may return a plain ``str`` or a ``Message``. Exceptions
-    propagate to the caller (``agent.py::_run_tool`` catches them at
-    the dispatch boundary).
+    ``fn`` may return a plain ``str`` (auto-wrapped into a
+    ``ToolResult`` with empty ``call_id``) or a ``ToolResult``
+    directly. Plain text content is truncated at
+    ``TOOL_RESULT_MAX_CHARS``. Exceptions propagate to the caller;
+    the ``_AgentTool`` wrapper or the runtime converts them to
+    ``ToolResult(is_error=True)`` at the dispatch boundary.
 
     Usage in a tool's ``run``::
 
-        async def run(self, msg: Message) -> Message:
-            directive = get_directive(msg)
-            return await run_sync(self._execute, parent_id=msg.id, **kwargs)
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            return await run_sync(self._execute, **kwargs)
 
     Args:
-      fn: Synchronous callable returning a string or Message.
-      parent_id: Parent message ID for threading.
+      fn: Synchronous callable returning a string or ToolResult.
       **kwargs: Forwarded to ``fn``.
 
     Returns:
-      msg: Result Message, truncated if text/plain.
+      result: Normalized ToolResult, content truncated if too large.
 
     """
-    result = await asyncio.to_thread(fn, **kwargs)
-    m = to_msg(result)
-    if m.descriptor == "text/plain":
-        return TextMessage(
-            truncate(cast(str, m.content), TOOL_RESULT_MAX_CHARS),
-            "text/plain",
-            parent_id=parent_id,
+    raw = await asyncio.to_thread(fn, **kwargs)
+    result = to_result(raw)
+    if len(result.content) > TOOL_RESULT_MAX_CHARS:
+        return dataclasses.replace(
+            result, content=truncate(result.content, TOOL_RESULT_MAX_CHARS)
         )
-    if parent_id != -1 and m.parent_id == -1:
-        return dataclasses.replace(m, parent_id=parent_id)
-    return m
-
-
-# -- @tool decorator ---------------------------------------------------
+    return result
 
 
 class _ToolImpl:
@@ -426,61 +431,50 @@ class _ToolImpl:
         self.supports_microcompaction = supports_microcompaction
         self.emit_tool_summary = False
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label for this tool invocation.
-
-        Args:
-          msg: Incoming tool-use message (unused; interface conformance).
-
-        Returns:
-          label: The tool name.
-
-        """
-        del msg
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short label for this tool invocation."""
+        del args
         return self.name
 
     def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
-
-        Returns:
-          prompt: Always empty for decorator-based tools.
-
-        """
+        """Return supplemental prompt text for this tool."""
         return ""
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
         """Return no receipt for decorator-based tools by default."""
         del result
         return None
 
-    async def run(self, msg: Message) -> Message:
-        """Invoke the wrapped function, propagating exceptions to the caller.
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Invoke the wrapped function and return a ToolResult.
+
+        The wrapped function may return ``str`` (wrapped to
+        ``ToolResult(content=...)``) or ``ToolResult`` directly. Text
+        content over ``max_result_chars`` is truncated. Exceptions
+        propagate; the ``_AgentTool`` wrapper at the dispatch boundary
+        converts them to ``is_error=True``.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Parsed directive forwarded as keyword arguments.
 
         Returns:
-          result: Tool result Message, truncated if text/plain.
+          result: Normalized ``ToolResult`` with truncated content.
 
         """
-        kwargs = dict(get_directive(msg))
+        kwargs = dict(args)
         if self._is_async:
             raw = cast(
-                str | Message,
+                str | ToolResult,
                 await cast(Callable[..., Awaitable[object]], self._fn)(**kwargs),
             )
         else:
-            raw = cast(str | Message, await asyncio.to_thread(self._fn, **kwargs))
-        m = to_msg(raw)
-        if m.descriptor == "text/plain":
-            return TextMessage(
-                truncate(cast(str, m.content), self._max_result_chars),
-                "text/plain",
-                parent_id=msg.id,
+            raw = cast(str | ToolResult, await asyncio.to_thread(self._fn, **kwargs))
+        result = to_result(raw)
+        if len(result.content) > self._max_result_chars:
+            return dataclasses.replace(
+                result, content=truncate(result.content, self._max_result_chars)
             )
-        if m.parent_id == -1:
-            return dataclasses.replace(m, parent_id=msg.id)
-        return m
+        return result
 
 
 @overload
@@ -550,419 +544,6 @@ def tool(
     )
 
 
-# -- Per-agent tool state ----------------------------------------------
-
-
-class ReadCacheEntry(NamedTuple):
-    """Cached read parameters and mtime for dedup and staleness checks."""
-
-    offset: int
-    limit: int
-    last_lines: int
-    mtime: float
-
-
-class ToolState:
-    """Per-agent state for tools (file tracking, cwd).
-
-    Each Agent creates one and sets it as the active context
-    before dispatching tools. Tools access it via
-    ``get_tool_state()``.
-    """
-
-    def __init__(self) -> None:
-        # Ordered: resolved_path → original_path. Serves as both
-        # the "has been read" set and recency-ordered file list.
-        self._read_order: dict[str, str] = {}
-        # (offset, limit, last_lines, mtime) of the last read. All
-        # four participate in the dedup key: a Read with different
-        # last_lines returns different content, so cache hits must
-        # match last_lines too.
-        self.read_cache: dict[str, ReadCacheEntry] = {}
-        # resolved_path → content at last read (for change diffs).
-        self._content_cache: dict[str, str] = {}
-        self.start_cwd: str = str(Path.cwd())
-        self.bash_cwd: str = self.start_cwd
-        # Extra directories from ``--add-dir`` whose AGENTS.md files get
-        # walked alongside cwd's. Defaults off because it can blow the
-        # prompt budget.
-        self.additional_dirs: list[str] = []
-        # Per-request session stats written by the Agent, read by the
-        # Diagnostics tool. Stays empty until the first model request completes.
-        self.stats: dict[str, float | int] = {}
-        # Per-request bashlex parse cache: command string → trees (or None).
-        # Populated by the agent's pre-dispatch concurrency check; read
-        # by the Bash tool's matcher dispatch. Eliminates the
-        # second parse of the same command within one Bash invocation.
-        # Cleared between model requests by the Agent.
-        self.bash_parse_cache: BashParseCache = {}
-        # Skills invoked this session (by name). Tracked so
-        # post-compaction can re-inject their SKILL.md bodies.
-        self.invoked_skills: set[str] = set()
-        # Subagent recursion depth. 0 for root Agent; incremented by
-        # ``Agent.run`` on entry when a parent ``ToolState`` is
-        # visible in the ambient context. Used by AgentSpawn's depth
-        # enforcement.
-        self.depth: int = 0
-
-    @property
-    def recent_files(self) -> list[str]:
-        """Recently-read files (original paths, oldest first)."""
-        return list(self._read_order.values())
-
-    def reset_file_tracking(self) -> None:
-        """Clear read/content/recency caches.
-
-        Called by the Agent on AgentSelf(clear) so the cleared session
-        starts with no recollection of previously-read or -edited
-        files. Intentionally does NOT reset ``bash_cwd`` (the shell
-        cwd is independent of conversation state) or
-        ``additional_dirs`` (CLI-supplied, not session-state).
-        """
-        self.read_cache.clear()
-        self._read_order.clear()
-        self._content_cache.clear()
-
-    def mark_read(
-        self,
-        path: str,
-        offset: int = 0,
-        limit: int = 0,
-        last_lines: int = 0,
-        content: str = "",
-        mtime: float | None = None,
-    ) -> None:
-        """Record that a file has been read.
-
-        Args:
-          path: File path (resolved internally).
-          offset: Starting line offset of the read.
-          limit: Maximum lines read.
-          last_lines: EOF-anchored line count.
-          content: Full file text for content-based staleness checks.
-          mtime: Pre-read mtime. If None, the file is stat'd now.
-              Pass the mtime captured *before* reading bytes to avoid
-              races with concurrent writers.
-
-        """
-        resolved = str(Path(path).resolve())
-        self._read_order.pop(resolved, None)
-        self._read_order[resolved] = path
-        logger.debug("mark_read: %s", resolved)
-        if mtime is None:
-            try:
-                mtime = Path(path).stat().st_mtime
-            except OSError:
-                mtime = 0.0
-        self.read_cache[resolved] = ReadCacheEntry(offset, limit, last_lines, mtime)
-        if content:
-            self._content_cache[resolved] = content
-
-    def mark_written(self, path: str) -> None:
-        """Re-stamp after a successful write.
-
-        Clears offset/limit/last_lines to break read dedup (forces
-        re-fetch on next Read) and updates mtime.
-
-        Args:
-          path: File path (resolved internally).
-
-        """
-        resolved = str(Path(path).resolve())
-        try:
-            mtime = Path(path).stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        self.read_cache[resolved] = ReadCacheEntry(0, 0, 0, mtime)
-        # Update content cache with what's now on disk.
-        try:
-            self._content_cache[resolved] = Path(path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            self._content_cache.pop(resolved, None)
-
-    def check_unchanged(
-        self,
-        path: str,
-        offset: int,
-        limit: int,
-        last_lines: int = 0,
-    ) -> bool:
-        """Return True if file unchanged since last read.
-
-        Args:
-          path: File path to check.
-          offset: Line offset of the read to compare.
-          limit: Line limit of the read to compare.
-          last_lines: EOF-anchored line count to compare.
-
-        Returns:
-          unchanged: True if mtime and read parameters match the cache.
-
-        """
-        resolved = str(Path(path).resolve())
-        cached = self.read_cache.get(resolved)
-        if cached is None:
-            return False
-        prev_offset, prev_limit, prev_last_lines, prev_mtime = cached
-        if (
-            prev_offset != offset
-            or prev_limit != limit
-            or prev_last_lines != last_lines
-        ):
-            return False
-        try:
-            current_mtime = Path(path).stat().st_mtime
-        except OSError:
-            return False
-        return current_mtime == prev_mtime
-
-    def check_stale(self, path: str) -> bool:
-        """Return True if cached belief of file content no longer matches disk.
-
-        Fast path: mtime matches → not stale. Fallback: mtime differs
-        but disk content equals cached content → not stale (mtime bumped
-        without a real change: cloud sync, antivirus, idempotent
-        reformatter, etc.).
-
-        Args:
-          path: File path to check.
-
-        Returns:
-          stale: True if file content on disk differs from cached belief.
-
-        """
-        resolved = str(Path(path).resolve())
-        cached = self.read_cache.get(resolved)
-        if cached is None:
-            return False
-        *_, prev_mtime = cached
-        try:
-            current_mtime = Path(path).stat().st_mtime
-        except OSError:
-            return False
-        if current_mtime == prev_mtime:
-            return False
-        cached_content = self._content_cache.get(resolved)
-        if cached_content is None:
-            # No cached content (binary / PDF / image). Conservatively stale.
-            return True
-        try:
-            current_content = Path(path).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            return True
-        if current_content != cached_content:
-            return True
-        # Content-equality match: mtime bumped but bytes identical.
-        # Refresh the cached mtime so subsequent ``check_stale`` hits
-        # the O(1) mtime-match fast path instead of re-reading and
-        # re-comparing the full file on every call.
-        prev_offset, prev_limit, prev_last_lines, _ = cached
-        self.read_cache[resolved] = ReadCacheEntry(
-            prev_offset, prev_limit, prev_last_lines, current_mtime
-        )
-        return False
-
-    def consume_changed_files(self) -> dict[str, str]:
-        """Pop files modified since last read, returning diffs.
-
-        Side-effecting by design: after a file's change is reported
-        once, the cached mtime is bumped so the next call won't
-        re-report it. The ``consume_`` prefix signals that the state
-        transition happens on every call.
-
-        Returns:
-          changes: Map from original path to a unified diff
-              snippet, for files whose disk mtime exceeds the
-              cached mtime.
-
-        """
-        changes: dict[str, str] = {}
-        for resolved, orig_path in self._read_order.items():
-            cached = self.read_cache.get(resolved)
-            if cached is None:
-                continue
-            prev_offset, prev_limit, prev_last_lines, prev_mtime = cached
-            try:
-                current_mtime = Path(orig_path).stat().st_mtime
-            except OSError:
-                continue
-            if current_mtime == prev_mtime:
-                continue
-            old = self._content_cache.get(resolved, "")
-            try:
-                new = Path(orig_path).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            diff = "".join(
-                difflib.unified_diff(
-                    old.splitlines(keepends=True),
-                    new.splitlines(keepends=True),
-                    fromfile=orig_path,
-                    tofile=orig_path,
-                    n=3,
-                ),
-            )
-            if diff:
-                changes[orig_path] = diff
-            # Refresh mtime so we don't re-report next request, but
-            # preserve the (offset, limit, last_lines) shape so a subsequent
-            # Read with the same parameters still hits dedup.
-            self.read_cache[resolved] = ReadCacheEntry(
-                prev_offset,
-                prev_limit,
-                prev_last_lines,
-                current_mtime,
-            )
-            self._content_cache[resolved] = new
-        return changes
-
-    def has_been_read(self, path: str) -> bool:
-        """Check if a file has been read in this session.
-
-        Args:
-          path: File path to check.
-
-        Returns:
-          was_read: True if the file has been read.
-
-        """
-        return str(Path(path).resolve()) in self._read_order
-
-    def enforce_read(self, file_path: str) -> str | None:
-        """Return error if file not yet read, else None.
-
-        Args:
-          file_path: File path to check.
-
-        Returns:
-          error: Error message string, or None if the file was read.
-
-        """
-        if not self.has_been_read(file_path):
-            return f"File not yet read: {file_path}. Read it first."
-        return None
-
-
-# Context variable for per-agent tool state.
-tool_state_var: contextvars.ContextVar[ToolState] = contextvars.ContextVar("tool_state")
-
-# Fallback state for use outside an Agent context.
-_default_state = ToolState()
-
-
-def get_tool_state() -> ToolState:
-    """Get the current agent's tool state.
-
-    Returns:
-      state: The active ToolState, or a module-level default.
-
-    """
-    return tool_state_var.get(_default_state)
-
-
-@contextmanager
-def tool_state_context(state: ToolState) -> Generator[None]:
-    """Install ``state`` as the active tool state for the duration of the block.
-
-    Args:
-      state: ToolState to make active.
-
-    """
-    token = tool_state_var.set(state)
-    try:
-        yield
-    finally:
-        tool_state_var.reset(token)
-
-
-# -- Agent-tree ContextVars for AgentSpawn -----------------------------
-#
-# These three ContextVars carry cross-agent state down the spawn tree
-# so AgentSpawn can look up its parent, enforce ``max_depth``, and
-# aggregate cost into one shared ledger at the root.
-#
-# Placed in ``tools/core.py`` rather than ``agent.py`` because
-# ``tools/agent_spawn.py`` must import them without dragging the full
-# ``Agent`` class through a circular import. The ``Agent`` annotation is
-# guarded by ``if TYPE_CHECKING`` above.
-
-# The Agent instance currently executing. Set by ``Agent.run``
-# on entry and reset on exit. Tools invoked mid-request read this to
-# reach their invoking Agent (e.g. to inherit system/tools/model).
-current_agent_var: contextvars.ContextVar[Agent | None] = contextvars.ContextVar(
-    "current_agent", default=None
-)
-
-# Effective max_depth cap for the current subtree. Set by AgentSpawn so
-# grandchild factory invocations see the same cap as their ancestor,
-# regardless of which factory instance they use.
-max_depth_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "max_depth", default=None
-)
-
-# Subtree cost target: the ``CostTracker`` that descendants of the
-# active root agent write to. Root agents (top-level + persistent
-# subagents) install their own tracker here at lifecycle open;
-# sync subagents inherit by ContextVar copy and write through to
-# the root. Single-store cost flow -- there is no separate ledger
-# object. See ``agent.cost_tracker.CostTracker`` and the doc's
-# §20.1 (cost lifecycle).
-cost_root_var: contextvars.ContextVar[CostTracker | None] = contextvars.ContextVar(
-    "cost_root", default=None
-)
-
-# Hierarchical agent path. Root is ""; first child is "0", its
-# second child is "0_1", etc. Set by AgentSpawn before launching
-# the child so the child and its descendants can build labels like
-# ``Agent_0_1_3``.
-agent_path_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "agent_path", default=""
-)
-
-# Per-agent child counter. ``Agent.run`` installs a fresh
-# ``itertools.count()`` on entry; concurrent siblings spawned by
-# ``asyncio.gather`` share the same object (atomic under CPython)
-# so each gets a unique index.
-agent_counter_var: contextvars.ContextVar[itertools.count[int]] = (
-    contextvars.ContextVar("agent_counter")
-)
-
-# Human-readable label for the currently-executing agent. Root uses
-# ``Agent.name`` (e.g. "Agent"); children get labels like "Agent_0",
-# "Agent_0_1". Set by ``Agent.run`` (root) and ``AgentSpawn.run``
-# (children). Read by ``AgentSend`` to tag the sender.
-agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "agent_label", default=""
-)
-
-
-class AgentLike(Protocol):
-    """Minimal agent surface for tools that route messages between agents.
-
-    Used by ``AgentSend`` to drop messages onto a peer's inbox; by
-    ``BackgroundTask`` to enumerate / cancel / foreground bg jobs.
-
-    Attributes:
-      inbox: Inbox holding pending external work.
-      work: The one foreground asyncio task (``None`` when idle).
-      background: All detached tasks keyed by stable id; the
-          ``hidden`` field distinguishes infra (REPL pump, daemons)
-          from user-scheduled bg tools and persistent subagents.
-
-    """
-
-    inbox: Inbox
-    work: asyncio.Task[object] | None
-    background: dict[str, BackgroundTaskEntry]
-
-
-# Process-wide registry of live agents, keyed by label. Agents
-# register on ``run()`` entry and deregister in ``finally``. Used
-# by ``AgentSend`` to route messages by label. Safe under sagent's
-# single-event-loop concurrency model; not thread-safe.
-agent_registry: dict[str, AgentLike] = {}
-
-
 # Convenience functions that delegate to current state.
 def mark_read(
     path: str,
@@ -1006,8 +587,6 @@ def has_been_read(path: str) -> bool:
     return get_tool_state().has_been_read(path)
 
 
-# -- Per-file write serialization --------------------------------------
-
 # Process-wide registry of asyncio.Lock keyed by resolved file path.
 # Mutating tools (Edit, Write, etc.) serialize their read-modify-write
 # critical sections through this registry so concurrent coroutines -
@@ -1047,9 +626,6 @@ def get_file_write_lock(path: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _file_write_locks[resolved] = lock
     return lock
-
-
-# -- Changed-file context provider ------------------------------------
 
 
 def changed_files_context(max_diff_lines: int = 500) -> str:
@@ -1093,3 +669,32 @@ def changed_files_context(max_diff_lines: int = 500) -> str:
             f" line numbers):\n{snippet}",
         )
     return "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
+
+
+__all__ = (
+    "TOOL_RESULT_MAX_CHARS",
+    "AgentLike",
+    "ReadCacheEntry",
+    "ToolState",
+    "agent_counter_var",
+    "agent_label_var",
+    "agent_path_var",
+    "agent_registry",
+    "changed_files_context",
+    "cost_root_var",
+    "current_agent_var",
+    "get_file_write_lock",
+    "get_tool_state",
+    "has_been_read",
+    "load_tool_description",
+    "mark_read",
+    "max_depth_var",
+    "opt_int",
+    "opt_str",
+    "set_recipe",
+    "to_result",
+    "tool",
+    "tool_state_context",
+    "tool_state_var",
+    "truncate",
+)

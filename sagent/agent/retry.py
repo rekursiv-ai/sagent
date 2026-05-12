@@ -35,16 +35,13 @@ else:
 
 from sagent.custom_exceptions import StreamInterruptedError
 from sagent.custom_types import (
-    Message,
     Model,
     ModelRequest,
     ModelResponse,
 )
-from sagent.lib.message import build_error_message, response_text
 
 
 logger = logging.getLogger(__name__)
-
 
 RETRY_BASE_SEC = 0.5
 MAX_RETRY_DELAY = 32.0
@@ -70,6 +67,11 @@ class RateLimitError(Exception):
     provider advertised one via ``retry-after`` or
     ``anthropic-ratelimit-unified-reset``. The message is
     pre-formatted for REPL display.
+
+    Args:
+      reset_time: Unix timestamp when the limit lifts, or ``None``.
+      original: The underlying provider exception, retained for context.
+
     """
 
     def __init__(self, reset_time: float | None, original: Exception) -> None:
@@ -161,7 +163,7 @@ async def send_with_retry(
     on_thinking: Callable[[str], None] | None = None,
     max_attempts: int,
     persistent_retry: bool,
-    publish_recoverable: Callable[[Message], None],
+    publish_recoverable: Callable[[str], None],
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
 ) -> ModelResponse:
     """Send with backoff, error classification, stream fallback.
@@ -226,7 +228,7 @@ async def send_with_retry(
                 full = "".join(chunks)
             else:
                 resp = await model.buffer(request=request)
-                full = response_text(resp.content)
+                full = resp.message.text
             if on_text is not None and live is None and full:
                 suffix = full.removeprefix(prior_emitted)
                 if suffix:
@@ -236,11 +238,8 @@ async def send_with_retry(
             stream_interrupts += 1
             prior_emitted = "".join(chunks) if live is not None else prior_emitted
             publish_recoverable(
-                build_error_message(
-                    f"stream interrupted (attempt {attempt}, "
-                    f"{stream_interrupts} interrupts so far)",
-                    exc=e,
-                )
+                f"stream interrupted (attempt {attempt},"
+                f" {stream_interrupts} interrupts so far): {e}"
             )
             if stream_interrupts > _MAX_STREAM_INTERRUPT_RETRIES:
                 logger.warning(
@@ -259,7 +258,7 @@ async def send_with_retry(
         except Exception as e:
             if model.is_context_overflow(e):
                 publish_recoverable(
-                    build_error_message(f"context overflow (attempt {attempt})", exc=e)
+                    f"context overflow (attempt {attempt}): {type(e).__name__}: {e}"
                 )
                 raise
             if not is_retryable(e, model):
@@ -305,11 +304,8 @@ async def send_with_retry(
                 else ""
             )
             publish_recoverable(
-                build_error_message(
-                    f"retry attempt {attempt}, waiting {delay:.1f}s"
-                    f"{fallback}: {type(e).__name__}: {e}",
-                    exc=e,
-                )
+                f"retry attempt {attempt}, waiting {delay:.1f}s"
+                f"{fallback}: {type(e).__name__}: {e}"
             )
             logger.warning(
                 "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs%s.",
@@ -332,6 +328,7 @@ async def send_with_retry(
 
 
 def _is_retryable(error: Exception, depth: int) -> bool:
+    """Walk transport/status/cause chain (depth-capped) for retryability."""
     if isinstance(error, (httpx.TransportError, ConnectionError, TimeoutError)):
         return True
     status = _error_status(error, 0)
@@ -344,6 +341,7 @@ def _is_retryable(error: Exception, depth: int) -> bool:
 
 
 def _error_status(error: Exception, depth: int) -> int | None:
+    """Walk ``status_code`` / ``response.status_code`` / ``__cause__`` for a status."""
     status = getattr(error, "status_code", None)
     if status is None:
         resp = getattr(error, "response", None)
@@ -360,6 +358,7 @@ def _make_stream_callback(
     chunks: list[str],
     live: Callable[[str], None] | None,
 ) -> Callable[[str], None]:
+    """Build a stream callback that captures chunks and forwards live ones."""
     if live is None:
         return chunks.append
     live_fn = live

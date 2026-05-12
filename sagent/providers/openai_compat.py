@@ -23,7 +23,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 import asyncio
@@ -44,28 +44,24 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
+from sagent.agent.runtime import (
+    AssistantMessage,
+    AssistantMessage as _AssistantMessage,  # noqa: F401 -- re-export friendly
+    BytesMessage,
+    ToolCall,
+    UserMessage,
+)
 from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
-    Message,
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
-    TextMessage,
     TokenCount,
 )
-from sagent.lib.descriptors import is_image
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
     int_val,
-    json_freeze,
     json_unfreeze,
-)
-from sagent.lib.message import (
-    get_directive,
-    get_queue_id,
-    get_tool_name,
-    tool_call_message,
 )
 from sagent.providers.lib.cost import (
     ModelProfile,
@@ -82,25 +78,17 @@ _STREAM_IDLE_TIMEOUT = 600.0
 
 
 class OpenAICompat:
-    """Base provider for OpenAI chat-completions compatible endpoints.
-
-    Subclasses override the class attrs below. ``model()`` returns an
-    ``OpenAICompatModel`` wired to this provider.
-    """
+    """Base provider for OpenAI chat-completions compatible endpoints."""
 
     DEFAULT_MODEL: ClassVar[str] = ""
     DEFAULT_UTILITY_MODEL: ClassVar[str] = ""
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {}
-    # Model class to instantiate. Subclasses can override with a
-    # subclass of ``OpenAICompatModel`` that tweaks hooks.
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key
-        # Allow ``base_url`` override for self-hosted endpoints without
-        # subclassing (e.g. ``Qwen.from_env(base_url="http://box:8000/v1")``).
         self.base_url = base_url or self.BASE_URL
 
     @classmethod
@@ -108,11 +96,11 @@ class OpenAICompat:
         """Build provider from an API key.
 
         Args:
-          api_key: Provider API key.
-          base_url: Override the default endpoint URL.
+          api_key: API key for the chat-completions endpoint.
+          base_url: Override for the provider's ``BASE_URL``.
 
         Returns:
-          provider: Provider instance.
+          provider: Configured provider instance.
 
         """
         return cls(api_key=api_key, base_url=base_url)
@@ -122,10 +110,10 @@ class OpenAICompat:
         """Build provider from the class's ``ENV_VAR``.
 
         Args:
-          base_url: Override the default endpoint URL.
+          base_url: Override for the provider's ``BASE_URL``.
 
         Returns:
-          provider: Provider instance.
+          provider: Configured provider instance.
 
         Raises:
           RuntimeError: If the API key is not configured.
@@ -147,7 +135,7 @@ class OpenAICompat:
 
         Args:
           model_id: Model ID. ``None`` uses ``DEFAULT_MODEL``.
-          max_request_tokens: Override max input tokens. ``None`` uses profile default.
+          max_request_tokens: Override max input tokens.
 
         Returns:
           model: Chat-completions model backend.
@@ -157,8 +145,6 @@ class OpenAICompat:
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Fail fast on unknown model IDs -- every supported model must
-        # be in KNOWN_MODELS with explicit limits and pricing.
         profile = self.KNOWN_MODELS.get(mid)
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
@@ -181,7 +167,7 @@ class OpenAICompat:
         """Return the default utility (fast/cheap) model backend.
 
         Returns:
-          model: Utility model backend.
+          model: Backend for the cheapest/fastest known model.
 
         """
         mid = self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL
@@ -212,8 +198,6 @@ class OpenAICompatModel:
         self._model_id = model_id
         self._profile = profile
         self._max_request_tokens = max_request_tokens
-        # Persistent client for connection reuse. Lazily initialized
-        # because tests patch the backing ``httpx.AsyncClient``.
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
 
@@ -228,68 +212,69 @@ class OpenAICompatModel:
 
     @property
     def max_request_tokens(self) -> int:
-        """Maximum input token count."""
+        """Maximum input tokens the model accepts."""
         return self._max_request_tokens
 
     @property
     def model_id(self) -> str:
-        """Model identifier string."""
+        """Provider-specific model identifier."""
         return self._model_id
 
     @property
     def max_response_tokens(self) -> int:
-        """Maximum output token count."""
+        """Maximum output tokens the model can generate."""
         return self._profile.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
-        """Whether the model supports streaming responses."""
+        """Whether the model supports token-by-token streaming."""
         return True
 
     @property
     def supports_thinking(self) -> bool:
-        """Whether the model surfaces reasoning/thinking text."""
+        """Whether the model exposes a reasoning/thinking field."""
         return self._reasoning_field is not None
 
     @property
     def supports_effort(self) -> bool:
-        """Whether the model accepts a reasoning effort parameter."""
+        """Whether the model accepts a ``reasoning_effort`` hint."""
         return self._is_effort_model(self._model_id)
 
     @property
     def supports_cache_control(self) -> bool:
-        """Whether the provider supports prompt cache control."""
+        """Whether the provider supports prompt caching."""
         return False
 
     @property
     def supports_context_management(self) -> bool:
-        """Whether the provider supports context management."""
+        """Whether the provider manages context overflow internally."""
         return False
 
     @property
     def supports_persistent_retry(self) -> bool:
-        """Whether the provider supports persistent retry."""
+        """Whether the provider retries internally on transient failures."""
         return False
 
     @property
     def supports_account_auth(self) -> bool:
-        """Whether the provider uses account authentication."""
+        """Whether the provider uses account-based authentication."""
         return False
 
     def estimate_text_token_count(self, text: str) -> int:
-        """Estimate token count for text using 4 chars/token heuristic.
+        """Estimate input token count for a text string.
 
         Args:
-          text: Input text to estimate.
+          text: Text to score.
 
         Returns:
-          count: Estimated token count.
+          tokens: Approximate input token count (``len(text) // 4``).
 
         """
         return len(text) // 4
 
     @property
     def pricing(self) -> Pricing:
+        """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
     def estimate_image_token_count(self, data: bytes) -> int:
@@ -299,7 +284,7 @@ class OpenAICompatModel:
           data: Raw image bytes.
 
         Returns:
-          count: Estimated token count.
+          tokens: Approximate input token count (``85 + tiles * 170``).
 
         """
         # OpenAI: 85 base + 170 per 512x512 tile (high detail).
@@ -312,12 +297,12 @@ class OpenAICompatModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension in pixels."""
+        """Maximum image dimension (pixels) accepted by the API."""
         return 2048
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size in bytes."""
+        """Maximum image size (bytes) accepted by the API."""
         return 20 * 1024 * 1024
 
     def _is_effort_model(self, model_id: str) -> bool:
@@ -335,13 +320,13 @@ class OpenAICompatModel:
         return body
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Check whether an error indicates context-window overflow.
+        """Classify an error as a context-window overflow.
 
         Args:
-          error: Exception raised by the API call.
+          error: Exception raised by the provider call.
 
         Returns:
-          overflow: ``True`` if the error is a context-length overflow.
+          overflow: True when ``error`` indicates context overflow.
 
         """
         msg = str(error).lower()
@@ -350,19 +335,24 @@ class OpenAICompatModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """No provider-specific transient cases beyond status codes.
 
-        Chat-completions-compatible endpoints raise ``httpx.HTTPStatusError``
-        with an HTTP status code; the shared status-code path in
-        ``retry.py`` covers them.
+        Args:
+          error: Exception raised by the provider call.
+
+        Returns:
+          retryable: Always ``False`` (status-code dispatch covers retries).
+
         """
         del error
         return False
 
     @property
     def _endpoint(self) -> str:
+        """Chat-completions URL for the wrapped provider."""
         return f"{self._provider.base_url.rstrip('/')}/chat/completions"
 
     @property
     def _headers(self) -> dict[str, str]:
+        """Request headers (Authorization + JSON content-type)."""
         return {
             "Authorization": f"Bearer {self._provider.api_key}",
             "Content-Type": "application/json",
@@ -388,27 +378,33 @@ class OpenAICompatModel:
         if request.effort is not None and self.supports_effort:
             body["reasoning_effort"] = request.effort
         if request.tools:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": json_unfreeze(t.directive_schema),
-                    },
-                }
-                for t in request.tools
-            ]
+            body["tools"] = cast(
+                MutableJSONValue,
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": json_unfreeze(t.directive_schema),
+                        },
+                    }
+                    for t in request.tools
+                ],
+            )
         return self._transform_body(body, request)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Send a non-streaming chat-completions request.
 
         Args:
-          request: Model request to send.
+          request: Fully-built model request.
 
         Returns:
-          response: Translated model response.
+          response: Parsed ``ModelResponse``.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
 
         """
         body = self._build_body(request, stream=False)
@@ -445,19 +441,21 @@ class OpenAICompatModel:
     ) -> ModelResponse:
         """Stream a chat-completions SSE response.
 
-        An asyncio watchdog resets on every delivered chunk so a
-        server that goes silent mid-stream trips
-        ``asyncio.TimeoutError`` after ``_STREAM_IDLE_TIMEOUT``
-        rather than hanging for the full HTTP read deadline.
+        An asyncio watchdog resets on every delivered chunk so a server
+        that goes silent mid-stream trips ``asyncio.TimeoutError`` after
+        ``_STREAM_IDLE_TIMEOUT`` rather than hanging for the full HTTP
+        read deadline.
 
         Args:
-          request: Model request to send.
-          on_text: Callback invoked with each text chunk as it arrives.
-          on_thinking: Reserved; OpenAI-compatible chat APIs don't
-              expose a separate thinking stream.
+          request: Fully-built model request.
+          on_text: Called per text chunk; ``None`` disables text streaming.
+          on_thinking: Ignored (no thinking stream in chat-completions).
 
         Returns:
-          response: Assembled model response after the stream closes.
+          response: Parsed ``ModelResponse``.
+
+        Raises:
+          PromptTooLongError: Server reports context overflow.
 
         """
         del on_thinking  # OpenAI-compat APIs don't expose a thinking stream
@@ -468,9 +466,6 @@ class OpenAICompatModel:
             self._endpoint,
             json=body,
             headers={**self._headers, "Accept": "text/event-stream"},
-            # Give httpx a generous read deadline; idle detection
-            # is handled by the asyncio watchdog inside
-            # ``consume_stream``.
             timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
             if r.status_code == 400:
@@ -492,21 +487,22 @@ def build_messages(
     max_image_dim: int = 2048,
     max_image_bytes: int = 20 * 1024 * 1024,
 ) -> list[MutableJSON]:
-    """Convert internal Message list to OpenAI chat-completions format.
+    """Convert history entries to OpenAI chat-completions format.
 
-    Tool-returned images are accumulated across consecutive
-    tool results and emitted in a single synthetic user message after
-    the run. This preserves OpenAI's "tool messages must be contiguous"
-    rule: a sequence of tool results bound to the same model response
-    stays together, with one user-image payload tacked on at the end.
+    Tool-result images can't ride inside a ``role=tool`` message under
+    chat completions; they're hoisted into a synthetic follow-up
+    ``role=user`` message. Consecutive tool result images batch into a
+    single such follow-up to preserve the "tool messages must be
+    contiguous" rule.
 
     Args:
-      request: Model request containing messages and system prompt.
-      max_image_dim: Maximum image dimension in pixels.
-      max_image_bytes: Maximum image size in bytes.
+      request: Model request with history and optional system prompt.
+      max_image_dim: Maximum image dimension (pixels); larger inputs are
+          resized before encoding.
+      max_image_bytes: Maximum image size in bytes after resize.
 
     Returns:
-      messages: Chat-completions message list.
+      messages: Chat-completions wire-format messages.
 
     """
     ids = IdRemapper("call_")
@@ -514,117 +510,108 @@ def build_messages(
     pending_images: list[MutableJSON] = []
     if request.system:
         messages.append({"role": "system", "content": request.system})
-    for msg in request.messages:
-        if msg.descriptor == "text/x-user-message":
+    for entry in request.messages:
+        if isinstance(entry, UserMessage):
             _flush_images(messages, pending_images)
-            messages.append({"role": "user", "content": cast(str, msg.content)})
-        elif msg.descriptor == "multipart/x-user-message":
+            messages.append(_build_user_message(entry, max_image_dim, max_image_bytes))
+        elif isinstance(entry, AssistantMessage):
             _flush_images(messages, pending_images)
-            messages.append(_build_user_message(msg, max_image_dim, max_image_bytes))
-        elif msg.descriptor == "multipart/x-model-message":
-            _flush_images(messages, pending_images)
-            parts_mm = cast(tuple[Message, ...], msg.content)
-            text_content: str | None = None
-            tool_calls_wire: list[MutableJSON] = []
-            for part in parts_mm:
-                if part.descriptor == "text/plain":
-                    text_content = cast(str, part.content)
-                elif part.descriptor == "multipart/x-tool-call":
-                    directive = get_directive(part)
-                    tool_calls_wire.append(
-                        {
-                            "id": ids.map(get_queue_id(part)),
-                            "type": "function",
-                            "function": {
-                                "name": get_tool_name(part),
-                                "arguments": json.dumps(json_unfreeze(directive)),
-                            },
-                        }
-                    )
-            m: MutableJSON = {"role": "assistant", "content": text_content}
+            tool_calls_wire: list[MutableJSON] = [
+                {
+                    "id": ids.map(tc.id),
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(dict(tc.args)),
+                    },
+                }
+                for tc in entry.tool_calls
+            ]
+            m: MutableJSON = {
+                "role": "assistant",
+                "content": entry.text or None,
+            }
             if tool_calls_wire:
                 m["tool_calls"] = cast(MutableJSONValue, tool_calls_wire)
             messages.append(m)
-        elif msg.descriptor == "multipart/x-tool-result":
-            parts_tr = cast(tuple[Message, ...], msg.content)
-            text = "\n".join(
-                str(p.content)
-                for p in parts_tr
-                if p.descriptor in ("text/plain", "text/x-error")
-            )
-            image_parts_tr: list[Message] = [
-                p for p in parts_tr if is_image(p.descriptor)
-            ]
+        else:
+            # ToolResult: role=tool with text content; image attachments
+            # become a follow-up role=user message (chat-completions has
+            # no in-tool-message image support).
+            content = entry.content
+            if entry.is_error and content:
+                content = f"[Error] {content}"
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": ids.map(get_queue_id(msg)),
-                    "content": text,
+                    "tool_call_id": ids.map(entry.call_id),
+                    "content": content,
                 }
             )
-            for part in image_parts_tr:
-                raw, mime_type = image_lib.resize(
-                    cast(bytes, part.content),
-                    max_dim=max_image_dim,
-                    max_bytes=max_image_bytes,
-                )
-                b64 = base64.b64encode(raw).decode()
-                pending_images.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-                    }
-                )
+            for att in entry.attachments:
+                if _is_image_mime(att.descriptor):
+                    raw, mime_type = image_lib.resize(
+                        att.data,
+                        max_dim=max_image_dim,
+                        max_bytes=max_image_bytes,
+                    )
+                    b64 = base64.b64encode(raw).decode()
+                    pending_images.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+                        }
+                    )
     _flush_images(messages, pending_images)
     return messages
 
 
 def _flush_images(messages: list[MutableJSON], pending: list[MutableJSON]) -> None:
-    """Emit buffered image blocks as a synthetic user message, then clear.
-
-    OpenAI's tool-result messages can't carry image blocks; we attach
-    them as a follow-up user message containing just images.
-    """
+    """Emit buffered image blocks as a synthetic user message, then clear."""
     if pending:
         messages.append({"role": "user", "content": list(pending)})
         pending.clear()
 
 
 def _build_user_message(
-    msg: Message,
-    max_image_dim: int = 2048,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    entry: UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
 ) -> MutableJSON:
-    """Build a multipart user message, inlining image attachments as data URLs."""
-    content_parts = cast(tuple[Message, ...], msg.content)
+    """Build a chat-completions user message from a UserMessage."""
+    image_atts = [att for att in entry.attachments if _is_image_mime(att.descriptor)]
+    non_image_atts = [
+        att for att in entry.attachments if not _is_image_mime(att.descriptor)
+    ]
+    for att in non_image_atts:
+        logger.warning(
+            "OpenAI-compat: skipping non-image attachment (mime=%s)",
+            att.descriptor,
+        )
+    if not image_atts:
+        return {"role": "user", "content": entry.text}
     blocks: list[MutableJSON] = []
-    text_content: str | None = None
-    for part in content_parts:
-        if part.descriptor == "text/plain":
-            text_content = cast(str, part.content)
-        elif is_image(part.descriptor):
-            raw, mime = image_lib.resize(
-                cast(bytes, part.content),
-                max_dim=max_image_dim,
-                max_bytes=max_image_bytes,
-            )
-            b64 = base64.b64encode(raw).decode()
-            blocks.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{b64}"},
-                }
-            )
-        else:
-            logger.warning(
-                "OpenAI-compat: skipping non-image attachment (mime=%s)",
-                part.descriptor,
-            )
-    if text_content is not None:
-        blocks.append({"type": "text", "text": text_content})
-    if not blocks:
-        return {"role": "user", "content": text_content or ""}
+    for att in image_atts:
+        raw, mime = image_lib.resize(
+            att.data,
+            max_dim=max_image_dim,
+            max_bytes=max_image_bytes,
+        )
+        b64 = base64.b64encode(raw).decode()
+        blocks.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            }
+        )
+    if entry.text:
+        blocks.append({"type": "text", "text": entry.text})
     return cast(MutableJSON, {"role": "user", "content": blocks})
+
+
+def _is_image_mime(descriptor: str) -> bool:
+    """True for image content types (no descriptor registry needed)."""
+    return descriptor.startswith("image/")
 
 
 def _extract_usage(usage: MutableJSON) -> tuple[int, int, int]:
@@ -645,33 +632,39 @@ def parse_response(
     pricing: Pricing,
     reasoning_field: str | None,
 ) -> ModelResponse:
-    """Convert a non-streaming chat-completions body to ModelResponse.
+    """Convert a non-streaming chat-completions body to ``ModelResponse``.
 
     Args:
-      data: Raw JSON response body.
-      pricing: Token pricing for cost computation.
-      reasoning_field: Message field carrying reasoning text, or ``None``.
+      data: Decoded JSON response body.
+      pricing: Per-token price schedule for cost computation.
+      reasoning_field: Provider-specific reasoning-text field name,
+          or ``None`` when the provider does not surface reasoning.
 
     Returns:
-      response: Translated model response.
+      response: Parsed ``ModelResponse`` with usage and cost filled in.
 
     """
     choices = cast(list[MutableJSON], data["choices"])
     choice = choices[0]
     message = cast(MutableJSON, choice["message"])
-    msg_parts: list[Message] = []
+
+    text = ""
+    thinking_blocks: list[Mapping[str, object]] = []
+
+    raw_content = message.get("content")
+    if isinstance(raw_content, str):
+        text = raw_content
 
     if reasoning_field:
         raw_thinking = message.get(reasoning_field)
         if isinstance(raw_thinking, str) and raw_thinking:
-            msg_parts.append(TextMessage(raw_thinking, "text/x-thinking"))
+            # Wrap reasoning text in a single opaque dict so the
+            # AssistantMessage round-trips through history (provider
+            # may discard on resend if the wire doesn't support it).
+            thinking_blocks.append({"type": "reasoning", "text": raw_thinking})
 
-    text_content = cast(str | None, message.get("content"))
-    if text_content:
-        msg_parts.append(TextMessage(text_content, "text/plain"))
-
-    raw_tcs = cast(list[MutableJSON], message.get("tool_calls") or [])
-    for tc in raw_tcs:
+    tool_calls: list[ToolCall] = []
+    for tc in cast(list[MutableJSON], message.get("tool_calls") or []):
         func = cast(MutableJSON, tc["function"])
         tc_name = cast(str, func["name"])
         tc_id = cast(str, tc["id"])
@@ -681,7 +674,15 @@ def parse_response(
             tool_name=tc_name,
             call_id=tc_id,
         )
-        msg_parts.append(tool_call_message(tc_id, tc_name, json_freeze(parsed)))
+        tool_calls.append(
+            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], parsed))
+        )
+
+    asst = AssistantMessage(
+        text=text,
+        thinking_blocks=tuple(thinking_blocks),
+        tool_calls=tuple(tool_calls),
+    )
 
     usage = cast(MutableJSON, data.get("usage") or {})
     input_tokens, output_tokens, cache_read = _extract_usage(usage)
@@ -692,16 +693,8 @@ def parse_response(
         cache_read=cache_read,
     )
     message_id = cast(str, data.get("id") or "")
-    has_tool_use = any(p.descriptor == "multipart/x-tool-call" for p in msg_parts)
-    all_parts: list[Message] = []
-    if message_id:
-        all_parts.append(TextMessage(message_id, "text/x-queue-id"))
-    all_parts.extend(msg_parts)
     return ModelResponse(
-        content=MultipartMessage(
-            tuple(all_parts),
-            "multipart/x-model-message",
-        ),
+        message=asst,
         tokens=TokenCount(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -710,7 +703,7 @@ def parse_response(
         stop_reason=normalize_stop_reason(
             cast(str | None, choice.get("finish_reason")),
             kind="openai",
-            has_tool_use=has_tool_use,
+            has_tool_use=bool(tool_calls),
         ),
         message_id=message_id,
         request_id=message_id,
@@ -727,27 +720,22 @@ async def consume_stream(
     pricing: Pricing,
     reasoning_field: str | None,
 ) -> ModelResponse:
-    """Parse an SSE stream into an assembled ModelResponse.
+    """Parse an SSE stream into an assembled ``ModelResponse``.
 
     Tool-call arguments are streamed as sparse per-index deltas; we
     accumulate then json.loads at the end. ``reasoning_field`` (when
     set) captures the provider's reasoning/thinking delta as a string
-    - not surfaced live via ``on_text`` (extended thinking is emitted
-    post-request, not streamed).
-
-    The outer ``asyncio.timeout_at`` watchdog resets on every line so
-    a stalled server trips ``asyncio.TimeoutError`` after
-    ``_STREAM_IDLE_TIMEOUT`` of inactivity (matches the Anthropic
-    provider's idle-reset pattern).
+    — not surfaced live via ``on_text``.
 
     Args:
-      r: HTTP response with an open SSE stream.
-      on_text: Callback invoked with each text chunk as it arrives.
-      pricing: Token pricing for cost computation.
-      reasoning_field: Message field carrying reasoning text, or ``None``.
+      r: Open streaming response from the provider.
+      on_text: Called per text chunk; ``None`` disables text streaming.
+      pricing: Per-token price schedule for cost computation.
+      reasoning_field: Provider-specific reasoning-text field name,
+          or ``None`` when the provider does not surface reasoning.
 
     Returns:
-      response: Assembled model response after the stream closes.
+      response: Assembled ``ModelResponse`` with usage and cost filled in.
 
     """
     text_parts: list[str] = []
@@ -810,11 +798,12 @@ async def consume_stream(
                 if isinstance(args_chunk, str) and args_chunk:
                     tool_args.setdefault(idx, []).append(args_chunk)
 
-    msg_parts: list[Message] = []
+    thinking_blocks: list[Mapping[str, object]] = []
     if thinking_parts:
-        msg_parts.append(TextMessage("".join(thinking_parts), "text/x-thinking"))
-    if text_parts:
-        msg_parts.append(TextMessage("".join(text_parts), "text/plain"))
+        thinking_blocks.append(
+            {"type": "reasoning", "text": "".join(thinking_parts)},
+        )
+    tool_calls: list[ToolCall] = []
     for idx in sorted(tool_id):
         args_str = "".join(tool_args.get(idx, []))
         tc_name = tool_name.get(idx, "")
@@ -825,7 +814,14 @@ async def consume_stream(
             tool_name=tc_name,
             call_id=tc_id,
         )
-        msg_parts.append(tool_call_message(tc_id, tc_name, json_freeze(args)))
+        tool_calls.append(
+            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], args))
+        )
+    asst = AssistantMessage(
+        text="".join(text_parts),
+        thinking_blocks=tuple(thinking_blocks),
+        tool_calls=tuple(tool_calls),
+    )
 
     input_tokens, output_tokens, cache_read = _extract_usage(usage)
     in_cost, out_cost, total_cost = compute_cost(
@@ -834,16 +830,8 @@ async def consume_stream(
         output_tokens,
         cache_read=cache_read,
     )
-    has_tool_use = any(p.descriptor == "multipart/x-tool-call" for p in msg_parts)
-    all_parts_s: list[Message] = []
-    if message_id:
-        all_parts_s.append(TextMessage(message_id, "text/x-queue-id"))
-    all_parts_s.extend(msg_parts)
     return ModelResponse(
-        content=MultipartMessage(
-            tuple(all_parts_s),
-            "multipart/x-model-message",
-        ),
+        message=asst,
         tokens=TokenCount(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -852,7 +840,7 @@ async def consume_stream(
         stop_reason=normalize_stop_reason(
             finish_reason,
             kind="openai",
-            has_tool_use=has_tool_use,
+            has_tool_use=bool(tool_calls),
         ),
         message_id=message_id,
         request_id=message_id,
@@ -901,6 +889,10 @@ def _parse_tool_arguments(
     )
     return {}
 
+
+# Avoid unused-import warning when ``BytesMessage`` ends up unused after the
+# rewrite (consumers cast attachments directly).
+_ = BytesMessage
 
 # Wire default model class last so subclasses can also use the default.
 OpenAICompat.MODEL_CLASS = OpenAICompatModel

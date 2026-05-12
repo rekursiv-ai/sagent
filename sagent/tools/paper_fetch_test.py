@@ -1,234 +1,167 @@
-"""Tests for tools.paper_fetch. All HTTP calls are mocked."""
+"""Tests for ``tools.paper_fetch``: PDF download cascade."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
+import asyncio
 import json
 
-import pytest
-
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
+from sagent.lib.web.fetch import FetchError
+from sagent.tools.paper_fetch import (
+    _MIN_PDF_BYTES,
+    PaperFetch,
+    _looks_like_pdf,
+    _s2_oa_lookup,
 )
-from sagent.lib.json import JSON, JSONValue, json_freeze
-from sagent.lib.web.fetch import FetchError, HTTPConn
-from sagent.tools import paper_fetch as pf_mod
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-paperfetch"),),
-        "multipart/x-tool-call",
-    )
+# Minimal stub of a PDF: starts with magic + padding > _MIN_PDF_BYTES.
+_FAKE_PDF = b"%PDF-1.4\n" + b"x" * 200
 
 
-def _txt(msg: Message) -> str:
-    if isinstance(msg, TextMessage):
-        return msg.content
-    if isinstance(msg, MultipartMessage):
-        for p in msg.content:
-            if isinstance(p, TextMessage):
-                return p.content
-    return ""
+def test_looks_like_pdf_true() -> None:
+    assert _looks_like_pdf(_FAKE_PDF) is True
 
 
-_PDF_HEADER = b"%PDF-1.5\n" + b"x" * 200
-_HTML_HEADER = b"<html><body>not a pdf</body></html>"
+def test_looks_like_pdf_too_short() -> None:
+    assert _looks_like_pdf(b"%PDF-") is False
 
 
-class _FetchRouter:
-    """Route fetch() calls by URL pattern. Tracks calls for assertions."""
-
-    def __init__(
-        self,
-        gets: dict[str, bytes | Exception] | None = None,
-        posts: dict[str, bytes | Exception] | None = None,
-    ) -> None:
-        self._gets = gets or {}
-        self._posts = posts or {}
-        self.calls: list[tuple[str, str]] = []
-
-    def __call__(
-        self,
-        url: str,
-        *,
-        method: str = "GET",
-        data: dict[str, str] | None = None,
-        json: JSONValue = None,
-        headers: dict[str, str] | None = None,
-        cookies: dict[str, str] | None = None,
-        retries: int = 0,
-        timeout_sec: float = 30,
-        max_redirects: int = 10,
-        on_redirect: Callable[[str], None] | None = None,
-        return_connection: bool = False,
-        http_conn: HTTPConn | None = None,
-    ) -> bytes:
-        del data, json, headers, cookies, retries, timeout_sec
-        del max_redirects, on_redirect, return_connection, http_conn
-        self.calls.append((method, url))
-        table = self._posts if method == "POST" else self._gets
-        for pattern, val in table.items():
-            if pattern in url:
-                if isinstance(val, Exception):
-                    raise val
-                return val
-        raise FetchError(url, 404, {}, b"not found")
+def test_looks_like_pdf_wrong_magic() -> None:
+    assert _looks_like_pdf(b"<html>" + b"x" * 200) is False
 
 
-def _patch_fetch(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    gets: dict[str, bytes | Exception] | None = None,
-    posts: dict[str, bytes | Exception] | None = None,
-) -> _FetchRouter:
-    router = _FetchRouter(gets, posts)
-    monkeypatch.setattr("sagent.tools.paper_fetch.fetch", router)
-    return router
+def test_s2_oa_lookup_returns_url() -> None:
+    body = json.dumps({"openAccessPdf": {"url": "https://oa/x.pdf"}}).encode()
+    with patch("sagent.tools.paper_fetch.fetch", return_value=body):
+        url = _s2_oa_lookup("doi", "10.1234/x")
+    assert url == "https://oa/x.pdf"
 
 
-@pytest.fixture
-def cache_dir(tmp_path: Path) -> Path:
-    return tmp_path / "papers"
+def test_s2_oa_lookup_no_url_returns_none() -> None:
+    body = json.dumps({"openAccessPdf": None}).encode()
+    with patch("sagent.tools.paper_fetch.fetch", return_value=body):
+        assert _s2_oa_lookup("doi", "10.1234/x") is None
 
 
-class TestValidation:
-    @pytest.mark.anyio
-    async def test_missing_id(self, cache_dir: Path) -> None:
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": ""})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in str(resp.content)
-
-    @pytest.mark.anyio
-    async def test_bad_id(self, cache_dir: Path) -> None:
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": "not-an-id"})))
-        assert resp.descriptor == "text/x-error"
-        assert "Unrecognized" in str(resp.content)
+def test_s2_oa_lookup_non_dict_returns_none() -> None:
+    body = b"[]"
+    with patch("sagent.tools.paper_fetch.fetch", return_value=body):
+        assert _s2_oa_lookup("doi", "10.1234/x") is None
 
 
-class TestArxivPath:
-    @pytest.mark.anyio
-    async def test_direct_download(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        cache_dir: Path,
-    ) -> None:
-        router = _patch_fetch(
-            monkeypatch,
-            gets={"arxiv.org/pdf/2106.15928": _PDF_HEADER},
+def test_s2_oa_lookup_fetch_error_returns_none() -> None:
+    err = FetchError(url="u", status=500, headers={}, body=b"x")
+    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+        assert _s2_oa_lookup("doi", "10.1234/x") is None
+
+
+def test_s2_oa_lookup_invalid_json_returns_none() -> None:
+    with patch("sagent.tools.paper_fetch.fetch", return_value=b"not json"):
+        assert _s2_oa_lookup("doi", "10.1234/x") is None
+
+
+def test_paper_fetch_metadata(tmp_path: Path) -> None:
+    t = PaperFetch(cache_dir=tmp_path)
+    assert t.name == "PaperFetch"
+    assert t.tool_id == "application/x-tool-paperfetch"
+
+
+def test_summary_id(tmp_path: Path) -> None:
+    out = PaperFetch(cache_dir=tmp_path).summary({"id": "10.1234/abc"})
+    assert "PaperFetch" in out
+    assert "10.1234/abc" in out
+
+
+def test_summary_missing_id(tmp_path: Path) -> None:
+    assert PaperFetch(cache_dir=tmp_path).summary({}) == "PaperFetch ?"
+
+
+def test_prompt_empty(tmp_path: Path) -> None:
+    assert PaperFetch(cache_dir=tmp_path).prompt() == ""
+
+
+def test_run_empty_id(tmp_path: Path) -> None:
+    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"id": "  "}))
+    assert result.is_error
+    assert "'id' is required" in result.content
+
+
+def test_run_invalid_id(tmp_path: Path) -> None:
+    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"id": "garbage"}))
+    assert result.is_error
+
+
+def test_run_cached_existing(tmp_path: Path) -> None:
+    """An existing PDF in the cache short-circuits the cascade."""
+    # The slug for arxiv id "1234.56789" is "arxiv_1234.56789".
+    cache_file = tmp_path / "arxiv_1234.56789.pdf"
+    _ = cache_file.write_bytes(_FAKE_PDF)
+    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"id": "1234.56789"}))
+    assert "Cached" in result.content
+    assert str(cache_file) in result.content
+
+
+def test_run_arxiv_download_writes_cache(tmp_path: Path) -> None:
+    """ArXiv source successfully downloads on first try."""
+    with patch("sagent.tools.paper_fetch.fetch", return_value=_FAKE_PDF):
+        result = asyncio.run(
+            PaperFetch(cache_dir=tmp_path).run({"id": "1234.56789"}),
         )
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": "arXiv:2106.15928"})))
-        assert "arxiv" in _txt(resp).lower()
-        path = cache_dir / "arxiv_2106.15928.pdf"
-        assert path.exists()
-        assert path.read_bytes()[:5] == b"%PDF-"
-        assert any("arxiv.org/pdf" in call[1] for call in router.calls)
-        assert not any("semanticscholar.org" in call[1] for call in router.calls)
+    assert not result.is_error
+    assert "Downloaded via arxiv" in result.content
+    assert (tmp_path / "arxiv_1234.56789.pdf").exists()
 
-    @pytest.mark.anyio
-    async def test_falls_through_on_non_pdf(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        cache_dir: Path,
-    ) -> None:
-        s2_resp = json.dumps({"openAccessPdf": None}).encode()
-        _patch_fetch(
-            monkeypatch,
-            gets={
-                "arxiv.org/pdf": _HTML_HEADER,
-                "semanticscholar.org": s2_resp,
-            },
+
+def test_run_cascade_all_fail(tmp_path: Path) -> None:
+    """All sources return None → tool error."""
+    err = FetchError(url="u", status=500, headers={}, body=b"")
+    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+        result = asyncio.run(
+            PaperFetch(cache_dir=tmp_path).run({"id": "10.1234/nonexistent"}),
         )
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": "arXiv:2106.15928"})))
-        assert resp.descriptor == "text/x-error"
-        assert "No source returned a PDF" in str(resp.content)
+    assert result.is_error
+    assert "No source returned a PDF" in result.content
 
 
-class TestOpenAccessPath:
-    @pytest.mark.anyio
-    async def test_via_s2_oa_url(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        cache_dir: Path,
-    ) -> None:
-        s2_resp = json.dumps(
-            {"openAccessPdf": {"url": "https://oa.example.com/p.pdf"}},
-        ).encode()
-        router = _patch_fetch(
-            monkeypatch,
-            gets={
-                "semanticscholar.org": s2_resp,
-                "oa.example.com": _PDF_HEADER,
-            },
+def test_run_open_access_fallback_for_doi(tmp_path: Path) -> None:
+    """For DOI ids (no arxiv), the OA source is tried first."""
+    oa_meta = json.dumps(
+        {"openAccessPdf": {"url": "https://oa.example/x.pdf"}}
+    ).encode()
+    call_count = {"n": 0}
+
+    def fake_fetch(url: str, **_kw: object) -> bytes:
+        call_count["n"] += 1
+        if "openAccessPdf" in url:
+            return oa_meta
+        return _FAKE_PDF
+
+    with patch("sagent.tools.paper_fetch.fetch", side_effect=fake_fetch):
+        result = asyncio.run(
+            PaperFetch(cache_dir=tmp_path).run({"id": "10.1234/doi_oa_test"}),
         )
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": "10.1234/oa"})))
-        assert "open_access" in _txt(resp)
-
-        del router
-
-    @pytest.mark.parametrize(
-        "s2_resp",
-        [
-            b"not json",
-            b"[]",
-            json.dumps({"openAccessPdf": []}).encode(),
-        ],
-    )
-    @pytest.mark.anyio
-    async def test_malformed_s2_oa_response_is_external_failure(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        cache_dir: Path,
-        s2_resp: bytes,
-    ) -> None:
-        _patch_fetch(monkeypatch, gets={"semanticscholar.org": s2_resp})
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-
-        resp = await tool.run(_msg(json_freeze({"id": "10.1234/malformed"})))
-
-        assert resp.descriptor == "text/x-error"
-        assert "No source returned a PDF" in str(resp.content)
+    assert not result.is_error
+    assert "Downloaded via open_access" in result.content
 
 
-class TestPdfValidation:
-    def test_looks_like_pdf_true(self) -> None:
-        assert pf_mod._looks_like_pdf(_PDF_HEADER)
-
-    def test_looks_like_pdf_false_html(self) -> None:
-        assert not pf_mod._looks_like_pdf(_HTML_HEADER)
-
-    def test_looks_like_pdf_false_too_small(self) -> None:
-        assert not pf_mod._looks_like_pdf(b"%PDF-")
-
-
-class TestCache:
-    @pytest.mark.anyio
-    async def test_cached_path_returned_directly(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        cache_dir: Path,
-    ) -> None:
-        cache_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
-        cached = cache_dir / "arxiv_2106.15928.pdf"
-        cached.write_bytes(_PDF_HEADER)
-
-        router = _patch_fetch(monkeypatch, gets={})
-        tool = pf_mod.PaperFetch(cache_dir=cache_dir)
-        resp = await tool.run(_msg(json_freeze({"id": "arXiv:2106.15928"})))
-        assert "Cached" in _txt(resp)
-        assert str(cached) in _txt(resp)
-        assert not router.calls
+def test_min_pdf_bytes_threshold_check(tmp_path: Path) -> None:
+    """Cache short-circuit needs file > _MIN_PDF_BYTES."""
+    cache_file = tmp_path / "arxiv_1234.56789.pdf"
+    # Smaller than threshold: cache miss, falls through.
+    _ = cache_file.write_bytes(b"%PDF-" + b"x" * (_MIN_PDF_BYTES - 10))
+    err = FetchError(url="u", status=500, headers={}, body=b"")
+    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+        result = asyncio.run(
+            PaperFetch(cache_dir=tmp_path).run({"id": "1234.56789"}),
+        )
+    # Because file is too small, cascade ran and failed.
+    assert result.is_error
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

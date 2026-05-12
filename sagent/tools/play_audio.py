@@ -16,6 +16,7 @@ agent shouldn't fail a model request because the host can't beep.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import importlib
@@ -24,9 +25,8 @@ import platform
 import shutil
 import subprocess
 
-from sagent.custom_types import Message, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
@@ -59,63 +59,72 @@ class PlayAudio:
         }
     )
 
-    def summary(self, msg: Message) -> str:
-        """Return a short label showing the WAV filename.
+    def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short label for this audio-playback invocation.
 
         Args:
-          msg: Tool call message.
+          args: Directive carrying the ``path`` string.
 
         Returns:
-          label: "PlayAudio <filename>".
+          label: ``PlayAudio <basename>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        path = str(directive.get("path", ""))
+        path = str(args.get("path", ""))
         name = Path(path).name if path else "?"
         return f"PlayAudio {name}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for PlayAudio.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
     def prompt(self) -> str:
-        """Return per-request system prompt text.
+        """Return no supplemental system-prompt text for PlayAudio.
 
         Returns:
-          prompt: Always empty for this tool.
+          contribution: Empty string.
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
-        """Play the specified WAV file on the host.
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Play a WAV file on the host's audio output.
 
         Args:
-          msg: Tool call message with ``path`` field.
+          args: Directive carrying the ``path`` to a ``.wav`` file.
 
         Returns:
-          result: Playback confirmation or error message.
+          result: Confirmation message, or a non-error best-effort line
+              when no audio subsystem is reachable.
 
         """
-        directive = get_directive(msg)
-        path = str(directive.get("path", ""))
-        return await run_sync(self._run, parent_id=msg.id, path=path)
+        path = str(args.get("path", ""))
+        return await run_sync(self._run, path=path)
 
-    def _run(self, *, path: str) -> str | Message:
-        """Validate path and play the WAV file synchronously."""
+    def _run(self, *, path: str) -> str | ToolResult:
+        """Validate the path and dispatch to the platform-specific player."""
         if not path:
-            return TextMessage("path is required.", "text/x-error")
+            return ToolResult(call_id="", content="path is required.", is_error=True)
         p = Path(path).expanduser()
         if not p.is_absolute():
             p = Path(get_tool_state().bash_cwd) / p
         if not p.exists():
-            return TextMessage(f"Not found: {p}", "text/x-error")
+            return ToolResult(call_id="", content=f"Not found: {p}", is_error=True)
         if not p.is_file():
-            return TextMessage(f"Not a file: {p}", "text/x-error")
+            return ToolResult(call_id="", content=f"Not a file: {p}", is_error=True)
         if p.suffix.lower() != ".wav":
-            return TextMessage(
-                f"Unsupported format {p.suffix!r}; only .wav is supported.",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=(f"Unsupported format {p.suffix!r}; only .wav is supported."),
+                is_error=True,
             )
         err = _play(p)
         if err is not None:
@@ -138,6 +147,7 @@ def _play(path: Path) -> str | None:
 
 
 def _play_windows(path: Path) -> str | None:
+    """Play ``path`` via ``winsound`` on Windows hosts."""
     # Imported lazily so the module still imports on POSIX hosts for
     # static analysis and cross-platform tests.
     try:

@@ -1,12 +1,10 @@
-"""Bottom-toolbar renderer for the v2 REPL.
+"""Bottom-toolbar renderer for the REPL.
 
-Mirrors v1's ``render_toolbar``: single bracketed block of session
-totals plus a braille spinner while a model call is in flight.
-
-Reads the agent's ``activity`` (an :class:`ActivityTracker` registered
-on the agent) for elapsed time and live-call state; reads
-``cost_tracker`` for token / cost counters. The activity tracker is
-maintained by :class:`ActivityHandler` (see ``handlers/activity.py``).
+Single bracketed block of session totals plus a braille spinner while
+a model call is in flight. Reads ``agent.activity`` (an
+:class:`ActivityTracker` on the Agent) for elapsed time and
+live-call state; reads ``agent.cost_tracker`` for token / cost
+counters.
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ from sagent.repl.format import format_count, format_elapsed
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
-
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -42,16 +39,19 @@ def render_toolbar(agent: Agent) -> str:
     activity = agent.activity
     if activity.elapsed_seconds <= 0 and not activity.active:
         return ""
-    # ``cost_tracker`` is the single store; descendants write through to
-    # it via ``cost_root_var`` so this read is always live, including
-    # during the in-flight model call.
     tokens = agent.cost_tracker.total
     cost = float(agent.cost_tracker.total_cost_usd)
-    output_tokens = tokens.output_tokens + (
-        agent.live_model_response_tokens if activity.active else 0
+    live_response_tokens = (
+        activity.live_response_chars // agent.budget.chars_per_token
+        if activity.active
+        else 0
     )
+    output_tokens = tokens.output_tokens + live_response_tokens
+    elapsed = activity.elapsed_seconds
+    if activity.active:
+        elapsed += asyncio.get_running_loop().time() - activity.current_call_start
     bracket = (
-        f"[{format_elapsed(agent.total_active_elapsed_seconds)}"
+        f"[{format_elapsed(elapsed)}"
         f" {format_count(tokens.input_tokens)}↑"
         f" {format_count(output_tokens)}↓"
         f" {format_count(tokens.cache_creation_tokens)}↟"

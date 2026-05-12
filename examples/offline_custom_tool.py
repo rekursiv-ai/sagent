@@ -8,22 +8,32 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
+from sagent.agent.runtime import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 from sagent.custom_types import (
     ModelRequest,
     ModelResponse,
-    MultipartMessage,
     Pricing,
-    TextMessage,
     TokenCount,
 )
-from sagent.lib.json import json_freeze
-from sagent.lib.message import response_text, tool_call_message
 from sagent.tools import tool
 
 
 @tool(name="Echo")
 def echo(text: str) -> str:
-    """Return the supplied text with a visible prefix."""
+    """Return the supplied text with a visible prefix.
+
+    Args:
+      text: Text to echo.
+
+    Returns:
+      echoed: ``text`` prefixed with ``"Echo said: "``.
+
+    """
     return f"Echo said: {text}"
 
 
@@ -45,44 +55,76 @@ class ScriptedModel:
     pricing = Pricing()
 
     def estimate_text_token_count(self, text: str) -> int:
-        """Estimate text tokens with a deliberately simple offline heuristic."""
+        """Estimate text tokens with a deliberately simple offline heuristic.
+
+        Args:
+          text: Text to estimate.
+
+        Returns:
+          tokens: Approximate token count (at least 1).
+
+        """
         return max(1, len(text) // 4)
 
     def estimate_image_token_count(self, data: bytes) -> int:
-        """Return zero because this scripted model has no image support."""
+        """Return zero because this scripted model has no image support.
+
+        Args:
+          data: Image bytes (ignored).
+
+        Returns:
+          tokens: Always ``0``.
+
+        """
         del data
         return 0
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Return false because the scripted model never raises API errors."""
+        """Return false because the scripted model never raises API errors.
+
+        Args:
+          error: Provider error to classify.
+
+        Returns:
+          overflow: Always ``False``.
+
+        """
         del error
         return False
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Return false because the scripted model never raises API errors."""
+        """Return false because the scripted model never raises API errors.
+
+        Args:
+          error: Provider error to classify.
+
+        Returns:
+          retryable: Always ``False``.
+
+        """
         del error
         return False
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Return one tool call, then a final answer after the tool result."""
-        if any(msg.descriptor == "multipart/x-tool-result" for msg in request.messages):
+        """Return one tool call, then a final answer after the tool result.
+
+        Args:
+          request: Model request containing the conversation history.
+
+        Returns:
+          response: Either a tool-call response or the final answer.
+
+        """
+        if any(isinstance(msg, ToolResult) for msg in request.messages):
             return ModelResponse(
-                content=MultipartMessage(
-                    (TextMessage("Echo said: hello", "text/plain"),),
-                    "multipart/x-model-message",
-                ),
+                message=AssistantMessage(text="Echo said: hello"),
                 tokens=TokenCount(input_tokens=12, output_tokens=4),
             )
         return ModelResponse(
-            content=MultipartMessage(
-                (
-                    tool_call_message(
-                        "echo-1",
-                        "Echo",
-                        json_freeze({"text": "hello"}),
-                    ),
+            message=AssistantMessage(
+                tool_calls=(
+                    ToolCall(id="echo-1", name="Echo", args={"text": "hello"}),
                 ),
-                "multipart/x-model-message",
             ),
             tokens=TokenCount(input_tokens=8, output_tokens=4),
             stop_reason="model_tool_use",
@@ -94,17 +136,21 @@ class ScriptedModel:
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        """Return the buffered response and optionally emit final text."""
+        """Return the buffered response and optionally emit final text.
+
+        Args:
+          request: Model request containing the conversation history.
+          on_text: Optional callback invoked with the final response text.
+          on_thinking: Optional thinking callback (ignored).
+
+        Returns:
+          response: Buffered response identical to :meth:`buffer`.
+
+        """
         del on_thinking
         response = await self.buffer(request)
-        if (
-            on_text is not None
-            and response.stop_reason == "model_finished"
-            and isinstance(response.content, MultipartMessage)
-        ):
-            for part in response.content.content:
-                if part.descriptor == "text/plain":
-                    on_text(str(part.content))
+        if on_text is not None and response.message.text:
+            on_text(response.message.text)
         return response
 
 
@@ -122,13 +168,11 @@ async def run_example() -> str:
         max_tool_call_rounds=3,
         thinking=None,
     )
-    async for _event in agent.run(
-        TextMessage("Echo hello.", "text/x-user-message"),
-    ):
+    async for _event in agent.run(UserMessage(text="Echo hello.")):
         pass
     for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            return response_text(m)
+        if isinstance(m, AssistantMessage) and m.text:
+            return m.text
     return ""
 
 

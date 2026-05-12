@@ -1,293 +1,252 @@
-"""Tests for tools.slack."""
+"""Tests for ``tools.slack``: Slack Web API integration."""
 
 from __future__ import annotations
 
-from typing import Any
+from unittest.mock import patch
 
-import json as _json
+import asyncio
+import json
 
-import pytest
-
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, json_freeze
-from sagent.tools import slack as slack_mod
+from sagent.agent.runtime import ToolResult
+from sagent.lib.web.fetch import FetchError
+from sagent.tools.slack import Slack
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-slack"),),
-        "multipart/x-tool-call",
+_TOKEN = "test-token-placeholder"  # noqa: S105 -- fake test token
+
+
+def _ok(payload: dict[str, object]) -> bytes:
+    body: dict[str, object] = {"ok": True}
+    body.update(payload)
+    return json.dumps(body).encode()
+
+
+def _not_ok(error: str) -> bytes:
+    return json.dumps({"ok": False, "error": error}).encode()
+
+
+def test_slack_metadata() -> None:
+    s = Slack(token=_TOKEN)
+    assert s.name == "Slack"
+    assert s.tool_id == "application/x-tool-slack"
+
+
+def test_summary_with_channel() -> None:
+    s = Slack(token=_TOKEN)
+    assert s.summary({"operation": "send", "channel": "C1"}) == "Slack send:C1"
+
+
+def test_summary_no_channel() -> None:
+    s = Slack(token=_TOKEN)
+    assert s.summary({"operation": "list_channels"}) == "Slack list_channels"
+
+
+def test_summary_result_none() -> None:
+    assert (
+        Slack(token=_TOKEN).summary_result(ToolResult(call_id="", content="ok")) is None
     )
 
 
-class _Calls:
-    """Tracks mock fetch invocations."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, Any]] = []
+def test_prompt_empty() -> None:
+    assert Slack(token=_TOKEN).prompt() == ""
 
 
-def _patch_client(
-    monkeypatch: pytest.MonkeyPatch,
-    canned: dict[str, dict[str, Any]],
-) -> _Calls:
-    """Mock ``fetch`` for Slack API calls."""
-    tracker = _Calls()
-
-    def _mock_fetch(
-        url: str, *, method: str = "GET", json: Any = None, **kwargs: object
-    ) -> bytes:
-        del kwargs
-        slack_method = url.rsplit("/api/", maxsplit=1)[-1].split("?", maxsplit=1)[0]
-        tracker.calls.append((method, url, json))
-        if slack_method in canned:
-            return _json.dumps({"ok": True, **canned[slack_method]}).encode()
-        return _json.dumps({"ok": False, "error": "no_canned"}).encode()
-
-    monkeypatch.setattr("sagent.tools.slack.fetch", _mock_fetch)
-    return tracker
+def test_send_requires_channel_and_text() -> None:
+    s = Slack(token=_TOKEN)
+    result = asyncio.run(s.run({"operation": "send", "channel": "C"}))
+    assert result.is_error
+    assert "'channel' and 'text' required" in result.content
 
 
-_TEST_TOKEN = "xoxb-" + "test"
-
-
-def _tool(
-    *,
-    token: str = _TEST_TOKEN,
-    username: str = "",
-    icon_url: str = "",
-) -> slack_mod.Slack:
-    return slack_mod.Slack(token=token, username=username, icon_url=icon_url)
-
-
-class TestSend:
-    @pytest.mark.anyio
-    async def test_requires_channel_and_text(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        resp = await _tool().run(_msg(json_freeze({"operation": "send"})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in str(resp.content)
-
-    @pytest.mark.anyio
-    async def test_sends(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            {"chat.postMessage": {"ts": "12345.67", "channel": "C1"}},
-        )
-        resp = await _tool().run(
-            _msg(json_freeze({"operation": "send", "channel": "C1", "text": "hi"}))
-        )
-        assert isinstance(resp, TextMessage)
-        assert "12345.67" in resp.content
-        _, _, body = mock.calls[0]
-        assert body["channel"] == "C1"
-        assert body["text"] == "hi"
-
-    @pytest.mark.anyio
-    async def test_thread(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            {"chat.postMessage": {"ts": "t", "channel": "C1"}},
-        )
-        await _tool().run(
-            _msg(
-                json_freeze(
-                    {
-                        "operation": "send",
-                        "channel": "C1",
-                        "text": "reply",
-                        "thread_ts": "111.222",
-                    }
-                )
-            )
-        )
-        _, _, body = mock.calls[0]
-        assert body["thread_ts"] == "111.222"
-
-    @pytest.mark.anyio
-    async def test_identity_fields(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            {"chat.postMessage": {"ts": "t", "channel": "C1"}},
-        )
-        tool = _tool(username="Sara", icon_url="https://example.com/sara.png")
-        await tool.run(
-            _msg(json_freeze({"operation": "send", "channel": "C1", "text": "hi"}))
-        )
-        _, _, body = mock.calls[0]
-        assert body["username"] == "Sara"
-        assert body["icon_url"] == "https://example.com/sara.png"
-
-    @pytest.mark.anyio
-    async def test_no_identity_when_unset(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            {"chat.postMessage": {"ts": "t", "channel": "C1"}},
-        )
-        await _tool().run(
-            _msg(json_freeze({"operation": "send", "channel": "C1", "text": "hi"}))
-        )
-        _, _, body = mock.calls[0]
-        assert "username" not in body
-        assert "icon_url" not in body
-
-
-class TestListChannels:
-    @pytest.mark.anyio
-    async def test_renders(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "conversations.list": {
-                    "channels": [
-                        {"id": "C1", "name": "general", "num_members": 5},
-                    ]
+def test_send_success() -> None:
+    payload = _ok({"ts": "1.0", "channel": "C1"})
+    with patch("sagent.tools.slack.fetch", return_value=payload) as mock_fetch:
+        result = asyncio.run(
+            Slack(token=_TOKEN, username="bot", icon_url="https://i").run(
+                {
+                    "operation": "send",
+                    "channel": "C1",
+                    "text": "hi",
+                    "thread_ts": "thr1",
                 }
-            },
+            ),
         )
-        resp = await _tool().run(_msg(json_freeze({"operation": "list_channels"})))
-        assert isinstance(resp, TextMessage)
-        assert "C1" in resp.content
-        assert "#general" in resp.content
+    assert not result.is_error
+    assert "Sent." in result.content
+    # Verify the POST mode + payload include username/icon_url/thread.
+    _, kwargs = mock_fetch.call_args
+    payload_json = kwargs["json"]
+    assert payload_json["channel"] == "C1"
+    assert payload_json["text"] == "hi"
+    assert payload_json["thread_ts"] == "thr1"
+    assert payload_json["username"] == "bot"
+    assert payload_json["icon_url"] == "https://i"
 
 
-class TestMessages:
-    @pytest.mark.anyio
-    async def test_list_messages_requires_channel(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        resp = await _tool().run(_msg(json_freeze({"operation": "list_messages"})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in str(resp.content)
+def test_send_api_error() -> None:
+    with patch(
+        "sagent.tools.slack.fetch",
+        return_value=_not_ok("channel_not_found"),
+    ):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run(
+                {"operation": "send", "channel": "X", "text": "hi"}
+            ),
+        )
+    assert result.is_error
+    assert "channel_not_found" in result.content
 
-    @pytest.mark.anyio
-    async def test_list_messages(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "conversations.history": {
-                    "messages": [
-                        {"ts": "1", "user": "U1", "text": "hello"},
-                        {"ts": "2", "user": "U2", "text": "world"},
-                    ]
+
+def test_send_http_error() -> None:
+    err = FetchError(
+        url="https://slack.com/api/chat.postMessage",
+        status=500,
+        headers={},
+        body=b"boom",
+    )
+    with patch("sagent.tools.slack.fetch", side_effect=err):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run(
+                {"operation": "send", "channel": "C", "text": "hi"}
+            ),
+        )
+    assert result.is_error
+    assert "Slack HTTP 500" in result.content
+
+
+def test_list_channels_empty() -> None:
+    payload = _ok({"channels": []})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_channels"}))
+    assert result.content == "(no channels)"
+
+
+def test_list_channels_renders() -> None:
+    payload = _ok(
+        {
+            "channels": [
+                {"id": "C1", "name": "general", "num_members": 10},
+                {"id": "C2", "name": "random"},
+            ]
+        }
+    )
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_channels"}))
+    assert "C1  #general" in result.content
+    assert "members=10" in result.content
+    assert "C2  #random" in result.content
+    assert "members=?" in result.content
+
+
+def test_list_messages_requires_channel() -> None:
+    result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_messages"}))
+    assert result.is_error
+    assert "'channel' required" in result.content
+
+
+def test_list_messages_empty() -> None:
+    payload = _ok({"messages": []})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run({"operation": "list_messages", "channel": "C1"}),
+        )
+    assert result.content == "(no messages)"
+
+
+def test_list_messages_renders_with_reactions() -> None:
+    payload = _ok(
+        {
+            "messages": [
+                {
+                    "ts": "1.0",
+                    "user": "U1",
+                    "text": "hello",
+                    "reactions": [{"name": "tada", "count": 3}],
+                },
+                {"ts": "2.0", "bot_id": "B1", "text": "bot"},
+            ]
+        }
+    )
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run({"operation": "list_messages", "channel": "C1"}),
+        )
+    assert "[1.0] <U1> hello" in result.content
+    assert ":tada:x3" in result.content
+    assert "[2.0] <B1> bot" in result.content
+
+
+def test_read_thread_requires_channel_and_ts() -> None:
+    result = asyncio.run(Slack(token=_TOKEN).run({"operation": "read_thread"}))
+    assert result.is_error
+
+
+def test_read_thread_renders() -> None:
+    payload = _ok({"messages": [{"ts": "1.0", "user": "U1", "text": "parent"}]})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run(
+                {
+                    "operation": "read_thread",
+                    "channel": "C1",
+                    "thread_ts": "1.0",
                 }
-            },
+            ),
         )
-        resp = await _tool().run(
-            _msg(json_freeze({"operation": "list_messages", "channel": "C1"}))
-        )
-        assert isinstance(resp, TextMessage)
-        assert "hello" in resp.content
-        assert "world" in resp.content
-
-    @pytest.mark.anyio
-    async def test_read_thread(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "conversations.replies": {
-                    "messages": [
-                        {"ts": "1", "user": "U1", "text": "parent"},
-                        {"ts": "1.1", "user": "U2", "text": "reply"},
-                    ]
-                }
-            },
-        )
-        resp = await _tool().run(
-            _msg(
-                json_freeze(
-                    {"operation": "read_thread", "channel": "C1", "thread_ts": "1"}
-                )
-            )
-        )
-        assert isinstance(resp, TextMessage)
-        assert "parent" in resp.content
-        assert "reply" in resp.content
+    assert "[1.0] <U1> parent" in result.content
 
 
-class TestUsers:
-    @pytest.mark.anyio
-    async def test_list(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(
-            monkeypatch,
-            {
-                "users.list": {
-                    "members": [
-                        {"id": "U1", "name": "alice", "real_name": "Alice A"},
-                        {"id": "U2", "name": "bob", "deleted": True},
-                    ]
-                }
-            },
-        )
-        resp = await _tool().run(_msg(json_freeze({"operation": "list_users"})))
-        assert isinstance(resp, TextMessage)
-        assert "alice" in resp.content
-        assert "bob" not in resp.content
+def test_list_users_filters_deleted() -> None:
+    payload = _ok(
+        {
+            "members": [
+                {"id": "U1", "name": "alice", "real_name": "Alice"},
+                {"id": "U2", "name": "bob", "deleted": True},
+            ]
+        }
+    )
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
+    assert "U1  @alice" in result.content
+    assert "U2" not in result.content
 
 
-class TestCreateChannel:
-    @pytest.mark.anyio
-    async def test_requires_name(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _patch_client(monkeypatch, {})
-        resp = await _tool().run(_msg(json_freeze({"operation": "create_channel"})))
-        assert resp.descriptor == "text/x-error"
-        assert "required" in str(resp.content)
+def test_list_users_empty() -> None:
+    payload = _ok({"members": []})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
+    assert result.content == "(no users)"
 
-    @pytest.mark.anyio
-    async def test_creates(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        mock = _patch_client(
-            monkeypatch,
-            {"conversations.create": {"channel": {"id": "C99", "name": "test-log"}}},
+
+def test_create_channel_requires_name() -> None:
+    result = asyncio.run(Slack(token=_TOKEN).run({"operation": "create_channel"}))
+    assert result.is_error
+    assert "'channel_name' required" in result.content
+
+
+def test_create_channel_success() -> None:
+    payload = _ok({"channel": {"id": "C-new"}})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(
+            Slack(token=_TOKEN).run(
+                {"operation": "create_channel", "channel_name": "newroom"}
+            ),
         )
-        resp = await _tool().run(
-            _msg(
-                json_freeze({"operation": "create_channel", "channel_name": "test-log"})
-            )
-        )
-        assert isinstance(resp, TextMessage)
-        assert "C99" in resp.content
-        _, _, body = mock.calls[0]
-        assert body["name"] == "test-log"
+    assert result.content == "id=C-new"
+
+
+def test_unknown_operation() -> None:
+    result = asyncio.run(Slack(token=_TOKEN).run({"operation": "blah"}))
+    assert result.is_error
+    assert "Unknown operation" in result.content
+
+
+def test_send_convenience_method() -> None:
+    payload = _ok({"ts": "9.9", "channel": "C9"})
+    with patch("sagent.tools.slack.fetch", return_value=payload):
+        result = asyncio.run(Slack(token=_TOKEN).send("C9", "hi"))
+    assert isinstance(result, str)
+    assert "Sent." in result
 
 
 if __name__ == "__main__":

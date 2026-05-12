@@ -34,7 +34,6 @@ import sys
 import time
 import uuid
 
-from sagent.lib.descriptors import is_user_message
 from sagent.lib.json import MutableJSON
 
 
@@ -143,11 +142,22 @@ class SessionInfo:
     """Metadata about a persisted session (fast: mtime + head scan)."""
 
     path: Path
+    """Session directory containing ``session.jsonl``."""
+
     session_id: str
+    """Stable identifier copied from the ``meta`` record."""
+
     mtime: float
+    """``session.jsonl`` mtime in seconds since epoch."""
+
     status: str
+    """Status / title line, falling back to the first user message."""
+
     message_count: int
+    """Number of ``kind: history`` records in the file."""
+
     model_id: str
+    """Last-seen model id from the ``meta`` record."""
 
 
 def parse_jsonl(text: str) -> list[MutableJSON]:
@@ -178,8 +188,12 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
 
 
 def _is_user_text_message(rec: MutableJSON) -> bool:
-    desc = str(rec.get("descriptor", ""))
-    return is_user_message(desc) and isinstance(rec.get("content"), str)
+    """Detect a user-history record (``kind=history, type=user``)."""
+    return (
+        rec.get("kind") == "history"
+        and rec.get("type") == "user"
+        and isinstance(rec.get("text"), str)
+    )
 
 
 def _peek_session(session_dir: Path) -> SessionInfo | None:
@@ -212,10 +226,10 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
                     model_id = str(rec.get("model_id", ""))
                     session_id = str(rec.get("session_id", session_id))
                     status = str(rec.get("status") or rec.get("title") or "")
-                elif kind == "message":
+                elif kind == "history":
                     message_count += 1
                     if not first_user_msg and _is_user_text_message(rec):
-                        first_user_msg = str(rec["content"])
+                        first_user_msg = str(rec["text"])
     except (OSError, UnicodeDecodeError):
         return None
     return SessionInfo(
@@ -260,6 +274,9 @@ def list_all_sessions(*, projects_dir: Path | None = None) -> list[SessionInfo]:
 
     Args:
       projects_dir: Override for the projects root directory.
+
+    Returns:
+      sessions: Session metadata across all projects, sorted by mtime descending.
 
     """
     root = projects_dir or _PROJECTS_DIR

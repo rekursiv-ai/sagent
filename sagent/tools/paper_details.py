@@ -13,13 +13,13 @@ trim client-side. See :data:`_FILTER_FETCH_CAP`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 import cachetools
 
-from sagent.custom_types import Message, TextMessage, is_message
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, MutableJSON, bool_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     IdType,
@@ -67,7 +67,6 @@ _FILTER_FETCH_CAP = 1000
 
 _LIMIT_DEFAULT = 100
 
-
 _cache = cachetools.TTLCache[tuple[object, ...], str](
     maxsize=256,
     ttl=_CACHE_TTL_SEC,
@@ -80,25 +79,32 @@ def _validate_details_args(
     *,
     influential_only: bool,
     year_from: int | None,
-) -> tuple[str, IdType, str] | Message:
+) -> tuple[str, IdType, str] | ToolResult:
     """Return (normalized_op, kind, canonical) or an error."""
     if not raw:
-        return TextMessage("'id' is required.", "text/x-error")
+        return ToolResult(call_id="", content="'id' is required.", is_error=True)
     parsed = normalize_id(raw)
-    if is_message(parsed):
+    if isinstance(parsed, ToolResult):
         return parsed
     kind, canonical = parsed
     op_norm = op.strip().lower()
     if op_norm not in ("", "references", "citations"):
-        return TextMessage(
-            f"Unknown operation {op!r}."
-            " Valid: 'references', 'citations', or omit for metadata.",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=(
+                f"Unknown operation {op!r}."
+                " Valid: 'references', 'citations', or omit for metadata."
+            ),
+            is_error=True,
         )
     if op_norm != "citations" and (influential_only or year_from is not None):
-        return TextMessage(
-            "'influential_only' and 'year_from' only apply to operation='citations'.",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=(
+                "'influential_only' and 'year_from' only apply to"
+                " operation='citations'."
+            ),
+            is_error=True,
         )
     return op_norm, kind, canonical
 
@@ -171,27 +177,35 @@ class PaperDetails:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Tool arguments.
 
         Returns:
           label: Human-readable summary string.
 
         """
-        directive = get_directive(msg)
-        raw_id = str(directive.get("id", "")).strip()
+        raw_id = str(args.get("id", "")).strip()
         short = short_id(raw_id) if raw_id else "?"
-        op = str(directive.get("operation", "")).strip()
+        op = str(args.get("operation", "")).strip()
         if op == "references":
             return f"PaperDetails references {short}"
         if op == "citations":
             return f"PaperDetails citations {short}"
         return f"PaperDetails {short}"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for PaperDetails.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
@@ -204,23 +218,22 @@ class PaperDetails:
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Look up paper metadata, references, or citations.
 
         Args:
-          msg: Directive message containing ``id`` and optional filters.
+          args: Tool arguments containing ``id`` and optional filters.
 
         Returns:
           result: Formatted metadata or citation list, or an error.
 
         """
-        directive = get_directive(msg)
-        id_raw = directive.get("id", "")
-        operation = str(directive.get("operation", ""))
-        influential_only = bool_val(directive.get("influential_only"), False)
-        year_from = opt_int(directive, "year_from")
-        limit = opt_int(directive, "limit")
-        abstract_chars = opt_int(directive, "abstract_chars")
+        id_raw = args.get("id", "")
+        operation = str(args.get("operation", ""))
+        influential_only = bool_val(args.get("influential_only"), False)
+        year_from = opt_int(args, "year_from")
+        limit = opt_int(args, "limit")
+        abstract_chars = opt_int(args, "abstract_chars")
         raw = str(id_raw).strip()
         validated = _validate_details_args(
             raw,
@@ -228,7 +241,7 @@ class PaperDetails:
             influential_only=influential_only,
             year_from=year_from,
         )
-        if is_message(validated):
+        if isinstance(validated, ToolResult):
             return validated
         op, kind, canonical = validated
 
@@ -244,7 +257,7 @@ class PaperDetails:
         )
         cached = _cache.get(cache_key)
         if cached is not None:
-            return TextMessage(cached, "text/plain")
+            return ToolResult(call_id="", content=cached)
 
         if op == "":
             content = await self._metadata(wire_id, cap)
@@ -263,20 +276,20 @@ class PaperDetails:
                 year_from=year_from,
             )
 
-        if is_message(content):
+        if isinstance(content, ToolResult):
             return content
         _cache[cache_key] = content
-        return TextMessage(content, "text/plain")
+        return ToolResult(call_id="", content=content)
 
     async def _metadata(
         self, wire_id: str, abstract_chars: int | None
-    ) -> str | Message:
+    ) -> str | ToolResult:
         """Fetch and format single-paper metadata."""
         data = await s2_get(
             f"/paper/{wire_id}",
             {"fields": _PAPER_FIELDS_STR},
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         rec = s2_paper_to_record(data)
         return format_block(rec, abstract_chars=abstract_chars)
@@ -286,13 +299,13 @@ class PaperDetails:
         wire_id: str,
         limit: int,
         abstract_chars: int | None,
-    ) -> str | Message:
+    ) -> str | ToolResult:
         """Fetch papers cited by the given paper."""
         data = await s2_get(
             f"/paper/{wire_id}/references",
             {"fields": _REF_FIELDS_STR, "limit": limit},
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         entries = cast(list[MutableJSON], data.get("data") or [])
         return _render_edge_list(
@@ -310,7 +323,7 @@ class PaperDetails:
         *,
         influential_only: bool,
         year_from: int | None,
-    ) -> str | Message:
+    ) -> str | ToolResult:
         """Fetch papers that cite the given paper, with optional filters."""
         filter_active = influential_only or (year_from is not None)
         fetch = _FILTER_FETCH_CAP if filter_active else limit
@@ -318,7 +331,7 @@ class PaperDetails:
             f"/paper/{wire_id}/citations",
             {"fields": _CIT_FIELDS_STR, "limit": fetch},
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         entries = cast(list[MutableJSON], data.get("data") or [])
 
@@ -340,6 +353,7 @@ class PaperDetails:
 
 
 def _entry_year(entry: MutableJSON, inner_key: str) -> int | None:
+    """Extract ``inner_key.year`` as an int (or ``None`` when missing)."""
     inner = cast(MutableJSON, entry.get(inner_key) or {})
     y = inner.get("year")
     return int(y) if isinstance(y, int) else None

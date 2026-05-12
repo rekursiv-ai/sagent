@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
-import dataclasses
+import asyncio
 import json
 
-from sagent.custom_types import (
-    BytesDescriptor,
-    BytesMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.descriptors import has_error
+from sagent.agent.runtime import BytesMessage, ToolResult
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -24,13 +17,11 @@ from sagent.lib.json import (
     int_val,
     json_freeze,
 )
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
     mark_read,
     resolve_tool_path,
-    run_sync,
 )
 from sagent.tools.lib.bash import (
     Node,
@@ -46,7 +37,6 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
-from sagent.tools.lib.state_parts import file_stat_part
 
 
 _IMAGE_EXTS = {
@@ -128,49 +118,47 @@ class Read:
         }
     )
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Read a file and return its contents.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Directive with ``file_path`` and optional windowing keys
+              (``offset``, ``limit``, ``last_lines``, ``pages``).
 
         Returns:
-          result: Tool result Message with file contents.
+          result: Text content (with line numbers), image/PDF attachments,
+              or an error when the file is missing or unsupported.
 
         """
-        directive = get_directive(msg)
-        file_path = resolve_tool_path(str(directive.get("file_path", "")))
-        offset = int_val(directive.get("offset"), 1)
-        limit = int_val(directive.get("limit"), 2000)
-        last_lines = int_val(directive.get("last_lines"), 0)
-        pages = str(directive.get("pages", ""))
-        result = await run_sync(
+        file_path = resolve_tool_path(str(args.get("file_path", "")))
+        offset = int_val(args.get("offset"), 1)
+        limit = int_val(args.get("limit"), 2000)
+        last_lines = int_val(args.get("last_lines"), 0)
+        pages = str(args.get("pages", ""))
+        return await asyncio.to_thread(
             self._run,
-            parent_id=msg.id,
             file_path=file_path,
             offset=offset,
             limit=limit,
             last_lines=last_lines,
             pages=pages,
         )
-        return _attach_file_stat(result, file_path, parent_id=msg.id)
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Directive carrying ``file_path`` and windowing keys.
 
         Returns:
-          label: Human-readable summary with filename and range.
+          label: ``Read <basename><range>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        file_path = str(directive.get("file_path", ""))
+        file_path = str(args.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
-        offset = int_val(directive.get("offset"), 0)
-        limit = int_val(directive.get("limit"), 0)
-        last_lines = int_val(directive.get("last_lines"), 0)
+        offset = int_val(args.get("offset"), 0)
+        limit = int_val(args.get("limit"), 0)
+        last_lines = int_val(args.get("last_lines"), 0)
         if last_lines > 0:
             suffix = f":last-{last_lines}"
         elif offset > 0 and limit > 0:
@@ -183,42 +171,33 @@ class Read:
             suffix = ""
         return f"Read {fname}{suffix}"
 
-    def summary_result(self, result: Message) -> str | None:
-        """One-line receipt summarizing the read.
+    def summary_result(self, result: ToolResult) -> str | None:
+        """One-line receipt: line count for text, ``binary``/``unchanged`` markers.
 
-        ``{N} lines`` for plain-text reads, ``image``/``pdf`` for
-        binary formats, ``(unchanged)`` when the file matches the
-        last-read snapshot, ``None`` for errors.
+        Args:
+          result: Completed ``ToolResult`` from ``run``.
+
+        Returns:
+          receipt: Short receipt line, or ``None`` when suppressed/empty.
+
         """
-        if not self.emit_tool_summary:
+        if not self.emit_tool_summary or result.is_error:
             return None
-        if result.descriptor == "text/x-error":
-            return None
-        text: str | None = None
-        has_binary = False
-        if result.descriptor == "text/plain":
-            text = str(result.content)
-        elif isinstance(result, MultipartMessage):
-            for p in result.content:
-                if isinstance(p, TextMessage) and p.descriptor == "text/plain":
-                    text = p.content
-                elif p.descriptor.startswith(("image/", "application/pdf")):
-                    has_binary = True
-        if text is None:
+        text = result.content
+        has_binary = bool(result.attachments)
+        if not text:
             return "binary" if has_binary else None
         if has_binary:
             return "binary"
         if text.startswith("[File unchanged"):
             return "unchanged"
-        # Line-numbered output: count newlines in the rendered body.
-        lines = text.count("\n")
-        return f"{lines} lines"
+        return f"{text.count(chr(10))} lines"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 
         Returns:
-          prompt: Always empty.
+          contribution: Empty string (no per-request prompt fragment).
 
         """
         return ""
@@ -231,17 +210,23 @@ class Read:
         limit: int = 2000,
         last_lines: int = 0,
         pages: str = "",
-    ) -> str | Message:
+    ) -> ToolResult:
+        """Dispatch to the type-specific reader (text, image, PDF, notebook)."""
         p = Path(file_path)
         if not p.exists():
-            return TextMessage(f"File not found: {file_path}", "text/x-error")
+            return ToolResult(
+                call_id="",
+                content=f"File not found: {file_path}",
+                is_error=True,
+            )
         if p.is_dir():
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     f"{file_path} is a directory, not a file."
                     " Use Glob to inspect directory contents."
                 ),
-                "text/x-error",
+                is_error=True,
             )
 
         suffix = p.suffix.lower()
@@ -256,7 +241,10 @@ class Read:
                 last_lines=last_lines,
             )
         ):
-            return f"[File unchanged since last read: {file_path}]"
+            return ToolResult(
+                call_id="",
+                content=f"[File unchanged since last read: {file_path}]",
+            )
 
         if suffix in _IMAGE_EXTS:
             mark_read(file_path, offset=offset, limit=limit, last_lines=last_lines)
@@ -281,14 +269,11 @@ class Read:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a hint if the command is ``cat``/``head``/``tail``.
 
-        Handles simple commands (via ``unwrap_cd_prefix``) and
-        pipelines like ``cat FILE | head -N``.
-
         Args:
-          trees: Parsed shell AST nodes.
+          trees: Parsed bashlex command trees from the active Bash call.
 
         Returns:
-          hint: Suggested Read invocation, or ``None`` if no match.
+          hint: Nudge string redirecting to the Read tool, or ``None``.
 
         """
         single = self._match_single(trees)
@@ -297,6 +282,7 @@ class Read:
         return _match_pipeline_read(trees)
 
     def _match_single(self, trees: Sequence[Node]) -> str | None:
+        """Match a single ``cat``/``head``/``tail`` command for a Read nudge."""
         unwrapped = unwrap_cd_prefix(trees)
         if unwrapped is None:
             return None
@@ -312,47 +298,34 @@ class Read:
         return None
 
 
-def _attach_file_stat(result: Message, file_path: str, *, parent_id: int) -> Message:
-    """Attach an ``application/x-file-stat`` sibling part to a Read result.
-
-    Skipped for errors and the ``[File unchanged...]`` cache-hit string
-    (its prior result already carries file-stat). For the cache-hit path
-    the file may have changed on disk since the cache was warmed; we
-    deliberately do NOT re-stat — that would muddle the dedup contract.
-    """
-    if has_error(result):
-        return result
-    if isinstance(result, TextMessage) and result.content.startswith("[File unchanged"):
-        return result
-    stat = file_stat_part(file_path)
-    if stat is None:
-        return result
-    if isinstance(result, MultipartMessage):
-        return dataclasses.replace(result, content=(*result.content, stat))
-    return MultipartMessage((result, stat), "multipart/mixed", parent_id=parent_id)
-
-
-def _read_image(p: Path, *, file_path: str, suffix: str) -> Message:
-    """Return an image file as a multipart message with JPEG/PNG bytes."""
-    return MultipartMessage(
-        (
-            TextMessage(f"[image: {file_path}]", "text/plain"),
-            BytesMessage(p.read_bytes(), cast("BytesDescriptor", _image_mime(suffix))),
-        ),
-        "multipart/mixed",
+def _read_image(p: Path, *, file_path: str, suffix: str) -> ToolResult:
+    """Return an image file as a ToolResult with a JPEG/PNG attachment."""
+    return ToolResult(
+        call_id="",
+        content=f"[image: {file_path}]",
+        attachments=(BytesMessage(p.read_bytes(), _image_mime(suffix)),),
     )
 
 
-def _read_notebook(p: Path, *, file_path: str) -> str | Message:
+def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
     """Parse a Jupyter notebook and return cell contents as text."""
     try:
         nb = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        return f"[Invalid notebook JSON: {file_path}: {e}]"
+        return ToolResult(
+            call_id="",
+            content=f"[Invalid notebook JSON: {file_path}: {e}]",
+        )
     except UnicodeDecodeError as e:
-        return f"[Non-UTF-8 notebook: {file_path}: {e}]"
+        return ToolResult(
+            call_id="",
+            content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
+        )
     if not isinstance(nb, dict):
-        return f"[Not a valid Jupyter notebook: {file_path}]"
+        return ToolResult(
+            call_id="",
+            content=f"[Not a valid Jupyter notebook: {file_path}]",
+        )
     nb_d = cast(MutableJSON, nb)
     cells_raw = cast(list[MutableJSONValue], nb_d.get("cells") or [])
     parts: list[str] = []
@@ -370,7 +343,10 @@ def _read_notebook(p: Path, *, file_path: str) -> str | Message:
         parts.append(f"--- Cell {i + 1} ({ctype}) ---")
         parts.append(source)
         _collect_cell_outputs(cell_d, parts)
-    return "\n".join(parts) or "(empty notebook)"
+    return ToolResult(
+        call_id="",
+        content="\n".join(parts) or "(empty notebook)",
+    )
 
 
 def _collect_cell_outputs(cell: MutableJSON, parts: list[str]) -> None:
@@ -400,13 +376,16 @@ def _read_text(
     offset: int,
     limit: int,
     last_lines: int,
-) -> str | Message:
+) -> ToolResult:
     """Read a text file with offset/limit/last_lines windowing."""
     with p.open("rb") as f:
         head = f.read(8192)
     if b"\x00" in head:
         size = p.stat().st_size
-        return f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]"
+        return ToolResult(
+            call_id="",
+            content=f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]",
+        )
     try:
         mtime = p.stat().st_mtime
     except OSError:
@@ -415,9 +394,12 @@ def _read_text(
         text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         size = p.stat().st_size
-        return (
-            f"[Non-UTF-8 file: {file_path} ({size} bytes)."
-            " Use Bash with an explicit decoder to inspect.]"
+        return ToolResult(
+            call_id="",
+            content=(
+                f"[Non-UTF-8 file: {file_path} ({size} bytes)."
+                " Use Bash with an explicit decoder to inspect.]"
+            ),
         )
     mark_read(
         file_path,
@@ -428,10 +410,14 @@ def _read_text(
         mtime=mtime,
     )
     if not text:
-        return f"[File exists but is empty: {file_path}]"
-    return _window_text(
+        return ToolResult(
+            call_id="",
+            content=f"[File exists but is empty: {file_path}]",
+        )
+    body = _window_text(
         text, file_path=file_path, offset=offset, limit=limit, last_lines=last_lines
     )
+    return ToolResult(call_id="", content=body)
 
 
 def _window_text(
@@ -464,7 +450,7 @@ def _window_text(
 
 
 def _match_cat(cwd: str | None, args: tuple[str, ...]) -> str | None:
-    # ``cat FILE`` - exactly one positional, no flags.
+    """Match ``cat FILE`` (exactly one positional, no flags) for a Read nudge."""
     del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     if len(args) != 1 or args[0].startswith("-"):
         return None
@@ -528,68 +514,71 @@ def _match_pipeline_read(trees: Sequence[Node]) -> str | None:
 
 
 def _image_mime(suffix: str) -> str:
+    """MIME type for an image file suffix (defaults to ``application/octet-stream``)."""
     return _MIME_BY_EXT.get(suffix, "application/octet-stream")
 
 
-def _read_pdf(path: Path, pages: str) -> Message:
+def _read_pdf(path: Path, pages: str) -> ToolResult:
     """Rasterize (a range of) a PDF's pages to JPEG attachments."""
     if not is_pdf(path):
-        return TextMessage(f"Not a PDF: {path} (missing %PDF- header)", "text/x-error")
+        return ToolResult(
+            call_id="",
+            content=f"Not a PDF: {path} (missing %PDF- header)",
+            is_error=True,
+        )
     size = path.stat().st_size
     if size > MAX_PDF_BYTES:
-        return TextMessage(
-            (
+        return ToolResult(
+            call_id="",
+            content=(
                 f"PDF too large: {size} bytes > {MAX_PDF_BYTES}."
                 ' Use pages="N-M" to read a range.'
             ),
-            "text/x-error",
+            is_error=True,
         )
 
     resolved = _resolve_page_range(path, pages)
-    if not isinstance(resolved, tuple):
+    if isinstance(resolved, ToolResult):
         return resolved
     first, last = resolved
 
     try:
-        page_paths = extract_pdf_pages(path, first=first, last=last)
+        page_jpegs = extract_pdf_pages(path, first=first, last=last)
     except PdfError as e:
-        return TextMessage(f"PDF: {e}", "text/x-error")
+        return ToolResult(call_id="", content=f"PDF: {e}", is_error=True)
 
     range_note = f" pages {first}-{last or 'end'}" if first is not None else ""
-    return MultipartMessage(
-        (
-            TextMessage(
-                f"[PDF: {path.name} ({len(page_paths)} page(s){range_note})]",
-                "text/plain",
-            ),
-            *(BytesMessage(pp.read_bytes(), "image/jpeg") for pp in page_paths),
-        ),
-        "multipart/mixed",
+    return ToolResult(
+        call_id="",
+        content=f"[PDF: {path.name} ({len(page_jpegs)} page(s){range_note})]",
+        attachments=tuple(BytesMessage(jpeg, "image/jpeg") for jpeg in page_jpegs),
     )
 
 
 def _resolve_page_range(
     path: Path, pages: str
-) -> tuple[int | None, int | None] | Message:
+) -> tuple[int | None, int | None] | ToolResult:
     """Validate page-range spec and return ``(first, last)`` or an error."""
     if pages:
         parsed = parse_page_range(pages)
         if parsed is None:
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     f"Invalid pages spec {pages!r}: "
                     'use "N" / "N-M" / "N-" (1-indexed, inclusive)'
                 ),
-                "text/x-error",
+                is_error=True,
             )
         return parsed
     count = get_pdf_page_count(path)
     if count is not None and count > MAX_INLINE_PAGES:
-        return TextMessage(
-            (
+        return ToolResult(
+            call_id="",
+            content=(
                 f"PDF has {count} pages (> {MAX_INLINE_PAGES})."
                 ' Pass pages="1-N" to read a window.'
             ),
-            "text/x-error",
+            is_error=True,
         )
     return None, None

@@ -43,7 +43,8 @@ def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
       raw: Raw file content potentially prefixed with YAML frontmatter.
 
     Returns:
-      result: Tuple of (metadata dict, body text).
+      metadata: Parsed YAML frontmatter dict, or empty dict if absent/invalid.
+      body: File body with frontmatter stripped.
 
     """
     m = _FRONTMATTER_RE.match(raw)

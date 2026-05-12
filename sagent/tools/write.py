@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
+import asyncio
 import re
 
-from sagent.custom_types import Message, MultipartMessage, TextMessage
+from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.descriptors import has_error
 from sagent.lib.json import JSON, json_freeze
-from sagent.lib.message import get_directive
 from sagent.tools.core import (
     get_file_write_lock,
     get_tool_state,
     load_tool_description,
     resolve_tool_path,
-    run_sync,
 )
-from sagent.tools.lib.state_parts import file_stat_part
 
 
 # Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.
@@ -44,96 +42,88 @@ class Write:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
         Args:
-          msg: Incoming tool-use message.
+          args: Directive arguments destined for ``run``.
 
         Returns:
-          label: Human-readable summary with filename.
+          label: ``Write <basename>`` line shown before invocation.
 
         """
-        directive = get_directive(msg)
-        file_path = str(directive.get("file_path", ""))
+        file_path = str(args.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
         return f"Write {fname}"
 
-    def summary_result(self, result: Message) -> str | None:
-        """One-line receipt: confirmation count from the success message."""
-        if not self.emit_tool_summary:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """One-line receipt: confirmation count from the success message.
+
+        Args:
+          result: Completed ``ToolResult`` from ``run``.
+
+        Returns:
+          receipt: ``wrote N bytes`` line, or ``None`` when suppressed.
+
+        """
+        if not self.emit_tool_summary or result.is_error:
             return None
-        text: str | None = None
-        if result.descriptor == "text/plain":
-            text = str(result.content).strip()
-        elif isinstance(result, MultipartMessage):
-            for p in result.content:
-                if isinstance(p, TextMessage) and p.descriptor == "text/plain":
-                    text = p.content.strip()
-                    break
-        if text is None:
-            return None
-        # ``_run`` returns "Wrote N bytes to PATH"; surface the byte count.
-        match = _WRITE_OK_RE.match(text)
+        match = _WRITE_OK_RE.match(result.content.strip())
         if match:
             return f"wrote {match.group(1)} bytes"
-        return text or None
+        return None
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
 
         Returns:
-          prompt: Always empty.
+          contribution: Empty string (no per-request prompt fragment).
 
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Write content to a file.
 
         Args:
-          msg: Incoming tool-use message containing the directive.
+          args: Directive with ``file_path`` and ``content`` keys.
 
         Returns:
-          result: Tool result Message confirming the write.
+          result: ``ToolResult`` carrying the byte-count confirmation or
+              the failure reason.
 
         """
-        directive = get_directive(msg)
-        file_path = resolve_tool_path(str(directive.get("file_path", "")))
-        content = str(directive.get("content", ""))
+        file_path = resolve_tool_path(str(args.get("file_path", "")))
+        content = str(args.get("content", ""))
         # Shared registry with Edit: same path → same lock → a concurrent
         # Edit and Write on the same file serialize against each other.
         async with get_file_write_lock(file_path):
-            result = await run_sync(
-                self._run, parent_id=msg.id, file_path=file_path, content=content
-            )
-        if has_error(result):
-            return result
-        stat = file_stat_part(file_path)
-        if stat is None:
-            return result
-        return MultipartMessage((result, stat), "multipart/mixed", parent_id=msg.id)
+            return await asyncio.to_thread(self._run, file_path, content)
 
-    def _run(self, *, file_path: str, content: str) -> str | Message:
+    def _run(self, file_path: str, content: str) -> ToolResult:
+        """Run the write synchronously with stale-file and mode-preservation checks."""
         p = Path(file_path)
         if p.is_dir():
-            return TextMessage(
-                f"{file_path} is a directory, not a file.", "text/x-error"
+            return ToolResult(
+                call_id="",
+                content=f"{file_path} is a directory, not a file.",
+                is_error=True,
             )
         state = get_tool_state()
         file_mode: int | None = None
         if p.exists():
             error = state.enforce_read(file_path)
             if error:
-                return TextMessage(error, "text/x-error")
+                return ToolResult(call_id="", content=error, is_error=True)
             if state.check_stale(file_path):
-                return TextMessage(
-                    (
+                return ToolResult(
+                    call_id="",
+                    content=(
                         "File has been modified since read, either by the user, a"
                         " linter, or another agent. Read it again before"
                         " attempting to write it."
                     ),
-                    "text/x-error",
+                    is_error=True,
                 )
             # Preserve the existing file's mode - atomic rename creates
             # a fresh inode that would otherwise pick up umask defaults
@@ -142,4 +132,7 @@ class Write:
         data = content.encode("utf-8")
         atomic_write_bytes(p, data, file_mode=file_mode)
         state.mark_written(file_path)
-        return f"Wrote {len(data)} bytes to {file_path}"
+        return ToolResult(
+            call_id="",
+            content=f"Wrote {len(data)} bytes to {file_path}",
+        )

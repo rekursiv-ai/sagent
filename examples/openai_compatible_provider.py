@@ -9,8 +9,7 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.custom_types import TextMessage
-from sagent.lib.message import response_text
+from sagent.agent.runtime import AssistantMessage, UserMessage
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import OpenAICompat
 
@@ -41,13 +40,11 @@ async def main() -> None:
         system="Answer concisely.",
         tools=[],
     )
-    async for _event in agent.run(
-        TextMessage("Say hello from Sagent.", "text/x-user-message"),
-    ):
+    async for _event in agent.run(UserMessage(text="Say hello from Sagent.")):
         pass
     for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            sys.stdout.write(f"{response_text(m)}\n")
+        if isinstance(m, AssistantMessage) and m.text:
+            sys.stdout.write(f"{m.text}\n")
             return
 
 

@@ -41,6 +41,7 @@ _GIT = shutil.which("git") or "git"
 
 @cache
 def _load_static() -> str:
+    """Load the recipe's base static prompt with placeholders substituted."""
     sp = recipe_dict("system_prompt")
     base = sp.get("base", "")
     if not base:

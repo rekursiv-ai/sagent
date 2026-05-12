@@ -17,11 +17,12 @@ shape locally.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 import cachetools
 
-from sagent.custom_types import Message, TextMessage, is_message
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -29,7 +30,6 @@ from sagent.lib.json import (
     int_val,
     json_freeze,
 )
-from sagent.lib.message import get_directive
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     AuthorRecord,
@@ -78,7 +78,6 @@ _PAPER_FIELDS_STR = ",".join(
 
 _SEARCH_LIMIT_DEFAULT = 20
 _PAPERS_LIMIT_DEFAULT = 100
-
 
 _cache = cachetools.TTLCache[tuple[object, ...], str](
     maxsize=256,
@@ -130,26 +129,33 @@ def _validate_author_args(
     *,
     year_from: int | None,
     year_to: int | None,
-) -> Message | None:
+) -> ToolResult | None:
     """Return an error if author args are invalid, else None."""
     if q and raw_id:
-        return TextMessage(
-            "Set exactly one of 'query' or 'id', not both.",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content="Set exactly one of 'query' or 'id', not both.",
+            is_error=True,
         )
     if not q and not raw_id:
-        return TextMessage("'query' or 'id' is required.", "text/x-error")
+        return ToolResult(
+            call_id="", content="'query' or 'id' is required.", is_error=True
+        )
     if op and op != "papers":
-        return TextMessage(
-            f"Unknown operation {op!r}. Valid: 'papers' (with id), or omit.",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=f"Unknown operation {op!r}. Valid: 'papers' (with id), or omit.",
+            is_error=True,
         )
     if op and not raw_id:
-        return TextMessage("'operation' requires 'id'.", "text/x-error")
+        return ToolResult(
+            call_id="", content="'operation' requires 'id'.", is_error=True
+        )
     if (q or not op) and (year_from is not None or year_to is not None):
-        return TextMessage(
-            "'year_from' / 'year_to' only apply to operation='papers'.",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content="'year_from' / 'year_to' only apply to operation='papers'.",
+            is_error=True,
         )
     return None
 
@@ -223,20 +229,19 @@ class PaperAuthor:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Tool arguments.
 
         Returns:
           label: Human-readable summary string.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", "")).strip()
-        raw_id = str(directive.get("id", "")).strip()
-        op = str(directive.get("operation", "")).strip()
+        query = str(args.get("query", "")).strip()
+        raw_id = str(args.get("id", "")).strip()
+        op = str(args.get("operation", "")).strip()
         if query:
             q = query if len(query) <= 40 else query[:37] + "..."
             return f"PaperAuthor search {q!r}"
@@ -246,7 +251,16 @@ class PaperAuthor:
             return f"PaperAuthor {raw_id}"
         return "PaperAuthor"
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for PaperAuthor.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
@@ -259,24 +273,23 @@ class PaperAuthor:
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute an author search, metadata lookup, or papers listing.
 
         Args:
-          msg: Directive message containing ``query`` or ``id``.
+          args: Tool arguments containing ``query`` or ``id``.
 
         Returns:
           result: Formatted author data or an error message.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", ""))
-        raw_id = str(directive.get("id", ""))
-        operation = str(directive.get("operation", ""))
-        limit = opt_int(directive, "limit")
-        year_from = opt_int(directive, "year_from")
-        year_to = opt_int(directive, "year_to")
-        abstract_chars = opt_int(directive, "abstract_chars")
+        query = str(args.get("query", ""))
+        raw_id = str(args.get("id", ""))
+        operation = str(args.get("operation", ""))
+        limit = opt_int(args, "limit")
+        year_from = opt_int(args, "year_from")
+        year_to = opt_int(args, "year_to")
+        abstract_chars = opt_int(args, "abstract_chars")
         q = query.strip()
         raw_id = raw_id.strip()
         op = operation.strip().lower()
@@ -312,7 +325,7 @@ class PaperAuthor:
         year_from: int | None,
         year_to: int | None,
         abstract_chars: int | None,
-    ) -> Message:
+    ) -> ToolResult:
         """Dispatch to search, papers, or author metadata with caching."""
         if q:
             n = clamp_limit(limit, default=_SEARCH_LIMIT_DEFAULT)
@@ -332,7 +345,7 @@ class PaperAuthor:
             cache_key = ("author", raw_id)
         cached = _cache.get(cache_key)
         if cached is not None:
-            return TextMessage(cached, "text/plain")
+            return ToolResult(call_id="", content=cached)
         if q:
             content = await self._search(q, limit=n)
         elif op == "papers":
@@ -345,12 +358,12 @@ class PaperAuthor:
             )
         else:
             content = await self._author(raw_id)
-        if is_message(content):
+        if isinstance(content, ToolResult):
             return content
         _cache[cache_key] = content
-        return TextMessage(content, "text/plain")
+        return ToolResult(call_id="", content=content)
 
-    async def _search(self, query: str, *, limit: int) -> str | Message:
+    async def _search(self, query: str, *, limit: int) -> str | ToolResult:
         """Search authors by name and return ranked results."""
         data = await s2_get(
             "/author/search",
@@ -360,7 +373,7 @@ class PaperAuthor:
                 "fields": _AUTHOR_FIELDS_STR,
             },
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         total = int_val(data.get("total"), 0)
         entries = cast(list[MutableJSON], data.get("data") or [])
@@ -378,13 +391,13 @@ class PaperAuthor:
         body = "\n".join(format_author_line(r) for r in shown)
         return body + truncation_notice(len(shown), total)
 
-    async def _author(self, author_id: str) -> str | Message:
+    async def _author(self, author_id: str) -> str | ToolResult:
         """Fetch full metadata for a single author."""
         data = await s2_get(
             f"/author/{author_id}",
             {"fields": _AUTHOR_FIELDS_STR},
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         return format_author_block(_s2_author_to_record(data))
 
@@ -396,7 +409,7 @@ class PaperAuthor:
         year_from: int | None,
         year_to: int | None,
         abstract_chars: int | None,
-    ) -> str | Message:
+    ) -> str | ToolResult:
         """Fetch an author's publications with optional year filtering."""
         # S2's /author/{id}/papers doesn't support year filters in-URL,
         # so we fetch at the requested cap and filter client-side.
@@ -404,7 +417,7 @@ class PaperAuthor:
             f"/author/{author_id}/papers",
             {"fields": _PAPER_FIELDS_STR, "limit": limit},
         )
-        if is_message(data):
+        if isinstance(data, ToolResult):
             return data
         entries = cast(list[MutableJSON], data.get("data") or [])
         records = [s2_paper_to_record(e) for e in entries]

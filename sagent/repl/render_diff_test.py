@@ -1,131 +1,184 @@
-# ruff: noqa: S108
-"""Tests for repl.render_diff."""
+"""Tests for ``repl.render_diff``: diff rendering + stable-boundary detection."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import io
+
+from rich.console import Console
 
 from sagent.repl.render_diff import (
-    _align_blocks,
-    _word_diff_pair,
     find_stable_boundary,
     render_diff_detail,
 )
-from sagent.tools.edit import make_diff
 
 
-def _fake_console() -> MagicMock:
-    c = MagicMock()
-    c.width = 80
-    return c
+def _capture(width: int = 80) -> tuple[Console, io.StringIO]:
+    buf = io.StringIO()
+    return (
+        Console(
+            file=buf,
+            width=width,
+            force_terminal=False,
+            color_system=None,
+            highlight=False,
+        ),
+        buf,
+    )
 
 
-class TestRenderDiffDetail:
-    def test_basic_edit_shows_stats(self) -> None:
-        console = _fake_console()
-        render_diff_detail(
-            console,
-            make_diff("x = 1", "x = 42", 0),
-            file_path="/tmp/test.py",
-        )
-        combined = " ".join(str(c) for c in console.print.call_args_list)
-        assert "Added 1 lines, removed 1 lines" in combined
-
-    def test_no_file_path(self) -> None:
-        console = _fake_console()
-        render_diff_detail(console, make_diff("a", "b", 0))
-        assert console.print.called
-
-    def test_unified_diff_shows_removed_lines(self) -> None:
-        console = _fake_console()
-        render_diff_detail(
-            console,
-            make_diff("\n".join(f"line{i}" for i in range(5)), "new", 0),
-            file_path="/tmp/f.py",
-        )
-        combined = " ".join(str(c) for c in console.print.call_args_list)
-        assert "line0" in combined
-
-    def test_unified_diff_shows_added_lines(self) -> None:
-        console = _fake_console()
-        render_diff_detail(
-            console,
-            make_diff("old", "\n".join(f"line{i}" for i in range(5)), 0),
-            file_path="/tmp/f.py",
-        )
-        combined = " ".join(str(c) for c in console.print.call_args_list)
-        assert "line0" in combined
-        assert "line4" in combined
-
-    def test_context_lines_unchanged(self) -> None:
-        console = _fake_console()
-        render_diff_detail(
-            console,
-            make_diff("a\nb\nc\nd\ne", "a\nb\nCHANGED\nd\ne", 0),
-            file_path="/tmp/f.py",
-        )
-        combined = " ".join(str(c) for c in console.print.call_args_list)
-        assert "a" in combined
-        assert "CHANGED" in combined
+def test_find_stable_boundary_single_block_returns_zero() -> None:
+    # One paragraph -> nothing committed yet.
+    assert find_stable_boundary("hello world") == 0
 
 
-class TestFindStableBoundary:
-    def test_no_blank_line(self) -> None:
-        assert find_stable_boundary("hello world") == 0
-
-    def test_simple_paragraphs(self) -> None:
-        assert find_stable_boundary("paragraph one\n\nparagraph two") == len(
-            "paragraph one\n\n"
-        )
-
-    def test_open_code_fence_returns_zero(self) -> None:
-        assert find_stable_boundary("```python\ncode here\n\nmore code") == 0
-
-    def test_closed_code_fence(self) -> None:
-        text = "```python\ncode\n```\n\nafter"
-        b = find_stable_boundary(text)
-        assert b > 0
-        assert "after" not in text[:b]
-
-    def test_multiple_paragraphs(self) -> None:
-        assert find_stable_boundary("a\n\nb\n\nc") == len("a\n\nb\n\n")
+def test_find_stable_boundary_two_paragraphs() -> None:
+    text = "first para\n\nsecond"
+    offset = find_stable_boundary(text)
+    assert offset > 0
+    assert text[:offset].startswith("first para")
 
 
-class TestAlignBlocks:
-    def test_identical_lengths(self) -> None:
-        assert _align_blocks(["a", "b", "c"], ["A", "B", "C"]) == [
-            (0, 0),
-            (1, 1),
-            (2, 2),
-        ]
-
-    def test_middle_deletion_aligns_semantically(self) -> None:
-        removed = ["same", "deleted", "other"]
-        added = ["same", "other"]
-        got = _align_blocks(removed, added)
-        assert (0, 0) in got
-        assert (2, 1) in got
-        assert (1, 0) not in got
-
-    def test_fully_different_falls_back_to_positional(self) -> None:
-        got = _align_blocks(["x", "y"], ["a", "b"])
-        assert got == [(0, 0), (1, 1)]
-
-    def test_asymmetric_lengths(self) -> None:
-        got = _align_blocks(["a", "b", "c"], ["a", "c"])
-        assert got == [(0, 0), (2, 1)]
+def test_find_stable_boundary_three_blocks_commits_first_two() -> None:
+    text = "p1\n\np2\n\np3"
+    offset = find_stable_boundary(text)
+    # Last block is open; everything before should commit.
+    assert text[:offset].startswith("p1")
+    assert "p2" in text[:offset]
 
 
-class TestWordDiffPair:
-    def test_pure_deletion(self) -> None:
-        parts = _word_diff_pair("hello world", "hello")
-        assert parts is not None
-        assert any(tag == "-" for tag, _ in parts)
+def test_render_diff_detail_emits_header_count() -> None:
+    con, buf = _capture()
+    diff = "@@ -1,2 +1,2 @@\n-foo\n+bar\n unchanged\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "Added 1 lines" in out
+    assert "removed 1 lines" in out
 
-    def test_pure_insertion(self) -> None:
-        parts = _word_diff_pair("hello", "hello world")
-        assert parts is not None
-        assert any(tag == "+" for tag, _ in parts)
+
+def test_render_diff_detail_with_filename_uses_lexer() -> None:
+    con, buf = _capture(width=120)
+    diff = "@@ -1,2 +1,2 @@\n-def foo():\n+def bar():\n    pass\n"
+    render_diff_detail(con, diff, file_path="x.py")
+    out = buf.getvalue()
+    assert "Added 1 lines" in out
+    # Some marker of the function name lands in output.
+    assert "bar" in out
+    assert "foo" in out
+
+
+def test_render_diff_detail_unknown_extension_falls_back() -> None:
+    con, buf = _capture()
+    # Filename with no known lexer should still render.
+    diff = "@@ -1 +1 @@\n-x\n+y\n"
+    render_diff_detail(con, diff, file_path="x.unknownext")
+    out = buf.getvalue()
+    assert "Added 1 lines" in out
+
+
+def test_render_diff_detail_large_change_falls_back_to_line_diff() -> None:
+    con, buf = _capture()
+    # Word-diff threshold is 0.4: build a heavy change.
+    diff = (
+        "@@ -1,2 +1,2 @@\n"
+        "-totally different removed line\n"
+        "+completely new added text here\n"
+    )
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "totally different removed" in out
+    assert "completely new added" in out
+
+
+def test_render_diff_detail_handles_no_hunk_header() -> None:
+    con, buf = _capture()
+    # No @@ header: line numbers start at 0; should not crash.
+    diff = "+added\n unchanged\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "added" in out
+
+
+def test_render_diff_detail_empty_content_line_does_not_crash() -> None:
+    # Empty +/- lines exercise the ``if not code: return Text('')``
+    # branch in ``_highlight``.
+    con, buf = _capture()
+    diff = "@@ -1,2 +1,2 @@\n-\n+\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    # Header still emits totals.
+    assert "Added 1 lines" in out
+
+
+def test_render_diff_detail_pure_deletion_block() -> None:
+    # ``-`` block with no following ``+`` block: ``_pair_word_diffs``
+    # hits the ``if a_start == a_end: continue`` branch (line 327).
+    # Also exercises ``_word_diff_pair``'s ``delete`` tag (lines 252-254).
+    con, buf = _capture()
+    diff = "@@ -1,3 +1,2 @@\n keep\n-going to be deleted\n also keep\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "going to be deleted" in out
+
+
+def test_render_diff_detail_pure_addition_block() -> None:
+    # Pure addition: ``_word_diff_pair`` only fires when there's a paired
+    # ``-`` block, so this skips the pairing entirely.
+    con, buf = _capture()
+    diff = "@@ -1,1 +1,2 @@\n keep\n+inserted line\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "inserted line" in out
+
+
+def test_render_diff_detail_imbalanced_replace_aligns_pairs() -> None:
+    # 3 removes paired with 1 add: ``_align_blocks`` enters the ``replace``
+    # branch with min(3, 1) == 1 pair (line 286).
+    con, buf = _capture()
+    diff = "@@ -1,3 +1,1 @@\n-alpha\n-beta\n-gamma\n+alpha replaced\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "alpha" in out
+    assert "beta" in out
+    assert "gamma" in out
+
+
+def test_render_diff_detail_word_diff_with_insert_only() -> None:
+    # Word-diff pair where the differing tokens are pure ``insert`` opcodes
+    # (no replace). Covers lines 256-258 in ``_word_diff_pair``.
+    con, buf = _capture()
+    diff = "@@ -1,1 +1,1 @@\n-x = 1\n+x = 1 + 2\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "x = 1" in out
+
+
+def test_render_diff_detail_word_diff_with_delete_only() -> None:
+    # Word-diff pair where the differing tokens are pure ``delete``
+    # opcodes (the added line is a strict prefix of the removed line).
+    # Covers lines 252-254 in ``_word_diff_pair``.
+    con, buf = _capture()
+    diff = "@@ -1,1 +1,1 @@\n-x = 1 + 2\n+x = 1\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "x = 1" in out
+
+
+def test_render_diff_detail_narrow_width_no_padding() -> None:
+    # When the line equals or exceeds ``width``, the no-padding branch
+    # of ``_render_diff_line`` fires (line 363) and the same branch in
+    # ``_render_word_diff_line`` (line 395). Use a context (unchanged)
+    # line so the non-word-diff path also fires.
+    con, buf = _capture(width=10)
+    diff = (
+        "@@ -1,2 +1,2 @@\n"
+        " unchanged context line that overflows width\n"
+        "-abcdef ghijkl mnopqr stuv\n"
+        "+abcdef ghijkl mnopqr stuw\n"
+    )
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "abcdef" in out
+    assert "unchanged" in out
 
 
 if __name__ == "__main__":

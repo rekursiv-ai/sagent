@@ -8,6 +8,7 @@ a single backend via ``source="s2"`` or ``source="openalex"``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 import asyncio
@@ -18,9 +19,8 @@ import re
 
 import cachetools
 
-from sagent.custom_types import Message, TextMessage, is_message
+from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, MutableJSON, bool_val, int_val, json_freeze
-from sagent.lib.message import get_directive
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
@@ -35,7 +35,6 @@ from sagent.tools.paper_common import (
 
 
 logger = logging.getLogger(__name__)
-
 
 _OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_TIMEOUT = 60.0
@@ -79,17 +78,12 @@ _OPENALEX_SELECT = ",".join(
     ),
 )
 
-
 _VALID_SOURCES = ("s2", "openalex", "fused")
-
 
 _cache = cachetools.TTLCache[tuple[object, ...], str](
     maxsize=256,
     ttl=_CACHE_TTL_SEC,
 )
-
-
-# -- Backend: Semantic Scholar --------------------------------------------
 
 
 def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
@@ -108,7 +102,7 @@ async def _search_s2(
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
-) -> tuple[list[PaperRecord], int] | Message:
+) -> tuple[list[PaperRecord], int] | ToolResult:
     """Query Semantic Scholar and return (records, total) or an error."""
     params: dict[str, str | int] = {
         "query": query,
@@ -122,7 +116,7 @@ async def _search_s2(
         # S2 treats ``openAccessPdf`` as a presence flag (value ignored).
         params["openAccessPdf"] = ""
     data = await s2_get("/paper/search", params)
-    if is_message(data):
+    if isinstance(data, ToolResult):
         return data
     total = int_val(data.get("total"), 0)
     records = [
@@ -130,9 +124,6 @@ async def _search_s2(
         for entry in cast(list[MutableJSON], data.get("data") or [])
     ]
     return records, total
-
-
-# -- Backend: OpenAlex ----------------------------------------------------
 
 
 def _openalex_headers() -> dict[str, str]:
@@ -166,7 +157,7 @@ async def _search_openalex(
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
-) -> tuple[list[PaperRecord], int] | Message:
+) -> tuple[list[PaperRecord], int] | ToolResult:
     """Query OpenAlex and return (records, total) or an error."""
     params: dict[str, str | int] = {
         "search": query,
@@ -193,16 +184,20 @@ async def _search_openalex(
         )
     except FetchError as e:
         if e.status == 429:
-            return TextMessage(
-                (
+            return ToolResult(
+                call_id="",
+                content=(
                     "OpenAlex rate limit hit. Set OPENALEX_EMAIL to enter the "
                     "polite pool (10 req/s), or retry shortly."
                 ),
-                "text/x-error",
+                is_error=True,
             )
-        return TextMessage(
-            f"OpenAlex HTTP {e.status}: {e.body[:200].decode(errors='replace')}",
-            "text/x-error",
+        return ToolResult(
+            call_id="",
+            content=(
+                f"OpenAlex HTTP {e.status}: {e.body[:200].decode(errors='replace')}"
+            ),
+            is_error=True,
         )
     data = cast(MutableJSON, json.loads(raw))
     meta = cast(MutableJSON, data.get("meta") or {})
@@ -269,9 +264,6 @@ def _openalex_work_to_record(work: MutableJSON) -> PaperRecord:
         open_access_pdf=(str(oa["oa_url"]) if oa.get("oa_url") else None),
         sources=("openalex",),
     )
-
-
-# -- Fusion ---------------------------------------------------------------
 
 
 _WORD_PUNCT_RE = re.compile(r"[^\w\s]+")
@@ -348,9 +340,6 @@ def _fuse(
     return [by_key[k] for k in order]
 
 
-# -- Tool -----------------------------------------------------------------
-
-
 class PaperSearch:
     """Text search over scholarly literature.
 
@@ -418,27 +407,35 @@ class PaperSearch:
         }
     )
 
-    def summary(self, msg: Message) -> str:
+    def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
         Args:
-          msg: Directive message.
+          args: Tool arguments.
 
         Returns:
           label: Human-readable summary string.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", "")).strip()
+        query = str(args.get("query", "")).strip()
         if len(query) > 50:
             query = query[:47] + "..."
-        source = str(directive.get("source", "") or "s2")
+        source = str(args.get("source", "") or "s2")
         label = f"PaperSearch {query!r}" if query else "PaperSearch"
         if source != "s2":
             label += f" ({source})"
         return label
 
-    def summary_result(self, result: Message) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
+        """Suppress the per-call receipt for PaperSearch.
+
+        Args:
+          result: Completed ``ToolResult`` (ignored).
+
+        Returns:
+          receipt: Always ``None`` (no receipt line).
+
+        """
         del result
         return None
 
@@ -451,32 +448,34 @@ class PaperSearch:
         """
         return ""
 
-    async def run(self, msg: Message) -> Message:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute a paper search and return formatted results.
 
         Args:
-          msg: Directive message containing query and optional filters.
+          args: Tool arguments containing query and optional filters.
 
         Returns:
           result: Plain-text search results or an error message.
 
         """
-        directive = get_directive(msg)
-        query = str(directive.get("query", ""))
-        source = str(directive.get("source", "s2") or "s2")
-        limit = opt_int(directive, "limit")
-        year_from = opt_int(directive, "year_from")
-        year_to = opt_int(directive, "year_to")
-        open_access_only = bool_val(directive.get("open_access_only"), False)
-        abstract_chars = opt_int(directive, "abstract_chars")
+        query = str(args.get("query", ""))
+        source = str(args.get("source", "s2") or "s2")
+        limit = opt_int(args, "limit")
+        year_from = opt_int(args, "year_from")
+        year_to = opt_int(args, "year_to")
+        open_access_only = bool_val(args.get("open_access_only"), False)
+        abstract_chars = opt_int(args, "abstract_chars")
         q = query.strip()
         if not q:
-            return TextMessage("'query' is required.", "text/x-error")
+            return ToolResult(call_id="", content="'query' is required.", is_error=True)
         src = (source or "s2").strip().lower()
         if src not in _VALID_SOURCES:
-            return TextMessage(
-                f"Invalid source {source!r}. Valid: {', '.join(_VALID_SOURCES)}.",
-                "text/x-error",
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid source {source!r}. Valid: {', '.join(_VALID_SOURCES)}."
+                ),
+                is_error=True,
             )
         n = clamp_limit(limit, default=_LIMIT_DEFAULT)
         cap = int(abstract_chars) if abstract_chars is not None else None
@@ -493,7 +492,7 @@ class PaperSearch:
         )
         cached = _cache.get(cache_key)
         if cached is not None:
-            return TextMessage(cached, "text/plain")
+            return ToolResult(call_id="", content=cached)
 
         result = await self._dispatch_search(
             src,
@@ -503,13 +502,13 @@ class PaperSearch:
             year_to=year_to,
             open_access_only=open_access_only,
         )
-        if is_message(result):
+        if isinstance(result, ToolResult):
             return result
         hits, total = result
 
         text = _render_search_results(hits, total, n, cap)
         _cache[cache_key] = text
-        return TextMessage(text, "text/plain")
+        return ToolResult(call_id="", content=text)
 
     async def _dispatch_search(
         self,
@@ -520,7 +519,7 @@ class PaperSearch:
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
-    ) -> tuple[list[PaperRecord], int] | Message:
+    ) -> tuple[list[PaperRecord], int] | ToolResult:
         """Route to the appropriate search backend."""
         if src == "s2":
             return await _search_s2(
@@ -554,7 +553,7 @@ class PaperSearch:
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
-    ) -> tuple[list[PaperRecord], int] | Message:
+    ) -> tuple[list[PaperRecord], int] | ToolResult:
         """Run S2 and OpenAlex concurrently; degrade gracefully on one failure."""
         tasks = [
             _search_s2(
@@ -582,19 +581,19 @@ class PaperSearch:
 
         if isinstance(s2_res, BaseException):
             errors.append(f"S2: {type(s2_res).__name__}: {s2_res}")
-        elif is_message(s2_res):
-            errors.append(str(s2_res.content))
+        elif isinstance(s2_res, ToolResult):
+            errors.append(s2_res.content)
         else:
             s2_hits, s2_total = s2_res
         if isinstance(oa_res, BaseException):
             errors.append(f"OpenAlex: {type(oa_res).__name__}: {oa_res}")
-        elif is_message(oa_res):
-            errors.append(str(oa_res.content))
+        elif isinstance(oa_res, ToolResult):
+            errors.append(oa_res.content)
         else:
             oa_hits, oa_total = oa_res
 
         if errors and not s2_hits and not oa_hits:
-            return TextMessage("; ".join(errors), "text/x-error")
+            return ToolResult(call_id="", content="; ".join(errors), is_error=True)
         if errors:
             logger.warning("PaperSearch partial failure: %s", "; ".join(errors))
 

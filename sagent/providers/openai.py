@@ -35,6 +35,7 @@ class _OpenAIModel(OpenAICompatModel):
 
     @override
     def _is_effort_model(self, model_id: str) -> bool:
+        """True for OpenAI reasoning models that accept ``reasoning_effort``."""
         return model_id.startswith(("o1", "o3", "o4", "gpt-5"))
 
 

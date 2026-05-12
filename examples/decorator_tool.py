@@ -6,15 +6,22 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.custom_types import TextMessage
-from sagent.lib.message import response_text
+from sagent.agent.runtime import AssistantMessage, UserMessage
 from sagent.providers import Google
 from sagent.tools import tool
 
 
 @tool(name="WordCount")
 def word_count(text: str) -> str:
-    """Count whitespace-separated words in text."""
+    """Count whitespace-separated words in text.
+
+    Args:
+      text: Input text to tokenize on whitespace.
+
+    Returns:
+      count: Word count as a decimal string.
+
+    """
     return str(len(text.split()))
 
 
@@ -29,11 +36,11 @@ async def main() -> None:
         "How many words are in 'typed agents compose cleanly'?"
         " Use the tool, then answer in one sentence."
     )
-    async for _event in agent.run(TextMessage(prompt, "text/x-user-message")):
+    async for _event in agent.run(UserMessage(text=prompt)):
         pass
     for m in reversed(agent.history):
-        if m.descriptor == "multipart/x-model-message":
-            sys.stdout.write(f"{response_text(m)}\n")
+        if isinstance(m, AssistantMessage) and m.text:
+            sys.stdout.write(f"{m.text}\n")
             return
 
 

@@ -1,118 +1,146 @@
-"""Tests for Write tool."""
+"""Tests for ``tools.write``: file creation / overwrite tool."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import asyncio
+import os
+import stat
+import time
 
 import pytest
 
-from sagent.custom_types import (
-    JsonMessage,
-    Message,
-    MultipartMessage,
-    TextMessage,
-)
-from sagent.lib.json import JSON, json_freeze
-from sagent.tools.core import ToolState, tool_state_context
-from sagent.tools.read import Read
+from sagent.agent.runtime import ToolResult
+from sagent.testing import with_fake_agent
 from sagent.tools.write import Write
 
 
-read = Read()
 write = Write()
 
 
-def _text(r: Message) -> str:
-    if isinstance(r, TextMessage):
-        return r.content
-    if isinstance(r, MultipartMessage):
-        for p in r.content:
-            if isinstance(p, TextMessage) and p.descriptor == "text/plain":
-                return p.content
-    return ""
+@pytest.mark.asyncio
+async def test_write_creates_new_file(tmp_path: Path) -> None:
+    f = tmp_path / "new.txt"
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await write.run({"file_path": str(f), "content": "hello"})
+    assert not result.is_error
+    assert f.read_text() == "hello"
+    assert "Wrote 5 bytes" in result.content
 
 
-def _msg(directive: JSON) -> Message:
-    return MultipartMessage(
-        (JsonMessage(directive, "application/x-tool-x"),),
-        "multipart/x-tool-call",
-    )
+@pytest.mark.asyncio
+async def test_write_relative_path(tmp_path: Path) -> None:
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await write.run({"file_path": "rel.txt", "content": "hi"})
+    assert not result.is_error
+    assert (tmp_path / "rel.txt").read_text() == "hi"
 
 
-class TestWrite:
-    @pytest.mark.anyio
-    async def test_write_file(self, tmp_path: Path) -> None:
-        f = tmp_path / "out.txt"
-        response = await write.run(
-            _msg(json_freeze({"file_path": str(f), "content": "hello"}))
-        )
-        assert f.read_text() == "hello"
-        assert "5 bytes" in _text(response)
+@pytest.mark.asyncio
+async def test_write_overwrite_requires_prior_read(tmp_path: Path) -> None:
+    f = tmp_path / "exists.txt"
+    f.write_text("old")
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await write.run({"file_path": str(f), "content": "new"})
+    assert result.is_error
+    assert "not yet read" in result.content
 
-    @pytest.mark.anyio
-    async def test_summary_result_reports_byte_count(self, tmp_path: Path) -> None:
-        """Write.summary_result extracts the byte count from the OK message."""
-        summary_write = Write()
-        summary_write.emit_tool_summary = True
-        f = tmp_path / "out.txt"
-        response = await summary_write.run(
-            _msg(json_freeze({"file_path": str(f), "content": "hello"}))
-        )
-        assert summary_write.summary_result(response) == "wrote 5 bytes"
 
-    def test_summary_result_off_by_default(self) -> None:
-        """Write.summary_result returns None when the gate is off."""
-        assert (
-            write.summary_result(TextMessage("Wrote 5 bytes to /x", "text/plain"))
-            is None
-        )
+@pytest.mark.asyncio
+async def test_write_overwrite_after_read_succeeds(tmp_path: Path) -> None:
+    f = tmp_path / "exists.txt"
+    f.write_text("old\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        agent.tool_state.mark_read(str(f), content="old\n")
+        result = await write.run({"file_path": str(f), "content": "new\n"})
+    assert not result.is_error
+    assert f.read_text() == "new\n"
 
-    @pytest.mark.anyio
-    async def test_write_creates_dirs(self, tmp_path: Path) -> None:
-        f = tmp_path / "sub" / "dir" / "out.txt"
-        await write.run(_msg(json_freeze({"file_path": str(f), "content": "nested"})))
-        assert f.read_text() == "nested"
 
-    @pytest.mark.anyio
-    async def test_relative_path_uses_bash_cwd(self, tmp_path: Path) -> None:
-        state = ToolState()
-        state.bash_cwd = str(tmp_path)
-        with tool_state_context(state):
-            await write.run(
-                _msg(json_freeze({"file_path": "relative.txt", "content": "ok"}))
-            )
-        assert (tmp_path / "relative.txt").read_text() == "ok"
+@pytest.mark.asyncio
+async def test_write_stale_file_errors(tmp_path: Path) -> None:
+    f = tmp_path / "x.txt"
+    f.write_text("v0\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        agent.tool_state.mark_read(str(f), content="v0\n", mtime=1.0)
+        f.write_text("changed\n")
+        new_mtime = time.time() + 100
+        os.utime(f, (new_mtime, new_mtime))
+        result = await write.run({"file_path": str(f), "content": "v1\n"})
+    assert result.is_error
+    assert "modified since read" in result.content
 
-    @pytest.mark.anyio
-    async def test_write_guard_rejects(self, tmp_path: Path) -> None:
-        f = tmp_path / "existing.txt"
-        f.write_text("original")
-        r = await write.run(_msg(json_freeze({"file_path": str(f), "content": "new"})))
-        assert r.descriptor == "text/x-error"
-        assert "not yet read" in str(r.content)
-        assert f.read_text() == "original"
 
-    @pytest.mark.anyio
-    async def test_write_rejects_directory(self, tmp_path: Path) -> None:
-        r = await write.run(
-            _msg(json_freeze({"file_path": str(tmp_path), "content": "x"}))
-        )
-        assert r.descriptor == "text/x-error"
-        assert "is a directory" in str(r.content)
+@pytest.mark.asyncio
+async def test_write_to_directory_errors(tmp_path: Path) -> None:
+    sub = tmp_path / "dir"
+    sub.mkdir()
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await write.run({"file_path": str(sub), "content": "x"})
+    assert result.is_error
+    assert "directory" in result.content
 
-    @pytest.mark.anyio
-    async def test_write_rejects_stale_file(self, tmp_path: Path) -> None:
-        f = tmp_path / "stale.txt"
-        f.write_text("v1")
-        await read.run(_msg(json_freeze({"file_path": str(f)})))
-        # Mutate the file out-of-band.
-        await asyncio.sleep(0.01)
-        f.write_text("v2")
-        r = await write.run(_msg(json_freeze({"file_path": str(f), "content": "v3"})))
-        assert r.descriptor == "text/x-error"
-        assert "modified since read" in str(r.content)
+
+@pytest.mark.asyncio
+async def test_write_preserves_file_mode(tmp_path: Path) -> None:
+    f = tmp_path / "secret.txt"
+    f.write_text("v0\n")
+    f.chmod(0o600)
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        agent.tool_state.mark_read(str(f), content="v0\n")
+        result = await write.run({"file_path": str(f), "content": "v1\n"})
+    assert not result.is_error
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600
+
+
+def test_summary_path_basename() -> None:
+    assert write.summary({"file_path": "/tmp/foo.txt"}) == "Write foo.txt"  # noqa: S108
+
+
+def test_summary_no_path() -> None:
+    assert write.summary({}) == "Write ?"
+
+
+def test_summary_result_off_by_default() -> None:
+    r = ToolResult(call_id="", content="Wrote 10 bytes to /x")
+    assert write.summary_result(r) is None
+
+
+def test_summary_result_on_for_wrote_message() -> None:
+    w = Write()
+    w.emit_tool_summary = True
+    r = ToolResult(call_id="", content="Wrote 42 bytes to /x")
+    assert w.summary_result(r) == "wrote 42 bytes"
+
+
+def test_summary_result_error_skipped() -> None:
+    w = Write()
+    w.emit_tool_summary = True
+    r = ToolResult(call_id="", content="boom", is_error=True)
+    assert w.summary_result(r) is None
+
+
+def test_summary_result_unmatched_content_none() -> None:
+    w = Write()
+    w.emit_tool_summary = True
+    r = ToolResult(call_id="", content="something else")
+    assert w.summary_result(r) is None
+
+
+def test_prompt_empty() -> None:
+    assert write.prompt() == ""
+
+
+def test_schema_required() -> None:
+    schema = write.directive_schema
+    assert schema["required"] == ("file_path", "content")
 
 
 if __name__ == "__main__":

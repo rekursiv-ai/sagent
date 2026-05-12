@@ -3,7 +3,7 @@ name = "sagent"
 version = "0.1.3"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [
     {name = "rekursiv.ai", email = "hello@rekursiv.ai"},
@@ -16,6 +16,8 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -28,6 +30,7 @@ dependencies = [
     "pathspec",
     "Pillow",
     "prompt-toolkit",
+    "pypdfium2",
     "Pygments",
     "PyYAML>=6.0",
     "rich",
@@ -225,9 +228,9 @@ ignore = [
     "D400",    # Missing trailing period.
     "D401",    # Non-imperative mood.
     "D415",    # Missing terminal punctuation.
-    "RUF001",  # Ambiguous unicode character string. (Intentional math usage of `α, σ, γ, ×` etc.)
-    "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
-    "RUF003",  # Ambiguous unicode character comment. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
+    "RUF001",  # Ambiguous unicode character string. (Intentional math usage.)
+    "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage.)
+    "RUF003",  # Ambiguous unicode character comment. (Intentional math usage.)
 
     # Standard style relaxations.
     "A002",    # Builtin argument shadowing.
@@ -302,7 +305,7 @@ ignore = [
     "T201",    # Print found. (CLI tools use print for output.)
 ]
 "typings/**" = [
-    "PYI015", # Assignment default in stub — field specifiers (struct.field, module_field, dataclasses.field) are semantically meaningful to @dataclass_transform.
+    "PYI015", # Assignment default in stub — field specifiers are semantically meaningful to @dataclass_transform.
 ]
 "*.ipynb" = [
     "ARG001",  # Unused function argument (callbacks).
@@ -381,16 +384,16 @@ reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedT
 reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
 reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
 reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
-reportAttributeAccessIssue = false        # Public package omits source-tree-only stubs for dynamic third-party ASTs.
-reportAssignmentType = false              # Public package keeps cachetools inference advisory.
-reportMissingImports = false              # Public package supports optional provider/runtime extras.
-reportMissingTypeStubs = false            # Public package should not require optional third-party stubs.
-reportPrivateImportUsage = false          # Some third-party packages expose runtime APIs without stubs.
+reportAttributeAccessIssue = false         # Public package omits source-tree-only stubs for dynamic third-party ASTs.
+reportAssignmentType = false               # Public package keeps cachetools inference advisory.
+reportMissingImports = false               # Public package supports optional provider/runtime extras.
+reportMissingTypeStubs = false             # Public package should not require optional third-party stubs.
+reportPrivateImportUsage = false           # Some third-party packages expose runtime APIs without stubs.
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
-reportUnknownArgumentType = false         # Third-party dynamic ASTs do not carry useful static types.
-reportUnknownMemberType = false           # Third-party dynamic ASTs do not carry useful static types.
-reportUnknownParameterType = false        # Optional runtime accelerators may not ship stubs.
-reportUnknownVariableType = false         # Third-party dynamic ASTs do not carry useful static types.
+reportUnknownArgumentType = false          # Third-party dynamic ASTs do not carry useful static types.
+reportUnknownMemberType = false            # Third-party dynamic ASTs do not carry useful static types.
+reportUnknownParameterType = false         # Optional runtime accelerators may not ship stubs.
+reportUnknownVariableType = false          # Third-party dynamic ASTs do not carry useful static types.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
 reportConstantRedefinition = false         # Uppercase module-level dicts with internal-only overrides.
 
