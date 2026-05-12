@@ -149,8 +149,8 @@ pip install sagent
 sudo apt-get install -y ripgrep fd-find git
 curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
-cd sagent && uv sync
-uv run sagent/bin/cli.py --help
+cd sagent
+sagent/bin/cli.py --help
 ```
 
 #### macOS
@@ -158,8 +158,8 @@ uv run sagent/bin/cli.py --help
 ```bash
 brew install ripgrep fd uv git
 git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
-cd sagent && uv sync
-uv run sagent/bin/cli.py --help
+cd sagent
+sagent/bin/cli.py --help
 ```
 
 ## Quickstart: CLI

@@ -36,8 +36,6 @@ stores, retrievers, re-rankers, output parsers, and a graph DSL.
 
 ## Execution model
 
-This is the sharpest architectural difference.
-
 ### LangGraph: state-machine workflow runner
 
 LangGraph models an agent as a `StateGraph`. Nodes are functions over a
@@ -115,6 +113,82 @@ Neither model is strictly "better." LangGraph optimises for durability
 and explicit control flow. Sagent optimises for dynamic interactivity
 and one-loop simplicity. Reinventing one inside the other would yield
 the other.
+
+## Background work, scheduling, and inbox priority
+
+| Capability | Sagent | LangChain / LangGraph |
+| --- | --- | --- |
+| Run multiple tool calls from one turn concurrently | `asyncio.Task` per call, cohort `set[str]` gates the next model call | `ToolNode` + `asyncio.gather` |
+| Run a single tool call asynchronously, deliver result later | `background: true` / `delay: N` injected into every tool's directive schema by `BackgroundAwareTool` | Application-defined: write a tool that returns a job id and a separate poll tool |
+| Model-callable job control (list / cancel / resume long-running work) | `BackgroundTask` tool with `list` / `cancel <id>` / `foreground <id>` operations | Application-defined |
+| Registry of in-flight long-running operations | `BackgroundTaskEntry` covering tool calls, persistent subagents, detached cohort members, hidden infra | Application-defined |
+| Pause execution mid-run and resume later in another process | None — sessions persist transcripts, not mid-cohort state | `interrupt()` + `Checkpointer` (memory / SQLite / Postgres backends) |
+| Resume semantics after pause | N/A | Replay-based: the node re-runs from the top up to the `interrupt()` call |
+| Pluggable persistence backend for run state | Local JSONL session transcripts only | `Checkpointer` interface with shipped backends (memory / SQLite / Postgres) and a community pattern for more |
+| Inject user context that preempts in-flight work | `UserMessage` via `push_front`, stubs cohort with `[detached]`, fires model on the new state | `interrupt()` + `Command(resume=...)` — graph-level pause and replay, not per-cohort rebase |
+| Inject user context that does *not* preempt in-flight work | `UserQueuedMessage` — buffers, coalesces into next `UserMessage` after cohort drains | Application-defined |
+| Route different message sources to different inbox priorities | `push_front` vs `push_back` on `GatedDeque` | Application-defined |
+| Wait for an event without polling, in-process | `Await(types)` gates `drain()` until matching event lands; the agent loop stays running and idle | LangGraph stops the graph at `interrupt()`; the orchestrating process can do anything and resume by re-invoking the graph |
+| Deliver a message to another agent at a future time | `AgentSend(delay=N)` via `loop.call_later` | Application-defined (external scheduler) |
+| Address a live agent by name and deliver into its inbox | `AgentSpawn(persistent=true)` + named registry; `AgentSend` delivers | Application-defined: long-running graph + external trigger (HTTP webhook, Postgres `LISTEN`, MQ subscription) + `Checkpointer` |
+| Typed serialisable run state | Per-event dataclasses; JSONL session transcript | Typed `State` dict per graph; serialised by the `Checkpointer` |
+| Stream typed intermediate execution events | `RuntimeEvent` observer fan-out (cost, session, REPL, budget) | `astream_events` / `astream_log` over the Runnable / graph |
+| Resume the same conversation on a fresh process | `--continue` reloads session transcript and replays state | `Checkpointer` restores graph state from durable storage |
+
+A few cells earn more than one line of prose:
+
+**`background: true`** is the most consequential entry. Every tool's
+directive schema is wrapped by `BackgroundAwareTool` to add
+`background: bool` and `delay: integer`. When set, dispatch returns a
+"scheduled" tool result immediately and the real result is `push_back`'d
+to the inbox on completion. The cohort gate proceeds as if the tool
+finished quickly; the result arrives as user-context in the next
+round.
+
+**`Await(types)`** is the no-polling primitive. `Halt`, `Clear`, and
+`ModelResponseError` push an `Await(types)` onto the deque so `drain()`
+blocks until an event matching those types (or `Quit`) lands. No
+sleep loop, no timeout — the runtime sleeps until something
+interesting happens.
+
+**Detach** completes the picture. Preempting `UserMessage` arrival
+stubs unfinished cohort members with `[detached]` placeholders to
+satisfy the provider's `tool_use` / `tool_result` invariant. The
+detached tools keep running and deliver their results as
+`DetachedResult` events into the next round's user-context.
+
+**Persistent live agents vs LangGraph long-running runs.** You can
+build "agent waiting for inbound messages" on LangGraph with a
+long-running graph, a `Checkpointer` for durability, and an external
+trigger (HTTP webhook, Postgres `LISTEN`, message-queue subscription).
+That works and survives process restart, which sagent's in-process
+registry does not. Sagent gives you a named-agent registry and inbox
+delivery for free; LangGraph gives you durability for free.
+
+**Streaming intermediate events.** Sagent's `RuntimeEvent` fan-out
+publishes typed dataclass events to in-process observers:
+`ModelCallStarted`, `ModelResponsePartial` (per text chunk),
+`ModelResponseThinking` (per thinking chunk), `ModelResponseComplete`,
+`ToolLabel` (pre-execution), `ToolResult`, `DetachedResult`,
+`CohortComplete`, `ModelIdle`, `CompactComplete`, `SaveSession`,
+`ChildEvent`, `ChildDoneEvent`. Observers are plain callables, fanned
+out synchronously inside the runtime. LangChain's `astream_events` (v2)
+exposes a richer chain-of-Runnables view: per-Runnable
+`on_chat_model_start` / `on_chat_model_stream` / `on_chat_model_end`,
+`on_tool_start` / `on_tool_end`, `on_chain_*`, `on_retriever_*`, etc.,
+each with a metadata dict carrying tags, run id, parent id, and the
+emitting Runnable's name. LangChain's surface is more general (it
+streams from anywhere in the composed pipeline, not just an agent
+loop); sagent's is narrower and tied to the one loop, but the event
+catalogue covers the agent-runtime concerns directly without an
+intermediate Runnable abstraction.
+
+**Net.** Concurrent tool execution is at parity. Durable cross-process
+pause is LangGraph's win. Background tools, model-callable job
+control, non-preempting user queue, inbox priority, delayed peer
+delivery, and persistent live agents are sagent's. You can build any
+of the sagent items on LangGraph; they just aren't framework
+primitives there.
 
 ## Tools
 
@@ -292,13 +366,34 @@ a building-block framework.
 - **Five in-flight verbs as primitives.** `halt` / `kill` / `detach` /
   `undetach` / `clear` are runtime events with documented semantics,
   not application-defined patterns.
-- **`AgentSelf` exposed as a model-callable tool.** The model can swap
-  its own backend, compact its own context, clear its own history, and
-  change its own token limits via ordinary tool calls. LangChain agents
-  do not have a built-in self-mutation surface the model can drive.
-- **`AgentSend` peer-to-peer between live named agents.** LangGraph's
-  `Send` is fan-out within a graph; sagent's `AgentSend` delivers into
-  another live agent's inbox by name, with no shared graph required.
+- **`AgentSelf` exposed as a model-callable tool.** One directive
+  carries all self-mutation knobs: `status` text, `context` verbs
+  (`clear` / `compact` / `recompact`) dispatched as first-class
+  `RuntimeEvent`s on the inbox, `model_id` / `provider` / `auth` /
+  `account` for mid-session backend swap with provider/auth inferred
+  from the model id, `max_request_tokens` / `max_response_tokens` for
+  live context-budget rebudgeting, `model_options` for provider-specific
+  knobs (cache TTL, thinking, effort), `diagnostics` for self-inspection,
+  and `catalog` for read-only enumeration of known providers and
+  models. LangChain has nothing equivalent. The closest piece,
+  `Runnable.configurable_alternatives` + `with_config(...)`, is
+  *caller-driven* configuration, not a model-callable verb. The agent
+  cannot decide on its own to swap models, compact history, or rebudget
+  tokens; the surrounding application has to. Trade-off: model-callable
+  self-mutation is a footgun. A confused agent can compact useful
+  context away, swap to a model that doesn't fit the task, or shrink
+  its own token budget below the next request. LangChain's
+  caller-controls-config posture is arguably safer for high-trust
+  production deployments; sagent's posture is built for interactive
+  agents whose operator is reading along.
+- **`AgentSend` peer-to-peer between live named agents.** Delivers
+  `UserMessage(text=f"[from {sender}]: {content}")` into the target
+  agent's inbox via the live-agent registry, with optional delayed
+  delivery (`asyncio.get_running_loop().call_later`). The tool's
+  `prompt()` contribution dynamically lists currently-live peers the
+  model can address. LangGraph's `Send` is fan-out within one graph
+  step; there is no live-agent registry, no named addressability across
+  independent agent runs, and no delayed inbox delivery.
 - **One inbox unifying user / Slack / peer / background / commands.**
   REPL keystrokes, Slack messages, peer-agent sends, and background
   task completions all land on the same `GatedDeque`. The agent does
