@@ -143,7 +143,7 @@ def test_extracted_jpeg_is_decodable(tmp_path: Path) -> None:
     f = _make_pdf(tmp_path, 1)
     (jpeg,) = extract_pdf_pages(f)
     img = Image.open(io.BytesIO(jpeg))
-    img.load()
+    img.load()  # pyright: ignore[reportUnknownMemberType] -- Pillow's Image.load returns core.PixelAccess via a deferred-import module that pyright can't resolve
     # 1-inch page rendered at 144 DPI → ~144x144 px.
     assert 100 <= img.width <= 200
     assert 100 <= img.height <= 200

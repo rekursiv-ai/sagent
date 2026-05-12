@@ -374,7 +374,7 @@ class OpenAICompatModel:
             body["max_tokens"] = request.max_response_tokens
         if stream:
             body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
+            body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
         if request.effort is not None and self.supports_effort:
             body["reasoning_effort"] = request.effort
         if request.tools:
