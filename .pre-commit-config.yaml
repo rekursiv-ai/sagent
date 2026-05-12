@@ -19,11 +19,24 @@ repos:
     hooks:
       - id: end-of-file-fixer
         stages: [pre-commit]
+        exclude: |
+          (?x)^(
+            (.*/)?third_party/
+          )
       - id: trailing-whitespace
         stages: [pre-commit]
+        exclude: |
+          (?x)^(
+            (.*/)?third_party/
+          )
       - id: check-added-large-files
         stages: [pre-commit]
         args: [--maxkb=500]
+        exclude: |
+          (?x)^(
+            |typings/
+            |uv\.lock
+          )
       - id: check-merge-conflict
         stages: [pre-commit]
       - id: check-yaml
@@ -44,13 +57,14 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.12
     hooks:
+      # Exclusions defined in pyproject.toml.
       - id: ruff-check
         stages: [pre-commit]
-        types_or: [python, pyi]
+        types_or: [python, pyi, jupyter]
         args: [--fix]
       - id: ruff-format
         stages: [pre-commit]
-        types_or: [python, pyi]
+        types_or: [python, pyi, jupyter]
 
   - repo: local
     hooks:
@@ -58,25 +72,41 @@ repos:
         name: codespell
         language: system
         stages: [pre-commit]
-        types_or: [python, markdown]
+        types_or: [python, markdown, jupyter, shell]
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+          )
         entry: uv run --quiet --frozen codespell
         args: [-w]
 
   # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
   - repo: local
     hooks:
+      # Exclusions defined in pyproject.toml.
       - id: ty
         name: ty check
         language: system
         stages: [pre-commit]
         types_or: [python, pyi]
-        pass_filenames: false
+        # pass_filenames=False means code-base wide integration during commit.
+        # pass_filenames: false
         entry: uv run --quiet --frozen ty check
 
   # To enable:  uv run pre-commit install --hook-type pre-push
   # To disable: uv run pre-commit uninstall --hook-type pre-push
   - repo: local
     hooks:
+      # Exclusions defined in pyproject.toml.
+      - id: ty-global
+        name: ty check global
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv run --quiet --frozen ty check
+
       - id: basedpyright
         name: basedpyright
         language: system
