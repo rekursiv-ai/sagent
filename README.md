@@ -79,7 +79,8 @@ Three pieces make Sagent distinctive:
 
 - **Hot-swappable providers.** The same agent, tools, session, and
   compactor can run against Anthropic, OpenAI, Google, Moonshot,
-  DashScope, MiniMax, or an OpenAI-compatible endpoint.
+  DashScope, MiniMax, a managed local llama.cpp server, or any
+  OpenAI-compatible endpoint.
 - **Multi-agent primitives.** `AgentSelf`, `AgentSpawn`, and
   `AgentSend` let agents inspect themselves, spawn isolated children,
   and send messages to named peers.
@@ -89,7 +90,7 @@ Three pieces make Sagent distinctive:
 
 ## What sagent does
 
-- Runs agents against Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, and OpenAI-compatible endpoints.
+- Runs agents against Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, local llama.cpp servers, and OpenAI-compatible endpoints.
 - Exposes tools for local files, shell commands, web access, paper search, and agent coordination.
 - Keeps the same `Agent` behind CLI, Slack, parent agents, and application code.
 - Represents provider responses, tool calls, tool results, and user messages as typed `Message` objects.
@@ -211,7 +212,7 @@ See [API](docs/api.md), [Tutorial](docs/tutorial.md), and [Concepts](docs/concep
 
 ## Provider setup
 
-Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints. Set the key for the provider you plan to use:
+Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints, plus a managed local `LlamaCpp` provider. Set the key for the provider you plan to use:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -231,6 +232,7 @@ export MINIMAX_API_KEY=...
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
 | `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
+| `LlamaCpp` | none (uses `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER`) | `qwen3.6-27b-12gb` |
 
 See [Providers](docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
 
@@ -263,6 +265,12 @@ sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
 ```
 
 SelfHosted options use `+` suffixes after the model name. Device, dtype, and `compile` can appear in any order, but each category can appear once.
+
+The `LlamaCpp` provider is a second local option: it manages a
+`llama-server` subprocess and talks to it over its OpenAI-compatible
+endpoint. Point `LLAMA_CPP_SERVER` at a built `llama-server` binary and
+`LLAMA_CPP_MODEL` at a `.gguf` file, then run
+`sagent --provider LlamaCpp --model qwen3.6-27b-12gb`.
 
 See [Self-hosted Models](docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
 
@@ -520,7 +528,7 @@ runtime shape depends on whoever builds it.
 | `agent/` | Turn loop, retry, dispatch, sessions |
 | `compactor.py` | Structured compaction and prompt-too-long retry |
 | `custom_types.py` | Message, Tool, Model, Provider protocols |
-| `providers/` | Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible |
+| `providers/` | Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible, LlamaCpp |
 | `tools/` | Built-in tools for files, shell, web, search, and agent coordination |
 | `repl/` | prompt_toolkit REPL and diff rendering |
 | `sessions.py` | Per-cwd session storage |
