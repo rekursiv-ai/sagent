@@ -130,7 +130,7 @@ MAX_OVERFLOW_RECOVERY = 3
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class ActivityTracker:
-    """Lifecycle counters for the bottom toolbar."""
+    """Lifecycle counters for the status pane."""
 
     elapsed_seconds: float = 0.0
     """Cumulative wall-clock seconds spent in active model calls."""
@@ -381,12 +381,12 @@ class Agent:
 
     @property
     def status(self) -> str:
-        """Free-form status string surfaced by the toolbar."""
+        """Free-form status string surfaced by the status pane."""
         return self._status
 
     @status.setter
     def status(self, value: str) -> None:
-        """Set the toolbar status string and publish a ``StatusChanged`` event.
+        """Set the status string (rendered in the status pane) and publish a ``StatusChanged`` event.
 
         Args:
           value: New status string.

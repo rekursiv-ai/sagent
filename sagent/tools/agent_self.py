@@ -211,7 +211,7 @@ class _PatchPlan:
     """Validated AgentSelf patch ready to commit."""
 
     status: str | None = None
-    """New toolbar status string, or ``None`` to keep."""
+    """New status string (rendered in the status pane), or ``None`` to keep."""
 
     model: _ModelPlan | None = None
     """Pending model swap, or ``None`` to keep."""

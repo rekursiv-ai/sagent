@@ -2261,6 +2261,111 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() -> None:
+    """``UserQueuedMessage`` drains at ``ModelIdle``, not ``CohortComplete``.
+
+    Scenario:
+      - Round 1: ``UserMessage("user1")`` → model returns tool_calls →
+        tools spawn.
+      - Mid-cohort: push ``UserQueuedMessage("queued")``.
+      - Tools complete; cohort drains.
+      - Round 2 fires for the tool_result.
+      - Round 2 returns text (no tool_calls) → ``ModelIdle``.
+      - Round 3 fires for the queued message.
+
+    Required behavior (T4):
+      - Round 2's input history does NOT contain ``"queued"`` -- the
+        queued message has not yet been released; the round chain
+        from Round 1 is still in progress.
+      - Round 3's input history DOES contain ``"queued"`` -- it was
+        released only after ``ModelIdle`` ended the round chain.
+
+    Distinguishes T4 (wait for ``ModelIdle``) from T3 (drain at
+    ``CohortComplete``, the prior behavior): under T3, Round 2 would
+    see the queued message because it drained between cohort end and
+    next round.
+    """
+    tool_started = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class FastEcho:
+        _name: str = "echo"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            tool_started.set()
+            return ToolResult(call_id="", content="tool done")
+
+    @dataclass(kw_only=True, slots=True)
+    class ThreeRoundModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                return AssistantMessage(
+                    tool_calls=(ToolCall(id="t1", name="echo", args={}),),
+                )
+            msg = AssistantMessage(text=f"round{idx + 1}")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = ThreeRoundModel()
+    agent = AgentRuntime(model=model, tools=[FastEcho()])
+    agent.inbox.push_back(UserMessage(text="user1"))
+
+    async def queue_during_cohort_and_drive() -> None:
+        await tool_started.wait()
+        agent.inbox.push_back(UserQueuedMessage(text="queued"))
+        # Allow Round 2 (tool_result) to complete, Round 3 (queued) to
+        # start. Sleeps are upper-bounded by ``run_until_quit``'s timeout.
+        await asyncio.sleep(0.3)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        queue_during_cohort_and_drive(),
+    )
+
+    assert len(model.call_histories) >= 3, (
+        f"expected ≥ 3 model calls (user1 + tool_result + queued);"
+        f" got {len(model.call_histories)}."
+    )
+    round2_history = model.call_histories[1]
+    round2_user_texts = [m.text for m in round2_history if isinstance(m, UserMessage)]
+    assert all("queued" not in t for t in round2_user_texts), (
+        f"Round 2 must not see 'queued' -- it should still be queued at"
+        f" CohortComplete and only drain at ModelIdle. Round 2 user texts:"
+        f" {round2_user_texts}"
+    )
+    round3_history = model.call_histories[2]
+    assert any(
+        isinstance(m, UserMessage) and "queued" in m.text for m in round3_history
+    ), (
+        f"Round 3 must see 'queued' -- drained at ModelIdle and fired the"
+        f" next round. Round 3 history:"
+        f" {[type(m).__name__ for m in round3_history]}"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 

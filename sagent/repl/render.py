@@ -9,7 +9,7 @@ on the observer's closure, not on the Printer.
 The Printer Protocol covers every formatted output the REPL produces:
 plain lines, streaming chunks, markdown, full-width user bar, dim tool
 labels, errors, thinking blocks, diffs, child gutter blocks. Concrete
-implementations live in :mod:`repl.console` (rich-backed) and on
+implementations live in :mod:`repl.console_pane` (rich-backed) and on
 :class:`RecordingPrinter` (test harness).
 """
 

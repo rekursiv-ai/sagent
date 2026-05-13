@@ -5,10 +5,10 @@ that the input pump consumes on the next ``next_line()`` call.
 
 Bindings:
 
-- Enter: queue input into the REPL-local pending list while active;
-  submit when idle.
+- Enter: queue input into the REPL-local ``queued_input`` buffer
+  while active; submit when idle.
 - Alt+Enter: insert a newline (multi-line composition).
-- Up: pull most recent pending user message into the buffer for
+- Up: pull most recent ``queued_input`` entry into the buffer for
   editing; else history-backward.
 - Shift-Up / Shift-Down: prefix-based history search.
 - Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
@@ -18,7 +18,7 @@ Bindings:
 - Ctrl+_ / Esc-z: undo.
 - Ctrl+Z: suspend.
 
-The pending list is the REPL's local view of user texts not yet
+``queued_input`` is the REPL's local view of user texts not yet
 drained by the runtime. ``GatedDeque`` doesn't support tag-based
 peek / pop, so the REPL maintains this list itself and the
 keybindings update it.
@@ -42,12 +42,12 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
 
-def build_key_bindings(agent: Agent, pending: list[str]) -> KeyBindings:
-    """Build the REPL keybindings bound to ``agent`` and ``pending``.
+def build_key_bindings(agent: Agent, queued_input: list[str]) -> KeyBindings:
+    """Build the REPL keybindings bound to ``agent`` and ``queued_input``.
 
     Args:
       agent: Agent these key handlers will mutate.
-      pending: REPL-local list of texts typed while the agent was
+      queued_input: REPL-local list of texts typed while the agent was
           busy. Submitted-when-active inputs append here; Up pops
           the tail.
 
@@ -56,9 +56,9 @@ def build_key_bindings(agent: Agent, pending: list[str]) -> KeyBindings:
 
     """
     kb = KeyBindings()
-    kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent, pending))
+    kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent, queued_input))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("up")(functools.partial(_kb_up, pending))
+    kb.add("up")(functools.partial(_kb_up, queued_input))
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
@@ -71,10 +71,10 @@ def build_key_bindings(agent: Agent, pending: list[str]) -> KeyBindings:
 
 def _kb_submit(
     agent: Agent,
-    pending: list[str],
+    queued_input: list[str],
     event: KeyPressEvent,
 ) -> None:
-    """Submit when idle; queue input into the pending list while active.
+    """Submit when idle; queue into ``queued_input`` while active.
 
     Slash commands (``/...``) always route through the pump regardless
     of busy state so e.g. ``/model`` prints its read-mode response
@@ -84,8 +84,8 @@ def _kb_submit(
 
     Plain text submissions push a ``UserMessage`` to the runtime inbox
     when busy (the runtime preempts and stubs unfinished tools) and
-    record the text in ``pending`` so the dim preview and Up-arrow
-    edit-back keep working.
+    record the text in ``queued_input`` so the dim preview and
+    Up-arrow edit-back keep working.
     """
     buf = event.current_buffer
     text = buf.text
@@ -99,7 +99,7 @@ def _kb_submit(
     if not stripped:
         return
     agent.runtime.inbox.push_back(UserMessage(text=text))
-    pending.append(text)
+    queued_input.append(text)
     buf.append_to_history()
     buf.reset()
 
@@ -109,10 +109,10 @@ def _kb_newline(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
-def _kb_up(pending: list[str], event: KeyPressEvent) -> None:
-    """Lift the most recent pending text into the buffer; else history-back."""
-    if pending:
-        text = pending.pop()
+def _kb_up(queued_input: list[str], event: KeyPressEvent) -> None:
+    """Lift the most recent ``queued_input`` entry; else history-back."""
+    if queued_input:
+        text = queued_input.pop()
         buf = event.current_buffer
         buf.text = text
         buf.cursor_position = len(buf.text)

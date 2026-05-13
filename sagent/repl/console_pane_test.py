@@ -1,4 +1,4 @@
-"""Tests for ``repl.console``: rich-backed ``Printer`` implementation."""
+"""Tests for ``repl.console_pane``: rich-backed ``Printer`` implementation."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sagent.agent.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.repl.console import ConsolePrinter
+from sagent.repl.console_pane import ConsolePrinter
 
 
 def _printer(width: int = 80) -> tuple[ConsolePrinter, io.StringIO]:

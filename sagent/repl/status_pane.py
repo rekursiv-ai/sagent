@@ -1,4 +1,4 @@
-"""Bottom-toolbar renderer for the REPL.
+"""Status renderer for the REPL (the line below the input bar).
 
 Single bracketed block of session totals plus a braille spinner while
 a model call is in flight. Reads ``agent.activity`` (an
@@ -22,18 +22,18 @@ if TYPE_CHECKING:
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
-def render_toolbar(agent: Agent) -> str:
-    """Build the bottom-toolbar string for ``agent``.
+def render_status_pane(agent: Agent) -> str:
+    """Build the status-pane string for ``agent``.
 
     Format: ``[elapsed input↑ output↓ cw↟ cr↡ $cost]``. Active runs
     prefix a braille spinner that ticks live; the bracket values snap
     in at each model-call boundary.
 
     Args:
-      agent: Agent whose totals drive the toolbar.
+      agent: Agent whose totals drive the status line.
 
     Returns:
-      toolbar: Formatted toolbar string, or ``""`` before the first run.
+      status: Formatted status string, or ``""`` before the first run.
 
     """
     activity = agent.activity

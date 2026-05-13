@@ -89,10 +89,10 @@ def _fake_event(
     return ev
 
 
-def _build(agent: _FakeAgent, pending: list[str] | None = None) -> KeyBindings:
+def _build(agent: _FakeAgent, queued_input: list[str] | None = None) -> KeyBindings:
     """Bind the keybindings against a fake agent; ``Agent`` cast is structural."""
     return build_key_bindings(
-        cast(Agent, agent), pending if pending is not None else []
+        cast(Agent, agent), queued_input if queued_input is not None else []
     )
 
 
@@ -105,11 +105,11 @@ def test_enter_submits_when_idle() -> None:
 
 def test_enter_queues_during_model_call() -> None:
     agent = _busy_agent()
-    pending: list[str] = []
-    kb = _build(agent, pending)
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
     buf = _fake_buf("first msg")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert pending == ["first msg"]
+    assert queued_input == ["first msg"]
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
     assert isinstance(pushed, UserMessage)
@@ -126,32 +126,32 @@ def test_enter_routes_slash_command_through_pump_when_busy() -> None:
     user prompt to the model.
     """
     agent = _busy_agent()
-    pending: list[str] = []
-    kb = _build(agent, pending)
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
     buf = _fake_buf("/model")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     buf.validate_and_handle.assert_called_once()
     assert agent.runtime.inbox.items == []
-    assert pending == []
+    assert queued_input == []
 
 
 def test_enter_queues_during_tool_cohort() -> None:
     agent = _cohort_agent()
-    pending: list[str] = []
-    kb = _build(agent, pending)
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
     buf = _fake_buf("during tools")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert pending == ["during tools"]
+    assert queued_input == ["during tools"]
     assert len(agent.runtime.inbox.items) == 1
 
 
 def test_enter_empty_during_request_noop() -> None:
     agent = _busy_agent()
-    pending: list[str] = []
-    kb = _build(agent, pending)
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
     buf = _fake_buf("   ")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert pending == []
+    assert queued_input == []
     assert agent.runtime.inbox.items == []
     buf.reset.assert_not_called()
     buf.validate_and_handle.assert_not_called()
@@ -165,12 +165,12 @@ def test_alt_enter_inserts_newline() -> None:
 
 
 def test_up_pops_pending_into_buffer() -> None:
-    pending = ["queued text"]
-    kb = _build(_idle_agent(), pending)
+    queued_input = ["queued text"]
+    kb = _build(_idle_agent(), queued_input)
     buf = _fake_buf("")
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "queued text"
-    assert pending == []
+    assert queued_input == []
     buf.history_backward.assert_not_called()
 
 

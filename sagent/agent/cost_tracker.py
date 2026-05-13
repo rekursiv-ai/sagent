@@ -9,7 +9,7 @@ tracker so they accumulate independently.
 
 Two methods, both name what they do:
 
-- :meth:`record` -- write one model response. Always live; toolbar reads
+- :meth:`record` -- write one model response. Always live; status pane reads
   ``tracker.total*`` directly.
 - :meth:`restore` -- session-resume hook; overwrites totals from
   persisted metadata.
