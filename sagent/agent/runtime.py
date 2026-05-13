@@ -689,6 +689,17 @@ class GatedDeque[T]:
         self._gate: tuple[type, ...] | None = None
         self._gate_baseline: int = 0
 
+    @property
+    def gate_armed(self) -> bool:
+        """True while a drain gate is set and not yet released.
+
+        Surfaces inbox-level "waiting for X" state to the runtime's
+        gate-check section so the model isn't fired against stale
+        history while an ``Await`` (e.g. ``AWAIT_USER`` armed by
+        ``Halt`` / ``ModelResponseError``) is still pending.
+        """
+        return self._gate is not None
+
     def push_back(self, item: T) -> None:
         """Add to back of queue.
 
@@ -748,7 +759,7 @@ class GatedDeque[T]:
         if self._gate is not None:
             gate = self._gate
             baseline = self._gate_baseline
-            while not _gate_satisfied(items, gate, baseline):
+            while not self._gate_satisfied(items, gate, baseline):
                 items.append(await self._queue.get())
                 while not self._queue.empty():
                     try:
@@ -759,17 +770,18 @@ class GatedDeque[T]:
             self._gate_baseline = 0
         return items
 
-
-def _gate_satisfied(
-    items: Sequence[object],
-    gate: tuple[type, ...],
-    baseline: int,
-) -> bool:
-    """Return True when ``items`` satisfies the gate beyond ``baseline``."""
-    if any(isinstance(i, Quit) for i in items):
-        return True
-    count = sum(1 for i in items if isinstance(i, gate) and not isinstance(i, Quit))
-    return count > baseline
+    @classmethod
+    def _gate_satisfied(
+        cls,
+        items: Sequence[object],
+        gate: tuple[type, ...],
+        baseline: int,
+    ) -> bool:
+        """Return True when ``items`` satisfies the gate beyond ``baseline``."""
+        if any(isinstance(i, Quit) for i in items):
+            return True
+        count = sum(1 for i in items if isinstance(i, gate) and not isinstance(i, Quit))
+        return count > baseline
 
 
 class Tool(Protocol):
@@ -1228,8 +1240,15 @@ class AgentRuntime:
                 not self.cohort
                 and self.model_call is None
                 and self.compact_task is None
+                and not self.inbox.gate_armed
                 and self._should_call_model()
             ):
+                # ``inbox.gate_armed`` blocks firing while ``AWAIT_USER``
+                # is pending (armed by ``Halt`` / ``ModelResponseError``).
+                # Without this guard the model would fire on the stale
+                # ``UserMessage`` still at history.tail, treating the
+                # cancellation as a retry rather than waiting for the
+                # user's next input.
                 self.model_call = asyncio.create_task(
                     self._stream_and_post(),
                 )
