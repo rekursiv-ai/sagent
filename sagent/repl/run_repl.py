@@ -36,9 +36,12 @@ from rich.console import Console
 
 from sagent import providers
 from sagent.agent.runtime import (
+    AgentRuntime,
+    ModelIdle,
     ModelSwitch,
     RuntimeEvent,
     UserMessage,
+    UserQueuedMessage,
 )
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
@@ -104,6 +107,9 @@ async def run_repl(
         printer = ConsolePrinter(console)
         agent.runtime.observers.append(make_render_observer(printer))
         agent.runtime.observers.append(make_queued_input_clearer(queued_input))
+        agent.runtime.observers.append(
+            make_queued_input_committer(agent.runtime, queued_input)
+        )
         pump_task = spawn_repl_pump(
             agent,
             PromptToolkitInputSource(
@@ -177,6 +183,41 @@ def make_queued_input_clearer(
     def observer(event: RuntimeEvent) -> None:
         if isinstance(event, UserMessage):
             queued_input.clear()
+
+    return observer
+
+
+def make_queued_input_committer(
+    runtime: AgentRuntime,
+    queued_input: list[str],
+) -> Callable[[RuntimeEvent], None]:
+    r"""Observer that commits the staged ``queued_input`` on ``ModelIdle``.
+
+    Under the staging model (per ``repl.keybindings``), text typed
+    while the agent is busy accumulates in ``queued_input`` locally
+    and is not dispatched to the runtime until the user explicitly
+    commits (Enter on empty input) or the round chain settles. This
+    observer handles the latter: when the runtime publishes
+    ``ModelIdle`` -- the agent has finished its current round chain --
+    the staged queue is pushed as a single ``UserQueuedMessage``
+    joined by ``\\n\\n``. The runtime's own ``queued``-list drain
+    then appends a ``UserMessage`` and the gate fires for the next
+    round.
+
+    Args:
+      runtime: Runtime to push the ``UserQueuedMessage`` onto.
+      queued_input: REPL-local staging buffer.
+
+    Returns:
+      observer: Callable suitable for ``runtime.observers.append``.
+
+    """
+
+    def observer(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle) and queued_input:
+            joined = "\n\n".join(queued_input)
+            queued_input.clear()
+            runtime.inbox.push_back(UserQueuedMessage(text=joined))
 
     return observer
 

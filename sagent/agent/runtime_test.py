@@ -2457,6 +2457,32 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_queued_message_drain_publishes_user_message() -> None:
+    """``UserQueuedMessage`` drain must publish the coalesced ``UserMessage``.
+
+    Repro of the live bug: typing on an idle agent pushed
+    ``UserQueuedMessage``, the runtime appended a coalesced
+    ``UserMessage`` to history, and the gate fired the model -- but
+    the renderer's observer never saw the user bar because the drain
+    code only mutated history without ``publish()``. The user bar
+    in ``console_pane`` never appeared even though the model was
+    answering the message.
+    """
+    agent, collector = make_agent([AssistantMessage(text="ack")])
+    agent.inbox.push_back(UserQueuedMessage(text="hi"))
+
+    await run_with_quit(agent)
+
+    user_msgs_in_events = [
+        e for e in collector.events if isinstance(e, UserMessage) and e.text == "hi"
+    ]
+    assert user_msgs_in_events, (
+        "expected the coalesced UserMessage('hi') to be published so observers"
+        " (renderers, persistence) can react; only history mutation happened."
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 

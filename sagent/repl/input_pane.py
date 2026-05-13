@@ -303,46 +303,27 @@ class PromptToolkitInputSource(InputSource):
 
 
 def render_input_pane(agent: Agent, queued_input: list[str]) -> FormattedText:
-    """Build the input-pane ``FormattedText``: optional preview + prompt sigil.
+    r"""Build the input-pane ``FormattedText``: full queue + prompt sigil.
 
-    Only renders the preview when the agent is *busy* (a model call or
-    compaction is in flight, or a tool cohort is outstanding): then the
-    user's typed message is genuinely waiting and the preview is honest
-    UX. When idle, the text is about to be committed and surfacing it
-    as "queued" during that brief race window is misleading.
-
-    ``Up`` lifts the preview message back into the buffer for editing.
+    Renders the entire staged queue (blocks joined by ``\\n\\n``) above
+    the ``> `` prompt sigil whenever ``queued_input`` has entries.
+    The queue is a staging draft: blocks accumulate as the user
+    submits, are visible until committed, and can be lifted back into
+    ``input_pane`` for editing via Up.
 
     Args:
-      agent: Agent whose busy state gates the preview.
-      queued_input: REPL-local buffer; tail is previewed.
+      agent: Agent (currently unused; reserved for callers that want
+          to gate rendering on additional state).
+      queued_input: REPL-local staging buffer; each entry is one block.
 
     Returns:
-      formatted: The input zone's formatted text.
+      formatted: The input pane's formatted text.
 
     """
+    del agent
     parts: list[tuple[str, str]] = []
-    is_busy = agent.work is not None or bool(agent.runtime.cohort)
-    if is_busy and queued_input:
-        parts.append(("class:queued_input_pane", _collapse_preview(queued_input[-1])))
+    if queued_input:
+        parts.append(("class:queued_input_pane", "\n\n".join(queued_input)))
         parts.append(("", "\n"))
     parts.append(("class:input_pane", "> "))
     return FormattedText(parts)
-
-
-def _collapse_preview(text: str, width: int = 60) -> str:
-    """Collapse multi-line text into a one-line preview with a count suffix."""
-    text = text.rstrip("\n")
-    paras = text.split("\n\n")
-    first = paras[0].split("\n")[0]
-    if len(first) > width:
-        first = first[: width - 1] + "…"
-    extra_paras = len(paras) - 1
-    if extra_paras > 0:
-        return (
-            f"{first} (+{extra_paras} more paragraph{'s' if extra_paras != 1 else ''})"
-        )
-    extra_lines = len(paras[0].split("\n")) - 1
-    if extra_lines > 0:
-        return f"{first} (+{extra_lines} more line{'s' if extra_lines != 1 else ''})"
-    return first
