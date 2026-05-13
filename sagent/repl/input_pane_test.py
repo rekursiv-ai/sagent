@@ -27,7 +27,6 @@ from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
     PromptToolkitInputSource,
     StubInputSource,
-    _collapse_preview,
     _dispatch,
     _input_pump,
     render_input_pane,
@@ -467,83 +466,36 @@ def _as_real_agent(a: _FakeAgent) -> _RealAgent:
     return cast(_RealAgent, a)
 
 
-def test_render_input_pane_idle_no_preview() -> None:
-    """Idle agent renders only the ``> `` prompt token."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["queued"])
+def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
+    """Empty ``queued_input`` renders only the ``> `` prompt token."""
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), [])
     assert isinstance(fp, FormattedText)
     assert list(fp) == [("class:input_pane", "> ")]
 
 
-def test_render_input_pane_busy_with_queued_input_renders_preview() -> None:
-    a = _FakeAgent(work=object())
-    fp = render_input_pane(_as_real_agent(a), ["hello world"])
+def test_render_input_pane_single_block_renders_full_text() -> None:
+    """Single staged block renders verbatim above the prompt."""
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["hello world"])
     parts = list(fp)
     assert parts[0] == ("class:queued_input_pane", "hello world")
     assert parts[1] == ("", "\n")
     assert parts[2] == ("class:input_pane", "> ")
 
 
-def test_render_input_pane_busy_no_queued_input_omits_preview() -> None:
-    a = _FakeAgent(work=object())
-    fp = render_input_pane(_as_real_agent(a), [])
-    assert list(fp) == [("class:input_pane", "> ")]
-
-
-def test_render_input_pane_cohort_busy_renders_preview() -> None:
-    a = _FakeAgent()
-    a.runtime.cohort.add("c1")
-    fp = render_input_pane(_as_real_agent(a), ["mid-cohort"])
+def test_render_input_pane_multiple_blocks_join_with_double_newline() -> None:
+    r"""Multiple staged blocks render joined by ``\\n\\n``."""
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["a", "b", "c"])
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "mid-cohort")
+    assert parts[0] == ("class:queued_input_pane", "a\n\nb\n\nc")
+    assert parts[1] == ("", "\n")
+    assert parts[2] == ("class:input_pane", "> ")
 
 
-def test_render_input_pane_only_previews_tail() -> None:
-    a = _FakeAgent(work=object())
-    fp = render_input_pane(_as_real_agent(a), ["old1", "old2", "tail"])
+def test_render_input_pane_preserves_multi_line_block_content() -> None:
+    """Internal newlines in a block are preserved verbatim (no collapse)."""
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["line1\nline2"])
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "tail")
-
-
-def test_render_input_pane_compacting_busy() -> None:
-    """``compact_task`` shows up as ``agent.work`` (truthy) -> busy."""
-    a = _FakeAgent(work=object())
-    fp = render_input_pane(_as_real_agent(a), ["queued during compact"])
-    parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "queued during compact")
-
-
-def test_collapse_preview_short_passthrough() -> None:
-    assert _collapse_preview("hello") == "hello"
-
-
-def test_collapse_preview_truncates_long_first_line() -> None:
-    out = _collapse_preview("x" * 100, width=20)
-    assert out.endswith("…")
-    assert len(out) == 20
-
-
-def test_collapse_preview_extra_lines_suffix() -> None:
-    out = _collapse_preview("line1\nline2\nline3")
-    assert out == "line1 (+2 more lines)"
-
-
-def test_collapse_preview_one_extra_line_singular() -> None:
-    out = _collapse_preview("line1\nline2")
-    assert out == "line1 (+1 more line)"
-
-
-def test_collapse_preview_extra_paragraph_suffix() -> None:
-    out = _collapse_preview("para1\n\npara2\n\npara3")
-    assert out == "para1 (+2 more paragraphs)"
-
-
-def test_collapse_preview_one_extra_paragraph_singular() -> None:
-    out = _collapse_preview("para1\n\npara2")
-    assert out == "para1 (+1 more paragraph)"
-
-
-def test_collapse_preview_strips_trailing_newlines() -> None:
-    assert _collapse_preview("hello\n\n") == "hello"
+    assert parts[0] == ("class:queued_input_pane", "line1\nline2")
 
 
 def test_next_line_returns_typed_text() -> None:

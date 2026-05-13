@@ -1225,16 +1225,21 @@ class AgentRuntime:
                 and not self._should_call_model()
                 and queued
             ):
-                self.history.append(
-                    UserMessage(
-                        text="\n\n".join(q.text for q in queued),
-                        attachments=sum(
-                            (q.attachments for q in queued),
-                            (),
-                        ),
+                coalesced = UserMessage(
+                    text="\n\n".join(q.text for q in queued),
+                    attachments=sum(
+                        (q.attachments for q in queued),
+                        (),
                     ),
                 )
+                self.history.append(coalesced)
                 queued.clear()
+                # Publish so observers (renderers, persistence, the
+                # REPL's ``make_queued_input_clearer``) see the
+                # commit. Without this, the user bar never renders
+                # in ``console_pane`` and ``queued_input`` is never
+                # cleared.
+                self.publish(coalesced)
 
             if (
                 not self.cohort
