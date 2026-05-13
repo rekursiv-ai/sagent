@@ -26,7 +26,9 @@ def test_parse_slash_empty_returns_none(line: str) -> None:
     assert parse_slash(line) is None
 
 
-@pytest.mark.parametrize("line", ["/quit", "  /quit  ", "/QUIT"])
+@pytest.mark.parametrize(
+    "line", ["/quit", "  /quit  ", "/QUIT", "/exit", "  /exit  ", "/EXIT"]
+)
 def test_parse_slash_quit(line: str) -> None:
     assert isinstance(parse_slash(line), Quit)
 

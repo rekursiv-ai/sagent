@@ -13,7 +13,7 @@ import dataclasses
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Quit:
-    """User typed ``/quit`` (or pressed Ctrl+D); end the REPL."""
+    """User typed ``/quit`` or ``/exit`` (or pressed Ctrl+D); end the REPL."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -106,12 +106,10 @@ type SlashAction = (
 )
 
 # Quit phrases recognized by both REPL paths.
-QUIT_WORDS: frozenset[str] = frozenset({"/quit"})
+QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
 # Public list of supported commands; drives the unknown-command help line.
-_SUPPORTED = (
-    "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill /quit"
-)
+_SUPPORTED = "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill /quit /exit"
 
 
 def parse_slash(line: str) -> SlashAction | None:
