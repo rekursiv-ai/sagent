@@ -185,14 +185,20 @@ async def _dispatch(
         agent.shutdown(force=False)
         return True
     if isinstance(action, SlashHalt):
-        if action.target in ("", agent.name):
+        # Empty target halts self; non-empty target looks up the live
+        # registry label (which may have a ``_N`` suffix when default
+        # names collide). Comparing against ``agent.name`` here would
+        # halt the current agent on ``/halt Agent`` even if the live
+        # registry key is ``Agent_2`` -- a target/label mismatch.
+        if not action.target:
             agent.halt()
-        else:
-            other = agent_registry.get(action.target)
-            if isinstance(other, type(agent)):
-                other.halt()
-            elif printer is not None:
+            return False
+        other = agent_registry.get(action.target)
+        if other is None:
+            if printer is not None:
                 printer.write_tool_error(f"[/halt] unknown agent: {action.target}")
+            return False
+        other.halt()
         return False
     if isinstance(action, SlashKill):
         if action.target == "all":
