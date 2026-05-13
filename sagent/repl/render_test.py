@@ -285,6 +285,7 @@ def test_recording_printer_rendered_text_concats() -> None:
 def test_help_text_contains_core_commands() -> None:
     assert "/help" in HELP_TEXT
     assert "/quit" in HELP_TEXT
+    assert "/exit" in HELP_TEXT
     assert "/clear" in HELP_TEXT
 
 

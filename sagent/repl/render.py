@@ -350,7 +350,7 @@ HELP_TEXT = """\
 sagent commands
 
   /help                       this list
-  /quit                       exit
+  /quit, /exit                exit
 
   /clear                      wipe context (logs preserved on disk)
   /compact [hints]            compact history
