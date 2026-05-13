@@ -2366,6 +2366,97 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
+    """Reproduce: model streams → Halt → fresh ``UserMessage`` should
+    fire a new round.
+
+    User-reported symptom: type prompt, hit Ctrl+C ("[interrupted]"
+    appears, status pane stops), type a new prompt -- nothing happens
+    until typing again. Suspicion: ``AWAIT_USER``'s gate baseline
+    counts a UserMessage that was already in the inbox at Halt time
+    (e.g. pushed by ``_kb_submit``'s busy path), so the next fresh
+    UserMessage satisfies neither baseline nor gate-release.
+
+    Mirrors the live scenario:
+    - Round 1 streaming, ``UserMessage("first")`` already in history.
+    - Push ``Halt`` -- arms ``AWAIT_USER``.
+    - Push ``UserMessage("second")`` with no intervening yield.
+    - Expect: gate releases, Round 2 fires with ``second`` in history.
+
+    Distinct from ``test_halt_cancels_model_waits_for_user`` which
+    inserts ``await asyncio.sleep(0)`` between Halt and the next
+    UserMessage -- a gap the live UX doesn't have.
+    """
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class HaltableModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                stream_started.set()
+                # Block forever until cancelled, simulating a long
+                # streaming response the user halts.
+                await release_stream.wait()
+                msg = AssistantMessage(text="never-shown")
+            else:
+                msg = AssistantMessage(text="answer to second")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = HaltableModel()
+    agent = AgentRuntime(model=model)
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def halt_then_immediate_resume() -> None:
+        await stream_started.wait()
+        # Push Halt and the new UserMessage back-to-back with no
+        # intervening ``await asyncio.sleep(0)``. This mirrors the
+        # live REPL: Ctrl+C arms AWAIT_USER; the next Enter pushes
+        # UserMessage before the runtime has yielded.
+        agent.inbox.push_back(Halt())
+        agent.inbox.push_back(UserMessage(text="second"))
+        # Give the runtime time to process Halt + the new UserMessage
+        # and fire Round 2.
+        await asyncio.sleep(0.3)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        halt_then_immediate_resume(),
+    )
+
+    assert len(model.call_histories) >= 2, (
+        f"expected ≥ 2 model calls (Round 1 + Round 2 for 'second');"
+        f" got {len(model.call_histories)}."
+        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+    )
+    round2_history = model.call_histories[1]
+    assert any(
+        isinstance(m, UserMessage) and m.text == "second" for m in round2_history
+    ), (
+        f"Round 2 did not see 'second' in its history:"
+        f" {[type(m).__name__ for m in round2_history]}"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 
