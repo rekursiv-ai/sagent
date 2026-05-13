@@ -408,18 +408,18 @@ Sagent does not currently include:
 This comparison focuses on the runtime shape rather than every feature
 of each project.
 
-| | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [Flue](https://github.com/withastro/flue) | [Pi](https://pi.dev/) | [Attractor](https://github.com/strongdm/attractor) |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Python library                 | ✅ | 🟡    | ✅     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | ❌    |
-| Multi-provider                 | ✅ | ✅    | ✅     | ✅      | ✅    | ❌          | ❌        | ❌         | ✅    | ✅    | ✅    |
-| Context compaction             | ✅ | 🟡    | 🟡     | ❌      | 🟡    | ✅          | ✅        | ✅         | ❌    | ✅    | ✅    |
-| User-initiated backend swap    | ✅ | ✅    | ❌     | ✅      | ✅    | ❌          | ❌        | ❌         | ❌    | ✅    | ❌    |
-| Agent-initiated backend swap   | ✅ | ❌    | 🟡     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | 🟡    |
-| Agent self-mutation            | ✅ | ❌    | ❌     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | 🟡    | ❌    |
-| Context hot-swap               | ✅ | 🟡    | 🟡     | 🟡      | 🟡    | ❌          | ❌        | ❌         | 🟡    | ✅    | ✅    |
-| Recursive agent spawn          | ✅ | ❌    | ✅     | 🟡      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    |
-| Multi-agent (fully detached)   | ✅ | ❌    | ✅     | ✅      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    |
-| GitHub stars (May 2026)        | -- | 44.4k | 135.8k | 368.6k | 61.4k | --         | 80.1k     | 103.2k     | 2.5k  | 45.0k | 1.1k  |
+| | [Sagent](https://github.com/rekursiv-ai/sagent) | [aider](https://github.com/Aider-AI/aider) | [LangChain](https://github.com/langchain-ai/langchain) | [OpenClaw](https://github.com/openclaw/openclaw) | [Cline](https://github.com/cline/cline) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | [Codex CLI](https://github.com/openai/codex) | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | [Flue](https://github.com/withastro/flue) | [Pi](https://pi.dev/) | [Attractor](https://github.com/strongdm/attractor) | [npcsh](https://github.com/npc-worldwide/npcsh) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Python library                 | ✅ | 🟡    | ✅     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | ❌    | ✅  |
+| Multi-provider                 | ✅ | ✅    | ✅     | ✅      | ✅    | ❌          | ❌        | ❌         | ✅    | ✅    | ✅    | ✅  |
+| Context compaction             | ✅ | 🟡    | 🟡     | ❌      | 🟡    | ✅          | ✅        | ✅         | ❌    | ✅    | ✅    | ❌  |
+| User-initiated backend swap    | ✅ | ✅    | ❌     | ✅      | ✅    | ❌          | ❌        | ❌         | ❌    | ✅    | ❌    | ✅  |
+| Agent-initiated backend swap   | ✅ | ❌    | 🟡     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | ❌    | 🟡    | ❌  |
+| Agent self-mutation            | ✅ | ❌    | ❌     | ❌      | ❌    | ❌          | ❌        | ❌         | ❌    | 🟡    | ❌    | 🟡  |
+| Context hot-swap               | ✅ | 🟡    | 🟡     | 🟡      | 🟡    | ❌          | ❌        | ❌         | 🟡    | ✅    | ✅    | ❌  |
+| Recursive agent spawn          | ✅ | ❌    | ✅     | 🟡      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    | ✅  |
+| Multi-agent (fully detached)   | ✅ | ❌    | ✅     | ✅      | ❌    | 🟡          | 🟡        | ❌         | ✅    | 🟡    | ✅    | 🟡  |
+| GitHub stars (May 2026)        | -- | 44.4k | 135.8k | 368.6k | 61.4k | --         | 80.1k     | 103.2k     | 2.5k  | 48.6k | 1.1k  | 388 |
 
 ✅ = yes, 🟡 = partial, ❌ = no. Corrections welcome --
 [open a PR](https://github.com/rekursiv-ai/sagent/pulls).
@@ -491,19 +491,36 @@ agent-initiated backend swap -- the developer chooses the model at `init()`
 or per call. Skills, AGENTS.md, and per-call MCP tool injection are
 first-class.
 
-**[Pi](https://pi.dev/)** ([badlogic/pi-mono](https://github.com/badlogic/pi-mono)) --
+**[Pi](https://pi.dev/)** ([earendil-works/pi](https://github.com/earendil-works/pi),
+formerly `badlogic/pi-mono`) --
 TypeScript "minimal terminal coding harness." The design point is the
 opposite of Sagent's: ship aggressively few defaults and make every layer
 extensible (skills, prompt templates, themes, extensions, packages
 distributed via npm or git). `/model` and `Ctrl+L` swap the backend
-mid-session; `/tree` navigates session history as a branchable tree
-(genuine context hot-swap). `/reload` lets the agent rewrite its own files
-and pick up the change in place -- a soft form of self-mutation. Sub-agents,
-plan mode, permission gates, sandboxing, and MCP support are all explicitly
-*not* built in; install or build them via extensions. Print/JSON, RPC, and
-SDK modes make it embeddable. Star count reflects the whole `pi-mono`
-toolkit (CLI + LLM SDK + UI libraries + Slack bot), not the coding agent
-in isolation.
+mid-session; `/tree`, `/fork`, and `/clone` make session history a
+branchable tree (genuine context hot-swap); `/compact` runs a structured
+summarization prompt that records read/modified files. `/reload` lets the
+agent rewrite its own skills, prompts, themes, and extensions and pick up
+the change in place -- a soft form of self-mutation. Sub-agents ship only
+as an example extension; plan mode, permission gates, sandboxing, and MCP
+support are all similarly opt-in. Print/JSON, RPC, and SDK modes make it
+embeddable. Star count reflects the whole monorepo
+(`pi-coding-agent` + `pi-agent-core` + `pi-ai` + TUI/web-UI libraries),
+not the coding agent in isolation.
+
+**[npcsh](https://github.com/npc-worldwide/npcsh)** --
+Python "AI-powered, agentic shell" built on the sibling `npcpy` library and
+LiteLLM. The design point is the opposite of Sagent's minimalism: agents
+are filesystem-defined NPC personas (`.npc` files) grouped in YAML "teams,"
+tools are `.jinx` skill files, and dozens of full-screen modes ship in the
+box -- `/deep_research`, `/wander`, `/guac` (LLM Python REPL), `/yap`
+(voice), `/kg` (knowledge graph), `/convene` (multi-NPC discussion),
+`/delegate` (sub-agent with review loop), `/serve` (OpenAI-compatible team
+API). `/set model` and `/set provider` swap the backend mid-session;
+`/reattach` resumes prior sessions but there is no branchable session
+tree. Context "compaction" is a rate-limit fallback that drops middle
+messages (`_state.py:4183-4186`), not LLM-summarization. Sub-agents exist
+but are orchestrator-hub-and-spoke, not detached peers.
 
 **[Attractor](https://github.com/strongdm/attractor)** (StrongDM) --
 *Specification, not an implementation.* A pair of NLSpecs (`attractor-spec.md`,
