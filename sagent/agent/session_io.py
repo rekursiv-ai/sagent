@@ -33,10 +33,10 @@ from sagent.agent.runtime import (
     UserMessage,
     reset_id_counter,
 )
+from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.custom_types import Model, ModelSpec, TokenCount
 from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
-from sagent.tools.core import ReadCacheEntry, ToolState
 
 
 providers_lib = lazy_import("sagent.providers")
@@ -540,9 +540,75 @@ def load_session(
         restore_tool_state(state, snapshot)
     elif meta.bash_cwd:
         state.bash_cwd = meta.bash_cwd
+    history = repair_dangling_tool_calls(history)
     if history:
         reset_id_counter(max(e.id for e in history) + 1)
     return meta, history, state
+
+
+def repair_dangling_tool_calls(history: list[HistoryEntry]) -> list[HistoryEntry]:
+    """Synthesize ``[interrupted]`` results for orphan ``tool_use`` blocks.
+
+    A session can be interrupted mid-tool (Ctrl+C during execution):
+    the assistant message with ``tool_use`` got persisted but its
+    matching ``ToolResult`` did not. Resuming such a session would send
+    the model history with orphan tool_use to the provider, which
+    rejects it (Anthropic 400 ``tool_use ids were found without
+    tool_result blocks``; Gemini has the analogous functionCall rule).
+
+    In-memory history never produces orphans: the runtime always pairs
+    tool_use with a result (``[detached]`` on halt, ``is_error=True``
+    on exception). So the corruption only ever comes from disk loads,
+    which is why the repair lives here -- next to ``load_session``,
+    the producer of the only history shape that can have this defect.
+
+    Idempotent.
+
+    Args:
+      history: Conversation history just loaded from session.jsonl.
+
+    Returns:
+      repaired: Same entries with orphan ``ToolResult`` dropped and
+          synthetic ``ToolResult(is_error=True, content="[interrupted]")``
+          entries inserted for every unresolved ``tool_use``.
+
+    """
+    out: list[HistoryEntry] = []
+    i = 0
+    while i < len(history):
+        msg = history[i]
+        if isinstance(msg, AssistantMessage):
+            out.append(msg)
+            if msg.tool_calls:
+                expected = {tc.id for tc in msg.tool_calls}
+                seen: set[str] = set()
+                j = i + 1
+                while j < len(history) and isinstance(history[j], ToolResult):
+                    tr = history[j]
+                    assert isinstance(tr, ToolResult)
+                    if tr.call_id in expected and tr.call_id not in seen:
+                        seen.add(tr.call_id)
+                        out.append(tr)
+                    j += 1
+                out.extend(
+                    ToolResult(
+                        call_id=tc.id,
+                        content="[interrupted]",
+                        is_error=True,
+                    )
+                    for tc in msg.tool_calls
+                    if tc.id not in seen
+                )
+                i = j
+            else:
+                i += 1
+        elif isinstance(msg, ToolResult):
+            # Orphan tool_result with no preceding assistant tool_use; drop it.
+            i += 1
+        else:
+            out.append(msg)
+            i += 1
+    return out
 
 
 def _preserve_corrupt_session(session_file: Path) -> None:
@@ -552,6 +618,42 @@ def _preserve_corrupt_session(session_file: Path) -> None:
         backup.write_bytes(session_file.read_bytes())
     except OSError:
         logger.exception("Could not preserve corrupt session file %s.", session_file)
+
+
+def rebuild_content_cache(history: list[HistoryEntry], state: ToolState) -> None:
+    """Reseed ``ToolState`` content cache from disk for previously-touched files.
+
+    Walks Read/Edit/Write tool calls in the resumed history, collects
+    every ``file_path`` referenced, and reads the current disk content
+    for each. Result: ``check_stale`` has a content baseline matching
+    real disk bytes, so subsequent reads don't fire spurious
+    ``stale`` warnings on mtime drift (cloud sync, lint, etc.).
+
+    Binary / unreadable files are marked read with no content -- the
+    cache only carries text we can diff against.
+
+    Args:
+      history: Conversation history loaded from session.jsonl.
+      state: ToolState to mutate in place.
+
+    """
+    paths: set[str] = set()
+    for entry in history:
+        if not isinstance(entry, AssistantMessage):
+            continue
+        for tc in entry.tool_calls:
+            if tc.name.lower() not in ("read", "edit", "write", "multiedit"):
+                continue
+            fp = tc.args.get("file_path")
+            if isinstance(fp, str) and fp:
+                paths.add(fp)
+    for fp in paths:
+        try:
+            content = Path(fp).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            state.mark_read(fp)
+            continue
+        state.mark_read(fp, content=content)
 
 
 def restore_model(meta: SessionMeta) -> tuple[Model, ModelSpec] | None:

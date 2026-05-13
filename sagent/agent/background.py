@@ -28,7 +28,14 @@ import dataclasses
 
 from sagent.agent.runtime import ToolResult
 from sagent.custom_types import Tool
-from sagent.lib.json import JSON, MutableJSON, MutableJSONValue, json_freeze
+from sagent.lib.json import (
+    JSON,
+    MutableJSON,
+    MutableJSONValue,
+    bool_val,
+    int_val,
+    json_freeze,
+)
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -78,7 +85,7 @@ _BG_FIELDS: JSON = json_freeze(
         "background": {
             "type": "boolean",
             "description": (
-                "Run this tool asynchronously. Result delivered to inbox on completion."
+                "Run this tool asynchronously; result delivered at a later turn."
             ),
         },
         "delay": {
@@ -156,11 +163,12 @@ class BackgroundAwareTool:
         """
         return self._tool.summary_result(result)
 
-    def prompt(self) -> str:
+    def prompt(self) -> str | None:
         """Forward to the wrapped tool's system-prompt contribution.
 
         Returns:
-          contribution: Per-request prompt fragment, ``""`` if none.
+          contribution: Per-request prompt fragment, ``""`` for none,
+              or ``None`` to leave the per-section cache unchanged.
 
         """
         return self._tool.prompt()
@@ -176,3 +184,29 @@ class BackgroundAwareTool:
 
         """
         return await self._tool.run(args)
+
+
+def split_bg_args(
+    args: Mapping[str, object],
+) -> tuple[bool, float, dict[str, object]]:
+    """Pop ``background`` / ``delay`` from ``args``; return the rest.
+
+    The two keys are advertised to the LLM by ``BackgroundAwareTool``
+    but aren't part of the raw tool's schema. Strip before dispatch so
+    the inner tool doesn't see unexpected kwargs and validation
+    doesn't flag them.
+
+    Args:
+      args: Directive arguments as parsed from the model output.
+
+    Returns:
+      background: True when the LLM set ``background: true`` or
+          ``delay > 0`` (delay implies background).
+      delay_sec: Seconds to sleep before executing (``0.0`` for no delay).
+      clean_args: ``args`` minus ``background`` / ``delay``.
+
+    """
+    clean = {k: v for k, v in args.items() if k not in ("background", "delay")}
+    delay_sec = float(int_val(args.get("delay"), 0))
+    background = bool_val(args.get("background"), default=False) or delay_sec > 0
+    return background, max(0.0, delay_sec), clean

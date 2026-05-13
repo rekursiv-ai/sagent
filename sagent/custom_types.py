@@ -210,11 +210,13 @@ class Tool(Protocol):
         """
         ...
 
-    def prompt(self) -> str:
+    def prompt(self) -> str | None:
         """Per-request system-prompt contribution for this tool.
 
         Returns:
-          contribution: Prompt fragment, or ``""`` for no contribution.
+          contribution: Prompt fragment, ``""`` for no contribution this
+              round, or ``None`` to signal "no change since last call"
+              so per-section caches can stay byte-identical.
 
         """
         ...
@@ -485,14 +487,23 @@ class Compactor(Protocol):
         self,
         history: list[HistoryEntry],
         tools: dict[str, Tool],
-        **kwargs: object,
+        *,
+        last_response_time: float = 0.0,
+        gap_sec: float = 3600.0,
+        keep_recent: int = 5,
     ) -> None:
         """Apply between-request context maintenance (microcompaction).
 
         Args:
           history: Conversation history; mutated in place.
           tools: Tool registry; consulted for tool-specific trimming rules.
-          **kwargs: Reserved for future maintenance hooks.
+          last_response_time: Wall-clock seconds of the last response;
+              used to gate microcompaction on cache-cold likelihood.
+              ``0.0`` means "treat as cold (always microcompact)".
+          gap_sec: Microcompaction is skipped when ``time.time() -
+              last_response_time <= gap_sec`` so cache-warm requests
+              aren't disturbed.
+          keep_recent: Number of recent clearable results preserved.
 
         """
 

@@ -28,7 +28,6 @@ from sagent.tools.core import (
     load_tool_description,
     run_sync,
 )
-from sagent.tools.input_errors import tool_input_error_text
 from sagent.tools.prompt_text import escape_prompt_text
 
 
@@ -310,10 +309,14 @@ def _read_page_op(root: Path, slug: str) -> str | ToolResult:
     if not slug:
         return ToolResult(
             call_id="",
-            content=tool_input_error_text(
-                "Wiki",
-                "operation='read_page' requires `slug`.",
-                required=("slug",),
+            content=(
+                "ToolInputError: Wiki failed: operation='read_page' requires"
+                " `slug`.\n\nWiki requires: `slug`.\n\nThis tool call was not"
+                " executed because its JSON directive was missing or"
+                " misstated required fields. Do not repeat the same empty or"
+                " incomplete call. Either retry this tool with the required"
+                " fields, choose a different tool that fits the task, or"
+                " explain why the required value is unavailable."
             ),
             is_error=True,
         )

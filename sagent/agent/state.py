@@ -446,3 +446,27 @@ class AgentLike(Protocol):
 
 # Process-wide registry of live agents, keyed by label.
 agent_registry: dict[str, AgentLike] = {}
+
+
+def unique_registry_label(base: str) -> str:
+    """Pick the first free ``{base}`` / ``{base}_1`` / ... key.
+
+    Used by ``Agent._install_contextvars`` so two agents with the same
+    default name (the orchestrator builds many ``Agent`` instances with
+    ``name="Agent"``) don't overwrite each other's ``agent_registry``
+    entry and break ``AgentSend`` routing.
+
+    Args:
+      base: Preferred registry key for this agent.
+
+    Returns:
+      label: ``base`` when unused, else the smallest free numeric suffix.
+
+    """
+    if base not in agent_registry:
+        return base
+    for i in itertools.count(1):
+        candidate = f"{base}_{i}"
+        if candidate not in agent_registry:
+            return candidate
+    raise AssertionError("unreachable")  # itertools.count is infinite

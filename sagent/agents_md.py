@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import logging
@@ -46,8 +46,6 @@ from markdown_it import MarkdownIt
 
 if TYPE_CHECKING:
     from markdown_it.token import Token
-
-import pathspec
 
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 
@@ -115,44 +113,6 @@ def build_section(
     cfg = config or AgentsMdConfig()
     files = _discover(cwd, cfg)
     return _format_for_prompt([f for f in files if not f.globs])
-
-
-def file_triggered_md_reminder(
-    cwd: Path,
-    target_paths: Iterable[Path],
-    *,
-    config: AgentsMdConfig | None = None,
-    exclude_paths: set[Path] | None = None,
-) -> str:
-    """Render matching file-triggered fragments as a ``<system-reminder>``.
-
-    Args:
-      cwd: Current working directory.
-      target_paths: File paths to match against rule globs.
-      config: Discovery configuration. Uses defaults if None.
-      exclude_paths: Paths already emitted (mutated in-place to track
-        newly matched paths, so callers can dedup across batches).
-
-    Returns:
-      reminder: Formatted ``<system-reminder>`` block, or empty string.
-
-    """
-    matches = _matching_file_triggered_md(
-        cwd,
-        target_paths,
-        config=config,
-    )
-    if exclude_paths is not None:
-        matches = [m for m in matches if m.path not in exclude_paths]
-        for m in matches:
-            exclude_paths.add(m.path)
-    if not matches:
-        return ""
-    parts = [
-        f"Contents of {r.path} ({r.description}):\n\n{r.content.strip()}"
-        for r in matches
-    ]
-    return "<system-reminder>\n" + "\n\n".join(parts) + "\n</system-reminder>"
 
 
 def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
@@ -431,48 +391,3 @@ def _walk_tokens(
             _walk_tokens(tok.children, base_dir=base_dir, paths=paths, seen=seen)
         if tok.type == "text":
             _scan_includes(tok.content, base_dir=base_dir, paths=paths, seen=seen)
-
-
-def _matching_file_triggered_md(
-    cwd: Path,
-    target_paths: Iterable[Path],
-    *,
-    config: AgentsMdConfig | None = None,
-) -> list[_AgentMdFile]:
-    """Return glob-conditional files matching any of ``target_paths``."""
-    cfg = config or AgentsMdConfig()
-    all_files = _discover(cwd, cfg)
-    conditional = [f for f in all_files if f.globs]
-    if not conditional:
-        return []
-    targets = list(target_paths)
-    matched: dict[Path, _AgentMdFile] = {}
-    for rule in conditional:
-        if rule.path in matched:
-            continue
-        if any(_rule_matches(rule, t, cwd, cfg.dot_dir) for t in targets):
-            matched[rule.path] = rule
-    return list(matched.values())
-
-
-def _rule_matches(rule: _AgentMdFile, target: Path, cwd: Path, dot_dir: str) -> bool:
-    """True if ``target`` matches any glob in ``rule.globs``."""
-    if not rule.globs:
-        return False
-    base = _rule_base_dir(rule, cwd, dot_dir)
-    try:
-        rel = target.resolve().relative_to(base.resolve())
-    except (ValueError, OSError):
-        return False
-    spec = pathspec.GitIgnoreSpec.from_lines(rule.globs)
-    return spec.match_file(str(PurePosixPath(rel)))
-
-
-def _rule_base_dir(rule: _AgentMdFile, cwd: Path, dot_dir: str) -> Path:
-    """Directory that ``rule.globs`` patterns are relative to."""
-    if rule.memory_type in ("Managed", "User"):
-        return cwd
-    for parent in rule.path.parents:
-        if parent.name == dot_dir:
-            return parent.parent
-    return rule.path.parent

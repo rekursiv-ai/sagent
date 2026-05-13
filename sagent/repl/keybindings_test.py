@@ -119,6 +119,22 @@ def test_enter_queues_during_model_call() -> None:
     buf.validate_and_handle.assert_not_called()
 
 
+def test_enter_routes_slash_command_through_pump_when_busy() -> None:
+    """A slash command typed mid-flight must NOT be pushed as a
+    UserMessage -- the pump needs to see it so e.g. ``/model`` prints
+    its read-mode response immediately instead of being treated as a
+    user prompt to the model.
+    """
+    agent = _busy_agent()
+    pending: list[str] = []
+    kb = _build(agent, pending)
+    buf = _fake_buf("/model")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    buf.validate_and_handle.assert_called_once()
+    assert agent.runtime.inbox.items == []
+    assert pending == []
+
+
 def test_enter_queues_during_tool_cohort() -> None:
     agent = _cohort_agent()
     pending: list[str] = []

@@ -19,10 +19,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+import asyncio
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import ToolResult
+from sagent.agent.runtime import (
+    DetachedResult,
+    RuntimeEvent,
+    ToolResult,
+)
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import current_agent_var, load_tool_description
 
@@ -184,7 +189,22 @@ class BackgroundTask:
         )
 
     async def _foreground(self, agent: AgentLike, job_id: str) -> ToolResult:
-        """Await a tracked background task and return its result."""
+        """Resolve a tracked background task to its result.
+
+        Tracked tasks post results via ``DetachedResult`` to the
+        runtime inbox; the task object itself returns ``None``. If the
+        result has already been spliced into history (splice fires when
+        the runtime drains the ``DetachedResult``), read it from there;
+        otherwise wait for the event.
+
+        Args:
+          agent: The current agent.
+          job_id: Queue id of the registered task to foreground.
+
+        Returns:
+          result: The completed task's tool result, or an error result.
+
+        """
         if not job_id:
             return ToolResult(
                 call_id="", content="foreground requires an id", is_error=True
@@ -195,16 +215,41 @@ class BackgroundTask:
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
         try:
-            result = await job.task
-        except Exception as e:  # noqa: BLE001 -- task errors are heterogeneous
-            agent.cancel_background(job_id)
+            spliced = _find_history_result(agent, job_id)
+            if spliced is None:
+                spliced = await _await_detached(agent, job_id)
             return ToolResult(
-                call_id="",
-                content=f"Job {job_id} failed: {type(e).__name__}: {e}",
-                is_error=True,
+                call_id="", content=spliced.content, is_error=spliced.is_error
             )
-        agent.cancel_background(job_id)
-        # The task's result is a ToolResult from ``_AgentTool.run``; return it.
-        if isinstance(result, ToolResult):
-            return result
-        return ToolResult(call_id="", content=str(result))
+        finally:
+            agent.cancel_background(job_id)
+
+
+def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
+    """Return the most recent ``ToolResult`` matching ``call_id``, or ``None``."""
+    for entry in reversed(agent.runtime.history):
+        if isinstance(entry, ToolResult) and entry.call_id == call_id:
+            return entry
+    return None
+
+
+async def _await_detached(agent: AgentLike, call_id: str) -> ToolResult:
+    """Wait for a ``DetachedResult`` matching ``call_id`` and return it."""
+    fut: asyncio.Future[ToolResult] = asyncio.get_running_loop().create_future()
+
+    def on_event(event: RuntimeEvent) -> None:
+        if fut.done():
+            return
+        if isinstance(event, DetachedResult) and event.call_id == call_id:
+            fut.set_result(
+                ToolResult(
+                    call_id=call_id, content=event.content, is_error=event.is_error
+                ),
+            )
+
+    agent.runtime.observers.append(on_event)
+    try:
+        return await fut
+    finally:
+        if on_event in agent.runtime.observers:
+            agent.runtime.observers.remove(on_event)

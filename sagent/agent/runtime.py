@@ -139,7 +139,7 @@ keeps all state transitions in one match block, visible in one read.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -329,21 +329,23 @@ class Undetach:
     """Specific call to re-gate on, or ``None`` for all."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelSwitch:
-    """Swap the active model/provider."""
+    """Queue a model swap; the runtime applies it once safe.
 
-    model_id: str = ""
-    """Target model id."""
+    The slash handler builds the new model synchronously and packages
+    the swap as ``apply``. The runtime defers the call until
+    ``model_call`` and ``compact_task`` are both ``None`` so the
+    in-flight response finishes against the OLD model (cost
+    attribution, retry state, etc. stay self-consistent) and only the
+    NEXT call uses the new model.
+    """
 
-    provider: str = ""
-    """Provider key (e.g. ``anthropic``)."""
+    apply: Callable[[], None]
+    """Closure that performs the swap (typically ``agent.swap_model``)."""
 
-    auth: str = ""
-    """Auth flavor (e.g. ``key``, ``sub``)."""
-
-    account: str = ""
-    """Optional account scope."""
+    label: str = ""
+    """Optional human-readable label shown to renderers (e.g. ``old -> new``)."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -482,6 +484,19 @@ class SaveSession:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class StatusChanged:
+    """Agent ``status`` field was updated.
+
+    Publish-only: emitted by ``Agent.status`` setter. Renderers update
+    the terminal title, persistence observers re-flush ``meta`` so the
+    new status survives a crash even without a history delta.
+    """
+
+    text: str
+    """New status string."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolLabel:
     """Pre-execution label for a tool call (REPL rendering).
 
@@ -560,6 +575,7 @@ type RuntimeEvent = (
     | CompactStarted
     | CompactComplete
     | SaveSession
+    | StatusChanged
     | ToolLabel
     | ChildEvent
     | ChildDoneEvent
@@ -578,11 +594,26 @@ AWAIT_USER = Await((UserMessage, Quit))
 
 
 class GatedDeque[T]:
-    """Async item queue with drain gating."""
+    """Async item queue with drain gating.
+
+    The gate counts items matching its types that are already in the
+    queue at arm-time as ``_gate_baseline``. ``drain`` releases only
+    when the running count exceeds the baseline (a NEW item arrived
+    after arming) -- or when any ``Quit`` is seen, which always
+    releases regardless of baseline.
+
+    Why the baseline matters: under ``Halt``, the runtime arms
+    ``AWAIT_USER`` then requeues drained items. If a pending
+    ``UserMessage`` were already in the deque (the user typed multiple
+    redirects while busy), it would otherwise satisfy the gate
+    immediately and the ``/halt`` semantic ("wait for a fresh
+    redirect") would be lost.
+    """
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[T] = asyncio.Queue()
         self._gate: tuple[type, ...] | None = None
+        self._gate_baseline: int = 0
 
     def push_back(self, item: T) -> None:
         """Add to back of queue.
@@ -610,6 +641,13 @@ class GatedDeque[T]:
         for item in items:
             if isinstance(item, Await):
                 self._gate = item.types
+                # Snapshot how many pre-existing items already satisfy
+                # the gate (excluding ``Quit`` which always releases).
+                self._gate_baseline = sum(
+                    1
+                    for i in old
+                    if isinstance(i, item.types) and not isinstance(i, Quit)
+                )
             else:
                 self._queue.put_nowait(item)
         for item in old:
@@ -618,8 +656,9 @@ class GatedDeque[T]:
     async def drain(self) -> list[T]:
         """Block until items are available, then return all queued items.
 
-        When a gate is set, keeps draining until an item matching the
-        gate types (or Quit) arrives.
+        When a gate is set, keeps draining until a NEW item matching
+        the gate types arrives (count exceeds the baseline captured at
+        arm time) or until any ``Quit`` is observed.
 
         Returns:
           items: All queued items in arrival order.
@@ -634,7 +673,8 @@ class GatedDeque[T]:
                 break
         if self._gate is not None:
             gate = self._gate
-            while not any(isinstance(i, (*gate, Quit)) for i in items):
+            baseline = self._gate_baseline
+            while not _gate_satisfied(items, gate, baseline):
                 items.append(await self._queue.get())
                 while not self._queue.empty():
                     try:
@@ -642,7 +682,20 @@ class GatedDeque[T]:
                     except asyncio.QueueEmpty:
                         break
             self._gate = None
+            self._gate_baseline = 0
         return items
+
+
+def _gate_satisfied(
+    items: Sequence[object],
+    gate: tuple[type, ...],
+    baseline: int,
+) -> bool:
+    """Return True when ``items`` satisfies the gate beyond ``baseline``."""
+    if any(isinstance(i, Quit) for i in items):
+        return True
+    count = sum(1 for i in items if isinstance(i, gate) and not isinstance(i, Quit))
+    return count > baseline
 
 
 class Tool(Protocol):
@@ -765,6 +818,10 @@ class AgentRuntime:
         self.cohort: set[str] = set()
         self.model_call: asyncio.Task[None] | None = None
         self.compact_task: asyncio.Task[None] | None = None
+        # Buffered ModelSwitch awaiting a safe moment (no in-flight
+        # model call, no compaction). Applied at the end of each
+        # iteration once that condition holds.
+        self._pending_switch: ModelSwitch | None = None
 
     def publish(self, event: RuntimeEvent) -> None:
         """Fan out an event to all observers.
@@ -928,7 +985,7 @@ class AgentRuntime:
                             for tc in msg.tool_calls:
                                 self.cohort.add(tc.id)
                                 self.running_tools[tc.id] = asyncio.create_task(
-                                    self._run_tool_and_post(tc),
+                                    self._run_tool_and_post(tc, parent_id=msg.id),
                                 )
                         else:
                             self.publish(ModelIdle())
@@ -948,20 +1005,60 @@ class AgentRuntime:
 
                     case DetachedResult():
                         self.cohort.discard(item.call_id)
-                        self.history.append(
-                            UserMessage(
-                                text=(
-                                    f"[Tool {item.call_id} completed]\n{item.content}"
+                        # Splice into the existing placeholder so the
+                        # model sees the real result in the slot it
+                        # already expects, not a phantom user message
+                        # that triggers an extra round. Both
+                        # ``[detached]`` (preempt) and ``[Running in
+                        # background: ...]`` (explicit-bg) placeholders
+                        # match by ``call_id``.
+                        spliced = False
+                        for i, prior in enumerate(self.history):
+                            if (
+                                isinstance(prior, ToolResult)
+                                and prior.call_id == item.call_id
+                            ):
+                                self.history[i] = dataclasses.replace(
+                                    prior,
+                                    content=item.content,
+                                    is_error=item.is_error,
+                                )
+                                spliced = True
+                                break
+                        if not spliced:
+                            # No placeholder to splice into (rare: result
+                            # arrived before the stub was inserted). Fall
+                            # back to a user message so the content isn't
+                            # silently dropped.
+                            self.history.append(
+                                UserMessage(
+                                    text=(
+                                        f"[Tool {item.call_id} completed]\n"
+                                        f"{item.content}"
+                                    ),
                                 ),
-                            ),
-                        )
+                            )
                         self.publish(item)
 
                     case ModelSwitch():
-                        self.publish(item)
+                        # Buffer the switch; applied below once the
+                        # in-flight model call / compaction (if any)
+                        # completes. The OLD model finishes recording
+                        # its cost before the swap lands.
+                        self._pending_switch = item
 
                     case _:
                         pass
+
+            if (
+                self._pending_switch is not None
+                and self.model_call is None
+                and self.compact_task is None
+            ):
+                pending = self._pending_switch
+                self._pending_switch = None
+                pending.apply()
+                self.publish(pending)
 
             if not self.cohort and cohort_seen:
                 self.publish(CohortComplete())
@@ -1072,28 +1169,40 @@ class AgentRuntime:
             )
             self.inbox.push_back(ModelResponseComplete(message=response))
         except asyncio.CancelledError:
-            self.inbox.push_back(
+            # Publish directly (not via inbox): the Halt handler has
+            # already armed ``AWAIT_USER``, so an inbox push would gate
+            # this event behind the next ``UserMessage`` -- and the
+            # render/activity observers would miss it. They need to
+            # flush the streaming buffer and stop the spinner NOW.
+            self.publish(
                 ModelResponseCancelled(output_chars_estimate=chars),
             )
         except Exception as exc:
             logger.exception("model call failed")
             self.inbox.push_back(ModelResponseError(exc))
 
-    async def _run_tool_and_post(self, call: ToolCall) -> None:
+    async def _run_tool_and_post(
+        self,
+        call: ToolCall,
+        *,
+        parent_id: int = -1,
+    ) -> None:
         """Run one tool invocation, post the ``ToolResult`` to the inbox.
 
         Tool authors return a fully-formed ``ToolResult``; the runtime
-        stamps ``call_id`` from ``call.id`` when the result has an empty
-        one. Exceptions auto-convert to ``is_error=True``. If the tool
-        was detached mid-flight, the runtime emits ``DetachedResult``
-        instead of ``ToolResult`` so the late completion arrives as
-        context rather than being silently dropped by the cohort gate.
+        stamps ``call_id`` (and ``parent_id`` when unset) from the
+        originating assistant message. Exceptions auto-convert to
+        ``is_error=True``. If the tool was detached mid-flight, the
+        runtime emits ``DetachedResult`` instead of ``ToolResult`` so
+        the late completion arrives as context rather than being
+        silently dropped by the cohort gate.
         """
         tool = self.tools_map.get(call.name)
         if tool is None:
             self.inbox.push_back(
                 ToolResult(
                     call_id=call.id,
+                    parent_id=parent_id,
                     content=f"Unknown tool: {call.name}",
                     is_error=True,
                 ),
@@ -1105,13 +1214,19 @@ class AgentRuntime:
         call_token = current_call_id_var.set(call.id)
         try:
             result = await tool.run(call.args)
+            replacements: dict[str, object] = {}
             if not result.call_id:
-                result = dataclasses.replace(result, call_id=call.id)
+                replacements["call_id"] = call.id
+            if result.parent_id == -1 and parent_id != -1:
+                replacements["parent_id"] = parent_id
+            if replacements:
+                result = dataclasses.replace(result, **replacements)
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
             result = ToolResult(
                 call_id=call.id,
+                parent_id=parent_id,
                 content=f"{type(exc).__name__}: {exc}",
                 is_error=True,
             )

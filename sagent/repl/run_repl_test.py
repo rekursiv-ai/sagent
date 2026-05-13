@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import inspect
 
 from sagent.agent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.runtime import ModelSwitch
 from sagent.custom_types import ModelSpec
+from sagent.lib import last_models
+from sagent.providers import Google
 from sagent.repl.render import RecordingPrinter
+
+
+if TYPE_CHECKING:
+    import pytest
 from sagent.repl.run_repl import (
     _parse_model_args,
+    _resolve_model_target,
     do_login,
     do_switch_model,
     format_tasks,
@@ -25,20 +33,28 @@ _DEFAULT_PROV = "Anthropic"
 _DEFAULT_AUTH = "api"
 _DEFAULT_MODEL = "claude-opus-4-7"
 _DEFAULT_ACCOUNT: str | None = None
+_DEFAULT_SPEC = ModelSpec(
+    provider=_DEFAULT_PROV,
+    auth=_DEFAULT_AUTH,
+    model_id=_DEFAULT_MODEL,
+    account=_DEFAULT_ACCOUNT,
+)
 
 
 def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
-    return _parse_model_args(
-        list(tokens),
-        _DEFAULT_PROV,
-        _DEFAULT_AUTH,
-        _DEFAULT_MODEL,
-        _DEFAULT_ACCOUNT,
-    )
+    """Parse + resolve helper: mirrors the old _parse_model_args contract.
+
+    Tests assert against the final resolved 4-tuple; this composes the
+    two-stage parser+resolver into one call.
+    """
+    parsed = _parse_model_args(list(tokens))
+    if isinstance(parsed, str):
+        return parsed
+    return _resolve_model_target(parsed, _DEFAULT_SPEC)
 
 
 def test_parse_model_args_no_tokens_returns_usage_string() -> None:
-    out = _parse_model_args([], _DEFAULT_PROV, _DEFAULT_AUTH, _DEFAULT_MODEL, None)
+    out = _parse_model_args([])
     assert isinstance(out, str)
     assert "usage" in out
 
@@ -53,9 +69,14 @@ def test_parse_model_args_flag_provider() -> None:
     assert out == ("Google", _DEFAULT_AUTH, None, "gemini-3-pro")
 
 
-def test_parse_model_args_short_flag_provider() -> None:
+def test_parse_model_args_short_flag_provider_falls_back_to_default_model() -> None:
+    """Switching provider with no model → provider's DEFAULT_MODEL.
+
+    With no entry in ``~/.sagent/last-models.json`` for Google, the
+    resolver falls back to ``Google.DEFAULT_MODEL``.
+    """
     out = _parse("-p", "Google")
-    assert out == ("Google", _DEFAULT_AUTH, None, _DEFAULT_MODEL)
+    assert out == ("Google", _DEFAULT_AUTH, None, Google.DEFAULT_MODEL)
 
 
 def test_parse_model_args_flag_auth() -> None:
@@ -68,9 +89,10 @@ def test_parse_model_args_flag_account() -> None:
     assert out == (_DEFAULT_PROV, _DEFAULT_AUTH, "work", _DEFAULT_MODEL)
 
 
-def test_parse_model_args_kv_provider() -> None:
+def test_parse_model_args_kv_provider_falls_back_to_default_model() -> None:
+    """``/model provider=Google`` with no model picks Google.DEFAULT_MODEL."""
     out = _parse("provider=Google")
-    assert out == ("Google", _DEFAULT_AUTH, None, _DEFAULT_MODEL)
+    assert out == ("Google", _DEFAULT_AUTH, None, Google.DEFAULT_MODEL)
 
 
 def test_parse_model_args_kv_auth() -> None:
@@ -115,9 +137,37 @@ def test_parse_model_args_mixed_flags_and_bare_model() -> None:
     assert out == ("Google", "sub", None, "gemini-3-pro")
 
 
+def test_provider_switch_uses_last_used_when_known(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/model provider=Google`` prefers the last-used Google model over the default.
+
+    When ``~/.sagent/last-models.json`` already records a model_id for
+    Google (because the user previously typed e.g. ``/model
+    gemini-2.5-experimental``), the resolver picks that up. The
+    ``Google.DEFAULT_MODEL`` fallback only applies on cold-start.
+    """
+    monkeypatch.setattr(last_models, "load", lambda: {"Google": "remembered-model"})
+    out = _parse("provider=Google")
+    assert out == ("Google", _DEFAULT_AUTH, None, "remembered-model")
+
+
 @dataclass(slots=True, kw_only=True)
 class _FakeModel:
     model_id: str = "claude-opus-4-7"
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeInbox:
+    pushed: list[object] = field(default_factory=list)
+
+    def push_back(self, item: object) -> None:
+        self.pushed.append(item)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeRuntime:
+    inbox: _FakeInbox = field(default_factory=_FakeInbox)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -128,6 +178,8 @@ class _FakeAgent:
             provider="Anthropic", auth="api", model_id="claude-opus-4-7"
         ),
     )
+    runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+    work: object = None
     swap_calls: list[tuple[_FakeModel, ModelSpec | None]] = field(default_factory=list)
 
     def swap_model(self, model: _FakeModel, *, spec: ModelSpec | None = None) -> None:
@@ -175,7 +227,10 @@ def test_do_switch_model_unknown_flag_writes_error() -> None:
     assert agent.swap_calls == []
 
 
-def test_do_switch_model_success_swaps_and_prints_label() -> None:
+def test_do_switch_model_success_queues_swap_event() -> None:
+    """Slash handler pushes a ``ModelSwitch`` event; swap fires when
+    runtime applies the event's ``apply`` callable.
+    """
     agent = _FakeAgent()
     printer = RecordingPrinter()
     new_model = _FakeModel(model_id="claude-sonnet-4-6")
@@ -192,6 +247,11 @@ def test_do_switch_model_success_swaps_and_prints_label() -> None:
         ),
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
+    assert agent.swap_calls == []  # deferred until runtime applies
+    assert len(agent.runtime.inbox.pushed) == 1
+    switch_event = agent.runtime.inbox.pushed[0]
+    assert isinstance(switch_event, ModelSwitch)
+    switch_event.apply()
     assert len(agent.swap_calls) == 1
     swapped_model, spec = agent.swap_calls[0]
     assert swapped_model is new_model
@@ -220,6 +280,9 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
         ),
     ):
         do_switch_model(_as_agent(agent), "gemini-3-pro", printer)
+    switch_event = agent.runtime.inbox.pushed[0]
+    assert isinstance(switch_event, ModelSwitch)
+    switch_event.apply()
     assert len(agent.swap_calls) == 1
     _, spec = agent.swap_calls[0]
     assert spec is not None

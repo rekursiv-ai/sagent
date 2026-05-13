@@ -125,6 +125,27 @@ def test_build_messages_consecutive_tool_results_batched_into_single_user() -> N
     assert len(tool_results) == 2
 
 
+def test_user_after_tool_results_coalesces_into_same_wire_msg() -> None:
+    """C1: mid-cohort user text MUST merge with pending tool_results.
+
+    Emitting a separate ``role=user`` message after a ``role=user``
+    (tool_results) breaks Anthropic's strict alternation and triggers
+    HTTP 400. The fix coalesces both into the same wire user message.
+    """
+    asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
+    tool_result = ToolResult(call_id="c1", content="[detached]")
+    user_redirect = UserMessage(text="actually do something else")
+    msgs = _build_messages(_make_request([asst, tool_result, user_redirect]))
+    # Expect 2 messages: assistant(tool_use) + user(tool_result + text).
+    assert len(msgs) == 2, [m["role"] for m in msgs]
+    assert msgs[0]["role"] == "assistant"
+    assert msgs[1]["role"] == "user"
+    content = cast(list[dict[str, object]], msgs[1]["content"])
+    types = {b.get("type") for b in content}
+    assert "tool_result" in types
+    assert "text" in types
+
+
 def test_build_messages_tool_result_id_pairs_with_call() -> None:
     asst = AssistantMessage(
         tool_calls=(ToolCall(id="orig-X", name="N", args={}),),

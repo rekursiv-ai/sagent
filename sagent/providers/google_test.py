@@ -109,6 +109,31 @@ def test_build_request_tool_result_emits_function_response_with_name() -> None:
     assert response["content"] == "done"
 
 
+def test_user_after_tool_results_coalesces_into_same_wire_content() -> None:
+    """C1: mid-cohort user text MUST merge with pending functionResponse parts.
+
+    Emitting a separate ``role=user`` content after a ``role=user``
+    holding functionResponse parts breaks Gemini's user/model
+    alternation requirement. The fix coalesces both into the same wire
+    content.
+    """
+    asst = AssistantMessage(
+        tool_calls=(ToolCall(id="c1", name="MyTool", args={}),),
+    )
+    tool_result = ToolResult(call_id="c1", content="[detached]")
+    user_redirect = UserMessage(text="actually do something else")
+    body = _build_request(_make_request([asst, tool_result, user_redirect]))
+    contents = cast(list[MutableJSON], body["contents"])
+    # 2 contents: model(functionCall) + user(functionResponse + text).
+    assert len(contents) == 2, [c["role"] for c in contents]
+    assert contents[0]["role"] == "model"
+    assert contents[1]["role"] == "user"
+    parts = cast(list[MutableJSON], contents[1]["parts"])
+    keys = {k for p in parts for k in p}
+    assert "functionResponse" in keys
+    assert "text" in keys
+
+
 def test_build_request_tool_result_error_prefix() -> None:
     asst = AssistantMessage(tool_calls=(ToolCall(id="x", name="N", args={}),))
     res = ToolResult(call_id="x", content="boom", is_error=True)

@@ -34,6 +34,9 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
 from sagent import providers
+from sagent.agent.runtime import ModelSwitch
+from sagent.custom_types import ModelSpec
+from sagent.lib import last_models
 from sagent.providers import build_provider, infer_provider
 from sagent.repl.console import ConsolePrinter
 from sagent.repl.input import REPL_PUMP_KEY, spawn_repl_pump
@@ -164,14 +167,18 @@ def do_switch_model(
             f"model={spec.model_id} account={spec.account or 'default'}",
         )
         return
-    parsed = _parse_model_args(
-        tokens, spec.provider, spec.auth, spec.model_id, spec.account
-    )
+    parsed = _parse_model_args(tokens)
     if isinstance(parsed, str):
         _write(printer, parsed)
         return
-    prov_name, auth, account, model_id = parsed
-    if model_id and prov_name == spec.provider:
+    try:
+        prov_name, auth, account, model_id = _resolve_model_target(parsed, spec)
+    except AttributeError as exc:
+        _write(printer, f"[/model] {exc}")
+        return
+    # Bare model_id on the SAME provider may imply a different provider
+    # (e.g. ``/model gemini-3-pro`` while on Anthropic). Infer.
+    if parsed.model_id and prov_name == spec.provider:
         inferred = infer_provider(model_id, prov_name)
         if inferred is not None:
             prov_name, auth = inferred
@@ -182,21 +189,28 @@ def do_switch_model(
         _write(printer, f"[/model] {exc}")
         return
     old_id = agent.model.model_id
-    agent.swap_model(
-        new_model,
-        spec=dataclasses.replace(
-            spec,
-            provider=prov_name,
-            auth=auth,
-            model_id=new_model.model_id,
-            account=account,
-        ),
+    new_spec = dataclasses.replace(
+        spec,
+        provider=prov_name,
+        auth=auth,
+        model_id=new_model.model_id,
+        account=account,
     )
     if prov_name != spec.provider:
         label = f"{spec.provider}/{old_id} -> {prov_name}/{new_model.model_id}"
     else:
         label = f"{old_id} -> {new_model.model_id}"
-    _write(printer, f"[/model] {label}")
+    # Queue the swap through the runtime inbox so it sequences with
+    # any in-flight model call: the OLD model finishes its response
+    # (and records its own cost) before the new one becomes active.
+    agent.runtime.inbox.push_back(
+        ModelSwitch(
+            apply=lambda: agent.swap_model(new_model, spec=new_spec),
+            label=label,
+        ),
+    )
+    queued = " (queued)" if agent.work is not None else ""
+    _write(printer, f"[/model] {label}{queued}")
 
 
 def do_login(agent: Agent, printer: Printer | None) -> None:
@@ -290,35 +304,43 @@ _FLAG_ACCOUNT = ("--account",)
 _KV_KEYS = frozenset({"provider", "auth", "account", "model", "model_id"})
 
 
-def _parse_model_args(
-    tokens: list[str],
-    cur_provider: str,
-    cur_auth: str,
-    cur_model_id: str,
-    cur_account: str | None,
-) -> tuple[str, str, str | None, str] | str:
-    """Parse ``/model`` arguments. Return (provider, auth, account, model) or error str."""
-    prov_name = cur_provider
-    auth = cur_auth
-    account = cur_account
-    model_id = cur_model_id
-    nothing_supplied = True
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ParsedModelArgs:
+    """Only the fields the user explicitly typed; rest stay ``None``.
+
+    ``account_set`` disambiguates "user typed account=" (with empty or
+    'default' → ``None``) from "user didn't mention account at all."
+
+    """
+
+    provider: str | None = None
+    auth: str | None = None
+    account: str | None = None
+    account_set: bool = False
+    model_id: str | None = None
+
+
+def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
+    """Parse ``/model`` tokens; return explicit fields, or an error string."""
+    provider: str | None = None
+    auth: str | None = None
+    account: str | None = None
+    account_set = False
+    model_id: str | None = None
     i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok in _FLAG_PROVIDER and i + 1 < len(tokens):
-            prov_name = tokens[i + 1]
-            nothing_supplied = False
+            provider = tokens[i + 1]
             i += 2
             continue
         if tok in _FLAG_AUTH and i + 1 < len(tokens):
             auth = tokens[i + 1]
-            nothing_supplied = False
             i += 2
             continue
         if tok in _FLAG_ACCOUNT and i + 1 < len(tokens):
             account = tokens[i + 1]
-            nothing_supplied = False
+            account_set = True
             i += 2
             continue
         if "=" in tok and not tok.startswith("-"):
@@ -326,26 +348,67 @@ def _parse_model_args(
             if key not in _KV_KEYS:
                 return f"[/model] unknown key: {key}"
             if key == "provider":
-                prov_name = value
+                provider = value
             elif key == "auth":
                 auth = value
             elif key == "account":
                 account = None if value in ("", "default") else value
+                account_set = True
             else:
                 model_id = value
-            nothing_supplied = False
             i += 1
             continue
         if not tok.startswith("-"):
             model_id = tok
-            nothing_supplied = False
             i += 1
             continue
         return f"[/model] unknown flag: {tok}"
-    if nothing_supplied:
+    if provider is None and auth is None and not account_set and model_id is None:
         return (
             "[/model] usage: /model [provider=P] [auth=A] [account=ACCT]"
             " [model=MODEL_ID]   (or --provider/--auth/--account flags,"
             " or a bare model_id)"
         )
+    return _ParsedModelArgs(
+        provider=provider,
+        auth=auth,
+        account=account,
+        account_set=account_set,
+        model_id=model_id,
+    )
+
+
+def _resolve_model_target(
+    parsed: _ParsedModelArgs,
+    spec: ModelSpec,
+) -> tuple[str, str, str | None, str]:
+    """Layer parsed args onto ``spec``; fill model_id from cross-session memory.
+
+    When the user switches provider but doesn't name a model, look up
+    the last model used for that provider in
+    ``~/.sagent/last-models.json``. Fall back to the provider class's
+    ``DEFAULT_MODEL`` if this provider hasn't been used before.
+    """
+    prov_name = parsed.provider or spec.provider
+    auth = parsed.auth or spec.auth
+    account = parsed.account if parsed.account_set else spec.account
+    if parsed.model_id is not None:
+        model_id = parsed.model_id
+    elif prov_name == spec.provider:
+        model_id = spec.model_id
+    else:
+        model_id = last_models.get(prov_name) or _default_model_for(prov_name)
     return prov_name, auth, account, model_id
+
+
+def _default_model_for(prov_name: str) -> str:
+    """Return ``Provider.DEFAULT_MODEL`` for the named provider class."""
+    cls = getattr(providers, prov_name, None)
+    if cls is None:
+        raise AttributeError(f"unknown provider: {prov_name!r}")
+    default = getattr(cls, "DEFAULT_MODEL", None)
+    if not isinstance(default, str) or not default:
+        raise AttributeError(
+            f"provider {prov_name!r} has no DEFAULT_MODEL",
+        )
+    return default

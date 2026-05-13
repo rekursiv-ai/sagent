@@ -40,6 +40,7 @@ from pathlib import Path
 
 import asyncio
 import contextlib
+import contextvars
 import dataclasses
 import itertools
 import logging
@@ -49,6 +50,7 @@ import uuid
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
+    split_bg_args,
 )
 from sagent.agent.compaction import (
     CompactionState,
@@ -56,6 +58,7 @@ from sagent.agent.compaction import (
     post_compact_enrich,
 )
 from sagent.agent.cost_tracker import CostTracker
+from sagent.agent.result_storage import post_process_result
 from sagent.agent.retry import send_with_retry
 from sagent.agent.runtime import (
     AgentRuntime,
@@ -63,23 +66,31 @@ from sagent.agent.runtime import (
     Clear,
     Compact,
     CompactComplete,
+    DetachedResult,
     Halt,
     HistoryEntry,
     Kill,
     Model as RuntimeModel,
     ModelCallStarted,
     ModelIdle,
+    ModelResponseCancelled,
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
     Quit,
     Recompact,
     RuntimeEvent,
+    StatusChanged,
     Tool as RuntimeTool,
     ToolLabel,
     ToolResult,
     UserMessage,
     current_call_id_var,
+)
+from sagent.agent.session_io import (
+    SessionMeta,
+    rebuild_content_cache,
+    restore_model,
 )
 from sagent.agent.state import (
     ToolState,
@@ -89,6 +100,7 @@ from sagent.agent.state import (
     cost_root_var,
     current_agent_var,
     tool_state_var,
+    unique_registry_label,
 )
 from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
@@ -101,12 +113,16 @@ from sagent.custom_types import (
     TokenCount,
     Tool as RichTool,
 )
+from sagent.lib import last_models
 from sagent.lib.compaction import write_pre_compact_transcript
+from sagent.lib.json import JSON
 
 
 logger = logging.getLogger(__name__)
 
 SystemPromptArg = str | Callable[[], str]
+"""System-prompt spec. ``str`` is literal; ``Callable[[], str]`` is
+re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
 ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
 MAX_OVERFLOW_RECOVERY = 3
@@ -182,11 +198,9 @@ class Agent:
         self.description = description
         self.model = model
         self.model_spec = model_spec
-        if isinstance(system, str):
-            text = system
-            self._system_factory: Callable[[], str] = lambda: text
-        else:
-            self._system_factory = system
+        if model_spec is not None:
+            last_models.record(model_spec.provider, model_spec.model_id)
+        self._system_spec: SystemPromptArg = system
         self._tools_list: list[RichTool] = list(tools or [])
         self.compactor = compactor
         if budget is None:
@@ -221,14 +235,16 @@ class Agent:
         # Wrappers. ``_agent_compactor`` is None when no rich compactor
         # was supplied (the runtime is satisfied with a None compactor).
         self._agent_model = _AgentModel(model, self)
+        # ``_tools_map`` holds the RAW rich tool keyed by name so
+        # isinstance / Protocol checks (CompactRestorable, Slack, ...) at
+        # consumer sites pass through. The schema-augmenting
+        # ``BackgroundAwareTool`` wrapper is applied per request in
+        # ``_AgentModel.stream`` when building the provider tool list.
         self._tools_map: dict[str, RichTool] = {}
         agent_tools: list[RuntimeTool] = []
         for t in self._tools_list:
-            wrapped: RichTool = (
-                BackgroundAwareTool(t) if t.name != "BackgroundTask" else t
-            )
-            self._tools_map[t.name] = wrapped
-            agent_tools.append(_AgentTool(wrapped, self))
+            self._tools_map[t.name] = t
+            agent_tools.append(_AgentTool(t, self))
         self._agent_compactor = (
             _AgentCompactor(compactor, self) if compactor is not None else None
         )
@@ -370,13 +386,16 @@ class Agent:
 
     @status.setter
     def status(self, value: str) -> None:
-        """Set the toolbar status string.
+        """Set the toolbar status string and publish a ``StatusChanged`` event.
 
         Args:
           value: New status string.
 
         """
+        if value == self._status:
+            return
         self._status = value
+        self.runtime.publish(StatusChanged(text=value))
 
     @property
     def history(self) -> list[HistoryEntry]:
@@ -453,6 +472,10 @@ class Agent:
     def swap_model(self, model: RichModel, *, spec: ModelSpec | None = None) -> None:
         """Replace the active model.
 
+        Clears ``thinking`` / ``effort`` when the new model lacks
+        support so the agent's user-visible state matches what the
+        provider will actually receive.
+
         Args:
           model: New rich provider model.
           spec: Optional spec recording how the model was built.
@@ -475,6 +498,12 @@ class Agent:
         self.model_spec = spec
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
+        if not model.supports_thinking:
+            self._thinking = None
+        if not model.supports_effort:
+            self._effort = None
+        if spec is not None:
+            last_models.record(spec.provider, spec.model_id)
 
     def system_prompt(self) -> str:
         """Assemble the full system prompt (system + tool contributions).
@@ -484,6 +513,45 @@ class Agent:
 
         """
         return self._build_system()
+
+    def resume(
+        self,
+        meta: SessionMeta,
+        history: list[HistoryEntry],
+        tool_state: ToolState,
+    ) -> None:
+        """Apply a persisted session snapshot to this agent.
+
+        Restores cost / activity / compaction state, the original
+        ``session_id`` and ``status``, and (when the persisted
+        provider+model differ from the current one) swaps the model.
+        Repopulates ``tool_state`` and reseeds its content cache from
+        current disk for previously-touched files so post-resume
+        ``check_stale`` doesn't fire on mtime drift.
+
+        Args:
+          meta: Persisted ``SessionMeta``.
+          history: Persisted conversation history.
+          tool_state: Persisted ``ToolState`` snapshot.
+
+        """
+        self.runtime.history.extend(history)
+        self.tool_state = tool_state
+        rebuild_content_cache(history, self.tool_state)
+        if meta.session_id:
+            self._session_id = meta.session_id
+        if meta.status:
+            self._status = meta.status
+        self.cost_tracker.restore(total_cost_usd=meta.total_cost_usd, total=meta.tokens)
+        self.activity.num_tool_call_rounds = meta.num_tool_call_rounds
+        self.activity.elapsed_seconds = meta.total_active_elapsed_seconds
+        self.compaction_state.compact_count = meta.compact_count
+        self.compaction_state.summary_pointers = list(meta.summary_pointers)
+        if meta.provider and meta.model_id and meta.model_id != self.model.model_id:
+            restored = restore_model(meta)
+            if restored is not None:
+                new_model, new_spec = restored
+                self.swap_model(new_model, spec=new_spec)
 
     # -- Foreground slot / cancel verbs --------------------------------
 
@@ -604,24 +672,41 @@ class Agent:
 
     @contextlib.contextmanager
     def _install_contextvars(self):
-        """Install per-agent ContextVars for the lifetime of the block."""
+        """Install per-agent ContextVars for the lifetime of the block.
+
+        Non-persistent subagents inherit the parent's cost tracker so
+        the root sees the full spawn-tree spend (and ``max_budget_usd``
+        caps the tree, not just the root's own calls). Tool-state depth
+        is incremented from the parent so ``AgentSpawn`` depth caps
+        actually fire. Default-name collisions in ``agent_registry``
+        are resolved with a numeric suffix so ``AgentSend`` can address
+        a specific agent even when several share a base name.
+        """
         agent_token = current_agent_var.set(self)
-        cost_token = cost_root_var.set(self.cost_tracker)
-        label = agent_label_var.get("") or self.name
+        parent_root = cost_root_var.get(None)
+        cost_token: contextvars.Token[CostTracker | None] | None = (
+            cost_root_var.set(self.cost_tracker)
+            if self._persistent or parent_root is None
+            else None
+        )
+        parent_state = tool_state_var.get(None)
+        self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
+        base_label = agent_label_var.get("") or self.name
+        label = base_label if self._persistent else unique_registry_label(base_label)
         label_token = agent_label_var.set(label)
         counter_token = agent_counter_var.set(itertools.count())
         state_token = tool_state_var.set(self.tool_state)
-        if not self._persistent:
-            agent_registry[label] = self
+        agent_registry[label] = self
         try:
             yield
         finally:
-            if not self._persistent:
+            if agent_registry.get(label) is self:
                 _ = agent_registry.pop(label, None)
             tool_state_var.reset(state_token)
             agent_counter_var.reset(counter_token)
             agent_label_var.reset(label_token)
-            cost_root_var.reset(cost_token)
+            if cost_token is not None:
+                cost_root_var.reset(cost_token)
             current_agent_var.reset(agent_token)
 
     async def _await_event(
@@ -643,11 +728,10 @@ class Agent:
                 self.runtime.observers.remove(resolver)
 
     def _build_system(self) -> str:
-        """Assemble the system prompt from sections + tool contributions."""
-        parts: list[str] = []
-        sys = self._system_factory()
-        if sys:
-            parts.append(sys)
+        """Assemble the system prompt from base spec + tool contributions."""
+        spec = self._system_spec
+        base = spec if isinstance(spec, str) else spec()
+        parts: list[str] = [base] if base else []
         for tool in self._tools_map.values():
             contribution = tool.prompt()
             if contribution:
@@ -688,7 +772,10 @@ class Agent:
             self.activity.live_response_chars = 0
         elif isinstance(event, ModelResponsePartial):
             self.activity.live_response_chars += len(event.text)
-        elif isinstance(event, (ModelResponseComplete, ModelIdle)):
+        elif isinstance(
+            event,
+            (ModelResponseComplete, ModelIdle, ModelResponseCancelled),
+        ):
             if self.activity.active:
                 elapsed = (
                     asyncio.get_running_loop().time() - self.activity.current_call_start
@@ -834,22 +921,36 @@ class _AgentModel:
         # Microcompact in place (no event; just mutate history).
         self._agent.microcompact_history(history)
 
+        # Re-evaluate the system spec per request so callable sections
+        # (e.g. cwd-aware ``environment``) stay live after ``cd``. The
+        # runtime-passed ``system`` is a one-shot snapshot from
+        # construction and is intentionally ignored here.
+        del system
+
         # Build ModelRequest from runtime-passed args + agent state.
         # The runtime hands us ``runtime.Tool`` instances (the ``_AgentTool``
         # wrappers), which expose only ``name`` / ``run``. Providers need
         # the full rich Tool surface (``description``, ``directive_schema``,
         # ``prompt``, etc.) so look each one up in the agent's
-        # ``tools_map`` by name.
-        rich_tools: list[RichTool] = [self._agent.tools_map[t.name] for t in tools]
+        # ``tools_map`` by name and wrap with ``BackgroundAwareTool`` so
+        # the LLM-visible schema advertises the ``background`` / ``delay``
+        # properties without polluting the raw tool's identity.
+        rich_tools: list[RichTool] = [
+            self._agent.tools_map[t.name]
+            if t.name == "BackgroundTask"
+            else BackgroundAwareTool(self._agent.tools_map[t.name])
+            for t in tools
+        ]
         rich_thinking = self._agent.thinking if self._inner.supports_thinking else None
         rich_effort = self._agent.effort if self._inner.supports_effort else None
 
         last_err: Exception | None = None
         response: ModelResponse | None = None
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
+            fresh_system = self._agent.system_prompt()
             request = ModelRequest(
                 messages=list(history),
-                system=system or None,
+                system=fresh_system or None,
                 tools=rich_tools or None,
                 max_response_tokens=self._agent.max_response_tokens,
                 thinking=rich_thinking,
@@ -867,6 +968,7 @@ class _AgentModel:
                     publish_recoverable=lambda text: logger.info(
                         "recoverable: %s", text
                     ),
+                    on_discarded_response=self._agent.record_response,
                 )
                 break
             except PromptTooLongError as exc:
@@ -888,15 +990,34 @@ class _AgentModel:
 
 
 class _AgentTool:
-    """Bridges rich ``Tool`` to runtime ``Tool`` protocol.
+    """Bridges raw rich ``Tool`` to the runtime's lean ``Tool`` protocol.
 
-    Emits ``ToolLabel`` pre-execution. Runs the inner tool's ``run``
-    and post-processes (empty-marker injection, oversized content
-    persistence — handled by the inner tool's own machinery for now).
+    Per call, in order:
+
+    - Pop the ``BackgroundAwareTool``-injected ``background`` / ``delay``
+      keys from ``args`` so they don't reach the raw tool's schema
+      validation or runtime.
+    - Pre-validate ``args`` against the raw tool's
+      ``directive_schema`` (required fields, ``additionalProperties``
+      bound). Validation errors surface as
+      ``ToolResult(is_error=True)`` with an ``InputValidationError:``
+      header carrying the recovery hint so the model can self-correct
+      without looping.
+    - Publish ``ToolLabel`` for the REPL renderer.
+    - When ``background`` / ``delay`` is set: spawn a detached task that
+      will eventually post ``DetachedResult`` to the runtime inbox; the
+      synchronous return is a ``[Running in background: <name>]``
+      placeholder. The runtime splices the real result into that
+      placeholder slot once the bg task completes.
+    - Otherwise: await the raw tool's ``run``, then post-process
+      (empty-result marker, oversized-content disk offload).
 
     Args:
-      inner: Rich tool whose ``run`` is delegated to.
-      agent: Owning ``Agent``; used to publish ``ToolLabel``.
+      inner: Raw rich tool (no schema injection); validated against
+          its own ``directive_schema``.
+      agent: Owning ``Agent`` used for publishing events, registering
+          background tasks, and looking up session-dir / budget for
+          result persistence.
 
     """
 
@@ -910,20 +1031,87 @@ class _AgentTool:
         return self._inner.name
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Publish ``ToolLabel`` and forward execution to the wrapped tool.
+        """Validate, publish ``ToolLabel``, dispatch, post-process.
 
         Args:
-          args: Directive arguments parsed by the runtime.
+          args: Directive arguments parsed by the runtime; includes the
+              ``BackgroundAwareTool``-injected ``background`` / ``delay``
+              keys when the model requested asynchronous execution.
 
         Returns:
-          result: The wrapped tool's ``ToolResult``.
+          result: Tool result, an input-validation error, or a
+              ``[Running in background: <name>]`` placeholder.
 
         """
         call_id = current_call_id_var.get("")
-        self._agent.runtime.publish(
-            ToolLabel(call_id=call_id, text=self._inner.summary(args)),
+        bg_requested, delay_sec, clean_args = split_bg_args(args)
+        validation_error = _validate_input(
+            self._inner.name, self._inner.directive_schema, clean_args
         )
-        return await self._inner.run(args)
+        if validation_error is not None:
+            return ToolResult(
+                call_id=call_id,
+                content=validation_error,
+                is_error=True,
+            )
+        self._agent.runtime.publish(
+            ToolLabel(call_id=call_id, text=self._inner.summary(clean_args)),
+        )
+        if bg_requested or delay_sec > 0:
+            task = asyncio.create_task(
+                self._run_bg(call_id, clean_args, delay_sec),
+            )
+            self._agent.register_background(
+                call_id,
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name=self._inner.name,
+                    queue_id=call_id,
+                    started=time.time(),
+                    delay_sec=delay_sec,
+                    kind="tool",
+                ),
+            )
+            return ToolResult(
+                call_id=call_id,
+                content=f"[Running in background: {self._inner.name}]",
+            )
+        result = await self._inner.run(clean_args)
+        return post_process_result(
+            result,
+            self._inner.name,
+            session_dir=self._agent.session_dir,
+            persist_threshold=self._agent.budget.persist_threshold,
+        )
+
+    async def _run_bg(
+        self,
+        call_id: str,
+        args: Mapping[str, object],
+        delay_sec: float,
+    ) -> None:
+        """Background-task body: optional sleep, run inner, post result."""
+        if delay_sec > 0:
+            await asyncio.sleep(delay_sec)
+        try:
+            result = await self._inner.run(args)
+            processed = post_process_result(
+                result,
+                self._inner.name,
+                session_dir=self._agent.session_dir,
+                persist_threshold=self._agent.budget.persist_threshold,
+            )
+            content, is_error = processed.content, processed.is_error
+        except asyncio.CancelledError:
+            self._agent.cancel_background(call_id)
+            raise
+        except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
+            content = f"{type(exc).__name__}: {exc}"
+            is_error = True
+        self._agent.runtime.inbox.push_back(
+            DetachedResult(call_id=call_id, content=content, is_error=is_error),
+        )
+        self._agent.cancel_background(call_id)
 
 
 class _AgentCompactor:
@@ -980,9 +1168,9 @@ class _AgentCompactor:
             custom_instructions=args or None,
             summary_pointers=self._agent.compaction_state.summary_pointers or None,
         )
-        self._agent.compaction_state.compact_count += 1
 
-        # Post-compact enrich.
+        # Post-compact enrich. ``compact_count`` is incremented AFTER so
+        # ``pre_compact_{n}.jsonl`` and ``summary_{n}.md`` agree on ``n``.
         try:
             used = estimate_total_tokens(
                 self._agent.system_prompt(), result, self._agent.model
@@ -1004,6 +1192,7 @@ class _AgentCompactor:
             )
         except Exception:
             logger.exception("post_compact_enrich failed; continuing")
+        self._agent.compaction_state.compact_count += 1
 
         # The runtime's gate needs the last entry to be UserMessage or
         # ToolResult so the next iteration calls the model. If the
@@ -1016,8 +1205,82 @@ class _AgentCompactor:
     def maintain(self, history: list[HistoryEntry]) -> None:
         """Forward microcompaction to the inner compactor.
 
+        Threads ``cost_tracker.last_response_time`` so the inner
+        compactor can gate microcompaction on cache-cold likelihood.
+
         Args:
           history: History list to mutate in place.
 
         """
-        self._inner.maintain(history, self._agent.tools_map)
+        self._inner.maintain(
+            history,
+            self._agent.tools_map,
+            last_response_time=self._agent.cost_tracker.last_response_time,
+        )
+
+
+_INPUT_VALIDATION_PREFIX = "InputValidationError:"
+_TOOL_INPUT_RECOVERY_HINT = (
+    "This tool call was not executed because its JSON directive was missing or "
+    "misstated required fields. Do not repeat the same empty or incomplete call. "
+    "Either retry this tool with the required fields, choose a different tool "
+    "that fits the task, or explain why the required value is unavailable."
+)
+
+
+def _validate_input(
+    tool_name: str,
+    schema: JSON,
+    args: Mapping[str, object],
+) -> str | None:
+    """Pre-check ``args`` against ``schema``; return an error or ``None``.
+
+    Catches the two failure modes that wedge the model on retry: missing
+    ``required`` fields (typically a truncated ``stop_reason=max_tokens``
+    tool_use) and unexpected fields (model hallucinated a key that
+    doesn't exist).
+
+    Args:
+      tool_name: Tool name -- used in the error header.
+      schema: The tool's frozen ``directive_schema``.
+      args: Directive args parsed from the model output.
+
+    Returns:
+      error: Multi-line error text starting with
+          ``InputValidationError:`` when validation fails, ``None`` on
+          well-formed input.
+
+    """
+    required_raw = schema.get("required")
+    required: list[str] = (
+        [k for k in required_raw if isinstance(k, str)]
+        if isinstance(required_raw, (list, tuple))
+        else []
+    )
+    props_raw = schema.get("properties")
+    accepted: list[str] = (
+        [str(k) for k in props_raw] if isinstance(props_raw, Mapping) else []
+    )
+    missing = [k for k in required if k not in args]
+    unexpected: list[str] = (
+        [k for k in args if k not in set(accepted)]
+        if schema.get("additionalProperties") is False
+        else []
+    )
+    if not missing and not unexpected:
+        return None
+    issues: list[str] = [f"The required parameter `{k}` is missing." for k in missing]
+    issues.extend(f"Unexpected parameter `{k}`." for k in unexpected)
+    plural = "issues" if len(issues) > 1 else "issue"
+    parts = [
+        f"{_INPUT_VALIDATION_PREFIX} {tool_name} failed due to the following {plural}:",
+        *issues,
+    ]
+    if required:
+        keys = ", ".join(f"`{k}`" for k in required)
+        parts.append(f"\n{tool_name} requires: {keys}.")
+    if unexpected and accepted:
+        keys = ", ".join(f"`{k}`" for k in accepted)
+        parts.append(f"{tool_name} accepts: {keys}.")
+    parts.append(f"\n{_TOOL_INPUT_RECOVERY_HINT}")
+    return "\n".join(parts)
