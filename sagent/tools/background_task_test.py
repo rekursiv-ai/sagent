@@ -14,7 +14,7 @@ from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
 )
-from sagent.agent.runtime import ToolResult
+from sagent.agent.runtime import DetachedResult, ToolResult
 from sagent.lib.json import json_freeze
 from sagent.testing import with_fake_agent
 from sagent.tools.background_task import BackgroundTask
@@ -323,60 +323,83 @@ async def test_foreground_unknown_id() -> None:
 
 @pytest.mark.asyncio
 async def test_foreground_success_returns_tool_result() -> None:
+    """M6: foreground reads the result from the ``DetachedResult`` event
+    posted by the bg task (cohort-detached and explicit-bg tasks alike
+    return ``None`` from the task itself).
+    """
     t = BackgroundTask()
-
-    async def produce() -> ToolResult:
-        return ToolResult(call_id="", content="payload")
-
     with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(produce())
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
         agent.register_background(
             "j",
             BackgroundTaskEntry(
                 task=task, tool_name="Dummy", queue_id="j", started=0.0
             ),
         )
+
+        async def deliver() -> None:
+            await asyncio.sleep(0.01)
+            agent.runtime.publish(
+                DetachedResult(call_id="j", content="payload"),
+            )
+
+        delivery = asyncio.create_task(deliver())
         result = await t.run({"operation": "foreground", "id": "j"})
+        await delivery
     assert result.content == "payload"
     assert "j" not in agent.background
 
 
 @pytest.mark.asyncio
-async def test_foreground_wraps_plain_value() -> None:
+async def test_foreground_reads_pre_existing_spliced_result() -> None:
+    """M6: when the splice has already landed in history, foreground
+    returns the spliced result without waiting for another event.
+    """
     t = BackgroundTask()
-
-    async def produce_str() -> str:
-        return "scalar"
-
     with with_fake_agent() as agent:
-        task: asyncio.Task[str] = asyncio.create_task(produce_str())
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
         agent.register_background(
             "j",
             BackgroundTaskEntry(
                 task=task, tool_name="Dummy", queue_id="j", started=0.0
             ),
         )
+        agent.runtime.history.append(
+            ToolResult(call_id="j", content="prior result"),
+        )
         result = await t.run({"operation": "foreground", "id": "j"})
-    assert result.content == "scalar"
-    assert not result.is_error
+    assert result.content == "prior result"
+    assert "j" not in agent.background
 
 
 @pytest.mark.asyncio
-async def test_foreground_propagates_task_failure() -> None:
+async def test_foreground_propagates_error_via_detached_result() -> None:
+    """M6: a failing bg task posts an ``is_error=True`` ``DetachedResult``;
+    foreground surfaces it as a tool-error result.
+    """
     t = BackgroundTask()
-
-    async def fail() -> ToolResult:
-        raise RuntimeError("boom")
-
     with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(fail())
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
         agent.register_background(
             "j",
             BackgroundTaskEntry(
                 task=task, tool_name="Dummy", queue_id="j", started=0.0
             ),
         )
+
+        async def deliver() -> None:
+            await asyncio.sleep(0.01)
+            agent.runtime.publish(
+                DetachedResult(
+                    call_id="j",
+                    content="RuntimeError: boom",
+                    is_error=True,
+                ),
+            )
+
+        delivery = asyncio.create_task(deliver())
         result = await t.run({"operation": "foreground", "id": "j"})
+        await delivery
     assert result.is_error
     assert "RuntimeError" in result.content
     assert "boom" in result.content

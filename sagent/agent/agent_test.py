@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
+from typing import cast, override
 
 import asyncio
 import contextlib
@@ -16,10 +16,12 @@ from sagent.agent.agent import (
     ActivityTracker,
     Agent,
     SystemPromptArg,
+    _validate_input,
 )
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
+    split_bg_args,
 )
 from sagent.agent.runtime import (
     AssistantMessage,
@@ -31,11 +33,14 @@ from sagent.agent.runtime import (
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
+    ModelSwitch as RuntimeModelSwitch,
+    StatusChanged,
     ToolCall as RuntimeToolCall,
     ToolLabel,
     ToolResult,
     UserMessage,
 )
+from sagent.agent.state import agent_registry
 from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
     ContextBudget,
@@ -222,13 +227,41 @@ def test_agent_system_callable_passthrough() -> None:
     assert len(calls) == n_before + 2
 
 
-def test_agent_tools_map_wraps_in_background_aware() -> None:
+def test_agent_tools_map_stores_raw_tools() -> None:
+    """H2: ``tools_map`` stores raw rich tools so isinstance / Protocol
+    checks at consumer sites (CompactRestorable, Slack identity swap,
+    etc.) pass through. Wrapping happens per-request in
+    ``_AgentModel.stream``.
+    """
     tool: RichTool = StubTool()
     a = _build_agent(tools=[tool])
     assert "Echo" in a.tools_map
-    wrapped = a.tools_map["Echo"]
-    assert isinstance(wrapped, BackgroundAwareTool)
-    assert wrapped.name == "Echo"
+    stored = a.tools_map["Echo"]
+    assert stored is tool
+    assert not isinstance(stored, BackgroundAwareTool)
+
+
+@pytest.mark.asyncio
+async def test_agent_request_tools_wrapped_in_background_aware() -> None:
+    """H2: per-request wrapping advertises ``background`` / ``delay`` to
+    the model while keeping ``tools_map`` storage raw.
+    """
+    model = StubModel()
+    tool = StubTool(
+        directive_schema=json_freeze(
+            {"type": "object", "properties": {"msg": {"type": "string"}}}
+        ),
+    )
+    a = _build_agent(model=model, tools=[tool])
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    assert model.received
+    req = model.received[-1]
+    assert req.tools is not None
+    seen = req.tools[0]
+    props = dict(cast(Mapping[str, object], seen.directive_schema["properties"]))
+    assert "background" in props
+    assert "delay" in props
 
 
 @pytest.mark.asyncio
@@ -1092,6 +1125,254 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
     assert any(
         isinstance(e, UserMessage) and e.text == "[summary]" for e in a.runtime.history
     )
+
+
+def test_callable_system_composes_sections() -> None:
+    """Callable system can compose multiple named sections internally."""
+
+    def factory() -> str:
+        return "\n\n".join(["static", _env()])
+
+    def _env() -> str:
+        return "dynamic"
+
+    a = _build_agent(system=factory)
+    assembled = a.system_prompt()
+    assert "static" in assembled
+    assert "dynamic" in assembled
+
+
+def test_callable_system_re_evaluates_per_call() -> None:
+    """C4: callable system is re-evaluated on every ``system_prompt`` call."""
+    counter = {"n": 0}
+
+    def factory() -> str:
+        counter["n"] += 1
+        return f"call#{counter['n']}"
+
+    a = _build_agent(system=factory)
+    p1 = a.system_prompt()
+    p2 = a.system_prompt()
+    assert p1 != p2
+
+
+@pytest.mark.asyncio
+async def test_stream_rebuilds_system_per_request() -> None:
+    """C4: ``_AgentModel.stream`` must rebuild the system prompt each
+    call so cwd-aware sections stay live after ``cd``.
+    """
+    call_count = 0
+
+    def factory() -> str:
+        nonlocal call_count
+        call_count += 1
+        return f"sys-v{call_count}"
+
+    model = StubModel()
+    a = _build_agent(model=model, system=factory)
+    pre_run_count = call_count
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    assert call_count > pre_run_count
+    assert model.received[-1].system == f"sys-v{call_count}"
+
+
+def test_subagent_inherits_root_cost_tracker() -> None:
+    """C5: non-persistent subagent's cost folds into the root tracker."""
+    root = _build_agent()
+    child = _build_agent()
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(input_tokens=10, output_tokens=5),
+        total_cost=0.02,
+    )
+    with root._install_contextvars(), child._install_contextvars():
+        child.record_response(response)
+    assert root.cost_tracker.total_cost_usd == pytest.approx(0.02)
+    assert child.cost_tracker.total_cost_usd == 0.0
+
+
+def test_persistent_subagent_shadows_root_cost_tracker() -> None:
+    """C5: persistent subagent gets its own cost tracker (parent unaffected)."""
+    root = _build_agent()
+    child = _build_agent()
+    child._persistent = True
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(),
+        total_cost=0.02,
+    )
+    with root._install_contextvars(), child._install_contextvars():
+        child.record_response(response)
+    assert root.cost_tracker.total_cost_usd == 0.0
+    assert child.cost_tracker.total_cost_usd == pytest.approx(0.02)
+
+
+def test_subagent_tool_state_depth_increments() -> None:
+    """C6: nested subagent's ``ToolState.depth`` reflects spawn depth."""
+    root = _build_agent()
+    child = _build_agent()
+    with root._install_contextvars():
+        assert root.tool_state.depth == 0
+        with child._install_contextvars():
+            assert child.tool_state.depth == 1
+
+
+def test_default_named_agents_get_unique_registry_label() -> None:
+    """H11/M7: two agents with the same name don't overwrite each other."""
+    a1 = _build_agent()
+    a2 = _build_agent()
+    assert a1.name == a2.name == "Agent"
+    with a1._install_contextvars(), a2._install_contextvars():
+        labels = [k for k, v in agent_registry.items() if v in (a1, a2)]
+        assert len(set(labels)) == 2
+
+
+def test_status_setter_publishes_status_changed() -> None:
+    """H5: changing ``status`` publishes ``StatusChanged`` to observers."""
+    a = _build_agent()
+    events: list[str] = []
+
+    def watch(event: object) -> None:
+        if isinstance(event, StatusChanged):
+            events.append(event.text)
+
+    a.runtime.observers.append(watch)
+    a.status = "working"
+    a.status = "working"  # No-op: same value.
+    a.status = "idle"
+    assert events == ["working", "idle"]
+
+
+def test_validate_input_missing_required() -> None:
+    """C8: missing required field surfaces a structured error."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"file_path": {"type": "string"}},
+            "required": ["file_path"],
+            "additionalProperties": False,
+        }
+    )
+    err = _validate_input("Read", schema, {})
+    assert err is not None
+    assert "file_path" in err
+    assert "InputValidationError" in err
+
+
+def test_validate_input_unexpected_field() -> None:
+    """C8: extra field with ``additionalProperties: false`` is reported."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+            "additionalProperties": False,
+        }
+    )
+    err = _validate_input("Echo", schema, {"bogus": 1})
+    assert err is not None
+    assert "Unexpected parameter `bogus`" in err
+
+
+def test_validate_input_valid_passes() -> None:
+    """C8: well-formed args return ``None``."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+            "required": ["msg"],
+            "additionalProperties": False,
+        }
+    )
+    assert _validate_input("Echo", schema, {"msg": "hi"}) is None
+
+
+def test_split_bg_args_strips_background_and_delay() -> None:
+    """C7: ``background`` / ``delay`` removed from forwarded args."""
+    bg, delay, clean = split_bg_args({"msg": "hi", "background": True, "delay": 3})
+    assert bg is True
+    assert delay == 3.0
+    assert clean == {"msg": "hi"}
+
+
+def test_split_bg_args_delay_implies_background() -> None:
+    """C7: positive ``delay`` implies ``background=True`` even when omitted."""
+    bg, delay, _ = split_bg_args({"delay": 5})
+    assert bg is True
+    assert delay == 5.0
+
+
+@pytest.mark.asyncio
+async def test_model_switch_event_queues_swap_until_call_drains() -> None:
+    """Write-mode ``/model`` (via ``runtime.ModelSwitch``) defers the
+    swap until the in-flight model call finishes, so cost is recorded
+    against the OLD model and only the NEXT call uses the NEW one.
+
+    Calling ``agent.swap_model`` directly mid-call mis-attributes cost
+    (the bug); routing through the inbox sequences the swap correctly.
+    """
+    stream_entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class GatedModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: object = None,
+            on_thinking: object = None,
+        ) -> ModelResponse:
+            del on_text, on_thinking
+            self.received.append(request)
+            stream_entered.set()
+            await gate.wait()
+            return ModelResponse(
+                message=AssistantMessage(text="from A"), total_cost=0.10
+            )
+
+    model_a = GatedModel(model_id="model-A")
+    model_b = StubModel(model_id="model-B")
+    agent = _build_agent(model=model_a)
+
+    async def consume() -> None:
+        async for _ in agent.run(UserMessage(text="hi")):
+            pass
+
+    drive = asyncio.create_task(consume())
+    await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
+
+    # User types ``/model model-B``. Slash handler pushes a
+    # ``ModelSwitch`` event into the inbox; runtime defers it.
+    agent.runtime.inbox.push_back(
+        RuntimeModelSwitch(apply=lambda: agent.swap_model(model_b), label="A -> B"),
+    )
+
+    # Release the in-flight call.
+    gate.set()
+    await drive
+
+    # Cost lands on model-A: the runtime didn't apply the swap until
+    # AFTER ``ModelResponseComplete`` set ``model_call`` to None, which
+    # is after ``_AgentModel.stream`` called ``record_response``.
+    assert len(model_a.received) == 1
+    assert len(model_b.received) == 0
+    assert agent.cost_tracker.calls_by_model == {"model-A": 1}
+    # And the deferred swap did fire: the NEXT call would go to B.
+    assert agent.model is model_b
+
+
+def test_swap_model_clears_unsupported_thinking() -> None:
+    """L4: swapping to a model without thinking support clears ``_thinking``."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _NoThinkingModel(StubModel):
+        supports_thinking: bool = False
+
+    a = _build_agent()
+    a.thinking = "adaptive"
+    a.swap_model(_NoThinkingModel())
+    assert a.thinking is None
 
 
 if __name__ == "__main__":

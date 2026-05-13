@@ -894,9 +894,16 @@ def _build_messages(
 
     for entry in request.messages:
         if isinstance(entry, UserMessage):
-            _flush_tool_results(messages, pending_tool_results)
             blocks = _user_blocks(entry, max_image_dim, max_image_bytes)
-            if blocks:
+            # Coalesce: when a user message lands mid-cohort (preempt
+            # with detached stubs), append its blocks into the same
+            # role=user wire message that holds the pending tool_results.
+            # Emitting a separate role=user message breaks Anthropic's
+            # strict alternation and triggers HTTP 400.
+            if pending_tool_results:
+                pending_tool_results.extend(cast(list[dict[str, object]], blocks))
+                _flush_tool_results(messages, pending_tool_results)
+            elif blocks:
                 messages.append(
                     cast(
                         anthropic.types.MessageParam,

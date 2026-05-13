@@ -21,6 +21,7 @@ from typing import Literal
 import dataclasses
 import logging
 import re
+import time
 
 from sagent.agent.runtime import (
     AssistantMessage,
@@ -146,18 +147,30 @@ class SummaryCompactor:
         self,
         history: list[HistoryEntry],
         tools: dict[str, Tool],
-        **kwargs: object,
+        *,
+        last_response_time: float = 0.0,
+        gap_sec: float = 3600.0,
+        keep_recent: int = MICROCOMPACT_KEEP_RECENT,
     ) -> None:
         """Replace old clearable ``ToolResult`` entries with a placeholder.
+
+        Skips when the prompt cache is likely still warm (``time.time() -
+        last_response_time <= gap_sec``); microcompacting a warm-cache
+        request would force re-tokenization for no real saving.
 
         Args:
           history: History list to mutate in place.
           tools: Tool registry; only ``supports_microcompaction`` results clear.
-          **kwargs: Reserved for future maintenance hooks; ignored.
+          last_response_time: Wall-clock seconds of the last response.
+              ``0.0`` falls through the gate so first-call sessions
+              still get cleared.
+          gap_sec: Cache-warm threshold; default 1 hour.
+          keep_recent: Number of recent clearable results preserved.
 
         """
-        del kwargs
-        microcompact(history, tools)
+        if last_response_time and (time.time() - last_response_time) <= gap_sec:
+            return
+        microcompact(history, tools, keep_recent=keep_recent)
 
     async def should_compact(
         self,
@@ -260,7 +273,7 @@ class SummaryCompactor:
                 tools=None,
             )
             try:
-                response = await compact_model.buffer(request)
+                response = await compact_model.stream(request)
                 summary_text = response.message.text
                 break
             except PromptTooLongError as exc:

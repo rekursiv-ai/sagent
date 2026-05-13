@@ -22,6 +22,8 @@ from sagent.agent.session_io import (
     append_session,
     load_session,
     parse_summary_pointers,
+    rebuild_content_cache,
+    repair_dangling_tool_calls,
     restore_model,
     restore_tool_state,
     serialize_tool_state,
@@ -57,18 +59,26 @@ def test_serialize_tool_state_round_trip(tmp_path: Path) -> None:
 
 def _round_trip(entry: HistoryEntry, tmp_path: Path) -> HistoryEntry:
     """Write ``entry`` to a fresh session and re-load the first record."""
+    history = _round_trip_history([entry], tmp_path)
+    assert len(history) == 1
+    return history[0]
+
+
+def _round_trip_history(
+    entries: list[HistoryEntry], tmp_path: Path
+) -> list[HistoryEntry]:
+    """Write ``entries`` to a fresh session and return the reloaded history."""
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
     append_session(
         session_file,
         meta=meta.serialize(),
-        history_delta=[entry],
+        history_delta=entries,
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
     _, history, _ = loaded
-    assert len(history) == 1
-    return history[0]
+    return history
 
 
 def test_user_message_round_trip(tmp_path: Path) -> None:
@@ -88,8 +98,14 @@ def test_user_message_with_attachment(tmp_path: Path) -> None:
 
 
 def test_assistant_message_round_trip(tmp_path: Path) -> None:
+    # Pair with a tool_result so the resume-time orphan repair doesn't
+    # synthesize an ``[interrupted]`` entry.
     tc = ToolCall(id="c1", name="Echo", args={"msg": "hi"})
-    out = _round_trip(AssistantMessage(text="ok", tool_calls=(tc,)), tmp_path)
+    asst = AssistantMessage(text="ok", tool_calls=(tc,))
+    res = ToolResult(call_id="c1", content="done")
+    history = _round_trip_history([asst, res], tmp_path)
+    assert len(history) == 2
+    out = history[0]
     assert isinstance(out, AssistantMessage)
     assert out.text == "ok"
     assert len(out.tool_calls) == 1
@@ -106,10 +122,15 @@ def test_assistant_message_thinking_blocks_round_trip(tmp_path: Path) -> None:
 
 
 def test_tool_result_round_trip(tmp_path: Path) -> None:
-    entry = ToolResult(
+    # Pair with the matching tool_use so the result isn't dropped as orphan.
+    tc = ToolCall(id="c1", name="Echo", args={})
+    asst = AssistantMessage(tool_calls=(tc,))
+    res = ToolResult(
         call_id="c1", content="ran", diff="--- a\n+++ b\n", hint="hi", summary="1"
     )
-    out = _round_trip(entry, tmp_path)
+    history = _round_trip_history([asst, res], tmp_path)
+    assert len(history) == 2
+    out = history[1]
     assert isinstance(out, ToolResult)
     assert out.call_id == "c1"
     assert out.content == "ran"
@@ -476,6 +497,62 @@ def test_restore_model_success_path() -> None:
     assert spec.provider == "Fake"
     assert spec.model_id == "fake-m"
     assert spec.account == "me"
+
+
+def test_repair_synthesizes_missing_tool_result() -> None:
+    """C2: orphan tool_use gets a synthetic ``[interrupted]`` placeholder."""
+    asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
+    history: list[HistoryEntry] = [UserMessage(text="do X"), asst]
+    repaired = repair_dangling_tool_calls(history)
+    assert len(repaired) == 3
+    last = repaired[-1]
+    assert isinstance(last, ToolResult)
+    assert last.call_id == "c1"
+    assert last.content == "[interrupted]"
+    assert last.is_error is True
+
+
+def test_repair_is_idempotent() -> None:
+    """C2: re-running the repair pass over its own output is a no-op."""
+    asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
+    history: list[HistoryEntry] = [UserMessage(text="do X"), asst]
+    repaired = repair_dangling_tool_calls(history)
+    again = repair_dangling_tool_calls(repaired)
+    assert [type(x) for x in again] == [type(x) for x in repaired]
+    assert len(again) == len(repaired)
+
+
+def test_repair_drops_orphan_tool_result_with_no_call() -> None:
+    """C2: dangling ToolResult lacking a parent AssistantMessage is dropped."""
+    orphan = ToolResult(call_id="ghost", content="leftover")
+    history: list[HistoryEntry] = [UserMessage(text="hi"), orphan]
+    repaired = repair_dangling_tool_calls(history)
+    assert len(repaired) == 1
+    assert isinstance(repaired[0], UserMessage)
+
+
+def test_repair_preserves_matching_tool_result_pair() -> None:
+    """C2: existing tool_use + tool_result pair stays intact."""
+    asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
+    res = ToolResult(call_id="c1", content="OK")
+    history: list[HistoryEntry] = [UserMessage(text="hi"), asst, res]
+    repaired = repair_dangling_tool_calls(history)
+    assert repaired == history
+
+
+def test_rebuild_content_cache_from_read(tmp_path: Path) -> None:
+    """L5: Read tool result seeds _content_cache so post-resume reads are clean."""
+    f = tmp_path / "data.txt"
+    body = "hello world\n"
+    _ = f.write_text(body)
+    asst = AssistantMessage(
+        tool_calls=(ToolCall(id="c1", name="Read", args={"file_path": str(f)}),),
+    )
+    result_text = f"     1\t{body}"
+    res = ToolResult(call_id="c1", content=result_text)
+    state = ToolState()
+    rebuild_content_cache([asst, res], state)
+    assert state.has_been_read(str(f))
 
 
 if __name__ == "__main__":

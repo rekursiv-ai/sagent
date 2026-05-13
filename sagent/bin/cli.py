@@ -68,6 +68,7 @@ from sagent.agent.runtime import (
     Quit,
     RuntimeEvent,
     SaveSession,
+    StatusChanged,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -666,15 +667,23 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
 
 
 def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
-    """Attach a ``SaveSession`` observer that appends history deltas to disk."""
+    """Attach a ``SaveSession`` observer that appends history deltas to disk.
+
+    Re-writes ``meta`` whenever ``agent.status`` changes (via the
+    ``StatusChanged`` event), even when there's no history delta, so a
+    status update survives a crash before the next history append.
+    """
     persisted_len = len(agent.history)
     meta_written = False
+    last_status = agent.status
 
     def _on_event(event: RuntimeEvent) -> None:
-        nonlocal persisted_len, meta_written
-        if not isinstance(event, SaveSession):
+        nonlocal persisted_len, meta_written, last_status
+        if not isinstance(event, (SaveSession, StatusChanged)):
             return
         delta = agent.history[persisted_len:]
+        status_changed = agent.status != last_status
+        write_meta = delta or status_changed or not meta_written
         spec = agent.model_spec
         meta = SessionMeta(
             session_id=agent.session_id,
@@ -693,12 +702,13 @@ def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
         )
         append_session(
             session_dir / "session.jsonl",
-            meta=meta.serialize() if (delta or not meta_written) else None,
+            meta=meta.serialize() if write_meta else None,
             history_delta=delta or None,
             tool_state_snapshot=serialize_tool_state(agent.tool_state),
         )
         persisted_len = len(agent.history)
         meta_written = True
+        last_status = agent.status
 
     agent.runtime.observers.append(_on_event)
 
@@ -791,9 +801,7 @@ def main() -> None:
     if session_dir is not None:
         loaded = load_session(Path(session_dir), {})
         if loaded is not None:
-            _, prior_history, prior_state = loaded
-            agent.runtime.history.extend(prior_history)
-            agent.tool_state = prior_state
+            agent.resume(*loaded)
         _install_session_persistence(agent, Path(session_dir))
 
     agent.tool_state.additional_dirs = list(args.add_dir)

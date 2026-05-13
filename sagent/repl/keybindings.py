@@ -76,17 +76,27 @@ def _kb_submit(
 ) -> None:
     """Submit when idle; queue input into the pending list while active.
 
-    Active submissions push a ``UserMessage`` to the runtime inbox
-    immediately (the runtime preempts and stubs unfinished tools) and
+    Slash commands (``/...``) always route through the pump regardless
+    of busy state so e.g. ``/model`` prints its read-mode response
+    immediately instead of being pushed as a ``UserMessage`` the model
+    would treat as a fresh prompt. The pump's dispatcher decides
+    whether to print directly (reads) or queue an event (writes).
+
+    Plain text submissions push a ``UserMessage`` to the runtime inbox
+    when busy (the runtime preempts and stubs unfinished tools) and
     record the text in ``pending`` so the dim preview and Up-arrow
     edit-back keep working.
     """
-    if agent.work is None and not agent.runtime.cohort:
-        event.current_buffer.validate_and_handle()
-        return
     buf = event.current_buffer
     text = buf.text
-    if not text.strip():
+    stripped = text.strip()
+    if stripped.startswith("/"):
+        buf.validate_and_handle()
+        return
+    if agent.work is None and not agent.runtime.cohort:
+        buf.validate_and_handle()
+        return
+    if not stripped:
         return
     agent.runtime.inbox.push_back(UserMessage(text=text))
     pending.append(text)

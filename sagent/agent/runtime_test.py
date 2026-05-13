@@ -18,11 +18,13 @@ from sagent.agent.runtime import (
     CohortComplete,
     Compact,
     Detach,
+    DetachedResult,
     GatedDeque,
     Halt,
     HistoryEntry,
     Kill,
     ModelIdle,
+    ModelResponseCancelled,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
@@ -382,6 +384,70 @@ async def test_halt_cancels_model_waits_for_user() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_halt_publishes_model_response_cancelled_immediately() -> None:
+    """``ModelResponseCancelled`` must fire on Halt, BEFORE next UserMessage.
+
+    Reproduces the "spinner keeps spinning after Ctrl+C" bug: Halt arms
+    AWAIT_USER then cancels the model task. The cancelled task pushes
+    ``ModelResponseCancelled`` to the inbox, but the gate blocks drain
+    until UserMessage/Quit arrives -- so the cancellation event sits
+    undelivered. Observers (activity tracker, render flush) don't see
+    it until the next user message, which means the spinner keeps
+    going and any buffered stream output stays buffered.
+
+    The fix routes ``ModelResponseCancelled`` through ``publish()``
+    directly instead of the inbox, so observers see it as soon as the
+    cancellation propagates.
+    """
+    model_started = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class BlockingModel:
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_text, on_thinking
+            model_started.set()
+            await asyncio.sleep(10.0)
+            return AssistantMessage(text="unreachable")
+
+    agent = AgentRuntime(model=BlockingModel())
+    collector = EventCollector()
+    agent.observers.append(collector)
+    agent.inbox.push_back(UserMessage(text="go"))
+    events_before_quit: list[type] = []
+
+    async def halt_and_observe() -> None:
+        await model_started.wait()
+        agent.inbox.push_back(Halt())
+        # Wait long enough for the cancellation handler to push
+        # ``ModelResponseCancelled``. If observers were going to see it,
+        # they have by now.
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if any(isinstance(e, ModelResponseCancelled) for e in collector.events):
+                break
+        events_before_quit.extend(type(e) for e in collector.events)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        agent.run_forever(),
+        halt_and_observe(),
+    )
+
+    assert ModelResponseCancelled in events_before_quit, (
+        "ModelResponseCancelled must be observed during/after Halt, NOT gated"
+        f" behind AWAIT_USER. Events before Quit: {events_before_quit}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_clear_wipes_history() -> None:
     """Clear detaches tools, wipes history, waits for user."""
     first_turn = asyncio.Event()
@@ -459,32 +525,38 @@ async def test_kill_one_tool() -> None:
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_detach_and_result_arrives_later() -> None:
-    """Detached tool completes and result appears as context."""
+    """Detached tool completes; ``DetachedResult`` splices into placeholder.
+
+    H8/M1/M2 fix: late ``DetachedResult`` splices into the
+    ``[detached]`` placeholder so history stays linear and the real
+    result lives in the slot the model already expects. No phantom
+    user message; no extra model round.
+    """
     slow = StubTool(response="late result", delay_sec=0.1)
     agent, _ = make_agent(
         [
             AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
             AssistantMessage(text="detached"),
-            AssistantMessage(text="got late result"),
         ],
         tools=[slow],
     )
     agent.inbox.push_back(UserMessage(text="go"))
 
-    turn_count = 0
+    detached_seen = asyncio.Event()
 
-    def _quit_on_third(event: RuntimeEvent) -> None:
-        nonlocal turn_count
-        if isinstance(event, ModelIdle):
-            turn_count += 1
-            if turn_count >= 2:
-                agent.inbox.push_back(Quit())
+    def _quit_when_done(event: RuntimeEvent) -> None:
+        if isinstance(event, DetachedResult):
+            detached_seen.set()
 
-    agent.observers.append(_quit_on_third)
+    agent.observers.append(_quit_when_done)
 
     async def detach_then_wait() -> None:
         await asyncio.sleep(0.02)
         agent.inbox.push_back(Detach(call_id="t1"))
+        await detached_seen.wait()
+        # Drain one more iteration so the splice publish lands.
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Quit())
 
     await asyncio.gather(
         run_until_quit(agent, timeout_sec=3.0),
@@ -496,13 +568,12 @@ async def test_detach_and_result_arrives_later() -> None:
         for t in agent.history
         if isinstance(t, ToolResult) and t.content == "[detached]"
     ]
-    assert len(stubs) == 1
-    late = [
-        t
-        for t in agent.history
-        if isinstance(t, UserMessage) and "late result" in t.text
+    assert stubs == []
+    spliced = [
+        t for t in agent.history if isinstance(t, ToolResult) and t.call_id == "t1"
     ]
-    assert len(late) == 1
+    assert len(spliced) == 1
+    assert spliced[0].content == "late result"
 
 
 @pytest.mark.asyncio
@@ -544,12 +615,14 @@ async def test_undetach_gates_model() -> None:
         detach_undetach(),
     )
 
-    late = [
+    # H8 fix: the late result splices into the detached placeholder
+    # rather than being appended as a fresh user message.
+    spliced = [
         t
         for t in agent.history
-        if isinstance(t, UserMessage) and "waited for" in t.text
+        if isinstance(t, ToolResult) and t.content == "waited for"
     ]
-    assert len(late) == 1
+    assert len(spliced) == 1
 
 
 @pytest.mark.asyncio
@@ -682,7 +755,7 @@ async def test_await_user_blocks_non_user_items() -> None:
     """AwaitUser blocks drain until a UserMessage arrives."""
     agent, _ = make_agent([AssistantMessage(text="after wait")])
     agent.inbox.push_front(AWAIT_USER)
-    agent.inbox.push_back(ModelSwitch())
+    agent.inbox.push_back(ModelSwitch(apply=lambda: None))
 
     async def send_user_later() -> None:
         await asyncio.sleep(0.05)
@@ -696,6 +769,37 @@ async def test_await_user_blocks_non_user_items() -> None:
     assert any(
         isinstance(t, UserMessage) and t.text == "unblock" for t in agent.history
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_await_user_baseline_skips_preexisting_user() -> None:
+    """M3: AWAIT_USER doesn't release on a UserMessage already queued.
+
+    The gate snapshots the user-message count at arm time; only a NEW
+    arrival (count > baseline) satisfies it. Otherwise ``/halt`` would
+    drain a redirect that arrived BEFORE the halt and the user's intent
+    to wait for a fresh redirect would be lost.
+    """
+    agent, _ = make_agent([AssistantMessage(text="after wait")])
+    # Pre-existing user message in the queue.
+    agent.inbox.push_back(UserMessage(text="pre-existing"))
+    # Now arm the gate (push_front simulates Halt re-queuing).
+    agent.inbox.push_front(AWAIT_USER)
+
+    async def send_new_user_later() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(UserMessage(text="fresh redirect"))
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        send_new_user_later(),
+    )
+
+    # Both user messages eventually land in history; the gate releases
+    # only after the second (fresh) one arrives.
+    user_texts = [t.text for t in agent.history if isinstance(t, UserMessage)]
+    assert "fresh redirect" in user_texts
 
 
 @pytest.mark.asyncio
@@ -1778,7 +1882,7 @@ async def test_gated_deque_drain_with_gate_waits_for_match() -> None:
     """A gated deque drains until the gated type or Quit appears."""
     dq: GatedDeque[object] = GatedDeque()
     dq.push_front(Await((UserMessage,)))
-    dq.push_back(ModelSwitch())  # not user-shaped; doesn't satisfy the gate
+    dq.push_back(ModelSwitch(apply=lambda: None))  # not user-shaped
     dq.push_back(UserMessage(text="ok"))
 
     items = await dq.drain()

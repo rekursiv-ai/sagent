@@ -23,11 +23,13 @@ from sagent.agent.runtime import (
     AssistantMessage,
     ChildDoneEvent,
     ChildEvent,
+    ModelResponseCancelled,
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
+    StatusChanged,
     ToolLabel,
     ToolResult,
     ToolResultPartial,
@@ -251,6 +253,9 @@ class RenderObserver:
                 render_tool_result(self._printer, event)
             case ToolResultPartial(text=text):
                 self._printer.write_chunk(text)
+            case ModelResponseCancelled():
+                self._flush_stream()
+                self._printer.write_interrupted()
             case ModelResponseError(exception=exc):
                 self._flush_stream()
                 self._printer.write_tool_error(repr(exc))
@@ -259,6 +264,8 @@ class RenderObserver:
                 self._consume_child(label, inner)
             case ChildDoneEvent(label=label):
                 self._flush_child(label)
+            case StatusChanged(text=text):
+                self._printer.set_terminal_title(text)
             case _:
                 pass
 

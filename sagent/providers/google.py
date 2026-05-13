@@ -479,7 +479,6 @@ def _build_request(
     pending_tool_parts: list[MutableJSON] = []
     for entry in request.messages:
         if isinstance(entry, UserMessage):
-            _flush_tool_parts(contents, pending_tool_parts)
             parts: list[MutableJSON] = []
             if entry.text:
                 parts.append({"text": entry.text})
@@ -489,7 +488,16 @@ def _build_request(
                     parts.append(block)
             if not parts:
                 parts.append({"text": ""})
-            contents.append(cast(MutableJSON, {"role": "user", "parts": parts}))
+            # Coalesce: when a user message lands mid-cohort (preempt
+            # with detached stubs), append its parts into the same
+            # role=user content that holds the pending functionResponse
+            # parts. A standalone role=user message would violate
+            # Gemini's user/model alternation requirement.
+            if pending_tool_parts:
+                pending_tool_parts.extend(parts)
+                _flush_tool_parts(contents, pending_tool_parts)
+            else:
+                contents.append(cast(MutableJSON, {"role": "user", "parts": parts}))
         elif isinstance(entry, AssistantMessage):
             _flush_tool_parts(contents, pending_tool_parts)
             model_parts: list[MutableJSON] = []
