@@ -97,6 +97,10 @@ def _kb_submit(
         buf.validate_and_handle()
         return
     if not stripped:
+        # Busy + whitespace-only Enter: discard the whitespace so the
+        # buffer doesn't retain stale spaces. Mirrors the idle path,
+        # which clears the buffer via ``validate_and_handle``.
+        buf.reset()
         return
     agent.runtime.inbox.push_back(UserMessage(text=text))
     queued_input.append(text)

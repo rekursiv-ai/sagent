@@ -443,6 +443,15 @@ class AgentLike(Protocol):
         """
         ...
 
+    def halt(self) -> None:
+        """Cancel the agent's current model call and gate on user input.
+
+        Surface needed by ``/halt <label>`` so the REPL pump can halt
+        a sibling agent looked up via ``agent_registry``.
+
+        """
+        ...
+
 
 # Process-wide registry of live agents, keyed by label.
 agent_registry: dict[str, AgentLike] = {}

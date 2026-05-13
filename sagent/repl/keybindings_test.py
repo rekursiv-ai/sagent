@@ -145,7 +145,8 @@ def test_enter_queues_during_tool_cohort() -> None:
     assert len(agent.runtime.inbox.items) == 1
 
 
-def test_enter_empty_during_request_noop() -> None:
+def test_enter_empty_during_request_discards_whitespace() -> None:
+    """Busy + whitespace-only Enter resets the buffer; nothing is pushed."""
     agent = _busy_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
@@ -153,7 +154,7 @@ def test_enter_empty_during_request_noop() -> None:
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     assert queued_input == []
     assert agent.runtime.inbox.items == []
-    buf.reset.assert_not_called()
+    buf.reset.assert_called_once()
     buf.validate_and_handle.assert_not_called()
 
 

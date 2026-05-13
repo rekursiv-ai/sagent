@@ -128,6 +128,15 @@ message is appended, gate fires. This is the original "type to
 redirect" path and is orthogonal to the four trigger points above
 (which apply during streaming, not during cohort execution).
 
+Provider role-alternation: Anthropic Messages enforces strict
+``user``/``assistant`` alternation and returns 400 on consecutive
+same-role turns; Gemini ``generateContent`` and OpenAI Chat
+Completions are permissive. The runtime maintains strict alternation
+regardless -- it's the lowest common denominator, and the gate's
+invariants (``_should_call_model``, the mid-stream buffer drain,
+the queued coalesce) all depend on the tail-of-history check
+distinguishing user/tool entries from assistant entries.
+
 Model call gate
 ~~~~~~~~~~~~~~~
 

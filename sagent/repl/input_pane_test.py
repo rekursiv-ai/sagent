@@ -129,10 +129,42 @@ async def test_dispatch_halt_self_calls_halt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_halt_with_self_name() -> None:
+async def test_dispatch_halt_bare_name_does_not_halt_when_registry_label_suffixed() -> (
+    None
+):
+    """Regression: ``/halt AgentA`` must error when the live registry
+    label is ``AgentA_2`` (not match ``agent.name`` directly).
+    """
     a = _agent()
     stub = cast(_StubAgent, a)
-    _ = await _dispatch(a, SlashHalt(target="AgentA"), None)
+    p = RecordingPrinter()
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"AgentA_2": a},
+    ):
+        _ = await _dispatch(a, SlashHalt(target="AgentA"), p)
+    assert stub.halted == 0
+    assert any("unknown agent" in e for e in p.tool_errors)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_halt_by_registry_label() -> None:
+    """``/halt <label>`` halts the agent registered under that label,
+    even when ``label`` equals the current agent's registry key.
+
+    Previously the dispatcher matched ``action.target`` against
+    ``agent.name`` (the constructor name), which is wrong when the
+    live registry key has a ``_N`` suffix from
+    ``unique_registry_label``. Looking up the registry directly
+    routes correctly in both cases.
+    """
+    a = _agent()
+    stub = cast(_StubAgent, a)
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"AgentA": a},
+    ):
+        _ = await _dispatch(a, SlashHalt(target="AgentA"), None)
     assert stub.halted == 1
 
 

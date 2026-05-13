@@ -258,7 +258,7 @@ class RenderObserver:
                 self._printer.write_interrupted()
             case ModelResponseError(exception=exc):
                 self._flush_stream()
-                self._printer.write_tool_error(repr(exc))
+                self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
                 self._printer.write_halt(HALT_MESSAGE)
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)

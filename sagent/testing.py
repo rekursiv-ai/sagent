@@ -27,6 +27,7 @@ from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.runtime import (
     AgentRuntime,
     AssistantMessage,
+    Halt,
     HistoryEntry,
     RuntimeEvent,
     Tool,
@@ -134,6 +135,10 @@ class FakeAgent:
     def register_background(self, job_id: str, entry: BackgroundTaskEntry) -> None:
         """Add ``entry`` to the explicit-bg registry under ``job_id``."""
         self._bg[job_id] = entry
+
+    def halt(self) -> None:
+        """Stub for ``AgentLike.halt``; published as a ``Halt`` runtime event."""
+        self.runtime.publish(Halt())
 
     def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:
         """Return all captured events that are instances of ``cls``."""
