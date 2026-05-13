@@ -36,7 +36,7 @@ from sagent.repl.run_repl import (
     do_login,
     do_switch_model,
     format_tasks,
-    make_pending_clearer,
+    make_queued_input_clearer,
     run_repl,
 )
 
@@ -445,21 +445,21 @@ def test_run_repl_invokes_replay_messages() -> None:
     assert "replay_messages(" in src
 
 
-def test_make_pending_clearer_clears_on_user_message() -> None:
-    """Direct unit: a published ``UserMessage`` empties ``pending``."""
-    pending = ["elephant", "banana", "chair"]
-    observer = make_pending_clearer(pending)
+def test_make_queued_input_clearer_clears_on_user_message() -> None:
+    """Direct unit: a published ``UserMessage`` empties ``queued_input``."""
+    queued_input = ["elephant", "banana", "chair"]
+    observer = make_queued_input_clearer(queued_input)
     observer(UserMessage(text="real submission"))
-    assert pending == []
+    assert queued_input == []
 
 
-def test_make_pending_clearer_ignores_non_user_events() -> None:
-    """Non-``UserMessage`` events leave ``pending`` untouched."""
-    pending = ["elephant"]
-    observer = make_pending_clearer(pending)
+def test_make_queued_input_clearer_ignores_non_user_events() -> None:
+    """Non-``UserMessage`` events leave ``queued_input`` untouched."""
+    queued_input = ["elephant"]
+    observer = make_queued_input_clearer(queued_input)
     observer(ModelIdle())
     observer(ModelResponseError(RuntimeError("x")))
-    assert pending == ["elephant"]
+    assert queued_input == ["elephant"]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -483,20 +483,20 @@ class _TextOnlyModel:
 
 
 @pytest.mark.asyncio
-async def test_pending_cleared_when_runtime_publishes_user_message() -> None:
-    """Integration: pre-populated ``pending`` clears once the runtime
+async def test_queued_input_cleared_when_runtime_publishes_user_message() -> None:
+    """Integration: pre-populated ``queued_input`` clears once the runtime
     publishes a ``UserMessage`` event.
 
     Repro of the live bug: user typed several lines while the agent was
-    busy; each ``_kb_submit`` appended to ``pending`` and pushed a
+    busy; each ``_kb_submit`` appended to ``queued_input`` and pushed a
     ``UserMessage`` to the inbox. The runtime committed them to history
     and published ``UserMessage`` events. Without the
-    ``make_pending_clearer`` observer, ``pending`` retains all the
-    typed lines and the dim preview shows the tail forever.
+    ``make_queued_input_clearer`` observer, ``queued_input`` retains
+    all the typed lines and the dim preview shows the tail forever.
     """
-    pending = ["elephant", "banana", "chair"]
+    queued_input = ["elephant", "banana", "chair"]
     agent = AgentRuntime(model=_TextOnlyModel(text="committed"))
-    agent.observers.append(make_pending_clearer(pending))
+    agent.observers.append(make_queued_input_clearer(queued_input))
 
     done = asyncio.Event()
 
@@ -512,7 +512,7 @@ async def test_pending_cleared_when_runtime_publishes_user_message() -> None:
     agent.inbox.push_back(Quit())
     await task
 
-    assert pending == [], f"expected pending cleared, got {pending}"
+    assert queued_input == [], f"expected queued_input cleared, got {queued_input}"
 
 
 if __name__ == "__main__":

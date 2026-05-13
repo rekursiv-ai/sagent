@@ -1,4 +1,4 @@
-"""AgentRuntime: inbox-driven event loop.
+r"""AgentRuntime: inbox-driven event loop.
 
 One loop, one pipe, one match block. Everything is a ``RuntimeEvent``.
 
@@ -29,26 +29,104 @@ History
 ``list[UserMessage | AssistantMessage | ToolResult]``. Three types.
 Match on type, not string descriptors.
 
-Cohort
-~~~~~~
+Tool task lifecycle
+~~~~~~~~~~~~~~~~~~~
 
-A tool cohort is ``set[str]`` of pending call IDs, populated when
-``ModelResponseComplete`` carries tool calls. Model fires only when
-the cohort is empty. No Cohort class.
+Two registries with orthogonal semantics:
 
-Rebase model
-~~~~~~~~~~~~
+- ``cohort: set[str]`` names call IDs the model gate waits on.
+  Membership = blocking the next model call.
+- ``detached: dict[str, Task]`` names tasks whose completion splices
+  into an existing ``[detached]`` placeholder via ``DetachedResult``
+  rather than appending a fresh ``ToolResult``. Membership = in-place
+  mutation of history at completion.
 
-Provider APIs require a ``tool_result`` for every ``tool_use``. When
-the user types mid-cohort, we stub unfinished tools with
-``"[detached]"`` placeholders to close out the branch, then append
-the user message. History stays linear. Detached tools post
-``DetachedResult`` when they complete; these arrive as ``UserMessage``
-context in the next round.
+Both names describe the *role*, not the *origin*. ``cohort`` is not
+``Undetached`` because most entries arrive from a fresh
+``ModelResponseComplete`` and were never detached; ``Undetach`` is
+just one of several ways to populate the set. Likewise ``detached``
+is not ``Stubbed`` because not all entries got there via the
+stub-and-let-finish path -- mid-stream-detach spawns straight into
+``detached`` with no prior ``Detach`` event. Naming by role lets the
+same set absorb every spawn path without renaming.
 
-``UserQueuedMessage`` is a non-preempting variant: it buffers text
-and coalesces into one ``UserMessage`` after the cohort completes,
-without stubbing tools.
+A call ID can be in either, both, or neither::
+
+    cohort  detached  state
+    yes     no        fresh spawn, gating, completion appends new entry
+    no      yes       background work, completion splices placeholder
+    yes     yes       re-gated after detach (``Undetach``)
+    no      no        not running
+
+Only one cohort generation is alive at a time (the gate requires
+``not self.cohort`` to fire the next ``model_call``, so no new
+``ModelResponseComplete`` can populate a second generation while the
+current one is non-empty). ``detached`` has no such restriction:
+tasks from any number of prior rounds can run in parallel.
+
+Spawn paths:
+
+- Regular ``ModelResponseComplete`` (no pending mid-stream user):
+  cohort + ``running_tools``.
+- ``ModelResponseComplete`` with mid-stream user pending: bypass
+  cohort entirely -- task goes straight into ``detached`` with a
+  ``[detached]`` placeholder appended. The gate then fires for the
+  coalesced user content.
+
+Transitions:
+
+- ``Detach`` / implicit stub on ``UserMessage`` / ``Compact`` /
+  ``Clear``: move cohort entry to detached, append ``[detached]``
+  placeholder.
+- ``Undetach``: re-add to cohort. Stays in detached -- so completion
+  still splices the existing placeholder rather than appending a
+  phantom result.
+- ``Kill``: drop cohort + ``running_tools`` entry, cancel task.
+
+Completion routing is decided in ``_run_tool_and_post`` by whether
+``call.id in self.detached`` at finish time. If yes, the task posts
+``DetachedResult`` (splice). Otherwise it posts a fresh ``ToolResult``
+(append).
+
+User-message dispatch timing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Provider APIs require a ``tool_result`` for every ``tool_use``, so
+history must stay linear (no orphaned ``tool_use`` blocks). The
+runtime maintains this invariant by stubbing unfinished tools with
+``[detached]`` placeholders before appending user-side content that
+would otherwise leave the branch open. Within that constraint, a
+``UserMessage`` arriving while the agent is busy can be released at
+one of four trigger points, trading responsiveness against
+preservation of in-flight work:
+
+- **Pre-MRC (immediate cancel).** Cancel ``model_call``, discard
+  the partial stream, append user, gate fires now. Maximum
+  responsiveness, partial response lost. Reached via ``Halt``
+  followed by a fresh ``UserMessage``.
+- **At ``ModelResponseComplete`` with tool detach.** Let the stream
+  complete; if it produced tool_calls, detach them to background;
+  gate fires for the coalesced user. Default for ``UserMessage``
+  arriving while ``model_call`` is in flight (held in
+  ``_mid_stream_queue``). No discarded model work; tools run
+  asynchronously and splice in later.
+- **At ``CohortComplete``.** Let stream complete *and* tools drain;
+  insert user between tool results and the next round's model call.
+  User waits for tools; in-flight work preserved fully. No surface
+  today.
+- **At ``ModelIdle``.** Let the entire round chain complete
+  (model -> tools -> model -> ... -> final no-tool response), then
+  dispatch. Most conservative. Reached by ``UserQueuedMessage``,
+  buffered in the local ``queued`` list and drained only when
+  ``not self._should_call_model()`` -- i.e. the gate would not fire
+  naturally, meaning history's tail is an ``AssistantMessage`` with
+  no tool_calls. Coalesces with ``\n\n`` joins.
+
+``UserMessage`` arriving mid-cohort (model_call is None, cohort
+non-empty) preempts: tools are stubbed to ``detached``, the user
+message is appended, gate fires. This is the original "type to
+redirect" path and is orthogonal to the four trigger points above
+(which apply during streaming, not during cohort execution).
 
 Model call gate
 ~~~~~~~~~~~~~~~
@@ -115,19 +193,6 @@ published events. If something needs to happen outside the runtime
 (persist session, swap model, track cost, enforce budget), it's an
 event that an observer handles. If you're tempted to add a method
 stub or a callback parameter, publish an event instead.
-
-Agent composes the runtime::
-
-    class Agent:
-        def __init__(self, model, tools, ...):
-            self.runtime = AgentRuntime(model=model, tools=tools)
-            self.runtime.observers.append(self._on_event)
-
-        async def run_forever(self):
-            await self.runtime.run_forever()
-
-        def halt(self):
-            self.runtime.inbox.push_back(Halt())
 
 Why the runtime owns Model and Tool references: the alternative is a
 generic runtime that only processes events, with the Agent calling
@@ -1123,7 +1188,22 @@ class AgentRuntime:
                 self.publish(CohortComplete())
                 cohort_seen = False
 
-            if not self.cohort and self.model_call is None and queued:
+            # ``UserQueuedMessage`` drains at ``ModelIdle``, not
+            # ``CohortComplete``. The ``not self._should_call_model()``
+            # check distinguishes "round chain ended" (history tail is
+            # ``AssistantMessage`` with no tool_calls, i.e. the gate
+            # would not fire on its own) from "between rounds" (history
+            # tail is ``ToolResult``, the gate would fire next round).
+            # Under the former, draining is correct; under the latter,
+            # we'd be cutting the queued content into a chain the user
+            # didn't intend to interrupt.
+            if (
+                not self.cohort
+                and self.model_call is None
+                and self.compact_task is None
+                and not self._should_call_model()
+                and queued
+            ):
                 self.history.append(
                     UserMessage(
                         text="\n\n".join(q.text for q in queued),

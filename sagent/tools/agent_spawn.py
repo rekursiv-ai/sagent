@@ -731,7 +731,7 @@ _VERBOSITY: dict[int, frozenset[type]] = {
 
 @dataclasses.dataclass(slots=True, kw_only=True)
 class ChildStats:
-    """Parent-scoped toolbar stats for one child agent."""
+    """Parent-scoped status-pane stats for one child agent."""
 
     label: str
     """Child agent's display label."""
@@ -755,7 +755,7 @@ class ChildStats:
 class _ChildForwarder:
     """Observer adapter: wraps child events as ``ChildEvent`` on parent.publish.
 
-    Tracks per-child stats so the parent's toolbar can render running-child
+    Tracks per-child stats so the parent's status pane can render running-child
     summaries. Errors and tool results always forward; other events follow
     the verbosity table.
     """

@@ -43,16 +43,17 @@ from sagent.agent.runtime import (
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import build_provider, infer_provider
-from sagent.repl.console import ConsolePrinter
-from sagent.repl.input import REPL_PUMP_KEY, spawn_repl_pump
-from sagent.repl.keybindings import build_key_bindings
-from sagent.repl.prompt import (
+from sagent.repl.console_pane import ConsolePrinter
+from sagent.repl.input_pane import (
+    REPL_PUMP_KEY,
     PromptToolkitInputSource,
-    dynamic_prompt,
+    render_input_pane,
+    spawn_repl_pump,
 )
+from sagent.repl.keybindings import build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
-from sagent.repl.toolbar import render_toolbar
+from sagent.repl.status_pane import render_status_pane
 from sagent.tools.core import agent_registry
 
 
@@ -81,31 +82,33 @@ async def run_repl(
     style = PTStyle.from_dict(
         {
             "bottom-toolbar": "fg:ansibrightblack noreverse bg:default",
-            "queued": "fg:ansibrightblack",
-            "prompt": "bold",
+            "queued_input_pane": "fg:ansibrightblack",
+            "input_pane": "bold",
         },
     )
-    pending: list[str] = []
+    queued_input: list[str] = []
     with patch_stdout(raw=True):
         console = Console(stderr=True)
         session: PromptSession[str] = PromptSession(
-            functools.partial(dynamic_prompt, agent, pending),
+            functools.partial(render_input_pane, agent, queued_input),
             multiline=True,
             erase_when_done=True,
             history=FileHistory(str(history_path)),
             auto_suggest=AutoSuggestFromHistory(),
-            bottom_toolbar=functools.partial(render_toolbar, agent),
+            bottom_toolbar=functools.partial(render_status_pane, agent),
             refresh_interval=0.2,
-            key_bindings=build_key_bindings(agent, pending),
+            key_bindings=build_key_bindings(agent, queued_input),
             enable_open_in_editor=False,
             style=style,
         )
         printer = ConsolePrinter(console)
         agent.runtime.observers.append(make_render_observer(printer))
-        agent.runtime.observers.append(make_pending_clearer(pending))
+        agent.runtime.observers.append(make_queued_input_clearer(queued_input))
         pump_task = spawn_repl_pump(
             agent,
-            PromptToolkitInputSource(session, pending=pending, console=console),
+            PromptToolkitInputSource(
+                session, queued_input=queued_input, console=console
+            ),
             printer=printer,
         )
         replay_messages(agent, printer)
@@ -144,14 +147,14 @@ async def run_repl(
         )
 
 
-def make_pending_clearer(
-    pending: list[str],
+def make_queued_input_clearer(
+    queued_input: list[str],
 ) -> Callable[[RuntimeEvent], None]:
-    """Observer that empties ``pending`` whenever the runtime accepts user input.
+    """Observer that empties ``queued_input`` once the runtime accepts user input.
 
-    ``pending`` is the REPL-local mirror of "lines the user typed while
-    the agent was busy" -- it backs the dim preview in
-    :func:`repl.prompt.dynamic_prompt` and the Up-arrow edit-back in
+    ``queued_input`` is the REPL-local mirror of "lines the user typed
+    while the agent was busy" -- it backs the dim preview in
+    :func:`repl.input_pane.render_input_pane` and the Up-arrow edit-back in
     :func:`repl.keybindings._kb_up`. Entries are appended by
     ``_kb_submit`` but never removed except by Up or quit, so without
     this observer the dim preview shows a stale tail entry indefinitely
@@ -160,11 +163,11 @@ def make_pending_clearer(
     The runtime publishes a ``UserMessage`` event whenever it accepts
     user input -- one event per coalesced batch under the mid-stream
     buffer, one event per submission otherwise. In either shape, the
-    event means everything currently in ``pending`` has been committed;
-    a full clear is correct.
+    event means everything currently in ``queued_input`` has been
+    committed; a full clear is correct.
 
     Args:
-      pending: REPL-local pending-text buffer to clear.
+      queued_input: REPL-local queued-text buffer to clear.
 
     Returns:
       observer: Callable suitable for ``agent.runtime.observers.append``.
@@ -173,7 +176,7 @@ def make_pending_clearer(
 
     def observer(event: RuntimeEvent) -> None:
         if isinstance(event, UserMessage):
-            pending.clear()
+            queued_input.clear()
 
     return observer
 

@@ -1,22 +1,44 @@
-"""REPL input pump + ``InputSource`` abstraction.
+"""REPL input zone: bar rendering + pump + ``InputSource`` abstraction.
 
-The pump is a long-running coroutine spawned as a *hidden* background
-task on the Agent. It loops on an :class:`InputSource`, parses each
-line via :func:`repl.slash.parse_slash`, and dispatches the resulting
-:class:`SlashAction` directly against the agent's public API.
+This module owns everything about the *input* zone of the REPL --
+the bar where the user types, the optional dim ``queued_input``
+preview rendered just above it, and the pump that consumes
+submitted lines.
 
-The pump is intentionally NOT a Handler / Tool / runtime event. It
+Pump
+~~~~
+
+A long-running coroutine spawned as a *hidden* background task on
+the Agent. It loops on an :class:`InputSource`, parses each line
+via :func:`repl.slash.parse_slash`, and dispatches the resulting
+:class:`SlashAction` directly against the agent's public API. The
+pump is intentionally NOT a Handler / Tool / runtime event; it
 lives in ``agent._bg`` as a hidden entry so user-initiated abort
 (``/halt`` / ``/kill``) can never tear down the input loop.
+
+Input-pane rendering
+~~~~~~~~~~~~~~~~~~~~
+
+:func:`render_input_pane` builds the prompt-toolkit ``FormattedText``
+for the input zone: an optional dim ``queued_input_pane`` preview
+line above the prompt sigil, then the ``> `` sigil itself. Backed by
+a REPL-local ``queued_input: list[str]`` buffer of texts the user
+typed while the agent was busy; the tail is shown as the preview,
+Up-arrow lifts it back, and the runtime's
+``make_queued_input_clearer`` observer empties the buffer once the
+runtime has committed user input to history.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, override
 
 import asyncio
 import logging
 import time
+
+from prompt_toolkit.formatted_text import FormattedText
+from rich.text import Text
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.runtime import (
@@ -27,6 +49,7 @@ from sagent.agent.runtime import (
 )
 from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
+    QUIT_WORDS,
     Clear as SlashClear,
     Compact as SlashCompact,
     Halt as SlashHalt,
@@ -51,6 +74,9 @@ _run_repl = lazy_import("sagent.repl.run_repl")
 _render = lazy_import("sagent.repl.render")
 
 if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
+    from rich.console import Console
+
     from sagent.agent.agent import Agent
     from sagent.repl.render import Printer
 
@@ -59,7 +85,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "REPL_PUMP_KEY",
     "InputSource",
+    "PromptToolkitInputSource",
     "StubInputSource",
+    "render_input_pane",
     "spawn_repl_pump",
 ]
 
@@ -214,3 +242,101 @@ async def _dispatch(
     if printer is not None:
         printer.write_tool_error(action.text)
     return False
+
+
+class PromptToolkitInputSource(InputSource):
+    """Async input source backed by a :class:`prompt_toolkit.PromptSession`.
+
+    The ``queued_input`` field mirrors the REPL-local buffer of texts
+    the user typed while the agent was busy. The runtime's
+    ``GatedDeque`` doesn't support tag-based peek / pop, so the REPL
+    maintains this list itself; the dim preview rendered by
+    :func:`render_input_pane` shows the tail and ``Up`` lifts it back.
+    """
+
+    queued_input: list[str]
+    """List of texts the user typed while the agent was busy. New input
+    appends; ``Up`` pops the latest; :func:`render_input_pane` previews
+    the tail."""
+
+    def __init__(
+        self,
+        session: PromptSession[str],
+        *,
+        queued_input: list[str],
+        console: Console | None = None,
+    ) -> None:
+        self._session = session
+        self.queued_input = queued_input
+        self._console = console
+
+    @override
+    async def next_line(self) -> str | None:
+        """Return the next line, or ``None`` to terminate the input loop."""
+        try:
+            text = await self._session.prompt_async()
+        except (EOFError, KeyboardInterrupt):
+            self._surface_queued_input_on_quit()
+            return None
+        stripped = text.strip()
+        if stripped.lower() in QUIT_WORDS:
+            self._surface_queued_input_on_quit()
+            return None
+        return text
+
+    def _surface_queued_input_on_quit(self) -> None:
+        """Surface the tail of ``queued_input`` before the loop ends."""
+        if not self.queued_input or self._console is None:
+            return
+        tail = self.queued_input[-1]
+        preview = tail.replace("\n", " ")[:80]
+        self._console.print(
+            Text(f"[discarding queued message: {preview}]", style="dim yellow"),
+        )
+        self.queued_input.clear()
+
+
+def render_input_pane(agent: Agent, queued_input: list[str]) -> FormattedText:
+    """Build the input-pane ``FormattedText``: optional preview + prompt sigil.
+
+    Only renders the preview when the agent is *busy* (a model call or
+    compaction is in flight, or a tool cohort is outstanding): then the
+    user's typed message is genuinely waiting and the preview is honest
+    UX. When idle, the text is about to be committed and surfacing it
+    as "queued" during that brief race window is misleading.
+
+    ``Up`` lifts the preview message back into the buffer for editing.
+
+    Args:
+      agent: Agent whose busy state gates the preview.
+      queued_input: REPL-local buffer; tail is previewed.
+
+    Returns:
+      formatted: The input zone's formatted text.
+
+    """
+    parts: list[tuple[str, str]] = []
+    is_busy = agent.work is not None or bool(agent.runtime.cohort)
+    if is_busy and queued_input:
+        parts.append(("class:queued_input_pane", _collapse_preview(queued_input[-1])))
+        parts.append(("", "\n"))
+    parts.append(("class:input_pane", "> "))
+    return FormattedText(parts)
+
+
+def _collapse_preview(text: str, width: int = 60) -> str:
+    """Collapse multi-line text into a one-line preview with a count suffix."""
+    text = text.rstrip("\n")
+    paras = text.split("\n\n")
+    first = paras[0].split("\n")[0]
+    if len(first) > width:
+        first = first[: width - 1] + "…"
+    extra_paras = len(paras) - 1
+    if extra_paras > 0:
+        return (
+            f"{first} (+{extra_paras} more paragraph{'s' if extra_paras != 1 else ''})"
+        )
+    extra_lines = len(paras[0].split("\n")) - 1
+    if extra_lines > 0:
+        return f"{first} (+{extra_lines} more line{'s' if extra_lines != 1 else ''})"
+    return first

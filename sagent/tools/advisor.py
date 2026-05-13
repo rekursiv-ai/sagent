@@ -125,7 +125,7 @@ class Advisor:
     supports_microcompaction: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return the toolbar label for a pending advisor consult.
+        """Return the status-pane label for a pending advisor consult.
 
         Args:
           args: Directive arguments (ignored).

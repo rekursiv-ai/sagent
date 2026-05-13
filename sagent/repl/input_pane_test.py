@@ -1,16 +1,19 @@
-"""Tests for ``repl.input``: InputSource + SlashAction dispatch."""
+"""Tests for ``repl.input_pane``: pump dispatch + input-pane rendering."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import asyncio
 
+from prompt_toolkit.formatted_text import FormattedText
+
 import pytest
 
+from sagent.agent.agent import Agent as _RealAgent
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.runtime import (
     Clear,
@@ -19,12 +22,15 @@ from sagent.agent.runtime import (
     RuntimeEvent,
     UserMessage,
 )
-from sagent.repl import input as repl_input_mod
-from sagent.repl.input import (
+from sagent.repl import input_pane as repl_input_mod
+from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
+    PromptToolkitInputSource,
     StubInputSource,
+    _collapse_preview,
     _dispatch,
     _input_pump,
+    render_input_pane,
     spawn_repl_pump,
 )
 from sagent.repl.render import RecordingPrinter
@@ -135,7 +141,7 @@ async def test_dispatch_halt_unknown_agent_writes_error() -> None:
     a = _agent()
     p = RecordingPrinter()
     with patch(
-        "sagent.repl.input.agent_registry",
+        "sagent.repl.input_pane.agent_registry",
         new={},
     ):
         _ = await _dispatch(a, SlashHalt(target="Other"), p)
@@ -337,7 +343,7 @@ async def test_input_pump_handles_dispatch_exception(
         raise RuntimeError("pump crashed")
 
     monkeypatch.setattr(
-        "sagent.repl.input._dispatch",
+        "sagent.repl.input_pane._dispatch",
         boom,
     )
     # Send one line then None; pump should log the error and shut down.
@@ -391,7 +397,7 @@ async def test_dispatch_halt_routes_to_registered_agent() -> None:
     a = _agent()
     other = _StubAgent(name="Other")
     with patch(
-        "sagent.repl.input.agent_registry",
+        "sagent.repl.input_pane.agent_registry",
         new={"Other": other},
     ):
         _ = await _dispatch(a, SlashHalt(target="Other"), None)
@@ -403,11 +409,188 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
     # No printer + unknown agent target: silently no-op.
     a = _agent()
     with patch(
-        "sagent.repl.input.agent_registry",
+        "sagent.repl.input_pane.agent_registry",
         new=cast("Mapping[str, object]", {}),
     ):
         exit_ = await _dispatch(a, SlashHalt(target="ghost"), None)
     assert exit_ is False
+
+
+# --- input-pane rendering + PromptToolkitInputSource tests ------------
+# (merged from former repl/prompt_test.py)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeRuntime:
+    cohort: set[str] = field(default_factory=set)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeAgent:
+    work: object = None
+    runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+
+
+def _as_real_agent(a: _FakeAgent) -> _RealAgent:
+    return cast(_RealAgent, a)
+
+
+def test_render_input_pane_idle_no_preview() -> None:
+    """Idle agent renders only the ``> `` prompt token."""
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["queued"])
+    assert isinstance(fp, FormattedText)
+    assert list(fp) == [("class:input_pane", "> ")]
+
+
+def test_render_input_pane_busy_with_queued_input_renders_preview() -> None:
+    a = _FakeAgent(work=object())
+    fp = render_input_pane(_as_real_agent(a), ["hello world"])
+    parts = list(fp)
+    assert parts[0] == ("class:queued_input_pane", "hello world")
+    assert parts[1] == ("", "\n")
+    assert parts[2] == ("class:input_pane", "> ")
+
+
+def test_render_input_pane_busy_no_queued_input_omits_preview() -> None:
+    a = _FakeAgent(work=object())
+    fp = render_input_pane(_as_real_agent(a), [])
+    assert list(fp) == [("class:input_pane", "> ")]
+
+
+def test_render_input_pane_cohort_busy_renders_preview() -> None:
+    a = _FakeAgent()
+    a.runtime.cohort.add("c1")
+    fp = render_input_pane(_as_real_agent(a), ["mid-cohort"])
+    parts = list(fp)
+    assert parts[0] == ("class:queued_input_pane", "mid-cohort")
+
+
+def test_render_input_pane_only_previews_tail() -> None:
+    a = _FakeAgent(work=object())
+    fp = render_input_pane(_as_real_agent(a), ["old1", "old2", "tail"])
+    parts = list(fp)
+    assert parts[0] == ("class:queued_input_pane", "tail")
+
+
+def test_render_input_pane_compacting_busy() -> None:
+    """``compact_task`` shows up as ``agent.work`` (truthy) -> busy."""
+    a = _FakeAgent(work=object())
+    fp = render_input_pane(_as_real_agent(a), ["queued during compact"])
+    parts = list(fp)
+    assert parts[0] == ("class:queued_input_pane", "queued during compact")
+
+
+def test_collapse_preview_short_passthrough() -> None:
+    assert _collapse_preview("hello") == "hello"
+
+
+def test_collapse_preview_truncates_long_first_line() -> None:
+    out = _collapse_preview("x" * 100, width=20)
+    assert out.endswith("…")
+    assert len(out) == 20
+
+
+def test_collapse_preview_extra_lines_suffix() -> None:
+    out = _collapse_preview("line1\nline2\nline3")
+    assert out == "line1 (+2 more lines)"
+
+
+def test_collapse_preview_one_extra_line_singular() -> None:
+    out = _collapse_preview("line1\nline2")
+    assert out == "line1 (+1 more line)"
+
+
+def test_collapse_preview_extra_paragraph_suffix() -> None:
+    out = _collapse_preview("para1\n\npara2\n\npara3")
+    assert out == "para1 (+2 more paragraphs)"
+
+
+def test_collapse_preview_one_extra_paragraph_singular() -> None:
+    out = _collapse_preview("para1\n\npara2")
+    assert out == "para1 (+1 more paragraph)"
+
+
+def test_collapse_preview_strips_trailing_newlines() -> None:
+    assert _collapse_preview("hello\n\n") == "hello"
+
+
+def test_next_line_returns_typed_text() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        return "hello"
+
+    session.prompt_async = _prompt_async
+    src = PromptToolkitInputSource(session, queued_input=[])
+    line = asyncio.run(src.next_line())
+    assert line == "hello"
+
+
+def test_next_line_quit_returns_none() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    src = PromptToolkitInputSource(session, queued_input=[])
+    line = asyncio.run(src.next_line())
+    assert line is None
+
+
+def test_next_line_eof_returns_none() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        raise EOFError
+
+    session.prompt_async = _prompt_async
+    src = PromptToolkitInputSource(session, queued_input=[])
+    line = asyncio.run(src.next_line())
+    assert line is None
+
+
+def test_next_line_keyboard_interrupt_returns_none() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        raise KeyboardInterrupt
+
+    session.prompt_async = _prompt_async
+    src = PromptToolkitInputSource(session, queued_input=[])
+    line = asyncio.run(src.next_line())
+    assert line is None
+
+
+def test_quit_surfaces_queued_input_preview() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    console = MagicMock()
+    queued_input = ["queued line"]
+    src = PromptToolkitInputSource(session, queued_input=queued_input, console=console)
+    line = asyncio.run(src.next_line())
+    assert line is None
+    console.print.assert_called_once()
+    assert queued_input == []
+
+
+def test_quit_without_console_swallows_preview() -> None:
+    session = MagicMock()
+
+    async def _prompt_async() -> str:
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    queued_input = ["queued"]
+    src = PromptToolkitInputSource(session, queued_input=queued_input, console=None)
+    line = asyncio.run(src.next_line())
+    assert line is None
+    # buffer left alone when there's no console to surface to.
+    assert queued_input == ["queued"]
 
 
 if __name__ == "__main__":

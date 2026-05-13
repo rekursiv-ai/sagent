@@ -1,4 +1,4 @@
-"""Tests for ``repl.toolbar``: bottom-toolbar string assembly."""
+"""Tests for ``repl.status_pane``: status-pane string assembly."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
 from sagent.custom_types import ContextBudget, TokenCount
-from sagent.repl.toolbar import render_toolbar
+from sagent.repl.status_pane import render_status_pane
 
 
 @dataclass(slots=True, kw_only=True)
@@ -23,7 +23,7 @@ class _FakeCostTracker:
 
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
-    """Minimal stand-in for ``Agent`` matching only the surface toolbar reads."""
+    """Minimal stand-in for ``Agent`` matching only the surface the status pane reads."""
 
     activity: ActivityTracker = field(default_factory=ActivityTracker)
     cost_tracker: _FakeCostTracker = field(default_factory=_FakeCostTracker)
@@ -96,7 +96,7 @@ def patched_loop_time() -> Iterator[None]:
 
 
 def test_empty_when_no_activity_no_tokens() -> None:
-    assert render_toolbar(_as_agent(_agent())) == ""
+    assert render_status_pane(_as_agent(_agent())) == ""
 
 
 def test_idle_renders_bracket() -> None:
@@ -108,7 +108,7 @@ def test_idle_renders_bracket() -> None:
         cache_read_tokens=1_800_000,
         total_cost_usd=0.98,
     )
-    assert render_toolbar(_as_agent(a)) == "[50s 18↑ 3114↓ 140K↟ 1.8M↡ $0.98]"
+    assert render_status_pane(_as_agent(a)) == "[50s 18↑ 3114↓ 140K↟ 1.8M↡ $0.98]"
 
 
 def test_idle_minutes_format() -> None:
@@ -118,7 +118,7 @@ def test_idle_minutes_format() -> None:
         output_tokens=8902,
         total_cost_usd=14.71,
     )
-    assert render_toolbar(_as_agent(a)) == "[1m 23s 67↑ 8902↓ 0↟ 0↡ $14.71]"
+    assert render_status_pane(_as_agent(a)) == "[1m 23s 67↑ 8902↓ 0↟ 0↡ $14.71]"
 
 
 def test_idle_hours_format() -> None:
@@ -131,7 +131,8 @@ def test_idle_hours_format() -> None:
         total_cost_usd=487.12,
     )
     assert (
-        render_toolbar(_as_agent(a)) == "[2h 17m 0s 3200↑ 412K↓ 18.0M↟ 241.0M↡ $487.12]"
+        render_status_pane(_as_agent(a))
+        == "[2h 17m 0s 3200↑ 412K↓ 18.0M↟ 241.0M↡ $487.12]"
     )
 
 
@@ -142,7 +143,7 @@ def test_idle_zero_cost_still_renders() -> None:
         output_tokens=2,
         total_cost_usd=0.0,
     )
-    assert render_toolbar(_as_agent(a)) == "[1s 1↑ 2↓ 0↟ 0↡ $0.00]"
+    assert render_status_pane(_as_agent(a)) == "[1s 1↑ 2↓ 0↟ 0↡ $0.00]"
 
 
 @pytest.mark.usefixtures("patched_loop_time")
@@ -155,7 +156,7 @@ def test_active_prefixes_spinner() -> None:
         output_tokens=20,
         total_cost_usd=0.05,
     )
-    s = render_toolbar(_as_agent(a))
+    s = render_status_pane(_as_agent(a))
     assert s.endswith("[5s 10↑ 20↓ 0↟ 0↡ $0.05]")
     assert s[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     assert s[1] == " "
@@ -172,7 +173,7 @@ def test_active_includes_live_output_estimate() -> None:
         total_cost_usd=0.10,
         live_response_chars=1000,  # / 4 chars_per_token = 250 tokens added
     )
-    s = render_toolbar(_as_agent(a))
+    s = render_status_pane(_as_agent(a))
     assert "750↓" in s
 
 
@@ -185,7 +186,7 @@ def test_idle_ignores_live_output_estimate() -> None:
         total_cost_usd=0.10,
         live_response_chars=1000,
     )
-    s = render_toolbar(_as_agent(a))
+    s = render_status_pane(_as_agent(a))
     assert "500↓" in s
     assert "750" not in s
 
@@ -193,12 +194,12 @@ def test_idle_ignores_live_output_estimate() -> None:
 @pytest.mark.usefixtures("patched_loop_time")
 def test_active_zero_elapsed_renders() -> None:
     a = _agent(active=True, current_call_start=8.0, elapsed_seconds=0.0)
-    s = render_toolbar(_as_agent(a))
+    s = render_status_pane(_as_agent(a))
     assert "[2s 0↑ 0↓ 0↟ 0↡ $0.00]" in s
 
 
 def test_real_agent_cost_tracker_is_compatible() -> None:
-    """``render_toolbar`` accepts a real ``CostTracker``/``ActivityTracker``."""
+    """``render_status_pane`` accepts a real ``CostTracker``/``ActivityTracker``."""
 
     class _Dummy:
         activity = ActivityTracker(elapsed_seconds=2.0)
@@ -211,7 +212,7 @@ def test_real_agent_cost_tracker_is_compatible() -> None:
             chars_per_token=4,
         )
 
-    s = render_toolbar(cast(Agent, _Dummy()))
+    s = render_status_pane(cast(Agent, _Dummy()))
     assert s.startswith("[2s ")
 
 

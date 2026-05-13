@@ -1,7 +1,7 @@
 """Leaf terminal-formatting utilities used by the REPL.
 
-Pure helpers shared between :mod:`repl.console`, :mod:`repl.replay`,
-:mod:`repl.toolbar`, and any external surface (orchestrator stdout,
+Pure helpers shared between :mod:`repl.console_pane`, :mod:`repl.replay`,
+:mod:`repl.status_pane`, and any external surface (orchestrator stdout,
 slack adapter, headless output) that needs the same formatting:
 
 - :func:`print_user_bar` -- full-width dark-gray user-message bar.
