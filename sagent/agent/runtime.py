@@ -822,6 +822,14 @@ class AgentRuntime:
         # model call, no compaction). Applied at the end of each
         # iteration once that condition holds.
         self._pending_switch: ModelSwitch | None = None
+        # Mid-stream UserMessages: buffered while ``model_call`` is in
+        # flight. On ``ModelResponseComplete`` the buffer is coalesced
+        # into one ``UserMessage`` appended after the assistant response;
+        # any tool calls the response carried are detached so the
+        # follow-up round for the user's input fires immediately
+        # ("type to redirect" UX during streaming, matching the
+        # mid-cohort behavior of stub-and-detach).
+        self._mid_stream_queue: list[UserMessage] = []
 
     def publish(self, event: RuntimeEvent) -> None:
         """Fan out an event to all observers.
@@ -860,6 +868,13 @@ class AgentRuntime:
                         if self.model_call:
                             self.model_call.cancel()
                             self.model_call = None
+                        # Preserve any mid-stream typed content: append
+                        # before arming AWAIT_USER so the user's input
+                        # survives the halt and AWAIT_USER still waits
+                        # for a FRESH redirect.
+                        coalesced = self._drain_mid_stream_queue()
+                        if coalesced is not None:
+                            self.publish(coalesced)
                         self.inbox.push_front(
                             AWAIT_USER,
                             *items[item_idx + 1 :],
@@ -875,6 +890,7 @@ class AgentRuntime:
                         self.cohort.clear()
                         cohort_seen = False
                         queued.clear()
+                        self._mid_stream_queue.clear()
                         self.history.clear()
                         self.inbox.push_front(
                             AWAIT_USER,
@@ -890,6 +906,10 @@ class AgentRuntime:
                             ),
                         )
                         self.publish(item)
+                        # Preserve mid-stream content past the error.
+                        coalesced = self._drain_mid_stream_queue()
+                        if coalesced is not None:
+                            self.publish(coalesced)
                         self.inbox.push_front(
                             AWAIT_USER,
                             *items[item_idx + 1 :],
@@ -942,6 +962,11 @@ class AgentRuntime:
                         self.cohort.clear()
                         cohort_seen = False
                         queued.clear()
+                        # Capture buffered mid-stream input into the snapshot
+                        # the compactor will see.
+                        coalesced = self._drain_mid_stream_queue()
+                        if coalesced is not None:
+                            self.publish(coalesced)
                         self.compact_task = asyncio.create_task(
                             self._compact_and_post(args),
                         )
@@ -959,12 +984,22 @@ class AgentRuntime:
                         self.publish(item)
 
                     case UserMessage():
-                        self._stub_running_tools_and_let_finish()
-                        self.running_tools = {}
-                        self.cohort.clear()
-                        cohort_seen = False
-                        self.history.append(item)
-                        self.publish(item)
+                        if self.model_call is not None:
+                            # Mid-stream: buffer for post-response coalesce.
+                            # The in-flight response is allowed to complete
+                            # so its content (and any tool calls) is not
+                            # discarded; tool calls will be detached and
+                            # the buffered user content will fire the next
+                            # round immediately.
+                            self._mid_stream_queue.append(item)
+                        else:
+                            # Mid-cohort or idle: preempt and append.
+                            self._stub_running_tools_and_let_finish()
+                            self.running_tools = {}
+                            self.cohort.clear()
+                            cohort_seen = False
+                            self.history.append(item)
+                            self.publish(item)
 
                     case UserQueuedMessage():
                         queued.append(item)
@@ -979,7 +1014,31 @@ class AgentRuntime:
                         self.model_call = None
                         self.history.append(msg)
                         self.publish(item)
-                        if msg.tool_calls:
+                        if self._mid_stream_queue:
+                            # User typed mid-stream. Cut their content in
+                            # line: relegate any tool calls to background
+                            # (placeholder + detached task; the result
+                            # splices in via ``DetachedResult`` when the
+                            # tool finishes), then append the coalesced
+                            # user content so the gate fires for it next.
+                            # No ``CohortStarted`` / ``ModelIdle`` here:
+                            # this round did not idle (a follow-up is
+                            # about to fire) and no cohort gates the model.
+                            for tc in msg.tool_calls:
+                                self.history.append(
+                                    ToolResult(
+                                        call_id=tc.id,
+                                        parent_id=msg.id,
+                                        content="[detached]",
+                                    ),
+                                )
+                                self.detached[tc.id] = asyncio.create_task(
+                                    self._run_tool_and_post(tc, parent_id=msg.id),
+                                )
+                            coalesced = self._drain_mid_stream_queue()
+                            if coalesced is not None:
+                                self.publish(coalesced)
+                        elif msg.tool_calls:
                             cohort_seen = True
                             self.publish(CohortStarted())
                             for tc in msg.tool_calls:
@@ -1064,7 +1123,7 @@ class AgentRuntime:
                 self.publish(CohortComplete())
                 cohort_seen = False
 
-            if not self.cohort and queued:
+            if not self.cohort and self.model_call is None and queued:
                 self.history.append(
                     UserMessage(
                         text="\n\n".join(q.text for q in queued),
@@ -1135,6 +1194,33 @@ class AgentRuntime:
                     ToolResult(call_id=cid, content="[detached]"),
                 )
                 self.detached[cid] = task
+
+    def _drain_mid_stream_queue(self) -> UserMessage | None:
+        r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
+
+        Multiple ``UserMessage`` items received while ``model_call`` was in
+        flight collapse into a single entry with ``\n\n``-joined text
+        and attachments concatenated in arrival order -- mirroring
+        :class:`UserQueuedMessage` coalescing semantics.
+
+        Returns:
+          appended: The coalesced ``UserMessage`` (so callers can publish
+              it) when the buffer was non-empty; ``None`` otherwise.
+              ``self.history`` is mutated in place.
+
+        """
+        if not self._mid_stream_queue:
+            return None
+        coalesced = UserMessage(
+            text="\n\n".join(q.text for q in self._mid_stream_queue),
+            attachments=sum(
+                (q.attachments for q in self._mid_stream_queue),
+                (),
+            ),
+        )
+        self._mid_stream_queue.clear()
+        self.history.append(coalesced)
+        return coalesced
 
     def _collect_detached(self) -> None:
         """Clean up detached tasks that completed or were cancelled.

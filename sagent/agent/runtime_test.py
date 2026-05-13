@@ -1893,6 +1893,374 @@ async def test_gated_deque_drain_with_gate_waits_for_match() -> None:
     assert "UserMessage" in types
 
 
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_user_message_mid_stream_fires_followup_round() -> None:
+    """Mid-stream user input must trigger a model call after the response.
+
+    Scenario:
+      - Round 1: ``UserMessage("user1")``, model starts streaming.
+      - Mid-stream: user pushes ``UserMessage("hey")``.
+      - Model completes its response to ``user1``.
+
+    Required behavior:
+      - History ends with the in-flight model's response, the mid-stream
+        ``UserMessage("hey")``, and a new assistant response answering
+        ``"hey"``. Two model calls in total.
+
+    Current bug (this test fails until fixed):
+      - The runtime's ``UserMessage`` handler appends to history without
+        cancelling ``model_call``. The model finishes and appends its
+        ``AssistantMessage`` after ``"hey"``, so the gate
+        (``_should_call_model`` checks tail entry only) sees an
+        ``AssistantMessage`` at history tail and never fires a round
+        for ``"hey"``. The user's input is silently stranded until they
+        type again.
+    """
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class MidStreamModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                stream_started.set()
+                await release_stream.wait()
+                msg = AssistantMessage(text="answer to user1")
+            else:
+                msg = AssistantMessage(text="answer to hey")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = MidStreamModel()
+    agent = AgentRuntime(model=model)
+    agent.inbox.push_back(UserMessage(text="user1"))
+
+    async def inject_and_release() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(UserMessage(text="hey"))
+        # Yield so the runtime drains the inbox before we release the
+        # model. This is the mid-stream condition: the runtime processes
+        # ``UserMessage("hey")`` while ``model_call`` is still in flight.
+        await asyncio.sleep(0)
+        release_stream.set()
+        # Give the runtime time to settle: process ModelResponseComplete,
+        # evaluate the gate, optionally fire a follow-up round.
+        await asyncio.sleep(0.2)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        inject_and_release(),
+    )
+
+    assert len(model.call_histories) == 2, (
+        f"expected 2 model calls (user1 + 'hey'); got {len(model.call_histories)}."
+        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+    )
+    second_call = model.call_histories[1]
+    assert any(isinstance(m, UserMessage) and m.text == "hey" for m in second_call), (
+        f"second call did not see 'hey' in its history: "
+        f"{[type(m).__name__ for m in second_call]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
+    r"""Multiple mid-stream user messages coalesce into a single follow-up round.
+
+    Scenario:
+      - Round 1: ``UserMessage("user1")``, model starts streaming.
+      - Mid-stream: user pushes ``UserMessage("hey")`` then
+        ``UserMessage("yo")``.
+      - Model completes its response to ``user1``.
+
+    Required behavior:
+      - One follow-up model call. The follow-up's input history shows
+        a single coalesced user turn containing both "hey" and "yo"
+        (matching :class:`UserQueuedMessage` semantics: joined on
+        ``\n\n``). Two model calls total, not three.
+
+    Current bug: same as the single-message case — no follow-up round
+    fires at all, and each mid-stream ``UserMessage`` is appended as a
+    separate history entry.
+    """
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class MidStreamModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                stream_started.set()
+                await release_stream.wait()
+                msg = AssistantMessage(text="answer to user1")
+            else:
+                msg = AssistantMessage(text="answer to coalesced")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = MidStreamModel()
+    agent = AgentRuntime(model=model)
+    agent.inbox.push_back(UserMessage(text="user1"))
+
+    async def inject_two_and_release() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(UserMessage(text="hey"))
+        agent.inbox.push_back(UserMessage(text="yo"))
+        await asyncio.sleep(0)
+        release_stream.set()
+        await asyncio.sleep(0.2)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        inject_two_and_release(),
+    )
+
+    assert len(model.call_histories) == 2, (
+        f"expected exactly 2 model calls (user1 + coalesced hey/yo);"
+        f" got {len(model.call_histories)}."
+    )
+    second_call = model.call_histories[1]
+    user_msgs = [m for m in second_call if isinstance(m, UserMessage)]
+    assert len(user_msgs) == 2, (
+        f"expected 2 user messages in follow-up history (user1 + coalesced);"
+        f" got {len(user_msgs)}: {[m.text for m in user_msgs]}"
+    )
+    coalesced = user_msgs[-1].text
+    assert "hey" in coalesced, (
+        f"expected coalesced follow-up to contain 'hey'; got {coalesced!r}"
+    )
+    assert "yo" in coalesced, (
+        f"expected coalesced follow-up to contain 'yo'; got {coalesced!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_user_message_mid_stream_detaches_new_tools_to_background() -> None:
+    """Mid-stream user input must cut in line over a response's tool_calls.
+
+    Scenario:
+      - Round 1: ``UserMessage("user1")``, model starts streaming.
+      - Mid-stream: user pushes ``UserMessage("hey")``.
+      - Round 1 completes returning an ``AssistantMessage`` with a
+        single slow tool call.
+
+    Required behavior:
+      - The slow tool is relegated to the background (detached). The
+        runtime fires a follow-up model call for ``"hey"`` immediately,
+        while the slow tool is still running. The user gets a response
+        to ``"hey"`` without waiting for the in-flight tool to complete.
+
+    Current bug: spawning the cohort blocks the gate (``cohort`` non-empty
+    suppresses ``_should_call_model``). The follow-up round for
+    ``"hey"`` only fires after the tool finishes, defeating the
+    "type to redirect" UX.
+    """
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        _name: str = "slow"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            tool_started.set()
+            await release_tool.wait()
+            return ToolResult(call_id="", content="tool done")
+
+    @dataclass(kw_only=True, slots=True)
+    class MidStreamModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                stream_started.set()
+                await release_stream.wait()
+                return AssistantMessage(
+                    tool_calls=(ToolCall(id="tc1", name="slow", args={}),),
+                )
+            msg = AssistantMessage(text="answer to hey")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = MidStreamModel()
+    agent = AgentRuntime(model=model, tools=[SlowTool()])
+    agent.inbox.push_back(UserMessage(text="user1"))
+
+    snapshot: dict[str, int] = {"calls_before_tool_release": 0}
+
+    async def inject_and_drive() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(UserMessage(text="hey"))
+        await asyncio.sleep(0)
+        release_stream.set()
+        # Tool must start before the snapshot is meaningful: it tells us
+        # the cohort really did spawn (so "background relegation" is a
+        # well-defined claim).
+        await asyncio.wait_for(tool_started.wait(), timeout=1.0)
+        # Give the runtime time to fire the follow-up call for "hey"
+        # while the tool is still blocked on ``release_tool``.
+        await asyncio.sleep(0.2)
+        snapshot["calls_before_tool_release"] = len(model.call_histories)
+        # Release the tool so the test can drain and exit.
+        release_tool.set()
+        await asyncio.sleep(0.2)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        inject_and_drive(),
+    )
+
+    assert snapshot["calls_before_tool_release"] >= 2, (
+        f"expected the follow-up model call for 'hey' to fire while the slow"
+        f" tool was still running (tool relegated to background); instead"
+        f" only {snapshot['calls_before_tool_release']} model call(s) had"
+        f" been made before the tool was released."
+    )
+    second_call = model.call_histories[1]
+    assert any(isinstance(m, UserMessage) and m.text == "hey" for m in second_call), (
+        f"second model call did not see 'hey' in its history:"
+        f" {[type(m).__name__ for m in second_call]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
+    """``UserQueuedMessage`` arriving mid-stream must fire a follow-up round.
+
+    Scenario:
+      - Round 1: ``UserMessage("user1")``, model starts streaming.
+      - Mid-stream: caller pushes ``UserQueuedMessage("hey")``.
+      - Model completes its response to ``user1``.
+
+    Required behavior:
+      - The queued user content is coalesced into a ``UserMessage`` and
+        appended after the assistant response (matching
+        ``UserQueuedMessage`` semantics). Gate fires; second model
+        call sees ``"hey"`` in history.
+
+    Current bug: the end-of-iteration coalesce drain checks only
+    ``not self.cohort and queued`` -- not ``self.model_call is None``.
+    So mid-stream ``UserQueuedMessage`` items get drained into history
+    while the model is still streaming. The model then appends its
+    ``AssistantMessage`` on top, burying the queued user content; the
+    gate never fires a follow-up round.
+    """
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class MidStreamModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                stream_started.set()
+                await release_stream.wait()
+                msg = AssistantMessage(text="answer to user1")
+            else:
+                msg = AssistantMessage(text="answer to queued")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    model = MidStreamModel()
+    agent = AgentRuntime(model=model)
+    agent.inbox.push_back(UserMessage(text="user1"))
+
+    async def inject_queued_and_release() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(UserQueuedMessage(text="hey"))
+        await asyncio.sleep(0)
+        release_stream.set()
+        await asyncio.sleep(0.2)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        inject_queued_and_release(),
+    )
+
+    assert len(model.call_histories) == 2, (
+        f"expected 2 model calls (user1 + queued 'hey');"
+        f" got {len(model.call_histories)}."
+        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+    )
+    second_call = model.call_histories[1]
+    assert any(isinstance(m, UserMessage) and "hey" in m.text for m in second_call), (
+        f"second call did not see 'hey' in its history:"
+        f" {[type(m).__name__ for m in second_call]}"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 

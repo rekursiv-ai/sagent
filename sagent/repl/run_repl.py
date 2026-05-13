@@ -14,6 +14,7 @@ the console outside the patch causes its writes to bypass the proxy.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,11 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
 from sagent import providers
-from sagent.agent.runtime import ModelSwitch
+from sagent.agent.runtime import (
+    ModelSwitch,
+    RuntimeEvent,
+    UserMessage,
+)
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import build_provider, infer_provider
@@ -97,6 +102,7 @@ async def run_repl(
         )
         printer = ConsolePrinter(console)
         agent.runtime.observers.append(make_render_observer(printer))
+        agent.runtime.observers.append(make_pending_clearer(pending))
         pump_task = spawn_repl_pump(
             agent,
             PromptToolkitInputSource(session, pending=pending, console=console),
@@ -136,6 +142,40 @@ async def run_repl(
             "sagent --continue-all     # most recent session across all dirs\n"
             "sagent --resume-all       # interactive picker across all dirs\n"
         )
+
+
+def make_pending_clearer(
+    pending: list[str],
+) -> Callable[[RuntimeEvent], None]:
+    """Observer that empties ``pending`` whenever the runtime accepts user input.
+
+    ``pending`` is the REPL-local mirror of "lines the user typed while
+    the agent was busy" -- it backs the dim preview in
+    :func:`repl.prompt.dynamic_prompt` and the Up-arrow edit-back in
+    :func:`repl.keybindings._kb_up`. Entries are appended by
+    ``_kb_submit`` but never removed except by Up or quit, so without
+    this observer the dim preview shows a stale tail entry indefinitely
+    after the runtime commits the user input to history.
+
+    The runtime publishes a ``UserMessage`` event whenever it accepts
+    user input -- one event per coalesced batch under the mid-stream
+    buffer, one event per submission otherwise. In either shape, the
+    event means everything currently in ``pending`` has been committed;
+    a full clear is correct.
+
+    Args:
+      pending: REPL-local pending-text buffer to clear.
+
+    Returns:
+      observer: Callable suitable for ``agent.runtime.observers.append``.
+
+    """
+
+    def observer(event: RuntimeEvent) -> None:
+        if isinstance(event, UserMessage):
+            pending.clear()
+
+    return observer
 
 
 def do_switch_model(

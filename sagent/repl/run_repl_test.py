@@ -2,29 +2,41 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import MagicMock, patch
 
+import asyncio
 import inspect
+
+import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import ModelSwitch
+from sagent.agent.runtime import (
+    AgentRuntime,
+    AssistantMessage,
+    HistoryEntry,
+    ModelIdle,
+    ModelResponseError,
+    ModelSwitch,
+    Quit,
+    RuntimeEvent,
+    Tool,
+    UserMessage,
+)
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.render import RecordingPrinter
-
-
-if TYPE_CHECKING:
-    import pytest
 from sagent.repl.run_repl import (
     _parse_model_args,
     _resolve_model_target,
     do_login,
     do_switch_model,
     format_tasks,
+    make_pending_clearer,
     run_repl,
 )
 
@@ -431,6 +443,76 @@ def test_run_repl_invokes_replay_messages() -> None:
     # stays green even when the call site is dropped (see eb4700ef).
     src = inspect.getsource(run_repl)
     assert "replay_messages(" in src
+
+
+def test_make_pending_clearer_clears_on_user_message() -> None:
+    """Direct unit: a published ``UserMessage`` empties ``pending``."""
+    pending = ["elephant", "banana", "chair"]
+    observer = make_pending_clearer(pending)
+    observer(UserMessage(text="real submission"))
+    assert pending == []
+
+
+def test_make_pending_clearer_ignores_non_user_events() -> None:
+    """Non-``UserMessage`` events leave ``pending`` untouched."""
+    pending = ["elephant"]
+    observer = make_pending_clearer(pending)
+    observer(ModelIdle())
+    observer(ModelResponseError(RuntimeError("x")))
+    assert pending == ["elephant"]
+
+
+@dataclass(kw_only=True, slots=True)
+class _TextOnlyModel:
+    """One-shot scripted model: returns text, no tool calls."""
+
+    text: str = "ok"
+
+    async def stream(
+        self,
+        history: list[HistoryEntry],
+        system: str,
+        tools: list[Tool],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, system, tools, on_thinking
+        for ch in self.text:
+            on_text(ch)
+        return AssistantMessage(text=self.text)
+
+
+@pytest.mark.asyncio
+async def test_pending_cleared_when_runtime_publishes_user_message() -> None:
+    """Integration: pre-populated ``pending`` clears once the runtime
+    publishes a ``UserMessage`` event.
+
+    Repro of the live bug: user typed several lines while the agent was
+    busy; each ``_kb_submit`` appended to ``pending`` and pushed a
+    ``UserMessage`` to the inbox. The runtime committed them to history
+    and published ``UserMessage`` events. Without the
+    ``make_pending_clearer`` observer, ``pending`` retains all the
+    typed lines and the dim preview shows the tail forever.
+    """
+    pending = ["elephant", "banana", "chair"]
+    agent = AgentRuntime(model=_TextOnlyModel(text="committed"))
+    agent.observers.append(make_pending_clearer(pending))
+
+    done = asyncio.Event()
+
+    def _watch_idle(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle):
+            done.set()
+
+    agent.observers.append(_watch_idle)
+
+    agent.inbox.push_back(UserMessage(text="real submission"))
+    task = asyncio.create_task(agent.run_forever())
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    agent.inbox.push_back(Quit())
+    await task
+
+    assert pending == [], f"expected pending cleared, got {pending}"
 
 
 if __name__ == "__main__":
