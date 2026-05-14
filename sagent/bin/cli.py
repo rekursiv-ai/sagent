@@ -62,6 +62,7 @@ from sagent.agent import Agent
 from sagent.agent.runtime import (
     AssistantMessage,
     HistoryEntry,
+    HistoryEntryUpdated,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
@@ -491,7 +492,7 @@ def _build_provider_model(
 
 
 def _configure_logging(level: str | None) -> None:
-    """Configure CLI logging from flag or environment."""
+    """Configure CLI logging from flag or environment (headless / pre-mode)."""
     raw = level or os.environ.get("SAGENT_LOG_LEVEL")
     if not raw:
         return
@@ -504,6 +505,58 @@ def _configure_logging(level: str | None) -> None:
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("sagent").setLevel(value)
+    logging.getLogger("sagent").setLevel(value)
+
+
+def _install_repl_logging() -> None:
+    """REPL mode: never write logs to stderr.
+
+    Python's default ``lastResort`` handler emits ``WARNING+`` records
+    to stderr, which corrupts prompt-toolkit's display (any stderr write
+    overlays the rendered UI). Policy: stderr is for headless mode
+    only. This function:
+
+      - Replaces ``logging.lastResort`` with ``NullHandler`` so the
+        implicit fallback is silent.
+      - Removes any pre-installed stderr/stdout-bound handlers on the
+        root logger (e.g. from a prior ``basicConfig`` call).
+      - When ``SAGENT_LOG_LEVEL`` is set, routes records to
+        ``SAGENT_LOG_FILE`` (defaults to ``~/.sagent/repl.log``) via
+        a ``FileHandler`` so the user can ``tail -f`` for diagnostics
+        without breaking the REPL.
+
+    Headless mode (``_configure_logging`` path) is unchanged.
+    """
+    logging.lastResort = logging.NullHandler()
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.StreamHandler) and getattr(
+            cast(object, handler), "stream", None
+        ) in (sys.stderr, sys.stdout):
+            root.removeHandler(cast(logging.Handler, handler))
+
+    raw = os.environ.get("SAGENT_LOG_LEVEL")
+    if not raw:
+        return
+    name = raw.upper()
+    value = getattr(logging, name, None)
+    if not isinstance(value, int):
+        # ``_configure_logging`` runs first and would have already
+        # rejected an invalid level; reaching here means a bad value
+        # was set after that point. Be quiet (REPL has no good
+        # place to surface this) and fall back to NullHandler-only.
+        return
+    log_file = os.environ.get(
+        "SAGENT_LOG_FILE",
+        str(Path.home() / ".sagent" / "repl.log"),
+    )
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),
+    )
+    root.addHandler(file_handler)
     logging.getLogger("sagent").setLevel(value)
     logging.getLogger("sagent").setLevel(value)
 
@@ -672,18 +725,37 @@ def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
     Re-writes ``meta`` whenever ``agent.status`` changes (via the
     ``StatusChanged`` event), even when there's no history delta, so a
     status update survives a crash before the next history append.
+
+    Tracks in-place splice updates from ``HistoryEntryUpdated`` events
+    (emitted when ``DetachedResult`` splices real tool output into a
+    ``[detached]`` placeholder). Splice updates are re-emitted as
+    ``kind=history`` records sharing the same ``id``; the loader dedupes
+    by ``id``, last write wins, so the spliced content survives session
+    resume.
     """
     persisted_len = len(agent.history)
     meta_written = False
     last_status = agent.status
+    pending_updates: dict[int, ToolResult] = {}
 
     def _on_event(event: RuntimeEvent) -> None:
         nonlocal persisted_len, meta_written, last_status
+        if isinstance(event, HistoryEntryUpdated):
+            if isinstance(event.entry, ToolResult):
+                pending_updates[event.entry.id] = event.entry
+            return
         if not isinstance(event, (SaveSession, StatusChanged)):
             return
         delta = agent.history[persisted_len:]
+        # Drop pending updates whose id is in the delta -- the delta
+        # already carries the latest content. Keep the rest as separate
+        # ``kind=update`` records (patches against entries that were
+        # already persisted).
+        delta_ids = {e.id for e in delta}
+        updates = [upd for uid, upd in pending_updates.items() if uid not in delta_ids]
+        pending_updates.clear()
         status_changed = agent.status != last_status
-        write_meta = delta or status_changed or not meta_written
+        write_meta = delta or updates or status_changed or not meta_written
         spec = agent.model_spec
         meta = SessionMeta(
             session_id=agent.session_id,
@@ -704,6 +776,7 @@ def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
             session_dir / "session.jsonl",
             meta=meta.serialize() if write_meta else None,
             history_delta=delta or None,
+            history_updates=updates or None,
             tool_state_snapshot=serialize_tool_state(agent.tool_state),
         )
         persisted_len = len(agent.history)
@@ -811,6 +884,7 @@ def main() -> None:
             sys.stderr.write(
                 "Note: --output-format is ignored in interactive REPL mode.\n"
             )
+        _install_repl_logging()
         asyncio.run(
             _with_signals(
                 agent,

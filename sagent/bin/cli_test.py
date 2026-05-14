@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 
@@ -25,6 +26,7 @@ from sagent.bin.cli import (
     DEFAULT_TOOLS,
     _configure_logging,
     _event_to_json_record,
+    _install_repl_logging,
     _last_assistant_text,
     _parse_cli_args,
     _parse_stream_json,
@@ -236,6 +238,84 @@ def test_configure_logging_env_var_used(
     monkeypatch.setenv("SAGENT_LOG_LEVEL", "DEBUG")
     _configure_logging(None)
     # No assertion on logger state -- just verify no raise.
+
+
+def test_install_repl_logging_silences_stderr(
+    capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_install_repl_logging`` must prevent log records reaching stderr.
+
+    The REPL renders via prompt-toolkit; any logger output to stderr
+    corrupts the display. Policy: stderr is for headless mode only.
+    This test pins the contract that calling ``_install_repl_logging``
+    suppresses both Python's ``lastResort`` stderr fallback and any
+    pre-installed stderr-bound handlers on root.
+    """
+    monkeypatch.delenv("SAGENT_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SAGENT_LOG_FILE", raising=False)
+
+    # Pre-state: a fake stderr handler on root (simulates a prior
+    # ``basicConfig`` from headless config bleeding into REPL).
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_last_resort = logging.lastResort
+    try:
+        root.handlers.clear()
+        stderr_handler = logging.StreamHandler()  # defaults to stderr
+        root.addHandler(stderr_handler)
+
+        _install_repl_logging()
+
+        logging.getLogger("sagent.test").warning("nope")
+        captured = capfd.readouterr()
+        assert captured.err == "", (
+            f"REPL mode must not write to stderr; got {captured.err!r}"
+        )
+    finally:
+        root.handlers.clear()
+        for h in saved_handlers:
+            root.addHandler(h)
+        logging.lastResort = saved_last_resort
+
+
+def test_install_repl_logging_routes_to_file_when_log_level_set(
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``SAGENT_LOG_LEVEL`` in REPL mode routes records to a file, not stderr."""
+    log_file = tmp_path / "repl.log"
+    monkeypatch.setenv("SAGENT_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("SAGENT_LOG_FILE", str(log_file))
+
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_last_resort = logging.lastResort
+    try:
+        root.handlers.clear()
+        _install_repl_logging()
+
+        logger = logging.getLogger("sagent.test")
+        logger.setLevel(logging.DEBUG)
+        logger.warning("hello-file")
+
+        captured = capfd.readouterr()
+        assert captured.err == "", (
+            f"REPL mode must never write to stderr; got {captured.err!r}"
+        )
+        # Flush handlers so the file content is visible.
+        for h in root.handlers:
+            h.flush()
+        assert "hello-file" in log_file.read_text(), (
+            f"expected log content in {log_file}; got {log_file.read_text()!r}"
+        )
+    finally:
+        for h in list(root.handlers):
+            h.close()
+            root.removeHandler(h)
+        for h in saved_handlers:
+            root.addHandler(h)
+        logging.lastResort = saved_last_resort
 
 
 def test_default_tools_constant() -> None:

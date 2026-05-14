@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import asyncio
 import contextlib
@@ -52,7 +52,7 @@ from sagent.repl.input_pane import (
     render_input_pane,
     spawn_repl_pump,
 )
-from sagent.repl.keybindings import build_key_bindings
+from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
@@ -89,6 +89,7 @@ async def run_repl(
         },
     )
     queued_input: list[str] = []
+    nav = NavState()
     with patch_stdout(raw=True):
         console = Console(stderr=True)
         session: PromptSession[str] = PromptSession(
@@ -99,7 +100,7 @@ async def run_repl(
             auto_suggest=AutoSuggestFromHistory(),
             bottom_toolbar=functools.partial(render_status_pane, agent),
             refresh_interval=0.2,
-            key_bindings=build_key_bindings(agent, queued_input),
+            key_bindings=build_key_bindings(agent, queued_input, nav),
             enable_open_in_editor=False,
             style=style,
         )
@@ -263,8 +264,27 @@ def do_switch_model(
     _write(printer, f"[/model] {label}{queued}")
 
 
-def do_login(agent: Agent, printer: Printer | None) -> None:
+@runtime_checkable
+class _AuthReloadable(Protocol):
+    """Provider that can hot-reload OAuth credentials from disk."""
+
+    async def handle_auth_error(self) -> None: ...
+
+
+async def do_login(agent: Agent, printer: Printer | None) -> None:
     """Re-auth the agent's current provider via its ``login`` classmethod.
+
+    After the OAuth flow writes fresh credentials to disk, hot-reload
+    the running provider's in-memory token state so the next model
+    call uses the new credentials. Without this reload, the in-memory
+    ``_refresh_token`` is still the revoked one and the next
+    ``_refresh()`` returns 400 -- so ``/login`` appears to succeed but
+    the auth error keeps firing.
+
+    The reload uses ``provider.handle_auth_error`` when available
+    (currently implemented on Anthropic-family providers). Providers
+    without the hook are left untouched -- callers will pick up the
+    new disk creds the next time they construct a provider.
 
     Args:
       agent: Agent whose provider should be re-authenticated.
@@ -285,9 +305,22 @@ def do_login(agent: Agent, printer: Printer | None) -> None:
         return
     try:
         login_fn()
-        _write(printer, f"[/login] {spec.provider} re-authenticated")
     except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
         _write(printer, f"[/login] {exc}")
+        return
+    # Hot-reload the live provider's in-memory credentials so the next
+    # model call uses the freshly-written disk creds, not the stale
+    # in-memory refresh token. ``handle_auth_error`` already implements
+    # the "reload from disk first, fall back to network refresh"
+    # routine we want here.
+    live_provider = getattr(agent.model, "_provider", None)
+    if isinstance(live_provider, _AuthReloadable):
+        try:
+            await live_provider.handle_auth_error()
+        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+            _write(printer, f"[/login] reloaded creds but provider sync failed: {exc}")
+            return
+    _write(printer, f"[/login] {spec.provider} re-authenticated")
 
 
 def format_tasks(agent: Agent) -> str:

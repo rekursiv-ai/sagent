@@ -225,6 +225,8 @@ import itertools
 import logging
 import time
 
+from sagent.custom_exceptions import log_exception_or_warning
+
 
 _id_counter: itertools.count[int] = itertools.count()
 
@@ -514,6 +516,26 @@ class DetachedResult:
     """True when the tool raised or signalled failure."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HistoryEntryUpdated:
+    """An existing history entry was mutated in-place (splice).
+
+    Publish-only. Emitted when ``DetachedResult`` (or its in-batch
+    sibling) splices real tool output into a ``[detached]`` placeholder
+    via ``dataclasses.replace``. Same ``id``, new ``content``.
+
+    Without this event the persistence observer never learns of the
+    update -- its delta-based append (``history[persisted_len:]``)
+    can't see in-place mutations, so resumed sessions would load the
+    stale placeholder. The persistence observer listens for this event
+    and re-emits the entry; the loader dedupes by ``id`` so last-write-
+    wins.
+    """
+
+    entry: HistoryEntry
+    """The updated history entry (carries id + new content)."""
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class CohortComplete:
     """All tool results for the current cohort have arrived."""
@@ -643,6 +665,7 @@ type RuntimeEvent = (
     | ToolResultPartial
     | ToolResult
     | DetachedResult
+    | HistoryEntryUpdated
     | CohortComplete
     | Compact
     | Recompact
@@ -954,10 +977,11 @@ class AgentRuntime:
                         if self.model_call:
                             self.model_call.cancel()
                             self.model_call = None
-                        # Preserve any mid-stream typed content: append
-                        # before arming AWAIT_USER so the user's input
-                        # survives the halt and AWAIT_USER still waits
-                        # for a FRESH redirect.
+                        # Preserve any mid-stream typed content: commit
+                        # it to history (alternation-coalesce handles
+                        # back-to-back UserMessages) and publish the
+                        # coalesced bar -- the preview drops, the bar
+                        # appears, single UI transition.
                         coalesced = self._drain_mid_stream_queue()
                         if coalesced is not None:
                             self.publish(coalesced)
@@ -986,13 +1010,16 @@ class AgentRuntime:
 
                     case ModelResponseError(exception=exc):
                         self.model_call = None
-                        self.history.append(
+                        self._append_or_coalesce_user(
                             UserMessage(
                                 text=f"[Error: {type(exc).__name__}: {exc}]",
                             ),
                         )
                         self.publish(item)
-                        # Preserve mid-stream content past the error.
+                        # Preserve mid-stream content past the error;
+                        # commit + publish the coalesced bar so the
+                        # pending preview transitions to a permanent
+                        # entry.
                         coalesced = self._drain_mid_stream_queue()
                         if coalesced is not None:
                             self.publish(coalesced)
@@ -1049,7 +1076,9 @@ class AgentRuntime:
                         cohort_seen = False
                         queued.clear()
                         # Capture buffered mid-stream input into the snapshot
-                        # the compactor will see.
+                        # the compactor will see; publish the coalesced
+                        # bar so the pending preview transitions to a
+                        # committed entry.
                         coalesced = self._drain_mid_stream_queue()
                         if coalesced is not None:
                             self.publish(coalesced)
@@ -1071,20 +1100,28 @@ class AgentRuntime:
 
                     case UserMessage():
                         if self.model_call is not None:
-                            # Mid-stream: buffer for post-response coalesce.
-                            # The in-flight response is allowed to complete
-                            # so its content (and any tool calls) is not
-                            # discarded; tool calls will be detached and
-                            # the buffered user content will fire the next
-                            # round immediately.
+                            # Mid-stream: buffer only. The ``queued_input_pane``
+                            # in the REPL renders ``pending_mid_stream()`` as
+                            # a dim preview while the buffer is non-empty,
+                            # so the user has immediate visual feedback
+                            # without a duplicate bar in console. The bar
+                            # appears on drain (ModelResponseComplete /
+                            # Halt / ModelResponseError / Compact) when
+                            # the coalesced UserMessage is published --
+                            # at which point the preview drops because the
+                            # buffer is empty. One UI surface at a time.
                             self._mid_stream_queue.append(item)
                         else:
                             # Mid-cohort or idle: preempt and append.
+                            # Coalesce on the alternation-invariant helper
+                            # so two same-batch Enters (or a post-halt
+                            # follow-up) don't stack as consecutive user
+                            # turns in history.
                             self._stub_running_tools_and_let_finish()
                             self.running_tools = {}
                             self.cohort.clear()
                             cohort_seen = False
-                            self.history.append(item)
+                            self._append_or_coalesce_user(item)
                             self.publish(item)
 
                     case UserQueuedMessage():
@@ -1121,6 +1158,11 @@ class AgentRuntime:
                                 self.detached[tc.id] = asyncio.create_task(
                                     self._run_tool_and_post(tc, parent_id=msg.id),
                                 )
+                            # Commit mid-stream input to history and
+                            # publish the coalesced bar -- the pending
+                            # preview drops as the buffer empties and
+                            # the bar appears in console, single UI
+                            # transition.
                             coalesced = self._drain_mid_stream_queue()
                             if coalesced is not None:
                                 self.publish(coalesced)
@@ -1148,6 +1190,34 @@ class AgentRuntime:
                         self.history.append(item)
                         self.publish(item)
 
+                    case ToolResult(call_id=cid) if cid in self.detached:
+                        # In-batch race: the tool task completed before
+                        # ``_stub_running_tools_and_let_finish`` reclassified
+                        # its call_id as detached. The ``ToolResult`` was
+                        # pushed as a regular result (because the task
+                        # ran ``self.detached`` check before the stub),
+                        # but a peer item in the same drain batch (e.g.
+                        # a tool-pushed ``UserMessage``) triggered a
+                        # preempt that cleared the cohort. Without this
+                        # case the result would fall through to ``_`` and
+                        # leave the assistant's ``tool_use`` paired only
+                        # with the ``[detached]`` placeholder forever.
+                        # Splice the real content into the placeholder
+                        # exactly like ``DetachedResult`` does.
+                        del self.detached[cid]
+                        for i, prior in enumerate(self.history):
+                            if isinstance(prior, ToolResult) and prior.call_id == cid:
+                                self.history[i] = dataclasses.replace(
+                                    prior,
+                                    content=item.content,
+                                    is_error=item.is_error,
+                                )
+                                self.publish(
+                                    HistoryEntryUpdated(entry=self.history[i]),
+                                )
+                                break
+                        self.publish(item)
+
                     case DetachedResult():
                         self.cohort.discard(item.call_id)
                         # Splice into the existing placeholder so the
@@ -1167,6 +1237,9 @@ class AgentRuntime:
                                     prior,
                                     content=item.content,
                                     is_error=item.is_error,
+                                )
+                                self.publish(
+                                    HistoryEntryUpdated(entry=self.history[i]),
                                 )
                                 spliced = True
                                 break
@@ -1246,7 +1319,7 @@ class AgentRuntime:
                         (),
                     ),
                 )
-                self.history.append(coalesced)
+                self._append_or_coalesce_user(coalesced)
                 queued.clear()
                 # Publish so observers (renderers, persistence, the
                 # REPL's ``make_queued_input_clearer``) see the
@@ -1307,20 +1380,93 @@ class AgentRuntime:
         self.observers.remove(_watch)
         return self.history[turns_before:]
 
+    def pending_mid_stream(self) -> Sequence[UserMessage]:
+        """Snapshot of mid-stream ``UserMessage`` items awaiting drain.
+
+        Buffered while ``model_call`` is in flight; drained into history
+        on ``ModelResponseComplete`` (or ``Halt`` / ``ModelResponseError``
+        / ``Compact``). Public surface for UI surfaces (``queue_pane``)
+        that need to show "your Enter mid-stream is queued, waiting for
+        the model to finish."
+
+        Returns:
+          snapshot: Read-only tuple of the buffered messages in arrival
+              order. Returns an empty tuple when nothing is buffered.
+
+        """
+        return tuple(self._mid_stream_queue)
+
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""
         if not self.history:
             return False
         return isinstance(self.history[-1], (UserMessage, ToolResult))
 
+    def _append_or_coalesce_user(self, item: UserMessage) -> None:
+        r"""Append ``item`` to history; coalesce with tail if also ``UserMessage``.
+
+        Anthropic-style chat APIs require user/assistant turn alternation.
+        Several runtime paths produce a ``UserMessage`` while the previous
+        history entry is already a ``UserMessage`` (no assistant turn
+        between -- the model was cancelled, errored, or simply never
+        ran). Appending naively would generate back-to-back user turns
+        and the next model call would 400.
+
+        Sites that need this:
+
+        - Idle/mid-cohort ``UserMessage`` branch (two rapid Enters land
+          in one drain batch; the gate only sets ``model_call`` AFTER
+          the per-item loop).
+        - ``ModelResponseError`` synthesizing ``[Error: ...]`` (model
+          never produced an assistant turn for the preceding user input).
+        - Halt-then-fresh-user (cancellation drops any partial assistant
+          content; only the user's prior message is in history).
+        - ``_drain_mid_stream_queue`` when invoked from a halt/compact/
+          error path (no assistant turn between the prior user input
+          and the buffered mid-stream content).
+        - ``UserQueuedMessage`` idle drain (Tab-staged content lands as
+          a coalesced ``UserMessage``; history tail can already be a
+          ``UserMessage`` from a same-batch race).
+
+        Coalesce semantics: text joins with ``\n\n``; attachments
+        concatenate in arrival order. The tail entry's ``id`` is
+        preserved so downstream consumers keyed on ids remain stable.
+        """
+        if self.history and isinstance(self.history[-1], UserMessage):
+            tail = self.history[-1]
+            self.history[-1] = dataclasses.replace(
+                tail,
+                text=f"{tail.text}\n\n{item.text}",
+                attachments=tail.attachments + item.attachments,
+            )
+        else:
+            self.history.append(item)
+
     def _stub_running_tools_and_let_finish(self) -> None:
-        """Stub unfinished tools with placeholders. Tasks keep running."""
+        """Stub all running tools with placeholders; route results via detached.
+
+        Appends ``[detached]`` placeholders for EVERY ``running_tools``
+        entry, including tasks that have already completed and pushed
+        their ``ToolResult`` to the inbox but whose result has not yet
+        drained. The earlier ``if not task.done()`` guard skipped done
+        tasks under the false assumption that their results were
+        already in history -- they're in the inbox, which the caller
+        then prevents from landing properly by clearing ``cohort`` and
+        ``running_tools``. The dropped result would leave the
+        assistant's ``tool_use`` block in history with no adjacent
+        ``tool_result``, breaking Anthropic alternation.
+
+        Moving the call_id into ``self.detached`` reroutes any
+        late-arriving ``ToolResult`` (whether already-in-inbox or
+        still-running) through the ``DetachedResult`` splice path so
+        the real content replaces the ``[detached]`` placeholder when
+        it arrives.
+        """
         for cid, task in self.running_tools.items():
-            if not task.done():
-                self.history.append(
-                    ToolResult(call_id=cid, content="[detached]"),
-                )
-                self.detached[cid] = task
+            self.history.append(
+                ToolResult(call_id=cid, content="[detached]"),
+            )
+            self.detached[cid] = task
 
     def _drain_mid_stream_queue(self) -> UserMessage | None:
         r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
@@ -1346,7 +1492,7 @@ class AgentRuntime:
             ),
         )
         self._mid_stream_queue.clear()
-        self.history.append(coalesced)
+        self._append_or_coalesce_user(coalesced)
         return coalesced
 
     def _collect_detached(self) -> None:
@@ -1390,8 +1536,8 @@ class AgentRuntime:
             self.publish(
                 ModelResponseCancelled(output_chars_estimate=chars),
             )
-        except Exception as exc:
-            logger.exception("model call failed")
+        except Exception as exc:  # noqa: BLE001 -- log_exception_or_warning routes UserFacingError to warning, others to exception; intentional catch-all for model-call failures
+            log_exception_or_warning(logger, "model call failed", exc)
             self.inbox.push_back(ModelResponseError(exc))
 
     async def _run_tool_and_post(
@@ -1473,8 +1619,8 @@ class AgentRuntime:
             )
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            logger.exception("compaction failed")
+        except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
+            log_exception_or_warning(logger, "compaction failed", exc)
             self.inbox.push_back(
                 UserMessage(
                     text=f"[Compaction error: {type(exc).__name__}: {exc}]",

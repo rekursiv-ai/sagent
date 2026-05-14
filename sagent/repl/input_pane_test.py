@@ -468,6 +468,10 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     cohort: set[str] = field(default_factory=set)
+    _mid_stream_queue: list[UserMessage] = field(default_factory=list)
+
+    def pending_mid_stream(self) -> tuple[UserMessage, ...]:
+        return tuple(self._mid_stream_queue)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -485,6 +489,44 @@ def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
     fp = render_input_pane(_as_real_agent(_FakeAgent()), [])
     assert isinstance(fp, FormattedText)
     assert list(fp) == [("class:input_pane", "> ")]
+
+
+def test_render_input_pane_shows_mid_stream_queue() -> None:
+    """Mid-stream ``UserMessage`` buffer must surface in ``queue_pane``.
+
+    Two buffers exist for pending user content: ``queued_input`` (Tab-
+    staged, REPL-local) and ``_mid_stream_queue`` (Enter-mid-stream,
+    runtime-internal). Both hold messages waiting for the model to be
+    ready. Today only ``queued_input`` renders in ``queued_input_pane``;
+    mid-stream sends are invisible despite being semantically queued,
+    so a user who hits Enter while the model is streaming sees a bar
+    fly past in scrollback but nothing in the queue pane -- making
+    "is my message queued?" unanswerable from the UI.
+
+    This test fails until ``render_input_pane`` reads both buffers.
+    """
+    fake = _FakeAgent()
+    fake.runtime._mid_stream_queue = [
+        UserMessage(text="tuttle"),
+        UserMessage(text="lawnmower"),
+    ]
+    fp = render_input_pane(_as_real_agent(fake), [])
+    # ``FormattedText`` entries are 2- or 3-tuples (the 3rd is an
+    # optional mouse handler). Index-access to stay shape-agnostic.
+    rendered = "".join(t[1] for t in fp)
+    assert "tuttle" in rendered, (
+        f"mid-stream UserMessage 'tuttle' must appear in queue pane; got {rendered!r}"
+    )
+    assert "lawnmower" in rendered, (
+        f"mid-stream UserMessage 'lawnmower' must appear in queue pane; "
+        f"got {rendered!r}"
+    )
+    # The queue pane styling must apply (dim preview, not the input
+    # sigil row).
+    queue_parts = [t[1] for t in fp if t[0] == "class:queued_input_pane"]
+    assert queue_parts, (
+        f"expected at least one ``queued_input_pane``-styled segment; got {list(fp)!r}"
+    )
 
 
 def test_render_input_pane_single_block_renders_full_text() -> None:

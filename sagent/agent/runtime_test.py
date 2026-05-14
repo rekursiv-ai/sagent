@@ -14,6 +14,7 @@ from sagent.agent.runtime import (
     AgentRuntime,
     AssistantMessage,
     Await,
+    BytesMessage,
     Clear,
     CohortComplete,
     Compact,
@@ -41,6 +42,7 @@ from sagent.agent.runtime import (
     current_call_id_var,
     reset_id_counter,
 )
+from sagent.custom_exceptions import AuthRefreshError
 
 
 @dataclass(kw_only=True, slots=True)
@@ -378,8 +380,13 @@ async def test_halt_cancels_model_waits_for_user() -> None:
         halt_then_resume(),
     )
 
+    # "resume" may coalesce into the prior "go" entry (alternation
+    # invariant: no back-to-back UserMessages in history). Either form
+    # is correct -- only the content presence matters.
     user_msgs = [t for t in agent.history if isinstance(t, UserMessage)]
-    assert any(m.text == "resume" for m in user_msgs)
+    assert any("resume" in m.text for m in user_msgs), (
+        f"'resume' must reach history; got {[m.text for m in user_msgs]!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -767,6 +774,211 @@ async def test_compact_rewrites_history() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_user_facing_error_logged_without_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``UserFacingError`` subclasses log at WARNING, no ``exc_info``.
+
+    Plain exceptions stay as ``logger.exception("model call failed")``
+    -- those traceback dumps are diagnostic for unexpected failures.
+    But errors flagged ``UserFacingError`` (auth expired, etc.) carry
+    a polished message that IS the remediation; the runtime must not
+    spam a Python traceback at the user for those.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class AuthFailingModel:
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_text, on_thinking
+            raise AuthRefreshError("session expired. Run /login.")
+
+    agent = AgentRuntime(model=AuthFailingModel())
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def resume() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Quit())
+
+    with caplog.at_level("DEBUG", logger="sagent.agent.runtime"):
+        await asyncio.gather(
+            run_until_quit(agent, timeout_sec=3.0),
+            resume(),
+        )
+
+    model_failed = [r for r in caplog.records if "model call failed" in r.getMessage()]
+    assert model_failed, (
+        "expected a 'model call failed' log record; got "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    rec = model_failed[0]
+    assert rec.levelname == "WARNING", (
+        f"UserFacingError must log at WARNING, not {rec.levelname}; "
+        "ERROR-level with traceback dumps Python internals at the user"
+    )
+    assert rec.exc_info is None, (
+        "UserFacingError log record must not carry a traceback "
+        f"(got exc_info={rec.exc_info!r})"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_plain_exception_logged_with_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Plain exceptions keep the traceback dump -- it's diagnostic.
+
+    Negative pair to ``test_user_facing_error_logged_without_traceback``.
+    Non-``UserFacingError`` failures are unexpected; the operator needs
+    the traceback to diagnose them. Don't accidentally swallow it.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class BoomModel:
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_text, on_thinking
+            raise RuntimeError("unexpected")
+
+    agent = AgentRuntime(model=BoomModel())
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def resume() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Quit())
+
+    with caplog.at_level("DEBUG", logger="sagent.agent.runtime"):
+        await asyncio.gather(
+            run_until_quit(agent, timeout_sec=3.0),
+            resume(),
+        )
+
+    model_failed = [r for r in caplog.records if "model call failed" in r.getMessage()]
+    assert model_failed, "expected a 'model call failed' log record"
+    rec = model_failed[0]
+    assert rec.levelname == "ERROR", (
+        f"plain exceptions must log at ERROR (with traceback), got {rec.levelname}"
+    )
+    assert rec.exc_info is not None, (
+        "plain-exception log record must carry exc_info so the operator "
+        "sees the traceback"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
+    """Tool that pushes a ``UserMessage`` mid-cohort must not orphan its tool_use.
+
+    Reproduces the production 400: a tool (e.g. ``AgentSend`` to self)
+    pushes a ``UserMessage`` into the runtime's inbox AND returns a
+    ``ToolResult`` to the cohort. Both items often land in the same
+    ``inbox.drain()`` batch. The per-item loop processes the
+    ``UserMessage`` first, hits the preempt branch which calls
+    ``_stub_running_tools_and_let_finish()``. That function's
+    ``if not task.done()`` guard skips already-done tasks under the
+    (false) assumption their results are in history -- but the result
+    is still in the inbox. The loop then clears the cohort and the
+    in-batch ``ToolResult`` gets dropped, leaving the assistant's
+    ``tool_use`` block in history without an adjacent ``tool_result``.
+
+    Anthropic's API requires every ``tool_use`` to be followed by its
+    ``tool_result``; otherwise ``messages.N: tool_use ids were found
+    without tool_result blocks immediately after``. This test pins the
+    adjacency invariant.
+    """
+    self_msg_text = "self-ping"
+
+    @dataclass(kw_only=True, slots=True)
+    class SelfPingTool:
+        """Tool that pushes a ``UserMessage`` to its host inbox + returns ok."""
+
+        _name: str = "self_ping"
+        runtime: AgentRuntime | None = None
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            assert self.runtime is not None
+            self.runtime.inbox.push_back(UserMessage(text=self_msg_text))
+            return ToolResult(call_id="", content="pinged")
+
+    @dataclass(kw_only=True, slots=True)
+    class PingingModel:
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_text, on_thinking
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                return AssistantMessage(
+                    text="",
+                    tool_calls=(ToolCall(id="toolu_self", name="self_ping", args={}),),
+                )
+            return AssistantMessage(text="done")
+
+    tool = SelfPingTool()
+    agent = AgentRuntime(model=PingingModel(), tools=[tool])
+    tool.runtime = agent
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    await run_with_quit(agent, timeout_sec=3.0)
+
+    # Adjacency invariant: every AssistantMessage with tool_calls must
+    # be followed by ToolResults for ALL of those calls before any other
+    # entry type (UserMessage / AssistantMessage / etc.).
+    pending: set[str] = set()
+    for entry in agent.history:
+        if isinstance(entry, AssistantMessage):
+            if pending:
+                pytest.fail(
+                    f"orphan tool_use(s) {pending}: an AssistantMessage "
+                    f"with tool_calls was not followed by all its tool_results "
+                    f"before the next entry. History: "
+                    f"{[type(m).__name__ for m in agent.history]}"
+                )
+            pending = {tc.id for tc in entry.tool_calls}
+        elif isinstance(entry, ToolResult):
+            pending.discard(entry.call_id)
+        elif pending:
+            pytest.fail(
+                f"orphan tool_use(s) {pending}: a {type(entry).__name__} "
+                f"appeared before all tool_results for the prior "
+                f"AssistantMessage. History: "
+                f"{[type(m).__name__ for m in agent.history]}"
+            )
+    assert not pending, (
+        f"trailing orphan tool_use(s) {pending} at end of history: "
+        f"{[type(m).__name__ for m in agent.history]}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_irrecoverable_error_gates_on_user() -> None:
     """Model failure posts ModelResponseError, waits for user."""
     agent, collector = make_agent(
@@ -785,11 +997,15 @@ async def test_irrecoverable_error_gates_on_user() -> None:
     )
 
     assert collector.has(ModelResponseError)
-    error_msgs = [
-        t for t in agent.history if isinstance(t, UserMessage) and "[Error:" in t.text
-    ]
-    assert len(error_msgs) == 1
-    assert any(isinstance(t, UserMessage) and t.text == "retry" for t in agent.history)
+    # The error sentinel and the user's retry coalesce into one entry
+    # (alternation invariant: no back-to-back UserMessages in history).
+    user_texts = [t.text for t in agent.history if isinstance(t, UserMessage)]
+    assert any("[Error:" in t for t in user_texts), (
+        f"expected an error sentinel in user history; got {user_texts!r}"
+    )
+    assert any("retry" in t for t in user_texts), (
+        f"expected 'retry' content to reach history; got {user_texts!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -883,9 +1099,13 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
     )
 
     # Both user messages eventually land in history; the gate releases
-    # only after the second (fresh) one arrives.
+    # only after the second (fresh) one arrives. Content can coalesce
+    # into a single entry (alternation invariant) or stand alone -- the
+    # test only requires the fresh redirect's text is present.
     user_texts = [t.text for t in agent.history if isinstance(t, UserMessage)]
-    assert "fresh redirect" in user_texts
+    assert any("fresh redirect" in t for t in user_texts), (
+        f"'fresh redirect' must reach history (possibly coalesced); got {user_texts!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -2066,6 +2286,434 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
     )
 
 
+# --- TestUserMessageLifecycle ------------------------------------------
+# Contract: a user message is in exactly one state at any moment.
+#   - "pending"   -> in ``pending_mid_stream()`` (UI: queued_input_pane);
+#                   NOT in ``history``; NOT published.
+#   - "committed" -> in ``history``; published exactly once (UI: bar in
+#                   console_pane); NOT in ``pending_mid_stream()``.
+# The state transitions on drain (ModelResponseComplete / Halt /
+# ModelResponseError / Compact). The two UI surfaces are
+# mutually exclusive for any given content -- never both, so the user
+# never sees a duplicate render.
+
+
+@dataclass(kw_only=True, slots=True)
+class _LifecycleModel:
+    """Model that streams once, blocks on ``release``, then idles.
+
+    Used by the ``test_lifecycle_*`` suite to pin the message-lifecycle
+    contract (pending vs committed) across the mid-stream window.
+    """
+
+    stream_started: asyncio.Event
+    release_stream: asyncio.Event
+    _i: int = field(default=0, init=False)
+
+    async def stream(
+        self,
+        history: list[HistoryEntry],
+        system: str,
+        tools: list[Tool],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, system, tools, on_text, on_thinking
+        idx = self._i
+        self._i += 1
+        if idx == 0:
+            self.stream_started.set()
+            await self.release_stream.wait()
+            return AssistantMessage(text="resp1")
+        return AssistantMessage(text="resp2")
+
+
+def _make_lifecycle_model() -> tuple[_LifecycleModel, asyncio.Event, asyncio.Event]:
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    return (
+        _LifecycleModel(stream_started=stream_started, release_stream=release_stream),
+        stream_started,
+        release_stream,
+    )
+
+
+def _assert_exactly_one_surface(
+    agent: AgentRuntime, text: str, published: list[str]
+) -> str:
+    """Return which surface holds ``text``; assert exactly one does.
+
+    Returns one of ``"pending"``, ``"history"``, ``"none"``.
+    """
+    in_pending = any(m.text == text for m in agent.pending_mid_stream())
+    in_history = any(
+        isinstance(m, UserMessage) and text in m.text for m in agent.history
+    )
+    publish_count = published.count(text)
+    # Bar in console_pane is driven by a publish event; "committed" =
+    # in history AND published exactly once.
+    committed = in_history and publish_count == 1
+    pending = in_pending and not in_history and publish_count == 0
+    none = not in_pending and not in_history and publish_count == 0
+    states = [
+        n
+        for n, b in (("pending", pending), ("committed", committed), ("none", none))
+        if b
+    ]
+    assert len(states) == 1, (
+        f"{text!r} must be in exactly one state; got "
+        f"in_pending={in_pending}, in_history={in_history}, "
+        f"publish_count={publish_count}, states={states}"
+    )
+    return states[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_lifecycle_idle_enter_commits_immediately() -> None:
+    """Idle Enter: no pending state. Straight to committed."""
+    agent = AgentRuntime(model=ScriptedModel(responses=[AssistantMessage(text="ok")]))
+    published: list[str] = []
+    agent.observers.append(
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+    )
+    agent.inbox.push_back(UserMessage(text="hello"))
+    await run_with_quit(agent, timeout_sec=3.0)
+
+    assert _assert_exactly_one_surface(agent, "hello", published) == "committed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
+    """Mid-stream Enter: pending. Not in history, not published, in queue."""
+    model, stream_started, release_stream = _make_lifecycle_model()
+    agent = AgentRuntime(model=model)
+    published: list[str] = []
+    agent.observers.append(
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+    )
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def inject_and_observe() -> None:
+        await stream_started.wait()
+        # "first" is committed (idle-path Enter before stream began).
+        assert _assert_exactly_one_surface(agent, "first", published) == "committed"
+        agent.inbox.push_back(UserMessage(text="hey"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        # "hey" arrived mid-stream: must be pending only.
+        assert _assert_exactly_one_surface(agent, "hey", published) == "pending"
+        release_stream.set()
+        await asyncio.sleep(0.1)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
+    """Mid-stream Enter: pending -> committed when model finishes."""
+    model, stream_started, release_stream = _make_lifecycle_model()
+    agent = AgentRuntime(model=model)
+    published: list[str] = []
+    agent.observers.append(
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+    )
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def inject_and_observe() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(UserMessage(text="hey"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        release_stream.set()
+        # Wait until "hey" lands in history (drain happened).
+        for _ in range(100):
+            if any(
+                isinstance(m, UserMessage) and "hey" in m.text for m in agent.history
+            ):
+                break
+            await asyncio.sleep(0.01)
+        # After drain "hey" is committed exactly once.
+        assert _assert_exactly_one_surface(agent, "hey", published) == "committed"
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
+    r"""N mid-stream Enters: all pending, then one coalesced commit + publish."""
+    model, stream_started, release_stream = _make_lifecycle_model()
+    agent = AgentRuntime(model=model)
+    published: list[str] = []
+    agent.observers.append(
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+    )
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def inject_and_observe() -> None:
+        await stream_started.wait()
+        for text in ("a", "b", "c"):
+            agent.inbox.push_back(UserMessage(text=text))
+            for _ in range(3):
+                await asyncio.sleep(0)
+        # All three pending, none committed, none published yet.
+        pending_texts = [m.text for m in agent.pending_mid_stream()]
+        assert pending_texts == ["a", "b", "c"], (
+            f"expected three pending; got {pending_texts}"
+        )
+        assert all(t not in published for t in ("a", "b", "c")), (
+            f"no per-message publish allowed; got {published}"
+        )
+        release_stream.set()
+        # Wait for the coalesced entry to land.
+        for _ in range(100):
+            if any(
+                isinstance(m, UserMessage) and "a\n\nb\n\nc" in m.text
+                for m in agent.history
+            ):
+                break
+            await asyncio.sleep(0.01)
+        # One coalesced publish (text "a\n\nb\n\nc"). Pending empty.
+        assert agent.pending_mid_stream() == ()
+        assert published.count("a\n\nb\n\nc") == 1, (
+            f"expected one coalesced publish 'a\\n\\nb\\n\\nc'; got {published}"
+        )
+        # No per-message publishes happened.
+        for t in ("a", "b", "c"):
+            assert t not in published, (
+                f"individual message {t!r} must not publish independently; "
+                f"got {published}"
+            )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
+    """Tab-staged ``UserQueuedMessage`` mirrors mid-stream lifecycle.
+
+    Pending while the model is busy; committed (history + publish)
+    on ``ModelIdle``. The two pending surfaces (``queued_input`` REPL-
+    list for Tab, ``_mid_stream_queue`` runtime-list for mid-stream
+    Enter) converge on the same committed state.
+    """
+    model, stream_started, release_stream = _make_lifecycle_model()
+    agent = AgentRuntime(model=model)
+    published: list[str] = []
+    agent.observers.append(
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+    )
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def inject_and_observe() -> None:
+        await stream_started.wait()
+        # Mid-stream Tab commit lands as ``UserQueuedMessage`` (the REPL
+        # would do this on ModelIdle; here we simulate the push directly).
+        agent.inbox.push_back(UserQueuedMessage(text="deferred"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        # Not committed yet: model is still streaming.
+        assert "deferred" not in published
+        assert not any(
+            isinstance(m, UserMessage) and "deferred" in m.text for m in agent.history
+        )
+        release_stream.set()
+        for _ in range(100):
+            if any(
+                isinstance(m, UserMessage) and "deferred" in m.text
+                for m in agent.history
+            ):
+                break
+            await asyncio.sleep(0.01)
+        # Committed exactly once on idle.
+        assert published.count("deferred") == 1
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
+
+
+def _runtime_for_alternation_tests() -> AgentRuntime:
+    """Bare runtime for direct ``_append_or_coalesce_user`` unit tests.
+
+    The model is never called; we only exercise the helper that mutates
+    history in place.
+    """
+    model = ScriptedModel(responses=[])
+    return AgentRuntime(model=model)
+
+
+class TestUserMessageAlternation:
+    """Unit tests for ``_append_or_coalesce_user`` -- the alternation invariant.
+
+    Anthropic-style chat APIs require user/assistant turn alternation.
+    The helper enforces "history never contains back-to-back UserMessages"
+    by coalescing the new entry into the tail when needed. These tests
+    cover the helper directly so a regression at any call site shows up
+    as a focused failure rather than as a downstream API 400.
+    """
+
+    def test_empty_history_appends(self) -> None:
+        agent = _runtime_for_alternation_tests()
+        agent._append_or_coalesce_user(UserMessage(text="hi"))
+        assert len(agent.history) == 1
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "hi"
+
+    def test_after_assistant_appends_new_entry(self) -> None:
+        """User -> Assistant -> User: tail is Assistant, no coalesce."""
+        agent = _runtime_for_alternation_tests()
+        agent.history.append(UserMessage(text="prior"))
+        agent.history.append(AssistantMessage(text="response"))
+        agent._append_or_coalesce_user(UserMessage(text="next"))
+        assert len(agent.history) == 3
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "next"
+
+    def test_after_tool_result_appends_new_entry(self) -> None:
+        """User -> Tool result -> User: tail is ToolResult, no coalesce."""
+        agent = _runtime_for_alternation_tests()
+        agent.history.append(UserMessage(text="prior"))
+        agent.history.append(ToolResult(call_id="c1", content="ok"))
+        agent._append_or_coalesce_user(UserMessage(text="next"))
+        assert len(agent.history) == 3
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "next"
+
+    def test_after_user_coalesces_text(self) -> None:
+        r"""Tail is UserMessage: merge text with ``\n\n`` join."""
+        agent = _runtime_for_alternation_tests()
+        agent.history.append(UserMessage(text="first"))
+        agent._append_or_coalesce_user(UserMessage(text="second"))
+        assert len(agent.history) == 1, (
+            f"expected one coalesced entry; got {len(agent.history)}: {agent.history!r}"
+        )
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "first\n\nsecond"
+
+    def test_after_user_preserves_tail_id(self) -> None:
+        """Coalesce keeps the tail entry's ``id`` so downstream refs survive."""
+        agent = _runtime_for_alternation_tests()
+        tail_before = UserMessage(text="first")
+        agent.history.append(tail_before)
+        agent._append_or_coalesce_user(UserMessage(text="second"))
+        tail_after = agent.history[-1]
+        assert isinstance(tail_after, UserMessage)
+        assert tail_after.id == tail_before.id, (
+            f"coalesce must reuse tail id {tail_before.id}; got {tail_after.id}"
+        )
+
+    def test_after_user_concatenates_attachments(self) -> None:
+        """Coalesce concatenates attachments in arrival order."""
+        a1 = BytesMessage(data=b"a", descriptor="image/png")
+        a2 = BytesMessage(data=b"b", descriptor="image/png")
+        agent = _runtime_for_alternation_tests()
+        agent.history.append(UserMessage(text="first", attachments=(a1,)))
+        agent._append_or_coalesce_user(
+            UserMessage(text="second", attachments=(a2,)),
+        )
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.attachments == (a1, a2), (
+            f"expected attachments (a1, a2); got {tail.attachments!r}"
+        )
+
+    def test_three_back_to_back_users_coalesce_into_one(self) -> None:
+        """Three rapid same-batch Enters -> one coalesced entry."""
+        agent = _runtime_for_alternation_tests()
+        for text in ("a", "b", "c"):
+            agent._append_or_coalesce_user(UserMessage(text=text))
+        assert len(agent.history) == 1
+        tail = agent.history[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "a\n\nb\n\nc"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None:
+    r"""Two ``UserMessage`` items in the same drain batch must not stack in history.
+
+    Reproduces the "next doesn't queue" bug: when two Enters land before
+    the runtime has drained, both arrive in one ``inbox.drain()`` batch.
+    The per-item loop processes each via the idle branch (``model_call``
+    only gets set by the gate AFTER the loop). Both append straight to
+    history, producing back-to-back ``UserMessage`` entries. The next
+    model call sees two consecutive user turns, which Anthropic rejects
+    (the API requires user/assistant alternation), so the second message
+    "doesn't queue" -- it breaks the round instead.
+
+    Required behavior: the second same-batch ``UserMessage`` must either
+    coalesce with the first OR be buffered for the next round so history
+    never contains two consecutive ``UserMessage`` entries with no
+    assistant turn between them.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class CapturingModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_text, on_thinking
+            self.call_histories.append(list(history))
+            return AssistantMessage(text="ok")
+
+    model = CapturingModel()
+    agent = AgentRuntime(model=model)
+
+    # Push BOTH before the runtime gets a chance to drain. With a single
+    # event-loop tick between push and drain, they land in the same batch.
+    agent.inbox.push_back(UserMessage(text="first"))
+    agent.inbox.push_back(UserMessage(text="second"))
+
+    await run_with_quit(agent, timeout_sec=3.0)
+
+    # Anthropic-style invariant: no two ``UserMessage`` entries adjacent
+    # in history. (One coalesced entry, or queued semantics that buffer
+    # the second into a follow-up round, are both fine.)
+    pairs = list(zip(agent.history, agent.history[1:], strict=False))
+    consecutive_users = [
+        (a, b)
+        for a, b in pairs
+        if isinstance(a, UserMessage) and isinstance(b, UserMessage)
+    ]
+    assert not consecutive_users, (
+        f"history has back-to-back UserMessages "
+        f"(breaks Anthropic alternation): "
+        f"{[(a.text, b.text) for a, b in consecutive_users]}; "
+        f"full history: {[type(m).__name__ for m in agent.history]}"
+    )
+    # Both messages' content must reach the model exactly once.
+    all_texts = "".join(
+        m.text for h in model.call_histories for m in h if isinstance(m, UserMessage)
+    )
+    assert all_texts.count("first") == 1, (
+        f"'first' should appear once across model calls; got "
+        f"{all_texts.count('first')} times in {model.call_histories!r}"
+    )
+    assert all_texts.count("second") == 1, (
+        f"'second' should appear once across model calls; got "
+        f"{all_texts.count('second')} times in {model.call_histories!r}"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
@@ -2534,12 +3182,13 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
         f" got {len(model.call_histories)}."
         f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
     )
+    # Round 2 must see "second" in some UserMessage. The alternation
+    # invariant may coalesce "first" and "second" into one entry (no
+    # AssistantMessage between, since the first response was cancelled).
     round2_history = model.call_histories[1]
-    assert any(
-        isinstance(m, UserMessage) and m.text == "second" for m in round2_history
-    ), (
-        f"Round 2 did not see 'second' in its history:"
-        f" {[type(m).__name__ for m in round2_history]}"
+    user_texts_round2 = [m.text for m in round2_history if isinstance(m, UserMessage)]
+    assert any("second" in t for t in user_texts_round2), (
+        f"Round 2 did not see 'second' in any UserMessage; got {user_texts_round2!r}"
     )
 
 

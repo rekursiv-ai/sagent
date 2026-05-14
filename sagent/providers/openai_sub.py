@@ -94,7 +94,10 @@ from sagent.agent.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.custom_exceptions import PromptTooLongError
+from sagent.custom_exceptions import (
+    AuthRefreshError,
+    PromptTooLongError,
+)
 from sagent.custom_types import (
     ModelRequest,
     ModelResponse,
@@ -497,6 +500,16 @@ class OpenAISubscription(OpenAI):
                 headers={"Content-Type": "application/json"},
                 timeout=15.0,
             )
+            if r.status_code in (400, 401):
+                # Refresh token was rotated by another process, revoked
+                # server-side, or aged out. Retrying is pointless --
+                # surface a clean user-facing error so the renderer
+                # shows actionable text instead of an httpx traceback.
+                raise AuthRefreshError(
+                    "OpenAI Codex subscription session expired or revoked. "
+                    "Run /login to re-authenticate, or /model to switch "
+                    "providers.",
+                )
             r.raise_for_status()
             data: MutableJSON = cast(MutableJSON, r.json())
         self._access_token = cast(str, data["access_token"])

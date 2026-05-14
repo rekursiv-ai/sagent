@@ -102,6 +102,7 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
+from sagent.custom_exceptions import log_exception_or_warning
 from sagent.custom_types import (
     Compactor as RichCompactor,
     ContextBudget,
@@ -785,7 +786,12 @@ class Agent:
             pass
         elif isinstance(
             event,
-            (ModelResponseComplete, ModelIdle, ModelResponseCancelled),
+            (
+                ModelResponseComplete,
+                ModelIdle,
+                ModelResponseCancelled,
+                ModelResponseError,
+            ),
         ):
             if self.activity.active:
                 elapsed = (
@@ -869,8 +875,12 @@ class Agent:
                 self._agent_model,
                 "",
             )
-        except Exception as exc:
-            logger.exception("synchronous compaction failed during overflow recovery")
+        except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
+            log_exception_or_warning(
+                logger,
+                "synchronous compaction failed during overflow recovery",
+                exc,
+            )
             self.runtime.history.append(
                 UserMessage(text=f"[Compaction error: {type(exc).__name__}: {exc}]"),
             )
@@ -1208,8 +1218,10 @@ class _AgentCompactor:
                 estimate_tokens=self._agent.max_request_tokens - used,
                 headroom=headroom,
             )
-        except Exception:
-            logger.exception("post_compact_enrich failed; continuing")
+        except Exception as exc:  # noqa: BLE001 -- post_compact_enrich calls the model; catch-all routes UserFacingError to warning, others to exception
+            log_exception_or_warning(
+                logger, "post_compact_enrich failed; continuing", exc
+            )
         self._agent.compaction_state.compact_count += 1
 
         # The runtime's gate needs the last entry to be UserMessage or
