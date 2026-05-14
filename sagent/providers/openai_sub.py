@@ -486,6 +486,32 @@ class OpenAISubscription(OpenAI):
                 await self._refresh()
             return self._access_token
 
+    async def handle_auth_error(self) -> None:
+        """Reload credentials from disk or force-refresh on 401.
+
+        Another process (or an interactive ``/login``) may have written
+        fresh tokens to disk, revoking the one we loaded at startup.
+        Reload from disk first; if that token also matches the
+        in-memory one, force a network refresh.
+        """
+        async with self._lock:
+            try:
+                creds = OpenAISubscription.load(account=self._account)
+                disk_at = creds["access_token"]
+                if disk_at != self._access_token:
+                    self._access_token = disk_at
+                    self._refresh_token = creds["refresh_token"]
+                    self._account_id = creds["account_id"]
+                    self._expires_at = creds["expires_at"]
+                    self._sdk = None
+                    self._sdk_token = None
+                    return
+            except (FileNotFoundError, ValueError, KeyError):
+                pass
+            await self._refresh()
+            self._sdk = None
+            self._sdk_token = None
+
     async def _refresh(self) -> None:
         """Exchange the refresh token for a new access token."""
         logger.debug("Refreshing OpenAI OAuth token.")

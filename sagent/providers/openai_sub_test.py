@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import base64
 import json
+import time
 
 import httpx
 import pytest
@@ -304,6 +305,8 @@ def test_save_writes_id_token_when_present(tmp_path: Path) -> None:
 _FAKE_ACCESS = ""
 _FAKE_REFRESH = "rt-test"
 _FAKE_ACCOUNT = "acc"
+_FRESH_REFRESH = "rt-fresh"
+_STALE_REFRESH = "rt-stale"
 
 
 def _make_provider(*, expires_at: float = 9999.0) -> OpenAISubscription:
@@ -372,6 +375,49 @@ def test_subscription_expired_property_true_when_past() -> None:
 def test_subscription_expired_property_false_when_far_future() -> None:
     p = _make_provider(expires_at=9_999_999_999.0)
     assert p.expired is False
+
+
+class TestHandleAuthError:
+    """After ``/login`` writes fresh creds, the live provider must reload.
+
+    Bug: ``do_login`` (``repl/run_repl.py``) calls
+    ``provider.handle_auth_error()`` to hot-reload in-memory tokens
+    from disk after a successful re-auth. Without this hook on
+    :class:`OpenAISubscription`, the live instance keeps its stale
+    ``_access_token`` / ``_refresh_token`` after ``/login``; the next
+    model call either sends the stale access token (-> API 401) or
+    posts the stale refresh token (-> 400 ->
+    :class:`AuthRefreshError`). Either way ``/login`` is a no-op until
+    process restart.
+    """
+
+    @pytest.mark.anyio
+    async def test_reloads_from_disk(self, tmp_path: Path) -> None:
+        """Fresh creds on disk replace stale in-memory creds."""
+        cred_file = tmp_path / "auth.json"
+        fresh_access = _make_jwt({"exp": time.time() + 3600})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=fresh_access,
+                refresh_token=_FRESH_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() + 3600,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=0.0,
+        )
+        with patch(
+            "sagent.providers.openai_sub._DEFAULT_PATH",
+            cred_file,
+        ):
+            await provider.handle_auth_error()
+        assert provider._access_token == fresh_access
+        assert provider._refresh_token == _FRESH_REFRESH
 
 
 class TestRefreshErrors:
