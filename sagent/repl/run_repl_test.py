@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -24,19 +24,25 @@ from sagent.agent.runtime import (
     Quit,
     RuntimeEvent,
     Tool,
+    ToolCall,
+    ToolResult,
     UserMessage,
+    UserQueuedMessage,
 )
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import Google
-from sagent.repl.render import RecordingPrinter
+from sagent.repl.render import (
+    RecordingPrinter,
+    make_render_observer,
+)
 from sagent.repl.run_repl import (
     _parse_model_args,
     _resolve_model_target,
     do_login,
     do_switch_model,
     format_tasks,
-    make_queued_input_clearer,
+    make_queued_input_committer,
     run_repl,
 )
 
@@ -445,21 +451,39 @@ def test_run_repl_invokes_replay_messages() -> None:
     assert "replay_messages(" in src
 
 
-def test_make_queued_input_clearer_clears_on_user_message() -> None:
-    """Direct unit: a published ``UserMessage`` empties ``queued_input``."""
+@pytest.mark.asyncio
+async def test_make_queued_input_committer_pushes_user_queued_on_model_idle() -> None:
+    """``ModelIdle`` with non-empty queue → coalesced ``UserQueuedMessage`` pushed; queue cleared."""
     queued_input = ["elephant", "banana", "chair"]
-    observer = make_queued_input_clearer(queued_input)
-    observer(UserMessage(text="real submission"))
-    assert queued_input == []
-
-
-def test_make_queued_input_clearer_ignores_non_user_events() -> None:
-    """Non-``UserMessage`` events leave ``queued_input`` untouched."""
-    queued_input = ["elephant"]
-    observer = make_queued_input_clearer(queued_input)
+    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    observer = make_queued_input_committer(runtime, queued_input)
     observer(ModelIdle())
+    assert queued_input == []
+    pushed = await runtime.inbox.drain()
+    assert len(pushed) == 1
+    item = pushed[0]
+    assert isinstance(item, UserQueuedMessage)
+    assert item.text == "elephant\n\nbanana\n\nchair"
+
+
+def test_make_queued_input_committer_ignores_non_idle_events() -> None:
+    """Non-``ModelIdle`` events leave ``queued_input`` and the inbox untouched."""
+    queued_input = ["elephant"]
+    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    observer = make_queued_input_committer(runtime, queued_input)
+    observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
     assert queued_input == ["elephant"]
+    assert runtime.inbox._queue.empty()
+
+
+def test_make_queued_input_committer_ignores_idle_when_queue_empty() -> None:
+    """``ModelIdle`` with an empty queue is a no-op (no spurious push)."""
+    queued_input: list[str] = []
+    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    observer = make_queued_input_committer(runtime, queued_input)
+    observer(ModelIdle())
+    assert runtime.inbox._queue.empty()
 
 
 @dataclass(kw_only=True, slots=True)
@@ -483,36 +507,194 @@ class _TextOnlyModel:
 
 
 @pytest.mark.asyncio
-async def test_queued_input_cleared_when_runtime_publishes_user_message() -> None:
-    """Integration: pre-populated ``queued_input`` clears once the runtime
-    publishes a ``UserMessage`` event.
+async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
+    """Integration: Tab-staged ``queued_input`` commits as ``UserQueuedMessage``
+    on ``ModelIdle`` and the local list clears.
 
-    Repro of the live bug: user typed several lines while the agent was
-    busy; each ``_kb_submit`` appended to ``queued_input`` and pushed a
-    ``UserMessage`` to the inbox. The runtime committed them to history
-    and published ``UserMessage`` events. Without the
-    ``make_queued_input_clearer`` observer, ``queued_input`` retains
-    all the typed lines and the dim preview shows the tail forever.
+    Wires the option-1 contract end-to-end: REPL stages locally via
+    Tab (here we pre-populate the list to simulate that), the
+    committer observer sees ``ModelIdle`` after the round answering
+    the initial ``UserMessage`` settles, and pushes the coalesced
+    queue back as ``UserQueuedMessage``. The runtime then drains it
+    at the next gate-section pass and fires a fresh round.
     """
     queued_input = ["elephant", "banana", "chair"]
     agent = AgentRuntime(model=_TextOnlyModel(text="committed"))
-    agent.observers.append(make_queued_input_clearer(queued_input))
+    agent.observers.append(make_queued_input_committer(agent, queued_input))
 
-    done = asyncio.Event()
+    second_round = asyncio.Event()
+    rounds = 0
 
     def _watch_idle(event: RuntimeEvent) -> None:
+        nonlocal rounds
         if isinstance(event, ModelIdle):
-            done.set()
+            rounds += 1
+            if rounds >= 2:
+                second_round.set()
 
     agent.observers.append(_watch_idle)
 
     agent.inbox.push_back(UserMessage(text="real submission"))
     task = asyncio.create_task(agent.run_forever())
-    await asyncio.wait_for(done.wait(), timeout=2.0)
+    await asyncio.wait_for(second_round.wait(), timeout=2.0)
     agent.inbox.push_back(Quit())
     await task
 
     assert queued_input == [], f"expected queued_input cleared, got {queued_input}"
+    queued_texts = [m.text for m in agent.history if isinstance(m, UserMessage)]
+    assert "elephant\n\nbanana\n\nchair" in queued_texts
+
+
+@pytest.mark.asyncio
+async def test_staging_path_end_to_end_renders_user_bar() -> None:
+    """End-to-end: committed ``UserMessage`` reaches ``console_pane``.
+
+    Wires the full chain: REPL pushes ``UserMessage`` (the staging
+    model's commit type) → runtime matches it, publishes the event →
+    render observer writes ``user_bar`` to printer. Validates the
+    end-to-end path the user observes after pressing Enter on an
+    empty buffer with a non-empty queue.
+    """
+    printer = RecordingPrinter()
+    agent = AgentRuntime(model=_TextOnlyModel(text="ack"))
+    agent.observers.append(make_render_observer(printer))
+
+    agent.inbox.push_back(UserMessage(text="hello world"))
+
+    done = asyncio.Event()
+
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle):
+            done.set()
+
+    agent.observers.append(_watch)
+
+    task = asyncio.create_task(agent.run_forever())
+    await asyncio.wait_for(done.wait(), timeout=2.0)
+    agent.inbox.push_back(Quit())
+    await task
+
+    assert "hello world" in printer.user_bars, (
+        f"expected the staged user content to land as a user bar in the"
+        f" console pane; got user_bars={printer.user_bars}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
+    """Regression: REPL commit while a cohort is running must preempt.
+
+    The user's "type to redirect" intent: when the agent is in the
+    middle of running tools, committing a staged message should detach
+    those tools to background (``[detached]`` placeholders) and fire
+    a fresh model round for the committed content immediately. T2
+    semantics.
+
+    Earlier we accidentally pushed ``UserQueuedMessage`` (T4 / drain
+    at ``ModelIdle``) at commit time. The keybinding unit test
+    ``test_enter_on_empty_buf_with_queue_commits_*`` asserted whatever
+    type the implementation pushed, so the regression slipped. This
+    test asserts the behavior end-to-end against a real ``AgentRuntime``:
+    if commit pushes anything that fails to preempt the cohort, the
+    fresh round never fires while tools are still running and this
+    test fails.
+    """
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class _BlockingTool:
+        _name: str = "echo"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            tool_started.set()
+            await release_tool.wait()
+            return ToolResult(call_id="", content="completed late")
+
+    @dataclass(kw_only=True, slots=True)
+    class _TwoRoundModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                # Round 1: request a slow tool. Cohort spawns.
+                return AssistantMessage(
+                    tool_calls=(ToolCall(id="t1", name="echo", args={}),),
+                )
+            # Round 2 (commit fire): respond to the staged message.
+            msg = AssistantMessage(text="redirected")
+            for ch in msg.text:
+                on_text(ch)
+            return msg
+
+    tool = _BlockingTool()
+    model = _TwoRoundModel()
+    runtime = AgentRuntime(model=model, tools=[tool])
+
+    # Round 1 trigger.
+    runtime.inbox.push_back(UserMessage(text="initial"))
+
+    # Simulate the REPL's text-Enter path: text input + Enter pushes
+    # ``UserMessage`` immediately. The runtime sees a mid-cohort
+    # ``UserMessage`` and must preempt -- stub the slow tool to
+    # ``detached`` and fire a fresh round.
+    async def commit_during_cohort() -> None:
+        await tool_started.wait()
+        runtime.inbox.push_back(UserMessage(text="redirect please"))
+        # Sleep gives the runtime time to preempt + fire Round 2.
+        await asyncio.sleep(0.2)
+        release_tool.set()
+        await asyncio.sleep(0.1)
+        runtime.inbox.push_back(Quit())
+
+    async def drive() -> None:
+        try:
+            await asyncio.wait_for(runtime.run_forever(), timeout=3.0)
+        except TimeoutError:
+            pytest.fail("runtime did not quit within timeout")
+
+    await asyncio.gather(drive(), commit_during_cohort())
+
+    assert len(model.call_histories) >= 2, (
+        "Round 2 (model call for the committed staged content) never"
+        " fired. The commit must preempt the in-flight cohort."
+    )
+    round2_users = [
+        m.text for m in model.call_histories[1] if isinstance(m, UserMessage)
+    ]
+    assert "redirect please" in round2_users, (
+        f"Round 2 did not see the committed message; got user messages {round2_users}"
+    )
+    # Tool's [detached] placeholder must be present in history (proves
+    # the cohort got stubbed to background rather than blocking the gate).
+    placeholders = [
+        m
+        for m in runtime.history
+        if isinstance(m, ToolResult) and m.content in {"[detached]", "completed late"}
+    ]
+    assert placeholders, (
+        f"Expected the slow tool to be detached or eventually splice"
+        f" 'completed late' into history; saw history:"
+        f" {[type(m).__name__ for m in runtime.history]}"
+    )
 
 
 if __name__ == "__main__":

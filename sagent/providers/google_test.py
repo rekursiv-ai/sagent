@@ -384,6 +384,90 @@ async def test_google_buffer_400_too_large_raises_prompt_too_long() -> None:
 
 
 @pytest.mark.asyncio
+async def test_google_buffer_413_too_large_raises_prompt_too_long() -> None:
+    """Status code is not the signal: any 4xx with overflow body normalizes."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, text="Input too large for model context.")
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(PromptTooLongError):
+        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_buffer_400_exceeds_maximum_normalizes() -> None:
+    """The ``exceeds the maximum`` substring is the canonical Gemini overflow phrase."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, text="The input token count exceeds the maximum allowed."
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(PromptTooLongError):
+        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_stream_400_too_long_raises_prompt_too_long() -> None:
+    """Stream path normalizes 4xx with overflow body to ``PromptTooLongError``."""
+    sse_body = b'data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}\n\n'
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(400, text="Input too long for model context.")
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    del sse_body  # only error path exercised
+    with pytest.raises(PromptTooLongError):
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> (
+    None
+):
+    """Stream 5xx with overflow keywords propagates as HTTPStatusError."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error: too long traceback")
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(httpx.HTTPStatusError):
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_buffer_500_with_overflow_keyword_is_http_error_not_overflow() -> (
+    None
+):
+    """5xx server errors are infrastructure, never overflow."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error: request context lost")
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(httpx.HTTPStatusError):
+        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
 async def test_google_buffer_400_other_raises_value_error() -> None:
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="malformed request body")

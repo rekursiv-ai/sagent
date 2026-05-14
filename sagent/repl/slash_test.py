@@ -7,6 +7,7 @@ import pytest
 from sagent.repl.slash import (
     Clear,
     Compact,
+    Defer,
     Halt,
     Help,
     Kill,
@@ -137,6 +138,19 @@ def test_parse_slash_text_strips_whitespace() -> None:
     action = parse_slash("   hi   ")
     assert isinstance(action, Text)
     assert action.content == "hi"
+
+
+def test_parse_slash_defer_with_text() -> None:
+    action = parse_slash("/defer when you have a moment")
+    assert isinstance(action, Defer)
+    assert action.content == "when you have a moment"
+
+
+def test_parse_slash_defer_no_text_returns_unknown() -> None:
+    """``/defer`` with no payload is invalid; surfaces as Unknown."""
+    action = parse_slash("/defer")
+    assert isinstance(action, Unknown)
+    assert "requires" in action.text
 
 
 if __name__ == "__main__":

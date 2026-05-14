@@ -1,9 +1,53 @@
-"""REPL input zone: bar rendering + pump + ``InputSource`` abstraction.
+r"""REPL input zone: bar rendering + pump + ``InputSource`` abstraction.
 
 This module owns everything about the *input* zone of the REPL --
-the bar where the user types, the optional dim ``queued_input``
-preview rendered just above it, and the pump that consumes
-submitted lines.
+the bar where the user types, the dim ``queued_input_pane`` preview
+rendered just above it when the staging queue is non-empty, and the
+pump that consumes slash submissions.
+
+Behavior contract
+~~~~~~~~~~~~~~~~~
+
+Up:
+  queue empty + history empty    -> nothing
+  queue empty + history exists   -> pull history into input
+  queue non-empty                -> lift queue into input (queue cleared);
+                                    true retract -- nothing was in the
+                                    runtime to begin with
+  in history already             -> walk further back
+
+Down:
+  input empty                    -> nothing (reserved future submenu)
+  input non-empty                -> clear input (back to empty)
+
+Enter:
+  text in input                  -> dispatch as preempting ``UserMessage``
+                                    (cuts in line over any cohort/stream).
+                                    ``queued_input`` is not touched.
+  text ends with ``\``           -> backslash continuation: replace
+                                    trailing ``\`` with literal ``\n``,
+                                    stay in buffer, do not dispatch
+  empty input                    -> nothing
+  slash command                  -> route through pump
+
+Tab:
+  text in input                  -> stage in ``queued_input`` (REPL-local).
+                                    No runtime push. The ``ModelIdle``
+                                    observer (``make_queued_input_committer``
+                                    in :mod:`repl.run_repl`) commits the
+                                    joined queue as a single
+                                    ``UserQueuedMessage`` when the
+                                    current round chain settles.
+  empty input                    -> nothing
+
+``queued_input`` is purely a Tab-staging buffer. Up-arrow truly
+retracts because nothing has been pushed to the runtime. Enter is
+direct dispatch -- its content does not go through this list.
+
+Headless callers without a Tab key use the ``/defer <text>`` slash
+command, which pushes ``UserQueuedMessage`` directly through the
+pump -- not retractable, but a one-shot defer gesture is sufficient
+for non-interactive contexts.
 
 Pump
 ~~~~
@@ -21,12 +65,11 @@ Input-pane rendering
 
 :func:`render_input_pane` builds the prompt-toolkit ``FormattedText``
 for the input zone: an optional dim ``queued_input_pane`` preview
-line above the prompt sigil, then the ``> `` sigil itself. Backed by
-a REPL-local ``queued_input: list[str]`` buffer of texts the user
-typed while the agent was busy; the tail is shown as the preview,
-Up-arrow lifts it back, and the runtime's
-``make_queued_input_clearer`` observer empties the buffer once the
-runtime has committed user input to history.
+above the ``> `` prompt sigil whenever ``queued_input`` is
+non-empty. The preview shows all staged blocks joined by ``\n\n``.
+The runtime's ``make_queued_input_clearer`` observer empties
+``queued_input`` once the runtime publishes the committed
+``UserMessage`` event so the dim preview stops showing stale entries.
 """
 
 from __future__ import annotations
@@ -46,12 +89,14 @@ from sagent.agent.runtime import (
     Compact,
     Recompact,
     UserMessage,
+    UserQueuedMessage,
 )
 from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
     QUIT_WORDS,
     Clear as SlashClear,
     Compact as SlashCompact,
+    Defer as SlashDefer,
     Halt as SlashHalt,
     Help as SlashHelp,
     Kill as SlashKill,
@@ -243,6 +288,9 @@ async def _dispatch(
         return False
     if isinstance(action, SlashText):
         agent.runtime.inbox.push_back(UserMessage(text=action.content))
+        return False
+    if isinstance(action, SlashDefer):
+        agent.runtime.inbox.push_back(UserQueuedMessage(text=action.content))
         return False
     # Remaining variant: Unknown -- surface the parse error.
     if printer is not None:

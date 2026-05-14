@@ -532,6 +532,39 @@ async def test_buffer_prompt_too_long_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_buffer_413_too_long_raises_prompt_too_long() -> None:
+    """Status code is not the signal: any 4xx with overflow body normalizes."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, text="context_length_exceeded: too big")
+
+    transport = httpx.MockTransport(handle)
+    _, model = _make_provider_with_mock(transport)
+    req = ModelRequest(messages=[UserMessage(text="x")])
+    with pytest.raises(PromptTooLongError):
+        await model.buffer(req)
+
+
+@pytest.mark.asyncio
+async def test_buffer_500_with_overflow_keyword_is_http_error_not_overflow() -> None:
+    """5xx server errors are infrastructure, never overflow.
+
+    Even if a server stack trace happens to contain ``too long`` or
+    ``context_length_exceeded``, a 5xx must not be normalized to
+    ``PromptTooLongError`` (which would trigger needless compaction).
+    """
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error: too long traceback")
+
+    transport = httpx.MockTransport(handle)
+    _, model = _make_provider_with_mock(transport)
+    req = ModelRequest(messages=[UserMessage(text="x")])
+    with pytest.raises(httpx.HTTPStatusError):
+        await model.buffer(req)
+
+
+@pytest.mark.asyncio
 async def test_buffer_unrelated_400_propagates_as_http_error() -> None:
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="malformed body")
@@ -577,6 +610,32 @@ async def test_stream_400_too_long_raises_prompt_too_long() -> None:
     transport = httpx.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     with pytest.raises(PromptTooLongError):
+        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_stream_413_too_long_raises_prompt_too_long() -> None:
+    """Status code is not the signal: any 4xx with overflow body normalizes."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, text="context_length_exceeded")
+
+    transport = httpx.MockTransport(handle)
+    _, model = _make_provider_with_mock(transport)
+    with pytest.raises(PromptTooLongError):
+        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> None:
+    """5xx server errors are infrastructure, never overflow (stream path)."""
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="internal error: too long traceback")
+
+    transport = httpx.MockTransport(handle)
+    _, model = _make_provider_with_mock(transport)
+    with pytest.raises(httpx.HTTPStatusError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 

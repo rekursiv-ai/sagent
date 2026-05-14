@@ -7,18 +7,11 @@ from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock
 
-import asyncio
-
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 
-import pytest
-
 from sagent.agent.agent import Agent
-from sagent.agent.runtime import UserQueuedMessage
-from sagent.repl.keybindings import (
-    _IDLE_COMMIT_DELAY_SEC,
-    build_key_bindings,
-)
+from sagent.agent.runtime import UserMessage
+from sagent.repl.keybindings import build_key_bindings
 
 
 @dataclass(slots=True, kw_only=True)
@@ -64,12 +57,14 @@ def _cohort_agent() -> _FakeAgent:
 
 
 def _handler(kb: KeyBindings, keys: tuple[str, ...]) -> Callable[[KeyPressEvent], None]:
-    """Return the registered handler for ``keys``.
+    r"""Return the registered handler for ``keys``.
 
-    ``enter`` is registered as ``Keys.ControlM`` at runtime, so callers that
-    pass ``"enter"`` are normalized to ``c-m``.
+    ``enter`` is registered as ``Keys.ControlM`` (``\r`` = Ctrl+M) and
+    ``tab`` as ``Keys.ControlI`` (``\t`` = Ctrl+I) at runtime. Callers
+    using the friendly names get normalized.
     """
-    normalized = tuple("c-m" if k == "enter" else k for k in keys)
+    aliases = {"enter": "c-m", "tab": "c-i"}
+    normalized = tuple(aliases.get(k, k) for k in keys)
     for b in kb.bindings:
         bk = tuple(getattr(k, "value", k) for k in b.keys)
         if bk == normalized:
@@ -103,76 +98,65 @@ def _build(agent: _FakeAgent, queued_input: list[str] | None = None) -> KeyBindi
     )
 
 
-def test_enter_text_stages_into_queue_without_dispatch() -> None:
-    """Enter on non-empty buffer appends to queue, leaves inbox untouched."""
+def test_enter_text_pushes_user_message_does_not_touch_queued_input() -> None:
+    """Enter on text dispatches ``UserMessage``; ``queued_input`` untouched.
+
+    Under option 1: ``queued_input`` belongs exclusively to Tab staging.
+    Enter is a direct-dispatch path that bypasses the queue entirely.
+    """
     agent = _idle_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("hello")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["hello"]
-    assert agent.runtime.inbox.items == []
-    buf.append_to_history.assert_called_once()
+    assert queued_input == [], "Enter must not touch the Tab-staging queue"
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "hello"
     buf.reset.assert_called_once()
-    buf.validate_and_handle.assert_not_called()
 
 
-def test_enter_text_during_model_call_stages_without_dispatch() -> None:
-    """Busy-state behavior identical to idle: just stage; runtime not touched."""
+def test_enter_text_during_model_call_does_not_touch_queued_input() -> None:
+    """Busy-state Enter: dispatch ``UserMessage``, queue still belongs to Tab."""
     agent = _busy_agent()
-    queued_input: list[str] = []
+    queued_input: list[str] = ["staged-by-tab"]
     kb = _build(agent, queued_input)
     buf = _fake_buf("first msg")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["first msg"]
-    assert agent.runtime.inbox.items == []
-    buf.reset.assert_called_once()
+    # Tab-staged content untouched.
+    assert queued_input == ["staged-by-tab"]
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "first msg"
 
 
-def test_enter_text_during_tool_cohort_stages_without_dispatch() -> None:
+def test_enter_text_during_tool_cohort_pushes_user_message_immediately() -> None:
+    """Cohort-active: text Enter pushes ``UserMessage`` to preempt."""
     agent = _cohort_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("during tools")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["during tools"]
-    assert agent.runtime.inbox.items == []
-
-
-def test_enter_text_appends_block_to_existing_queue() -> None:
-    """Each Enter creates a new block; queue accumulates in order."""
-    agent = _idle_agent()
-    queued_input: list[str] = ["a", "b"]
-    kb = _build(agent, queued_input)
-    buf = _fake_buf("c")
-    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["a", "b", "c"]
-
-
-def test_enter_on_empty_buf_with_queue_commits_user_queued_message() -> None:
-    r"""Empty Enter with non-empty queue is the explicit commit gesture.
-
-    Blocks join with ``\\n\\n`` into a single ``UserQueuedMessage``.
-    """
-    agent = _idle_agent()
-    queued_input: list[str] = ["alpha", "beta"]
-    kb = _build(agent, queued_input)
-    buf = _fake_buf("")
-    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     assert queued_input == []
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserQueuedMessage)
-    assert pushed.text == "alpha\n\nbeta"
+    assert isinstance(pushed, UserMessage)
 
 
-def test_enter_on_empty_buf_with_empty_queue_is_noop() -> None:
+def test_enter_on_empty_buf_is_noop() -> None:
+    """Empty Enter does nothing -- no commit gesture in the new model.
+
+    Each text Enter dispatches immediately; there's no accumulated
+    queue to commit on empty Enter.
+    """
     agent = _idle_agent()
-    queued_input: list[str] = []
+    queued_input: list[str] = ["leftover"]
     kb = _build(agent, queued_input)
     buf = _fake_buf("")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
+    assert queued_input == ["leftover"]
     assert agent.runtime.inbox.items == []
 
 
@@ -188,38 +172,123 @@ def test_enter_routes_slash_command_through_pump_when_busy() -> None:
     assert queued_input == []
 
 
-def test_enter_whitespace_discards_buffer_does_not_commit() -> None:
-    """Whitespace-only Enter resets the buffer; no commit even if queue
-    is non-empty (commit requires *empty*-buffer Enter).
-    """
+def test_enter_whitespace_discards_buffer() -> None:
+    """Whitespace-only Enter resets the buffer; nothing dispatches."""
     agent = _idle_agent()
-    queued_input: list[str] = ["staged"]
+    queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("   ")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["staged"]
+    assert queued_input == []
     assert agent.runtime.inbox.items == []
     buf.reset.assert_called_once()
 
 
-def test_down_on_non_empty_buf_acts_like_enter() -> None:
-    """Down with text in input_pane stages it (same as Enter)."""
+def test_enter_with_trailing_backslash_inserts_newline_no_dispatch() -> None:
+    r"""Backslash continuation: trailing ``\`` + Enter swaps for ``\n``.
+
+    Buffer becomes the same text with the trailing ``\`` replaced by
+    a literal newline; nothing is dispatched. Cursor sits at end of
+    the new buffer so subsequent typing continues on the new line.
+    """
+    agent = _idle_agent()
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+    buf = _fake_buf("first line\\")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert buf.text == "first line\n"
+    assert buf.cursor_position == len("first line\n")
+    assert queued_input == []
+    assert agent.runtime.inbox.items == []
+
+
+def test_tab_stages_locally_does_not_dispatch() -> None:
+    """Tab on text stages in ``queued_input``; nothing pushed to runtime.
+
+    Under option 1: Tab is pure REPL-side staging. The runtime is
+    untouched until ``make_queued_input_committer`` fires on
+    ``ModelIdle``. This makes Up-arrow a true retract.
+    """
+    agent = _idle_agent()
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+    buf = _fake_buf("for later")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queued_input == ["for later"]
+    assert agent.runtime.inbox.items == [], (
+        "Tab must not push to runtime -- it stages REPL-side until ModelIdle"
+    )
+
+
+def test_tab_then_up_arrow_truly_retracts() -> None:
+    """Reverse of the earlier bug: Tab then Up retracts cleanly.
+
+    Under option 1: Tab stages locally; Up lifts back; nothing was
+    in the runtime, so no duplicate dispatch on subsequent Enter.
+    """
+    agent = _idle_agent()
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+
+    # Tab "hello" -> stage.
+    buf1 = _fake_buf("hello")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf1)))
+    assert queued_input == ["hello"]
+    assert agent.runtime.inbox.items == []
+
+    # Up -> lift back to buffer, clear local list.
+    buf2 = _fake_buf("")
+    _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf2)))
+    assert buf2.text == "hello"
+    assert queued_input == []
+    assert agent.runtime.inbox.items == []
+
+    # Edit + Enter -> single UserMessage, no duplicate.
+    buf3 = _fake_buf("hello world")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf3)))
+    items = agent.runtime.inbox.items
+    assert len(items) == 1
+    assert isinstance(items[0], UserMessage)
+    assert items[0].text == "hello world"
+
+
+def test_tab_on_empty_buf_is_noop() -> None:
+    """Tab with empty buffer does nothing; queue untouched."""
+    agent = _idle_agent()
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+    buf = _fake_buf("")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queued_input == []
+    assert agent.runtime.inbox.items == []
+
+
+def test_down_on_non_empty_buf_clears_input_without_staging() -> None:
+    """Down with text discards the buffer; never stages, never dispatches.
+
+    Per ``repl.input_pane``'s contract: Up navigates queue/history INTO
+    the input, Down brings the input back to empty -- without staging
+    or dispatching. Only Enter stages/dispatches. This guards against
+    the "Up into history, then Down dispatches it" regression.
+    """
     agent = _idle_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("hello")
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["hello"]
+    buf.reset.assert_called_once()
+    assert queued_input == []
     assert agent.runtime.inbox.items == []
 
 
-def test_down_on_empty_buf_is_noop() -> None:
-    """Down with empty input_pane does nothing (reserved for future submenu)."""
+def test_down_on_empty_buf_is_noop_reserved_for_future_submenu() -> None:
+    """Down with empty input does nothing; queue untouched."""
     agent = _idle_agent()
     queued_input: list[str] = ["staged"]
     kb = _build(agent, queued_input)
     buf = _fake_buf("")
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
+    buf.reset.assert_not_called()
     assert queued_input == ["staged"]
     assert agent.runtime.inbox.items == []
 
@@ -343,52 +412,21 @@ def test_ctrl_c_idle_clears_buffer() -> None:
     buf.reset.assert_called_once()
 
 
-@pytest.mark.asyncio
-@pytest.mark.real_sleep
-async def test_idle_text_enter_commits_after_delay() -> None:
-    """Idle Enter on text stages, then auto-commits after the delay window.
-
-    Sequence:
-    - Type text, Enter while agent is idle.
-    - Immediately: text is staged in queue; nothing pushed yet.
-    - After ``_IDLE_COMMIT_DELAY_SEC``: queue committed as
-      ``UserQueuedMessage``; queue cleared.
-    """
-    agent = _idle_agent()
+def test_up_arrow_on_tab_staging_lifts_back_truly_retracts() -> None:
+    """Up-arrow lifts Tab-staged content back to buffer; runtime untouched."""
+    agent = _busy_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
-    buf = _fake_buf("hello")
-    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    # Synchronously: staged, nothing pushed.
-    assert queued_input == ["hello"]
+    # Tab "draft" -> stage locally; runtime untouched.
+    buf = _fake_buf("draft")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queued_input == ["draft"]
     assert agent.runtime.inbox.items == []
-    # Wait past the commit window plus a small margin.
-    await asyncio.sleep(_IDLE_COMMIT_DELAY_SEC + 0.05)
-    # After delay: queue committed.
-    assert queued_input == []
-    assert len(agent.runtime.inbox.items) == 1
-    pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserQueuedMessage)
-    assert pushed.text == "hello"
-
-
-@pytest.mark.asyncio
-@pytest.mark.real_sleep
-async def test_idle_enter_then_up_arrow_retracts_before_commit() -> None:
-    """Up-arrow within the idle-commit window retracts the staging."""
-    agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
-    buf = _fake_buf("hello")
-    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    # User up-arrows before the commit fires.
+    # Up-arrow lifts back -- true retract.
     buf2 = _fake_buf("")
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf2)))
-    assert buf2.text == "hello"
+    assert buf2.text == "draft"
     assert queued_input == []
-    # Wait past the commit window.
-    await asyncio.sleep(_IDLE_COMMIT_DELAY_SEC + 0.05)
-    # Commit should be a no-op (queue was emptied by retract).
     assert agent.runtime.inbox.items == []
 
 
