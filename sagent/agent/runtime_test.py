@@ -578,6 +578,92 @@ async def test_detach_and_result_arrives_later() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_splice_wakes_model_after_round_ended() -> None:
+    """Splicing a ``DetachedResult`` after the round ended wakes the model.
+
+    Scenario:
+      1. User sends "go"; model returns a tool call.
+      2. Tool starts running (slow).
+      3. User preempts mid-cohort with a fresh ``UserMessage``.
+      4. Runtime stubs the tool with ``[detached]`` and fires round 2.
+      5. Round 2 responds with text; model goes idle.
+      6. Detached tool eventually completes; ``DetachedResult`` splices
+         the real content into the placeholder slot.
+      7. **Fix**: because history tail was an ``AssistantMessage``, the
+         splice path appends a terse user-side notification so the
+         end-of-loop gate fires a fresh round and the model sees the
+         now-real tool output. The third scripted response is consumed.
+
+    The fallback branch (no placeholder match) already appended a
+    full-content ``UserMessage``. This guarantees the splice branch
+    also wakes the model, with the terse notification keeping history
+    clean (the real content lives in its proper ``ToolResult`` slot).
+    """
+    slow = StubTool(response="real output", delay_sec=0.2)
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
+            AssistantMessage(text="preempted response"),
+            AssistantMessage(text="post-splice response"),
+        ],
+        tools=[slow],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def preempt_then_wait_for_splice() -> None:
+        # Let the tool start; preempt with a user message.
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(UserMessage(text="preempt"))
+        # Wait long enough for the tool to finish, the splice to land,
+        # and the awoken round to complete.
+        await asyncio.sleep(0.6)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        preempt_then_wait_for_splice(),
+    )
+
+    # Splice succeeded: no [detached] placeholders remain, and the real
+    # tool output is in the call_id="t1" slot.
+    stubs = [
+        t
+        for t in agent.history
+        if isinstance(t, ToolResult) and t.content == "[detached]"
+    ]
+    assert stubs == [], (
+        "splice should have replaced the placeholder with the real result"
+    )
+    spliced = [
+        t for t in agent.history if isinstance(t, ToolResult) and t.call_id == "t1"
+    ]
+    assert len(spliced) == 1
+    assert spliced[0].content == "real output"
+
+    # Fix: the model woke after the splice and consumed the third
+    # scripted response. Without the wake, only round 2 would have
+    # fired.
+    assistant_texts = [
+        m.text for m in agent.history if isinstance(m, AssistantMessage) and m.text
+    ]
+    assert assistant_texts == ["preempted response", "post-splice response"], (
+        f"splice should wake the model; got assistant texts {assistant_texts!r}"
+    )
+
+    # The wake cue is a terse ``UserMessage`` notification; the real
+    # content stays in the ``ToolResult`` slot above and is not
+    # duplicated into the notification.
+    notifications = [
+        m
+        for m in agent.history
+        if isinstance(m, UserMessage) and m.text.startswith("[Detached tool ")
+    ]
+    assert len(notifications) == 1
+    assert "real output" not in notifications[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_undetach_gates_model() -> None:
     """Undetach re-gates the model on a detached tool."""
     tool_started = asyncio.Event()
