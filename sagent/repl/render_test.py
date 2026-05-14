@@ -144,12 +144,14 @@ def test_model_response_error_emits_error_and_halt() -> None:
     assert p.halts == [HALT_MESSAGE]
 
 
-def test_auth_refresh_error_renders_cleanly() -> None:
-    """``AuthRefreshError`` reaches the printer with actionable text intact.
+def test_auth_refresh_error_renders_without_class_name_prefix() -> None:
+    """``AuthRefreshError`` (any ``UserFacingError``) renders ``str(exc)`` only.
 
-    The renderer must surface the polished message (``/login`` guidance)
-    so the user can act on it. Regression guard: if someone changes the
-    error-rendering branch and drops ``str(exc)``, this catches it.
+    Plain exceptions get the ``ClassName: message`` shape so the
+    operator can identify the failure type. ``UserFacingError`` carries
+    a polished, user-actionable message; prefixing it with the class
+    name ("AuthRefreshError: ...") just adds Python-internals noise to
+    text the user is supposed to read and act on. Drop the prefix.
     """
     p = RecordingPrinter()
     obs = make_render_observer(p)
@@ -157,12 +159,60 @@ def test_auth_refresh_error_renders_cleanly() -> None:
     obs(ModelResponseError(exception=AuthRefreshError(msg)))
 
     rendered = " ".join(p.tool_errors)
-    assert "/login" in rendered, (
-        f"renderer must surface the /login guidance; got tool_errors={p.tool_errors!r}"
+    assert msg in rendered, (
+        f"renderer must surface the polished message; got tool_errors={p.tool_errors!r}"
     )
-    # No traceback / httpx internals must leak through the renderer.
+    assert "AuthRefreshError" not in rendered, (
+        f"UserFacingError messages must not be prefixed with their class "
+        f"name; got tool_errors={p.tool_errors!r}"
+    )
     assert "Traceback" not in rendered
     assert "HTTPStatusError" not in rendered
+
+
+def test_auth_refresh_error_uses_auth_specific_halt_banner() -> None:
+    """``AuthRefreshError`` halt banner mentions ``/login`` / ``/model``, not "retry".
+
+    The generic ``HALT_MESSAGE`` suggests "type to retry" -- but for an
+    expired refresh token, typing anything just re-fires the same auth
+    failure. The banner should reflect that only ``/login`` (or
+    switching provider via ``/model``) resolves the failure.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponseError(exception=AuthRefreshError("session expired")))
+
+    assert len(p.halts) == 1
+    banner = p.halts[0]
+    assert banner != HALT_MESSAGE, (
+        f"AuthRefreshError must use the auth-specific banner; "
+        f"got the generic HALT_MESSAGE: {banner!r}"
+    )
+    assert "/login" in banner, (
+        f"auth-specific banner must mention /login; got {banner!r}"
+    )
+    # "retry" implies typing more text fixes it; for auth, it doesn't.
+    assert "retry" not in banner.lower(), (
+        f"auth banner must not suggest retry (typing won't help an "
+        f"expired refresh token); got {banner!r}"
+    )
+
+
+def test_plain_exception_keeps_class_name_prefix_and_generic_banner() -> None:
+    """Unexpected exceptions retain the ``ClassName: message`` shape + generic banner.
+
+    Plain failures help the operator diagnose; the class name is
+    diagnostic. The generic banner ("type to retry") is appropriate
+    since retry might succeed.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponseError(exception=RuntimeError("boom")))
+
+    rendered = " ".join(p.tool_errors)
+    assert "RuntimeError: boom" in rendered, (
+        f"plain exception should keep class-name prefix; got {p.tool_errors!r}"
+    )
     assert p.halts == [HALT_MESSAGE]
 
 

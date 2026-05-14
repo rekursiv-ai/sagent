@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import base64
 import json
@@ -416,6 +416,154 @@ class TestHandleAuthError:
             cred_file,
         ):
             await provider.handle_auth_error()
+        assert provider._access_token == fresh_access
+        assert provider._refresh_token == _FRESH_REFRESH
+
+    @pytest.mark.anyio
+    async def test_force_refresh_when_disk_same(self, tmp_path: Path) -> None:
+        """Disk matches in-memory -> fall through to network refresh."""
+        in_memory_access = _make_jwt({"exp": 0.0})
+        cred_file = tmp_path / "auth.json"
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=in_memory_access,
+                refresh_token=_STALE_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=0.0,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=in_memory_access,
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=0.0,
+        )
+        refreshed_access = _make_jwt({"exp": time.time() + 3600})
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(
+            return_value={
+                "access_token": refreshed_access,
+                "refresh_token": _FRESH_REFRESH,
+                "expires_in": 3600,
+            },
+        )
+        mock_resp.status_code = 200
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "sagent.providers.openai_sub.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "sagent.providers.openai_sub._DEFAULT_PATH",
+                cred_file,
+            ),
+        ):
+            await provider.handle_auth_error()
+        assert provider._access_token == refreshed_access
+        assert provider._refresh_token == _FRESH_REFRESH
+
+    @pytest.mark.anyio
+    async def test_force_refresh_when_disk_missing(self, tmp_path: Path) -> None:
+        """Missing disk file -> caught -> fall through to network refresh."""
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=0.0,
+        )
+        refreshed_access = _make_jwt({"exp": time.time() + 3600})
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(
+            return_value={
+                "access_token": refreshed_access,
+                "refresh_token": _FRESH_REFRESH,
+                "expires_in": 3600,
+            },
+        )
+        mock_resp.status_code = 200
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "sagent.providers.openai_sub.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "sagent.providers.openai_sub._DEFAULT_PATH",
+                tmp_path / "does_not_exist.json",
+            ),
+        ):
+            await provider.handle_auth_error()
+        assert provider._access_token == refreshed_access
+        assert provider._refresh_token == _FRESH_REFRESH
+
+
+class TestEnsureValidRace:
+    """``_ensure_valid`` must reload disk before refreshing.
+
+    Multi-process race: process A's token expires; A refreshes,
+    rotating the refresh_token and saving fresh creds to disk.
+    Process B's in-memory refresh_token is now revoked. When B's
+    token expires, ``_ensure_valid`` must check disk first; if disk
+    has fresher creds, adopt them without posting B's stale
+    refresh_token (which would 400). Mirrors ``handle_auth_error``'s
+    disk-first pattern.
+    """
+
+    @pytest.mark.anyio
+    async def test_reloads_from_disk_when_sibling_refreshed(
+        self, tmp_path: Path
+    ) -> None:
+        """Fresh disk creds preempt the network refresh entirely."""
+        cred_file = tmp_path / "auth.json"
+        fresh_access = _make_jwt({"exp": time.time() + 3600})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=fresh_access,
+                refresh_token=_FRESH_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() + 3600,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=time.time() - 100,
+        )
+
+        # If ``_refresh`` is reached, the test fails fast -- the disk
+        # reload should preempt it.
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(
+            side_effect=AssertionError(
+                "_ensure_valid called _refresh instead of reloading from disk"
+            ),
+        )
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch(
+                "sagent.providers.openai_sub.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "sagent.providers.openai_sub._DEFAULT_PATH",
+                cred_file,
+            ),
+        ):
+            token = await provider._ensure_valid()
+
+        assert token == fresh_access
         assert provider._access_token == fresh_access
         assert provider._refresh_token == _FRESH_REFRESH
 
