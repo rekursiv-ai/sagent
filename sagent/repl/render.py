@@ -35,12 +35,19 @@ from sagent.agent.runtime import (
     ToolResultPartial,
     UserMessage,
 )
+from sagent.custom_exceptions import (
+    AuthRefreshError,
+    UserFacingError,
+)
 from sagent.repl.render_diff import find_stable_boundary
 
 
 logger = logging.getLogger(__name__)
 
 HALT_MESSAGE = "agent halted — type to retry, or /login, /model, /quit"
+HALT_MESSAGE_AUTH = (
+    "agent halted — run /login to re-authenticate or /model to switch providers"
+)
 
 type ChildItem = ToolResult | UserMessage | AssistantMessage
 
@@ -258,8 +265,21 @@ class RenderObserver:
                 self._printer.write_interrupted()
             case ModelResponseError(exception=exc):
                 self._flush_stream()
-                self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
-                self._printer.write_halt(HALT_MESSAGE)
+                # ``UserFacingError`` carries a polished, user-actionable
+                # message; the class-name prefix would just add Python-
+                # internals noise to text the user is supposed to read
+                # and act on. ``AuthRefreshError`` further tailors the
+                # halt banner: the generic "type to retry" misleads --
+                # an expired refresh token won't recover via retry, only
+                # via ``/login`` or ``/model``.
+                if isinstance(exc, UserFacingError):
+                    self._printer.write_tool_error(str(exc))
+                else:
+                    self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
+                if isinstance(exc, AuthRefreshError):
+                    self._printer.write_halt(HALT_MESSAGE_AUTH)
+                else:
+                    self._printer.write_halt(HALT_MESSAGE)
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)
             case ChildDoneEvent(label=label):

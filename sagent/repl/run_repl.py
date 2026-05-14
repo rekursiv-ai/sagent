@@ -42,6 +42,7 @@ from sagent.agent.runtime import (
     RuntimeEvent,
     UserQueuedMessage,
 )
+from sagent.custom_exceptions import log_exception_or_warning
 from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import build_provider, infer_provider
@@ -138,8 +139,10 @@ async def run_repl(
             try:
                 with contextlib.suppress(asyncio.CancelledError):
                     await pump_task
-            except Exception:
-                logger.exception("REPL input pump raised during shutdown")
+            except Exception as exc:  # noqa: BLE001 -- pump shutdown catches any slash-handler exception; UserFacingError routed to warning, others to exception
+                log_exception_or_warning(
+                    logger, "REPL input pump raised during shutdown", exc
+                )
             agent.cancel_background(REPL_PUMP_KEY)
     if agent.session_dir is not None:
         _ = sys.stderr.write(

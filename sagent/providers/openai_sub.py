@@ -478,12 +478,34 @@ class OpenAISubscription(OpenAI):
             return self._sdk
 
     async def _ensure_valid(self) -> str:
-        """Return a valid access token, refreshing if needed."""
+        """Return a valid access token, reloading from disk or refreshing.
+
+        Race recovery for multi-process credential sharing: a sibling
+        process may have already rotated the refresh token (saving new
+        creds to disk and invalidating our in-memory refresh_token).
+        Try disk first; only fall through to ``_refresh`` if disk
+        agrees with memory (no sibling activity), so we don't post a
+        now-revoked refresh_token to the OAuth endpoint.
+        """
         if not self.expired:
             return self._access_token
         async with self._lock:
-            if self.expired:
-                await self._refresh()
+            if not self.expired:
+                return self._access_token
+            try:
+                creds = OpenAISubscription.load(account=self._account)
+                disk_at = creds["access_token"]
+                if disk_at != self._access_token:
+                    self._access_token = disk_at
+                    self._refresh_token = creds["refresh_token"]
+                    self._account_id = creds["account_id"]
+                    self._expires_at = creds["expires_at"]
+                    self._sdk = None
+                    self._sdk_token = None
+                    return self._access_token
+            except (FileNotFoundError, ValueError, KeyError):
+                pass
+            await self._refresh()
             return self._access_token
 
     async def handle_auth_error(self) -> None:

@@ -123,6 +123,10 @@ from sagent.agent.runtime import (
     UserMessage,
     UserQueuedMessage,
 )
+from sagent.custom_exceptions import (
+    UserFacingError,
+    log_exception_or_warning,
+)
 from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -246,10 +250,19 @@ async def _input_pump(
                 return
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.exception("REPL input pump raised; surfacing as error")
+        except Exception as exc:  # noqa: BLE001 -- pump catches any slash-handler exception; UserFacingError routed to warning, others to exception
+            log_exception_or_warning(
+                logger, "REPL input pump raised; surfacing as error", exc
+            )
             if printer is not None:
-                printer.write_tool_error(f"[input pump] {type(exc).__name__}: {exc}")
+                # Polished message for UserFacingError; ClassName prefix
+                # for unexpected exceptions (helps the operator).
+                detail = (
+                    str(exc)
+                    if isinstance(exc, UserFacingError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                printer.write_tool_error(f"[input pump] {detail}")
 
 
 async def _dispatch(
