@@ -1152,11 +1152,11 @@ class AgentRuntime:
                         self.cohort.discard(item.call_id)
                         # Splice into the existing placeholder so the
                         # model sees the real result in the slot it
-                        # already expects, not a phantom user message
-                        # that triggers an extra round. Both
-                        # ``[detached]`` (preempt) and ``[Running in
-                        # background: ...]`` (explicit-bg) placeholders
-                        # match by ``call_id``.
+                        # already expects, without duplicating the
+                        # full content into a phantom user message.
+                        # Both ``[detached]`` (preempt) and ``[Running
+                        # in background: ...]`` (explicit-bg)
+                        # placeholders match by ``call_id``.
                         spliced = False
                         for i, prior in enumerate(self.history):
                             if (
@@ -1181,6 +1181,20 @@ class AgentRuntime:
                                         f"[Tool {item.call_id} completed]\n"
                                         f"{item.content}"
                                     ),
+                                ),
+                            )
+                        elif isinstance(self.history[-1], AssistantMessage):
+                            # Splice landed after the preempted round
+                            # already responded. History tail is an
+                            # ``AssistantMessage``, so the end-of-loop
+                            # model-call gate won't fire on its own.
+                            # Append a terse notification (the real
+                            # content is already in its proper slot
+                            # above) so the model wakes and can react
+                            # to the now-real tool result.
+                            self.history.append(
+                                UserMessage(
+                                    text=(f"[Detached tool {item.call_id} completed]"),
                                 ),
                             )
                         self.publish(item)

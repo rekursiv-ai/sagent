@@ -764,13 +764,25 @@ class Agent:
             )
 
     def _track_activity(self, event: RuntimeEvent) -> None:
-        """Bracket model-call elapsed time + count streamed chars."""
+        """Bracket round-chain elapsed time + count streamed chars.
+
+        A round chain spans from the first ``ModelCallStarted`` of a
+        user turn through ``ModelIdle`` (or terminal cancel). Mid-chain
+        ``ModelResponseComplete`` events with ``tool_calls`` do not
+        reset ``active`` so the status-pane spinner keeps ticking
+        through tool execution windows -- the user sees continuous
+        activity until the agent truly idles.
+        """
         if isinstance(event, ModelCallStarted):
-            self.activity.active = True
-            self.activity.current_call_start = asyncio.get_running_loop().time()
+            if not self.activity.active:
+                self.activity.active = True
+                self.activity.current_call_start = asyncio.get_running_loop().time()
             self.activity.live_response_chars = 0
         elif isinstance(event, ModelResponsePartial):
             self.activity.live_response_chars += len(event.text)
+        elif isinstance(event, ModelResponseComplete) and event.message.tool_calls:
+            # Tool calls follow; spinner keeps ticking through the cohort.
+            pass
         elif isinstance(
             event,
             (ModelResponseComplete, ModelIdle, ModelResponseCancelled),

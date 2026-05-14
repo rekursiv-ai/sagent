@@ -30,6 +30,7 @@ from sagent.agent.runtime import (
     HistoryEntry,
     Kill as RuntimeKill,
     ModelCallStarted,
+    ModelIdle,
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
@@ -675,6 +676,46 @@ def test_build_system_appends_tool_contributions() -> None:
     out = a.system_prompt()
     assert "root" in out
     assert "(extra-tool-prompt)" in out
+
+
+@pytest.mark.asyncio
+async def test_activity_active_spans_tool_execution() -> None:
+    """``activity.active`` stays True from first ModelCallStarted through ModelIdle.
+
+    Before fix: ``ModelResponseComplete`` always cleared ``active``,
+    so the status-pane spinner went dark during tool execution. The
+    user sees a long-running Bash with no visible progress indicator.
+
+    After fix: when ``ModelResponseComplete`` carries ``tool_calls``,
+    ``active`` stays True so the spinner keeps ticking through the
+    cohort window. ``active`` only clears on true terminal events
+    (``ModelIdle`` / cancel / error).
+    """
+    a = _build_agent()
+    tc = RuntimeToolCall(id="c1", name="Echo", args={})
+    msg_with_tools = AssistantMessage(text="", tool_calls=(tc,))
+
+    a.publish(ModelCallStarted())
+    assert a.activity.active is True
+
+    a.publish(ModelResponseComplete(message=msg_with_tools))
+    assert a.activity.active is True, (
+        "spinner should keep ticking while tools run; tool_calls in the "
+        "response mean the cohort is about to fire"
+    )
+
+    # Tool result arrives.
+    a.publish(ToolResult(call_id="c1", content="ok"))
+    assert a.activity.active is True
+
+    # Round 2 model call fires.
+    a.publish(ModelCallStarted())
+    assert a.activity.active is True
+
+    # Round 2 has no tool calls; model truly idles.
+    a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
+    a.publish(ModelIdle())
+    assert a.activity.active is False, "ModelIdle marks the end of the round chain"
 
 
 @pytest.mark.asyncio
