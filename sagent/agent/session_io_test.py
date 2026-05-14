@@ -87,6 +87,65 @@ def test_user_message_round_trip(tmp_path: Path) -> None:
     assert out.text == "hello"
 
 
+def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> None:
+    """Splice updates of an existing ``ToolResult`` must survive session reload.
+
+    Bug repro: when ``_run_tool_and_post`` posts a ``DetachedResult``
+    that splices into a ``[detached]`` placeholder, the runtime mutates
+    ``history[i]`` in memory. The persistence observer only writes new
+    entries (``delta = history[persisted_len:]``), so the splice never
+    reaches disk. On session resume the loader reconstructs history
+    with the stale ``[detached]`` content, losing the real tool output.
+
+    The fix: the persistence layer must support re-emitting an existing
+    entry (same ``id``, updated content). The loader must dedupe by
+    ``id`` keeping the LATEST occurrence so the spliced content wins.
+    Append-only schema preserved.
+    """
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
+
+    # Step 1: write a complete tool-use pair (assistant -> [detached]).
+    assistant = AssistantMessage(
+        text="",
+        tool_calls=(ToolCall(id="toolu_bash_1", name="Bash", args={}),),
+    )
+    original = ToolResult(call_id="toolu_bash_1", content="[detached]")
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        history_delta=[assistant, original],
+    )
+
+    # Step 2: write an update patch using the SAME id with the real
+    # bash output (simulating the splice).
+    spliced = ToolResult(
+        id=original.id,  # same id is the key
+        call_id="toolu_bash_1",
+        content="hello world\n",
+    )
+    append_session(
+        session_file,
+        history_updates=[spliced],
+    )
+
+    # Step 3: reload + assert the spliced content wins.
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, history, _ = loaded
+    matching = [
+        e for e in history if isinstance(e, ToolResult) and e.call_id == "toolu_bash_1"
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one ToolResult for the spliced call_id; "
+        f"got {len(matching)}: {[e.content for e in matching]}"
+    )
+    assert matching[0].content == "hello world\n", (
+        f"expected spliced content; got {matching[0].content!r}. "
+        f"Loader is appending duplicates instead of deduping by id."
+    )
+
+
 def test_user_message_with_attachment(tmp_path: Path) -> None:
     att = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     out = _round_trip(UserMessage(text="see", attachments=(att,)), tmp_path)

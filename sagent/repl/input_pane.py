@@ -5,49 +5,81 @@ the bar where the user types, the dim ``queued_input_pane`` preview
 rendered just above it when the staging queue is non-empty, and the
 pump that consumes slash submissions.
 
-Behavior contract
-~~~~~~~~~~~~~~~~~
+Behavior contract: Up / Down navigation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Up:
-  queue empty + history empty    -> nothing
-  queue empty + history exists   -> pull history into input
-  queue non-empty                -> lift queue into input (queue cleared);
-                                    true retract -- nothing was in the
-                                    runtime to begin with
-  in history already             -> walk further back
+Up / Down arrows traverse a virtual stack of (queue, history) without
+losing user state. The first Up captures a snapshot of
+``(queued_input, buffer)``; the final Down restores it.
 
-Down:
-  input empty                    -> nothing (reserved future submenu)
-  input non-empty                -> clear input (back to empty)
+The slot rows render top-to-bottom as ``history[-N]`` (oldest) through
+``queue`` then ``input``. ``[DONE]`` means the slot has no content to
+display at that step.
 
-Enter:
-  text in input                  -> dispatch as preempting ``UserMessage``
-                                    (cuts in line over any cohort/stream).
-                                    ``queued_input`` is not touched.
-  text ends with ``\``           -> backslash continuation: replace
-                                    trailing ``\`` with literal ``\n``,
-                                    stay in buffer, do not dispatch
-  empty input                    -> nothing
-  slash command                  -> route through pump
+Case 1 -- queue is non-empty::
 
-Tab:
-  text in input                  -> stage in ``queued_input`` (REPL-local).
-                                    No runtime push. The ``ModelIdle``
-                                    observer (``make_queued_input_committer``
-                                    in :mod:`repl.run_repl`) commits the
-                                    joined queue as a single
-                                    ``UserQueuedMessage`` when the
-                                    current round chain settles.
-  empty input                    -> nothing
+                  t=0    t=1     t=2     t=3    t=4
+                         UP      UP      DN     DN
+    history[-3]    d      c       b       c      d
+    history[-2]    e      d       c       d      e
+    history[-1]  [DNE]    e       d       e    [DNE]
+    queue          f    [DNE]   [DNE]   [DNE]    f
+    input          g      f       e       f      g
 
-``queued_input`` is purely a Tab-staging buffer. Up-arrow truly
-retracts because nothing has been pushed to the runtime. Enter is
-direct dispatch -- its content does not go through this list.
+- First Up "edits" the queue: queue text joins on ``\n\n``, lands in
+  buffer; queue slot empties. A snapshot of ``(queued_input, buffer)``
+  is captured.
+- Subsequent Ups walk older history into buffer; queue slot stays
+  empty during navigation.
+- Down reverses the walk; the final Down at the navigation boundary
+  restores the snapshot (queue and buffer return to t=0 state).
+
+Case 2 -- queue is empty::
+
+                  t=0    t=1     t=2     t=3    t=4
+                         UP      UP      DN     DN
+    history[-3]    d      c       b       c      d
+    history[-2]    e      d       c       d      e
+    history[-1]    f      e       d       e      f
+    input          g      f       e       f      g
+
+- First Up walks ``history[-1]`` into buffer; snapshot captured.
+- Subsequent Ups walk older history; queue slot stays empty (there was
+  no queue to restore).
+- Down reverses; final Down restores buffer to its pre-navigation value.
+
+Enter
+~~~~~
+
+- No navigation active (``cursor == 0``): preempt-dispatch as today --
+  push ``UserMessage`` straight to the runtime, cutting in line over any
+  cohort/stream. ``queued_input`` is not touched. Snapshot discarded.
+- Navigation active (``cursor > 0``): commit the buffer as a queued
+  block. Case 1 appends to ``queued_input``; case 2 creates the queue
+  from the buffer's content. The snapshot is discarded; ``cursor``
+  returns to 0; the dim ``queued_input_pane`` redraws with the new
+  state. The runtime sees the queued blocks at the next ``ModelIdle``
+  via ``make_queued_input_committer``.
+- Text ending in ``\``: backslash continuation -- replace trailing
+  ``\`` with literal ``\n``, stay in buffer, do not dispatch.
+- Empty buffer: nothing.
+- Slash command: route through pump.
+
+Tab
+~~~
+
+Tab stages the buffer in ``queued_input`` (REPL-local). No runtime
+push. ``make_queued_input_committer`` in :mod:`repl.run_repl` commits
+the joined queue as a single ``UserQueuedMessage`` on ``ModelIdle``.
+
+``queued_input`` is purely a Tab-staging buffer plus the post-navigation
+commit target. Up-arrow's lift is a true retract because nothing was
+ever in the runtime to begin with.
 
 Headless callers without a Tab key use the ``/defer <text>`` slash
-command, which pushes ``UserQueuedMessage`` directly through the
-pump -- not retractable, but a one-shot defer gesture is sufficient
-for non-interactive contexts.
+command, which pushes ``UserQueuedMessage`` directly through the pump
+-- not retractable, but a one-shot defer gesture is sufficient for
+non-interactive contexts.
 
 Pump
 ~~~~
@@ -276,7 +308,7 @@ async def _dispatch(
         _run_repl.do_switch_model(agent, action.args, printer)
         return False
     if isinstance(action, SlashLogin):
-        _run_repl.do_login(agent, printer)
+        await _run_repl.do_login(agent, printer)
         return False
     if isinstance(action, SlashHelp):
         if printer is not None:
@@ -353,25 +385,31 @@ class PromptToolkitInputSource(InputSource):
 def render_input_pane(agent: Agent, queued_input: list[str]) -> FormattedText:
     r"""Build the input-pane ``FormattedText``: full queue + prompt sigil.
 
-    Renders the entire staged queue (blocks joined by ``\\n\\n``) above
-    the ``> `` prompt sigil whenever ``queued_input`` has entries.
-    The queue is a staging draft: blocks accumulate as the user
-    submits, are visible until committed, and can be lifted back into
-    ``input_pane`` for editing via Up.
+    Renders all pending user content above the ``> `` prompt sigil
+    (blocks joined by ``\n\n``). Two buffers contribute:
+
+    - ``queued_input`` -- Tab-staged blocks, REPL-local. Up-arrow can
+      lift these back into the input buffer for editing.
+    - ``agent.runtime._mid_stream_queue`` -- Enter-mid-stream blocks,
+      already committed to the runtime. Shown for visibility ("is my
+      message queued?") but not retractable.
+
+    Both are pending model consumption; rendering them together gives
+    the user one canonical "what's queued" surface.
 
     Args:
-      agent: Agent (currently unused; reserved for callers that want
-          to gate rendering on additional state).
-      queued_input: REPL-local staging buffer; each entry is one block.
+      agent: Agent whose runtime ``_mid_stream_queue`` is consulted.
+      queued_input: REPL-local Tab-staging buffer; each entry is one block.
 
     Returns:
       formatted: The input pane's formatted text.
 
     """
-    del agent
+    blocks: list[str] = list(queued_input)
+    blocks.extend(m.text for m in agent.runtime.pending_mid_stream())
     parts: list[tuple[str, str]] = []
-    if queued_input:
-        parts.append(("class:queued_input_pane", "\n\n".join(queued_input)))
+    if blocks:
+        parts.append(("class:queued_input_pane", "\n\n".join(blocks)))
         parts.append(("", "\n"))
     parts.append(("class:input_pane", "> "))
     return FormattedText(parts)

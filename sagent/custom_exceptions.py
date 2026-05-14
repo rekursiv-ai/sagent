@@ -6,7 +6,53 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
+    import logging
+
     from sagent.custom_types import ModelResponse
+
+
+class UserFacingError(Exception):
+    """Marker for errors whose message is already polished for the end user.
+
+    The runtime's error-handling path (``_stream_and_post`` and the REPL
+    renderer) treats these specially: log at ``warning`` level without a
+    traceback, present ``str(exc)`` verbatim, and recommend the action
+    the message already encodes. Subclass this for any error path where
+    the message itself is the remediation cue (auth expired, network
+    down, etc.).
+    """
+
+
+class AuthRefreshError(UserFacingError):
+    """Provider OAuth refresh failed in a way the user must act on.
+
+    Raised when ``refresh_token`` exchange returns 400/401 -- the token
+    was rotated by another process, revoked server-side, or aged out.
+    Retrying the call will fail identically; the user must re-auth via
+    ``/login``. The message embeds the recommended action so renderers
+    can show it verbatim.
+    """
+
+
+def log_exception_or_warning(
+    logger: logging.Logger, msg: str, exc: BaseException
+) -> None:
+    """Log ``msg`` per the user-facing-error policy.
+
+    - ``UserFacingError`` (or subclass): ``logger.warning("%s: %s", msg, exc)``
+      -- no traceback. The exception's message is already polished
+      remediation text the user can act on; a Python traceback is
+      noise.
+    - Anything else: ``logger.exception(msg)`` -- traceback retained
+      so the operator can diagnose the unexpected failure.
+
+    Call from inside an ``except`` block so the ``exception`` path
+    can pick up ``sys.exc_info()``.
+    """
+    if isinstance(exc, UserFacingError):
+        logger.warning("%s: %s", msg, exc)
+    else:
+        logger.exception(msg)
 
 
 class PromptTooLongError(Exception):

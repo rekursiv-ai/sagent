@@ -435,20 +435,28 @@ def append_session(
     meta: Mapping[str, object] | None = None,
     tool_state_snapshot: Mapping[str, object] | None = None,
     history_delta: list[HistoryEntry] | None = None,
+    history_updates: list[ToolResult] | None = None,
     clear: bool = False,
 ) -> None:
     """Append records to ``session.jsonl``.
 
     Order within a batch: ``clear`` barrier (if any) → ``meta`` → all
-    ``history`` deltas → ``tool_state`` snapshot. Each loader pass
-    keeps the latest ``meta`` and ``tool_state``; the ``clear`` barrier
-    drops every preceding ``history`` record from the live view.
+    ``history`` deltas → ``update`` patches → ``tool_state`` snapshot.
+    Each loader pass keeps the latest ``meta`` and ``tool_state``; the
+    ``clear`` barrier drops every preceding ``history`` record from the
+    live view.
 
     Args:
       path: Destination file path; created if missing.
       meta: Optional session metadata dict (latest meta wins on load).
       tool_state_snapshot: Optional persistable ToolState fields.
       history_delta: New ``HistoryEntry`` records to append.
+      history_updates: Splice patches for already-persisted entries
+          (``DetachedResult`` replacing a ``[detached]`` placeholder's
+          content with the real tool output). Written as ``kind=update``
+          records carrying the target ``id`` plus ``content`` /
+          ``is_error`` so the loader can patch the entry on resume
+          without rewriting the file.
       clear: True to emit a ``kind: clear`` barrier before any
           other records in this batch.
 
@@ -459,6 +467,17 @@ def append_session(
     if meta is not None:
         parts.append(json.dumps({"kind": "meta", **meta}))
     parts.extend(json.dumps(_entry_to_json(e)) for e in history_delta or ())
+    parts.extend(
+        json.dumps(
+            {
+                "kind": "update",
+                "id": upd.id,
+                "content": upd.content,
+                "is_error": upd.is_error,
+            },
+        )
+        for upd in history_updates or ()
+    )
     if tool_state_snapshot is not None:
         parts.append(json.dumps({"kind": "tool_state", **tool_state_snapshot}))
     if not parts:
@@ -530,6 +549,15 @@ def load_session(
                     entry = _entry_from_json(rec)
                     if entry is not None:
                         history.append(entry)
+                elif kind == "update":
+                    # Splice patch: ``DetachedResult`` mutated an
+                    # existing entry in-place (e.g. real bash output
+                    # replacing a ``[detached]`` placeholder). The
+                    # patch carries the entry id plus the changed
+                    # ``content`` / ``is_error`` fields. Apply to the
+                    # matching entry; ignore if no match (stale patch
+                    # left over from a corrupted file).
+                    _apply_update(history, rec)
     except OSError:
         logger.warning("Could not read session file, starting fresh.")
         return None
@@ -544,6 +572,27 @@ def load_session(
     if history:
         reset_id_counter(max(e.id for e in history) + 1)
     return meta, history, state
+
+
+def _apply_update(history: list[HistoryEntry], rec: Mapping[str, object]) -> None:
+    """Apply a ``kind=update`` splice patch to ``history`` in place.
+
+    The patch carries an entry ``id`` and the changed fields
+    (``content`` / ``is_error``). Currently only ``ToolResult`` splices
+    are emitted; the patch is silently dropped if the target id isn't
+    a ``ToolResult`` or doesn't exist.
+    """
+    target_id = int_val(rec.get("id"), -1)
+    if target_id < 0:
+        return
+    for i, existing in enumerate(history):
+        if existing.id == target_id and isinstance(existing, ToolResult):
+            history[i] = dataclasses.replace(
+                existing,
+                content=str(rec.get("content") or ""),
+                is_error=bool(rec.get("is_error", False)),
+            )
+            return
 
 
 def repair_dangling_tool_calls(history: list[HistoryEntry]) -> list[HistoryEntry]:

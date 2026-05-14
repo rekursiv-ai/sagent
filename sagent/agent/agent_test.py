@@ -719,6 +719,32 @@ async def test_activity_active_spans_tool_execution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_activity_active_clears_on_model_response_error() -> None:
+    """``ModelResponseError`` must clear ``activity.active`` (stop spinner).
+
+    Bug repro: model call fails (e.g. ``AuthRefreshError`` on expired
+    OAuth). The runtime catches the exception and pushes
+    ``ModelResponseError`` to the inbox. Before fix: ``_record_activity``
+    only resets ``active`` on ``ModelResponseComplete`` / ``ModelIdle``
+    / ``ModelResponseCancelled``, so the status-pane spinner keeps
+    ticking forever even though no model call is in flight. After fix:
+    ``ModelResponseError`` joins the terminal-event set and clears
+    ``active``.
+    """
+    a = _build_agent()
+    a.publish(ModelCallStarted())
+    assert a.activity.active is True
+
+    a.publish(ModelResponseError(RuntimeError("boom")))
+    assert a.activity.active is False, (
+        "ModelResponseError is terminal -- spinner must stop"
+    )
+    assert a.activity.current_call_start == 0.0, (
+        f"current_call_start must reset; got {a.activity.current_call_start}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_streaming_chars_recorded_in_activity() -> None:
     """``_track_activity`` accumulates streamed chars on ModelResponsePartial."""
     a = _build_agent()

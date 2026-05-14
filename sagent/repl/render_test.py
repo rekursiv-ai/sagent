@@ -19,6 +19,7 @@ from sagent.agent.runtime import (
     ToolResultPartial,
     UserMessage,
 )
+from sagent.custom_exceptions import AuthRefreshError
 from sagent.repl.render import (
     HALT_MESSAGE,
     HELP_TEXT,
@@ -140,6 +141,28 @@ def test_model_response_error_emits_error_and_halt() -> None:
     obs = make_render_observer(p)
     obs(ModelResponseError(exception=RuntimeError("creds expired")))
     assert any("creds expired" in e for e in p.tool_errors)
+    assert p.halts == [HALT_MESSAGE]
+
+
+def test_auth_refresh_error_renders_cleanly() -> None:
+    """``AuthRefreshError`` reaches the printer with actionable text intact.
+
+    The renderer must surface the polished message (``/login`` guidance)
+    so the user can act on it. Regression guard: if someone changes the
+    error-rendering branch and drops ``str(exc)``, this catches it.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    msg = "OpenAI Codex subscription session expired. Run /login to re-authenticate."
+    obs(ModelResponseError(exception=AuthRefreshError(msg)))
+
+    rendered = " ".join(p.tool_errors)
+    assert "/login" in rendered, (
+        f"renderer must surface the /login guidance; got tool_errors={p.tool_errors!r}"
+    )
+    # No traceback / httpx internals must leak through the renderer.
+    assert "Traceback" not in rendered
+    assert "HTTPStatusError" not in rendered
     assert p.halts == [HALT_MESSAGE]
 
 

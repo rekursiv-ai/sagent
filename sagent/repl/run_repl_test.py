@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
 import inspect
@@ -173,6 +173,7 @@ def test_provider_switch_uses_last_used_when_known(
 @dataclass(slots=True, kw_only=True)
 class _FakeModel:
     model_id: str = "claude-opus-4-7"
+    _provider: object | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -325,23 +326,26 @@ def test_do_switch_model_provider_build_failure_writes_error() -> None:
     assert agent.swap_calls == []
 
 
-def test_do_login_no_spec_writes_error() -> None:
+@pytest.mark.asyncio
+async def test_do_login_no_spec_writes_error() -> None:
     agent = _FakeAgent(model_spec=None)
     printer = RecordingPrinter()
-    do_login(_as_agent(agent), printer)
+    await do_login(_as_agent(agent), printer)
     assert any("no model spec" in line for line in printer.lines)
 
 
-def test_do_login_unknown_provider_writes_error() -> None:
+@pytest.mark.asyncio
+async def test_do_login_unknown_provider_writes_error() -> None:
     agent = _FakeAgent(
         model_spec=ModelSpec(provider="NotAProvider", auth="api", model_id="x"),
     )
     printer = RecordingPrinter()
-    do_login(_as_agent(agent), printer)
+    await do_login(_as_agent(agent), printer)
     assert any("unknown provider" in line for line in printer.lines)
 
 
-def test_do_login_provider_without_login_writes_error() -> None:
+@pytest.mark.asyncio
+async def test_do_login_provider_without_login_writes_error() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     fake_cls = type("FakeProvider", (), {})  # no login attr
@@ -349,11 +353,12 @@ def test_do_login_provider_without_login_writes_error() -> None:
         "sagent.repl.run_repl.providers",
         MagicMock(Anthropic=fake_cls),
     ):
-        do_login(_as_agent(agent), printer)
+        await do_login(_as_agent(agent), printer)
     assert any("no login method" in line for line in printer.lines)
 
 
-def test_do_login_success_writes_confirmation() -> None:
+@pytest.mark.asyncio
+async def test_do_login_success_writes_confirmation() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     fake_cls = MagicMock()
@@ -361,12 +366,13 @@ def test_do_login_success_writes_confirmation() -> None:
         "sagent.repl.run_repl.providers",
         MagicMock(Anthropic=fake_cls),
     ):
-        do_login(_as_agent(agent), printer)
+        await do_login(_as_agent(agent), printer)
     fake_cls.login.assert_called_once()
     assert any("re-authenticated" in line for line in printer.lines)
 
 
-def test_do_login_failure_writes_error() -> None:
+@pytest.mark.asyncio
+async def test_do_login_failure_writes_error() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     fake_cls = MagicMock()
@@ -375,8 +381,57 @@ def test_do_login_failure_writes_error() -> None:
         "sagent.repl.run_repl.providers",
         MagicMock(Anthropic=fake_cls),
     ):
-        do_login(_as_agent(agent), printer)
+        await do_login(_as_agent(agent), printer)
     assert any("oauth failed" in line for line in printer.lines)
+
+
+@pytest.mark.asyncio
+async def test_do_login_reloads_running_provider_credentials() -> None:
+    """After ``login_fn()`` succeeds, the live provider must reload its creds.
+
+    Bug: ``/login`` runs ``provider_cls.login()`` which writes new
+    credentials to disk, but the running provider INSTANCE keeps using
+    its in-memory (now-revoked) refresh token. The next model call
+    posts the stale refresh token to ``oauth/token`` -> 400 ->
+    ``AuthRefreshError``, so ``/login`` appears to succeed yet the
+    error persists. Fix: after login, call ``handle_auth_error`` on
+    the running provider so it reloads from disk.
+    """
+    agent = _FakeAgent()
+    # Wire a provider hook the live model holds onto.
+    provider = MagicMock()
+    provider.handle_auth_error = AsyncMock()
+    agent.model._provider = provider
+    printer = RecordingPrinter()
+    fake_cls = MagicMock()
+    with patch(
+        "sagent.repl.run_repl.providers",
+        MagicMock(Anthropic=fake_cls),
+    ):
+        await do_login(_as_agent(agent), printer)
+    fake_cls.login.assert_called_once()
+    provider.handle_auth_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_do_login_skips_reload_when_provider_has_no_hook() -> None:
+    """Non-Anthropic providers (no ``handle_auth_error``) must not crash.
+
+    Defensive contract: ``do_login`` duck-types the reload hook so
+    providers without OAuth state machinery (or providers that have
+    not yet adopted the hook) work without an error.
+    """
+    agent = _FakeAgent()
+    # Bare provider with no ``handle_auth_error`` attribute.
+    agent.model._provider = object()
+    printer = RecordingPrinter()
+    fake_cls = MagicMock()
+    with patch(
+        "sagent.repl.run_repl.providers",
+        MagicMock(Anthropic=fake_cls),
+    ):
+        await do_login(_as_agent(agent), printer)
+    assert any("re-authenticated" in line for line in printer.lines)
 
 
 def test_format_tasks_no_registry_header_only() -> None:
