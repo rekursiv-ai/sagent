@@ -102,7 +102,6 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
-from sagent.custom_exceptions import PromptTooLongError
 from sagent.custom_types import (
     Compactor as RichCompactor,
     ContextBudget,
@@ -971,7 +970,14 @@ class _AgentModel:
                     on_discarded_response=self._agent.record_response,
                 )
                 break
-            except PromptTooLongError as exc:
+            except Exception as exc:
+                # Catch any exception the provider classifies as
+                # context overflow, not just ``PromptTooLongError``.
+                # Provider-side normalization can slip (e.g. unusual
+                # HTTP status carrying overflow body text); the
+                # canonical signal is ``is_context_overflow``.
+                if not self._inner.is_context_overflow(exc):
+                    raise
                 last_err = exc
                 if attempt >= MAX_OVERFLOW_RECOVERY:
                     raise

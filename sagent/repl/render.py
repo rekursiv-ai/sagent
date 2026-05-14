@@ -362,5 +362,6 @@ sagent commands
 
   /tasks                      list running work (agents + fg + bg)
   /halt     [<label>]         halt the current round; wait for redirect (Ctrl+C)
-  /kill     <qid|all>         cancel one or all outstanding tool tasks\
+  /kill     <qid|all>         cancel one or all outstanding tool tasks
+  /defer    <text>            send as deferred (non-preempting); drains at ModelIdle\
 """

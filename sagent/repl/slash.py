@@ -78,7 +78,22 @@ class Tasks:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Text:
-    """User typed plain (non-slash) input; queue as a user message."""
+    """User typed plain (non-slash) input; dispatch as a preempting ``UserMessage``."""
+
+    content: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Defer:
+    """User typed ``/defer <text>`` (or pressed Tab on a non-empty buffer);
+    dispatch as a non-preempting ``UserQueuedMessage`` that drains at
+    ``ModelIdle``.
+
+    Lets the user inject content that should be processed *after* the
+    agent's current round chain completes, without preempting in-flight
+    work. Headless callers use the ``/defer`` form (no Tab key); TUI
+    users get the Tab gesture.
+    """
 
     content: str
 
@@ -102,6 +117,7 @@ type SlashAction = (
     | Help
     | Tasks
     | Text
+    | Defer
     | Unknown
 )
 
@@ -109,7 +125,10 @@ type SlashAction = (
 QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
 # Public list of supported commands; drives the unknown-command help line.
-_SUPPORTED = "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill /quit /exit"
+_SUPPORTED = (
+    "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill"
+    " /defer /quit /exit"
+)
 
 
 def parse_slash(line: str) -> SlashAction | None:
@@ -156,6 +175,11 @@ def parse_slash(line: str) -> SlashAction | None:
         if not arg:
             return Unknown(text="/kill requires <qid> or 'all'")
         return Kill(target=arg)
+    arg = _arg_after("/defer", stripped)
+    if arg is not None:
+        if not arg:
+            return Unknown(text="/defer requires <text>")
+        return Defer(content=arg)
     if stripped.startswith("/"):
         cmd = stripped.split(maxsplit=1)[0]
         return Unknown(text=f"unknown command: {cmd}. Supported: {_SUPPORTED}")

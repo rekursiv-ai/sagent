@@ -40,7 +40,6 @@ from sagent.agent.runtime import (
     ModelIdle,
     ModelSwitch,
     RuntimeEvent,
-    UserMessage,
     UserQueuedMessage,
 )
 from sagent.custom_types import ModelSpec
@@ -106,7 +105,6 @@ async def run_repl(
         )
         printer = ConsolePrinter(console)
         agent.runtime.observers.append(make_render_observer(printer))
-        agent.runtime.observers.append(make_queued_input_clearer(queued_input))
         agent.runtime.observers.append(
             make_queued_input_committer(agent.runtime, queued_input)
         )
@@ -153,60 +151,28 @@ async def run_repl(
         )
 
 
-def make_queued_input_clearer(
-    queued_input: list[str],
-) -> Callable[[RuntimeEvent], None]:
-    """Observer that empties ``queued_input`` once the runtime accepts user input.
-
-    ``queued_input`` is the REPL-local mirror of "lines the user typed
-    while the agent was busy" -- it backs the dim preview in
-    :func:`repl.input_pane.render_input_pane` and the Up-arrow edit-back in
-    :func:`repl.keybindings._kb_up`. Entries are appended by
-    ``_kb_submit`` but never removed except by Up or quit, so without
-    this observer the dim preview shows a stale tail entry indefinitely
-    after the runtime commits the user input to history.
-
-    The runtime publishes a ``UserMessage`` event whenever it accepts
-    user input -- one event per coalesced batch under the mid-stream
-    buffer, one event per submission otherwise. In either shape, the
-    event means everything currently in ``queued_input`` has been
-    committed; a full clear is correct.
-
-    Args:
-      queued_input: REPL-local queued-text buffer to clear.
-
-    Returns:
-      observer: Callable suitable for ``agent.runtime.observers.append``.
-
-    """
-
-    def observer(event: RuntimeEvent) -> None:
-        if isinstance(event, UserMessage):
-            queued_input.clear()
-
-    return observer
-
-
 def make_queued_input_committer(
     runtime: AgentRuntime,
     queued_input: list[str],
 ) -> Callable[[RuntimeEvent], None]:
-    r"""Observer that commits the staged ``queued_input`` on ``ModelIdle``.
+    r"""Observer that commits the Tab-staged ``queued_input`` on ``ModelIdle``.
 
-    Under the staging model (per ``repl.keybindings``), text typed
-    while the agent is busy accumulates in ``queued_input`` locally
-    and is not dispatched to the runtime until the user explicitly
-    commits (Enter on empty input) or the round chain settles. This
-    observer handles the latter: when the runtime publishes
-    ``ModelIdle`` -- the agent has finished its current round chain --
-    the staged queue is pushed as a single ``UserQueuedMessage``
-    joined by ``\\n\\n``. The runtime's own ``queued``-list drain
-    then appends a ``UserMessage`` and the gate fires for the next
-    round.
+    ``queued_input`` is the REPL-local Tab-staging buffer (see
+    :func:`repl.keybindings._kb_defer`). Entries accumulate locally
+    while the agent is busy; nothing is in the runtime until commit.
+    On ``ModelIdle`` (the agent's current round chain has settled),
+    the joined queue is pushed as a single ``UserQueuedMessage`` and
+    the local list is cleared. The runtime then drains
+    ``UserQueuedMessage`` at its next gate-section pass and fires a
+    fresh round answering the staged content.
+
+    Up-arrow can pop ``queued_input`` back into the buffer at any
+    point before this observer fires -- a true retract, since
+    nothing has been pushed to the runtime yet.
 
     Args:
       runtime: Runtime to push the ``UserQueuedMessage`` onto.
-      queued_input: REPL-local staging buffer.
+      queued_input: REPL-local Tab-staging buffer.
 
     Returns:
       observer: Callable suitable for ``runtime.observers.append``.

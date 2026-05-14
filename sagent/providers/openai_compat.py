@@ -415,7 +415,7 @@ class OpenAICompatModel:
             headers=self._headers,
             timeout=120.0,
         )
-        if r.status_code == 400:
+        if 400 <= r.status_code < 500:
             msg = r.text.lower()
             if "context_length_exceeded" in msg or "too long" in msg:
                 raise PromptTooLongError(r.text)
@@ -468,7 +468,7 @@ class OpenAICompatModel:
             headers={**self._headers, "Accept": "text/event-stream"},
             timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
-            if r.status_code == 400:
+            if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
                 msg = err_body.lower()
                 if "context_length_exceeded" in msg or "too long" in msg:

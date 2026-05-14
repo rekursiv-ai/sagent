@@ -372,11 +372,12 @@ class _GeminiModel:
             },
             timeout=120.0,
         )
-        if r.status_code == 400:
+        if 400 <= r.status_code < 500:
             msg = r.text.lower()
-            if "too large" in msg or "too long" in msg or "context" in msg:
+            if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
                 raise PromptTooLongError(r.text)
-            raise ValueError(f"Google API 400: {r.text}")
+            if r.status_code == 400:
+                raise ValueError(f"Google API 400: {r.text}")
         r.raise_for_status()
         resp = _parse_response(r.json(), self._profile.pricing)
         logger.debug(
@@ -422,12 +423,17 @@ class _GeminiModel:
             },
             timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
-            if r.status_code == 400:
+            if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
                 msg = err_body.lower()
-                if "too large" in msg or "too long" in msg or "context" in msg:
+                if (
+                    "too large" in msg
+                    or "too long" in msg
+                    or "exceeds the maximum" in msg
+                ):
                     raise PromptTooLongError(err_body)
-                raise ValueError(f"Google API 400: {err_body}")
+                if r.status_code == 400:
+                    raise ValueError(f"Google API 400: {err_body}")
             r.raise_for_status()
             return await _consume_gemini_stream(
                 r, on_text=on_text, pricing=self._profile.pricing

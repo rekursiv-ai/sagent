@@ -879,8 +879,7 @@ class _OverflowModel:
         return 256
 
     def is_context_overflow(self, error: Exception) -> bool:
-        del error
-        return False
+        return isinstance(error, PromptTooLongError)
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
@@ -900,6 +899,66 @@ class _OverflowModel:
         self.call_index += 1
         if idx < self.overflow_count:
             raise PromptTooLongError("too long")
+        return ModelResponse(message=AssistantMessage(text="recovered"))
+
+
+@dataclass(slots=True, kw_only=True)
+class _RawOverflowModel:
+    """Model that raises a non-PromptTooLongError but classifies it as overflow.
+
+    Mirrors the production failure where ``anthropic.APIStatusError``
+    propagated up un-normalized: the recovery loop's catch must rely
+    on ``is_context_overflow``, not on ``isinstance(exc,
+    PromptTooLongError)``, or compaction never engages.
+    """
+
+    model_id: str = "raw"
+    max_request_tokens: int = 100_000
+    max_response_tokens: int = 1_024
+    supports_streaming: bool = True
+    supports_thinking: bool = False
+    supports_effort: bool = False
+    supports_cache_control: bool = False
+    supports_context_management: bool = False
+    supports_persistent_retry: bool = False
+    supports_account_auth: bool = False
+    max_image_dim: int = 8_000
+    max_image_bytes: int = 5 * 1024 * 1024
+    overflow_count: int = 0
+    call_index: int = 0
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing()
+
+    def estimate_text_token_count(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def estimate_image_token_count(self, data: bytes) -> int:
+        del data
+        return 256
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        return isinstance(error, RuntimeError) and "context window" in str(error)
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: object = None,
+        on_thinking: object = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        idx = self.call_index
+        self.call_index += 1
+        if idx < self.overflow_count:
+            raise RuntimeError("Request size exceeds model context window")
         return ModelResponse(message=AssistantMessage(text="recovered"))
 
 
@@ -995,6 +1054,60 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
+
+
+@pytest.mark.asyncio
+async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> None:
+    """Recovery engages on any exception classified as overflow, not just ``PromptTooLongError``.
+
+    When a provider's normalization slips and a raw provider exception
+    propagates with the canonical ``is_context_overflow(exc)`` returning
+    True, the recovery loop must still fire ``compact_now``. This is
+    the bug that produced the production death-spiral: the recovery
+    catch was narrowed to ``PromptTooLongError`` while the classifier
+    knew the exception was overflow.
+    """
+    compact_calls: list[int] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _CountingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            compact_calls.append(1)
+            return [UserMessage(text="[compact]")]
+
+        def maintain(
+            self, history: list[HistoryEntry], tools: object, **kwargs: object
+        ) -> None:
+            del history, tools, kwargs
+
+    model = _RawOverflowModel(overflow_count=1)
+    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    assert len(compact_calls) == 1
+    assert any(
+        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
+    )
 
 
 @pytest.mark.asyncio

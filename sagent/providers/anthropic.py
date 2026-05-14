@@ -370,14 +370,6 @@ class Anthropic:
 
 _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
 
-# Status codes that the Anthropic API uses for context-window overflow:
-# 400 returns ``BadRequestError`` with body ``"prompt is too long"``;
-# 413 returns ``RequestTooLargeError`` (not exposed in ``anthropic.__all__``)
-# with body ``"Request size exceeds model context window"``. Both should
-# normalize to ``PromptTooLongError`` so the compactor's shrink-retry and
-# the agent's overflow-recovery loop engage.
-_PROMPT_TOO_LONG_STATUS = frozenset({400, 413})
-
 # Statusless Anthropic errors with ``body["type"]`` in this set are
 # transient retryables that the shared status-code classifier misses.
 _RETRYABLE_BODY_TYPES = frozenset({"rate_limit_error", "server_error"})
@@ -578,6 +570,13 @@ class _AnthropicModel:
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a context-window overflow.
 
+        The body text is the canonical signal. The HTTP status code
+        carries less information: Anthropic returns 400 with body
+        ``"prompt is too long"`` and 413 with body ``"Request size
+        exceeds model context window"``, but other status codes
+        (uncommon but observed in production) can carry the same body
+        text. Trust the body, ignore the status.
+
         Args:
           error: Exception raised by the provider call.
 
@@ -588,8 +587,6 @@ class _AnthropicModel:
         if isinstance(error, PromptTooLongError):
             return True
         if not isinstance(error, anthropic.APIStatusError):
-            return False
-        if getattr(error, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
             return False
         return _is_prompt_too_long_text(str(error))
 
@@ -703,7 +700,7 @@ class _AnthropicModel:
                 await sdk.messages.create(**kwargs),  # pyright: ignore[reportArgumentType, reportCallIssue]  # ty: ignore[no-matching-overload] -- dynamic kwargs
             )
         except anthropic.APIStatusError as e:
-            if getattr(e, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
+            if not _is_prompt_too_long_text(str(e)):
                 raise
             debug_log.trace_error(
                 "bad_request",
@@ -771,7 +768,7 @@ class _AnthropicModel:
             kwargs["system"] = self._provider.build_system(request.system, messages)
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.APIStatusError as e:
-            if getattr(e, "status_code", None) not in _PROMPT_TOO_LONG_STATUS:
+            if not _is_prompt_too_long_text(str(e)):
                 raise
             debug_log.trace_error(
                 "bad_request",

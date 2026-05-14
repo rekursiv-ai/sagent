@@ -1,63 +1,43 @@
 r"""prompt-toolkit keybindings.
 
-Staging model:
+Wires keys to the input-pane behavior contract. The contract itself
+(what Up / Down / Enter / Tab do across queue and history states) is
+documented in :mod:`repl.input_pane`'s module docstring -- the
+behavior is a property of the input zone, not of the binding.
 
-- ``queued_input`` is a REPL-local list of staged blocks. Each entry
-  becomes one paragraph of the eventual ``UserQueuedMessage`` payload
-  (blocks join with ``\\n\\n``). Nothing is dispatched to the runtime
-  until commit -- so up-arrow can truly retract.
-- Enter on non-empty ``input_pane``: append text to ``queued_input``,
-  clear ``input_pane``.
-- Down on non-empty ``input_pane``: same as Enter (staging shortcut).
-- Enter on empty ``input_pane`` with non-empty queue: COMMIT -- push
-  ``UserQueuedMessage`` with joined blocks, clear queue.
-- Down on empty ``input_pane``: reserved (no-op for now; future
-  submenu navigation).
-- Up: if queue non-empty, lift the *entire* joined queue into
-  ``input_pane`` for editing, clear queue. Else PT history-backward.
-  Second up-arrow walks PT history (which doesn't include staged
-  blocks since they were never dispatched).
-- Slash commands always route through the pump via
-  ``buf.validate_and_handle()``.
-- Alt+Enter: literal newline (multi-line composition within a block).
-- Shift-Up / Shift-Down: prefix-based history search.
-- Ctrl+X Ctrl+E: open buffer in ``$EDITOR``.
-- Ctrl+C: ``agent.halt()`` while active; clear input buffer when
-  idle. Never exits.
-- Ctrl+D / ``/quit``: exit the REPL.
-- Ctrl+_ / Esc-z: undo.
-- Ctrl+Z: suspend.
+This module is the wiring:
 
-Auto-commit (case 2 of the staging model -- user submitted while the
-agent was busy) is handled by ``make_queued_input_committer`` on the
-runtime's ``ModelIdle`` event in ``run_repl``; the keybindings only
-handle the manual paths above.
+- ``enter``        -> :func:`_kb_submit` (preempting dispatch)
+- ``tab``          -> :func:`_kb_defer` (non-preempting dispatch)
+- ``down``         -> :func:`_kb_down`
+- ``up``           -> :func:`_kb_up`
+- ``escape enter`` -> literal newline (Alt+Enter)
+- ``s-up`` / ``s-down`` -> prefix history search
+- ``c-x c-e``      -> open buffer in ``$EDITOR``
+- ``c-c``          -> ``agent.halt()`` when active; clear buffer when idle
+- ``c-z``          -> suspend to background
+- ``c-_`` / ``escape z`` -> undo
+
+Backslash continuation: ``foo\`` + Enter inserts a literal newline
+(no dispatch); see ``_kb_submit``.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import asyncio
-import contextlib
 import functools
 
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.agent.runtime import UserQueuedMessage
+from sagent.agent.runtime import UserMessage
 
 
 if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyPressEvent
 
     from sagent.agent.agent import Agent
-
-# Idle-commit delay: after Enter on text while the agent is idle, the
-# REPL waits this long before pushing the staged ``UserQueuedMessage``
-# to the runtime. The window lets the user up-arrow to retract if they
-# realize the message is wrong; otherwise commit fires automatically.
-_IDLE_COMMIT_DELAY_SEC = 0.25
 
 
 def build_key_bindings(agent: Agent, queued_input: list[str]) -> KeyBindings:
@@ -73,7 +53,8 @@ def build_key_bindings(agent: Agent, queued_input: list[str]) -> KeyBindings:
     """
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(functools.partial(_kb_submit, agent, queued_input))
-    kb.add("down")(functools.partial(_kb_down, agent, queued_input))
+    kb.add("tab")(functools.partial(_kb_defer, agent, queued_input))
+    kb.add("down")(_kb_down)
     kb.add("escape", "enter")(_kb_newline)
     kb.add("up")(functools.partial(_kb_up, queued_input))
     kb.add("s-up")(_kb_history_prefix_back)
@@ -91,89 +72,60 @@ def _kb_submit(
     queued_input: list[str],
     event: KeyPressEvent,
 ) -> None:
-    r"""Stage text on Enter; commit queue on truly-empty-buffer Enter.
+    r"""Enter handler. See :mod:`repl.input_pane` for the full contract.
 
-    Behavior matrix (the buffer text is ``text``; ``stripped`` is its
-    ``.strip()``):
+    Branches:
 
-    - ``stripped`` starts with ``/`` (slash command): route through
-      pump via ``validate_and_handle`` (pump dispatches read-mode).
-    - ``text == ""`` (truly empty buffer) and queue is non-empty:
-      COMMIT -- push ``UserQueuedMessage`` joining blocks on
-      ``\n\n``, clear queue.
-    - ``text == ""`` and queue is empty: no-op.
-    - ``stripped == ""`` but ``text != ""`` (whitespace-only): discard
-      the buffer contents (no commit, no stage). Avoids stale spaces.
-    - Otherwise (non-empty text): append to queue, reset buffer.
+    - Slash command: route through pump via ``validate_and_handle``.
+    - Buffer ends with ``\``: backslash continuation. Replace the
+      trailing ``\`` with a literal newline (``\n``) and stay in the
+      buffer; do not dispatch.
+    - Empty / whitespace-only buffer: no-op (whitespace also resets
+      the buffer to clear stale spaces).
+    - Otherwise: dispatch as a preempting ``UserMessage``.
+
+    ``queued_input`` is *not* touched here. It belongs exclusively to
+    Tab-staging (see :func:`_kb_defer`); Enter is a direct dispatch.
     """
+    del queued_input  # Enter does not touch the Tab-staging queue.
     buf = event.current_buffer
     text = buf.text
     stripped = text.strip()
     if stripped.startswith("/"):
         buf.validate_and_handle()
         return
+    if text.endswith("\\"):
+        # Backslash continuation: swap trailing ``\`` for ``\n``.
+        buf.text = text[:-1] + "\n"
+        buf.cursor_position = len(buf.text)
+        return
     if not text:
-        if queued_input:
-            joined = "\n\n".join(queued_input)
-            queued_input.clear()
-            agent.runtime.inbox.push_back(UserQueuedMessage(text=joined))
         return
     if not stripped:
         buf.reset()
         return
-    queued_input.append(text)
     buf.append_to_history()
     buf.reset()
-    _schedule_idle_commit(agent, queued_input)
+    agent.runtime.inbox.push_back(UserMessage(text=text))
 
 
-def _schedule_idle_commit(agent: Agent, queued_input: list[str]) -> None:
-    """If the agent is idle, schedule a delayed commit of the queue.
-
-    The delay (``_IDLE_COMMIT_DELAY_SEC``) gives the user a window to
-    up-arrow and retract before the queue is dispatched. When the
-    agent is busy, the staging-model's auto-committer observer
-    (``make_queued_input_committer``) handles commit on ``ModelIdle``;
-    we don't schedule here in that case.
-    """
-    if agent.work is not None or agent.runtime.cohort:
-        return
-    with contextlib.suppress(RuntimeError):
-        # ``get_running_loop`` raises off-loop; tests that exercise
-        # ``_kb_submit`` synchronously skip the scheduling path.
-        loop = asyncio.get_running_loop()
-        loop.call_later(
-            _IDLE_COMMIT_DELAY_SEC,
-            functools.partial(_commit_if_still_idle, agent, queued_input),
-        )
-
-
-def _commit_if_still_idle(agent: Agent, queued_input: list[str]) -> None:
-    """Commit the staged queue iff the agent is still idle and the
-    queue still has content (user did not retract during the window).
-    """
-    if not queued_input:
-        return
-    if agent.work is not None or agent.runtime.cohort:
-        return
-    joined = "\n\n".join(queued_input)
-    queued_input.clear()
-    agent.runtime.inbox.push_back(UserQueuedMessage(text=joined))
-
-
-def _kb_down(
+def _kb_defer(
     agent: Agent,
     queued_input: list[str],
     event: KeyPressEvent,
 ) -> None:
-    """Stage text on Down (same as Enter for non-empty); else no-op.
+    """Tab handler: stage buffer in ``queued_input`` for deferred dispatch.
 
-    Mirrors Enter's stage behavior for non-empty buffers so the user
-    can pick whichever feels natural after editing a lifted queue:
-    Down stages and schedules the idle commit just like Enter. Down
-    on an empty buffer is reserved for a future submenu (spawned
-    agents / tasks) and does nothing today.
+    Tab is pure REPL-side staging: the text is appended to
+    ``queued_input`` and the buffer is cleared. **Nothing is pushed to
+    the runtime.** A ``ModelIdle`` observer (``make_queued_input_committer``
+    in ``run_repl``) commits the joined queue as a single
+    ``UserQueuedMessage`` when the agent's current round chain settles.
+
+    Up-arrow lifts the queue back to the buffer for editing -- a true
+    retract because nothing was ever in the runtime to begin with.
     """
+    del agent  # No runtime push -- staging is REPL-local until ModelIdle.
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
@@ -181,7 +133,21 @@ def _kb_down(
     queued_input.append(text)
     buf.append_to_history()
     buf.reset()
-    _schedule_idle_commit(agent, queued_input)
+
+
+def _kb_down(event: KeyPressEvent) -> None:
+    """Clear input on non-empty buffer; no-op on empty.
+
+    Per :mod:`repl.input_pane`'s contract: Down on a non-empty input
+    pane discards the buffer contents (returns to empty input). Down
+    on an empty buffer is reserved for a future submenu (spawned
+    agents / tasks) and does nothing today.
+
+    Down never dispatches or stages -- only Enter does.
+    """
+    buf = event.current_buffer
+    if buf.text:
+        buf.reset()
 
 
 def _kb_newline(event: KeyPressEvent) -> None:

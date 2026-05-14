@@ -21,6 +21,7 @@ from sagent.agent.runtime import (
     Recompact,
     RuntimeEvent,
     UserMessage,
+    UserQueuedMessage,
 )
 from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
@@ -36,6 +37,7 @@ from sagent.repl.render import RecordingPrinter
 from sagent.repl.slash import (
     Clear as SlashClear,
     Compact as SlashCompact,
+    Defer as SlashDefer,
     Halt as SlashHalt,
     Help as SlashHelp,
     Kill as SlashKill,
@@ -246,6 +248,18 @@ async def test_dispatch_text_pushes_user_message() -> None:
     _ = await _dispatch(a, SlashText(content="hi"), None)
     pushed = stub.runtime.inbox.items
     assert any(isinstance(i, UserMessage) and i.text == "hi" for i in pushed)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_defer_pushes_user_queued_message() -> None:
+    """``/defer <text>`` pushes ``UserQueuedMessage`` (non-preempting)."""
+    a = _agent()
+    stub = cast(_StubAgent, a)
+    _ = await _dispatch(a, SlashDefer(content="for later"), None)
+    pushed = stub.runtime.inbox.items
+    assert any(
+        isinstance(i, UserQueuedMessage) and i.text == "for later" for i in pushed
+    )
 
 
 @pytest.mark.asyncio

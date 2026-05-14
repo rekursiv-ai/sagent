@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import anthropic as anthropic_sdk
+import httpx
 import pytest
 
 from sagent.agent.runtime import (
@@ -443,6 +444,34 @@ def test_anthropic_model_is_context_overflow_non_api_status_error() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     assert m.is_context_overflow(RuntimeError("anything")) is False
+
+
+def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatusError:
+    """Construct an APIStatusError as the SDK would, with an arbitrary status."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code, request=request)
+    body = {
+        "type": "error",
+        "error": {"type": "invalid_request_error", "message": message},
+    }
+    return anthropic_sdk.APIStatusError(message, response=response, body=body)
+
+
+def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text() -> (
+    None
+):
+    """Generic APIStatusError (non-{400,413}) carrying overflow text is overflow.
+
+    Reproduces the production failure where the SDK returned a status
+    code outside the SDK's per-code subclass map -- yielding the bare
+    ``APIStatusError`` -- with body text ``Request size exceeds model
+    context window``. The body is the canonical signal; the status
+    code adds nothing.
+    """
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _api_status_error(414, "Request size exceeds model context window")
+    assert m.is_context_overflow(err) is True
 
 
 def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:
