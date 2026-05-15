@@ -749,18 +749,33 @@ class _OpenAISubModel(_OpenAIModel):
             if request.effort is not None and self.supports_effort
             else openai.omit
         )
+        create_kwargs: dict[str, object] = {
+            "model": self._model_id,
+            "input": _build_input(request),
+            "instructions": request.system or "",
+            "store": False,
+            "stream": True,
+            "tools": _build_tools(request.tools) if request.tools else openai.omit,
+            "reasoning": reasoning,
+        }
         try:
-            event_stream: AsyncResponseStream = await sdk.responses.create(  # pyright: ignore[reportCallIssue,reportUnknownVariableType]  # ty: ignore[no-matching-overload] -- SDK overload resolution fails on stream=True literal
-                model=self._model_id,
-                input=_build_input(request),
-                instructions=request.system or "",
-                store=False,
-                stream=True,
-                tools=(_build_tools(request.tools) if request.tools else openai.omit),
-                reasoning=reasoning,  # pyright: ignore[reportArgumentType] -- Reasoning|Omit is valid; overload resolution failure cascades
-            )
+            try:
+                event_stream: AsyncResponseStream = cast(
+                    "AsyncResponseStream",
+                    await sdk.responses.create(**create_kwargs),  # pyright: ignore[reportCallIssue, reportArgumentType]  # ty: ignore[no-matching-overload] -- dynamic kwargs; SDK overload resolution fails on stream=True literal
+                )
+            except openai.AuthenticationError:
+                # In-memory bearer was revoked server-side between our
+                # local expiry check and the request arriving. Reload
+                # disk creds (or force-refresh) and retry once.
+                await self._provider.handle_auth_error()
+                sdk = await self._provider.get_sdk()
+                event_stream = cast(
+                    "AsyncResponseStream",
+                    await sdk.responses.create(**create_kwargs),  # pyright: ignore[reportCallIssue, reportArgumentType]  # ty: ignore[no-matching-overload] -- dynamic kwargs; SDK overload resolution fails on stream=True literal
+                )
             return await _consume_stream(
-                event_stream,  # pyright: ignore[reportUnknownArgumentType] -- typed above; overload suppression loses it
+                event_stream,
                 pricing=self._profile.pricing,
                 on_text=on_text,
             )
