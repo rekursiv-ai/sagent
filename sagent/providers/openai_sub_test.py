@@ -588,10 +588,16 @@ class TestStreamAuthRetry:
         auth_err = openai.AuthenticationError(
             "Unauthorized", response=response, body=None
         )
-        sdk = MagicMock()
-        sdk.responses = MagicMock()
-        sdk.responses.create = AsyncMock(side_effect=auth_err)
-        get_sdk = AsyncMock(return_value=sdk)
+        # Return DIFFERENT SDKs from get_sdk so the test can prove the
+        # retry call landed on a freshly-built SDK (with a rotated
+        # bearer baked into default_headers), not the cached one.
+        sdk_stale = MagicMock()
+        sdk_stale.responses = MagicMock()
+        sdk_stale.responses.create = AsyncMock(side_effect=auth_err)
+        sdk_fresh = MagicMock()
+        sdk_fresh.responses = MagicMock()
+        sdk_fresh.responses.create = AsyncMock(side_effect=auth_err)
+        get_sdk = AsyncMock(side_effect=[sdk_stale, sdk_fresh])
         with (
             patch.object(provider, "get_sdk", get_sdk),
             patch.object(provider, "handle_auth_error", AsyncMock()) as ha,
@@ -600,10 +606,11 @@ class TestStreamAuthRetry:
             req = ModelRequest(messages=[UserMessage(text="hi")])
             with pytest.raises(openai.AuthenticationError):
                 await model.stream(req)
-        # Original attempt + one retry.
-        assert sdk.responses.create.await_count == 2
         ha.assert_awaited_once()
-        # SDK re-fetched after reload so a rotated bearer takes effect.
+        # Each SDK saw exactly one create call: the original attempt on
+        # the stale SDK, the retry on the freshly-fetched one.
+        assert sdk_stale.responses.create.await_count == 1
+        assert sdk_fresh.responses.create.await_count == 1
         assert get_sdk.await_count == 2
 
 
