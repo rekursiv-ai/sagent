@@ -13,6 +13,7 @@ import json
 import time
 
 import httpx
+import openai
 import pytest
 
 from sagent.agent.runtime import (
@@ -566,6 +567,44 @@ class TestEnsureValidRace:
         assert token == fresh_access
         assert provider._access_token == fresh_access
         assert provider._refresh_token == _FRESH_REFRESH
+
+
+class TestStreamAuthRetry:
+    """Mid-call 401 must trigger ``handle_auth_error`` + one-shot retry.
+
+    Bug: a stale in-memory bearer (rotated server-side between our
+    local expiry check and the request arriving) surfaces as
+    ``openai.AuthenticationError`` from ``sdk.responses.create``.
+    Without the catch + reload + retry wrapper, the error bubbles
+    raw to the user; with it, the runtime reloads disk creds (or
+    force-refreshes) and retries once before giving up.
+    """
+
+    @pytest.mark.anyio
+    async def test_auth_error_triggers_reload_and_retries_once(self) -> None:
+        provider = _make_provider(expires_at=time.time() + 3600)
+        request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex")
+        response = httpx.Response(401, request=request)
+        auth_err = openai.AuthenticationError(
+            "Unauthorized", response=response, body=None
+        )
+        sdk = MagicMock()
+        sdk.responses = MagicMock()
+        sdk.responses.create = AsyncMock(side_effect=auth_err)
+        get_sdk = AsyncMock(return_value=sdk)
+        with (
+            patch.object(provider, "get_sdk", get_sdk),
+            patch.object(provider, "handle_auth_error", AsyncMock()) as ha,
+        ):
+            model = provider.model("gpt-5.5")
+            req = ModelRequest(messages=[UserMessage(text="hi")])
+            with pytest.raises(openai.AuthenticationError):
+                await model.stream(req)
+        # Original attempt + one retry.
+        assert sdk.responses.create.await_count == 2
+        ha.assert_awaited_once()
+        # SDK re-fetched after reload so a rotated bearer takes effect.
+        assert get_sdk.await_count == 2
 
 
 class TestRefreshErrors:
