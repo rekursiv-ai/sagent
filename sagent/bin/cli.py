@@ -97,7 +97,7 @@ DEFAULT_TOOLS = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    "BackgroundTask",
+    # "BackgroundTask",
     "Bash",
     "Read",
     "Write",
