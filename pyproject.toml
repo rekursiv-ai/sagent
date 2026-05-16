@@ -21,26 +21,28 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "Pillow",
+    "PyYAML>=6.0",
+    "Pygments",
+    "aiohttp",
     "anthropic>=0.72.0",
+    "bashlex>=0.18",
+    "beautifulsoup4",
+    "brotli",
     "cachetools",
-    "configgle>=1.1.15",
     "httpx>=0.27",
     "markdown-it-py",
+    "mcp>=1.10",
     "openai",
     "pathspec",
-    "Pillow",
     "prompt-toolkit",
     "pypdfium2",
-    "Pygments",
-    "PyYAML>=6.0",
     "rich",
     "slack-sdk>=3.33.0",
-    "bashlex>=0.18",
+    "starlette>=0.40",
     "trafilatura",
-    "aiohttp",
+    "uvicorn>=0.30",
     "webp>=0.4.0",
-    "brotli",
-    "beautifulsoup4",
     "zstandard",
 ]
 
@@ -55,13 +57,13 @@ selfhosted = [
     "causal-conv1d ; sys_platform == 'linux'",
     "compressed-tensors",
     "kernels>=0.13.0",
+    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
     "protobuf",
+    "safetensors",
     "sentencepiece",
     "torch==2.11.0",
     "torchvision==0.26.0",
-    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
-    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
-    "safetensors",
     "transformers>=5.8.0",
 ]
 
@@ -78,11 +80,11 @@ lint = [
     "ruff",
 ]
 test = [
+    "pytest>=7.0",
     "pytest-asyncio>=1.3.0",
     "pytest-cov",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "pytest>=7.0",
 ]
 typing = [
     "basedpyright>=1.10",
@@ -200,9 +202,9 @@ ignore = [
     "D400",    # Missing trailing period.
     "D401",    # Non-imperative mood.
     "D415",    # Missing terminal punctuation.
-    "RUF001",  # Ambiguous unicode character string. (Intentional math usage.)
-    "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage.)
-    "RUF003",  # Ambiguous unicode character comment. (Intentional math usage.)
+    "RUF001",  # Ambiguous unicode character string. (Intentional math usage of `α, σ, γ, ×` etc.)
+    "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
+    "RUF003",  # Ambiguous unicode character comment. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
 
     # Standard style relaxations.
     "A002",    # Builtin argument shadowing.
@@ -262,9 +264,6 @@ ignore = [
 "__init__.py" = [
     "F401",    # Unused import.
 ]
-"sagent/lib/web/search.py" = [
-    "UP040",  # get_args() needs a runtime Literal alias, not TypeAliasType.
-]
 "{*_test.py,tests/*}" = [
     "INP001",  # Implicit namespace package. (Tests don't need __init__.py.)
     "PLR2004", # Magic value comparison.
@@ -277,7 +276,7 @@ ignore = [
     "T201",    # Print found. (CLI tools use print for output.)
 ]
 "typings/**" = [
-    "PYI015", # Assignment default in stub — field specifiers are semantically meaningful to @dataclass_transform.
+    "PYI015", # Assignment default in stub — field specifiers (struct.field, module_field, dataclasses.field) are semantically meaningful to @dataclass_transform.
 ]
 "*.ipynb" = [
     "ARG001",  # Unused function argument (callbacks).
@@ -386,7 +385,7 @@ python-version = "3.12"
 extra-paths = []
 
 [tool.ty.terminal]
-error-on-warning = false
+error-on-warning = true
 # output-format = "concise"   # full concise gitlab github junit
 
 [tool.ty.rules]

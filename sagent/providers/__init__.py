@@ -17,8 +17,10 @@ them at a localhost inference server.
 from typing import Literal, get_args
 
 from sagent.providers.anthropic import Anthropic
+from sagent.providers.anthropic_cli import AnthropicCLI
 from sagent.providers.dashscope import DashScope
 from sagent.providers.google import Google
+from sagent.providers.google_cli import GoogleCLI
 from sagent.providers.llamacpp import LlamaCpp
 from sagent.providers.minimax import MiniMax
 from sagent.providers.moonshot import Moonshot
@@ -31,8 +33,10 @@ from sagent.providers.selfhosted import SelfHosted, SelfHostedModel
 
 ProviderName = Literal[
     "Anthropic",
+    "AnthropicCLI",
     "DashScope",
     "Google",
+    "GoogleCLI",
     "LlamaCpp",
     "MiniMax",
     "Moonshot",
@@ -47,8 +51,10 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = get_args(ProviderName)
 __all__ = [
     "PROVIDER_NAMES",
     "Anthropic",
+    "AnthropicCLI",
     "DashScope",
     "Google",
+    "GoogleCLI",
     "LlamaCpp",
     "MiniMax",
     "Moonshot",
