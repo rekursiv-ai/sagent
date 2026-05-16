@@ -337,6 +337,16 @@ def test_subscription_model_uses_default_when_unset() -> None:
     assert m.model_id == OpenAISubscription.DEFAULT_MODEL
 
 
+def test_subscription_default_model_inherits_from_openai() -> None:
+    """``OpenAISubscription`` defers to ``OpenAI.DEFAULT_MODEL``."""
+    assert OpenAISubscription.DEFAULT_MODEL == OpenAI.DEFAULT_MODEL
+
+
+def test_subscription_default_utility_model_inherits_from_openai() -> None:
+    """``OpenAISubscription`` defers to ``OpenAI.DEFAULT_UTILITY_MODEL``."""
+    assert OpenAISubscription.DEFAULT_UTILITY_MODEL == OpenAI.DEFAULT_UTILITY_MODEL
+
+
 def test_subscription_utility_model_uses_utility_default() -> None:
     m = _make_provider().utility_model()
     assert m.model_id == OpenAISubscription.DEFAULT_UTILITY_MODEL

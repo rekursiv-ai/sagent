@@ -182,10 +182,8 @@ class OpenAISubscription(OpenAI):
     regardless of auth mode.
     """
 
-    # Most capable model -- sub users don't pay per-token.
-    # OpenAI (API key) defaults to gpt-5.5 for current frontier capability.
-    DEFAULT_MODEL = "gpt-5.5"
-    DEFAULT_UTILITY_MODEL = "gpt-5.4-mini"
+    # ``DEFAULT_MODEL`` / ``DEFAULT_UTILITY_MODEL`` inherit from ``OpenAI``;
+    # sub users pay a flat fee so the most-capable model is the right default.
     # Keep pricing inherited from the public API profiles, but clamp limits
     # separately because subscription auth is a different backend contract.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {

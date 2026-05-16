@@ -70,7 +70,7 @@ class Google:
     """Google provider - creates Gemini model backends."""
 
     DEFAULT_MODEL = "gemini-3.1-pro-preview"
-    DEFAULT_UTILITY_MODEL = "gemini-3-flash-preview"
+    DEFAULT_UTILITY_MODEL = "gemini-2.5-flash-lite"
 
     # Model limits and pricing.
     # Limits: https://ai.google.dev/gemini-api/docs/models

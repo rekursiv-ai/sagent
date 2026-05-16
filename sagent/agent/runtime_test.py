@@ -3193,6 +3193,33 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_forever_survives_synchronous_raise_in_pending_apply() -> None:
+    """A failing ``ModelSwitch.apply`` must not crash the dispatch loop.
+
+    Reproduces the live failure: ``/model`` queues a ``ModelSwitch``,
+    runtime drains it and invokes ``apply`` synchronously at the
+    pending-switch gate; if ``apply`` raises (e.g. ``swap_model`` rejects
+    a budget that exceeds the new model's window) the exception escapes
+    ``run_forever`` -- previously through to ``asyncio.run`` -- and tears
+    down the REPL. The master catch around the dispatch body must log
+    and continue so subsequent items still dispatch.
+    """
+
+    def _raises() -> None:
+        raise ValueError("budget exceeds new model's window")
+
+    agent, _ = make_agent([AssistantMessage(text="after error")])
+    agent.inbox.push_back(ModelSwitch(apply=_raises))
+    agent.inbox.push_back(UserMessage(text="hi"))
+
+    await run_with_quit(agent)
+
+    assert any(isinstance(t, UserMessage) and t.text == "hi" for t in agent.history)
+    assistant_msgs = [t for t in agent.history if isinstance(t, AssistantMessage)]
+    assert assistant_msgs[-1].text == "after error"
+
+
+@pytest.mark.asyncio
 async def test_queued_message_drain_publishes_user_message() -> None:
     """``UserQueuedMessage`` drain must publish the coalesced ``UserMessage``.
 

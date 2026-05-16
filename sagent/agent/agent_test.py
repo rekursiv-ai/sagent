@@ -507,6 +507,34 @@ def test_swap_model_replaces_model_and_inner_wrapper() -> None:
     assert a._agent_model._inner is new
 
 
+@pytest.mark.asyncio
+async def test_swap_model_schedules_close_on_old_cli_model() -> None:
+    """CLI providers own subprocess pools via ``HotSpare`` and define
+    ``async def close()``. ``Agent.swap_model`` must schedule that
+    teardown for the swapped-out model so the prior ``claude`` /
+    ``gemini`` subprocess and warming-spare task don't leak past the
+    swap. API-key models (no ``close``) are skipped silently.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class ClosableStubModel(StubModel):
+        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def close(self) -> None:
+            self.closed_event.set()
+
+    old = ClosableStubModel()
+    a = _build_agent(model=old)
+    a.swap_model(StubModel(model_id="stub-2"))
+    # The scheduled close task needs the loop to step once before its
+    # body runs; ``wait_for`` with a short timeout is more robust than
+    # ``sleep(0)`` against scheduler quirks (the close coroutine itself
+    # only sets an Event, so this resolves immediately under correct
+    # behavior and times out under regression).
+    await asyncio.wait_for(old.closed_event.wait(), timeout=1.0)
+    assert old.closed_event.is_set()
+
+
 def test_halt_pushes_halt_event() -> None:
     a = _build_agent()
     a.halt()

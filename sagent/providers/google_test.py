@@ -305,7 +305,12 @@ def test_google_model_default_uses_default_model() -> None:
     assert m.model_id == Google.DEFAULT_MODEL
 
 
-def test_google_utility_model_uses_flash() -> None:
+def test_google_utility_model_uses_flash_lite() -> None:
+    """Utility model resolves to the cheapest current-gen Gemini.
+
+    ``gemini-2.5-flash-lite`` is the cheapest non-deprecated entry in
+    ``KNOWN_MODELS`` -- both transports (API key and CLI) inherit it.
+    """
     p = Google.from_key("k")
     m = p.utility_model()
     assert m.model_id == Google.DEFAULT_UTILITY_MODEL
