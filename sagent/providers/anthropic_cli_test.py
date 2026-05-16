@@ -28,7 +28,7 @@ from sagent.providers.anthropic_cli import (
     _serialize_for_stdin,
     _user_line,
 )
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
 _CRED_PAYLOAD: dict[str, object] = {
@@ -321,7 +321,7 @@ def test_should_respawn_triggers() -> None:
 
     # Pretend the hot spare has a live active subprocess; the test only
     # needs ``_active`` to be non-None to exercise the respawn branch.
-    model._hot_spare._active = cast(_Subproc, _DummyActive())
+    model._hot_spare._active = cast(Subproc, _DummyActive())
     user = UserMessage(text="hi")
     request = ModelRequest(messages=[user])
 

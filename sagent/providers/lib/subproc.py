@@ -26,7 +26,7 @@ import shutil
 from sagent.lib.json import MutableJSON
 
 
-__all__ = ["_Subproc"]
+__all__ = ["Subproc"]
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ _STDERR_TAIL_LINES = 100
 _TERMINATE_GRACE_SEC = 2.0
 
 
-class _Subproc:
+class Subproc:
     """A managed CLI subprocess with NDJSON stdin/stdout and tmpdir cleanup.
 
     Args:

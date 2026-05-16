@@ -49,11 +49,11 @@ from sagent.providers.lib.cost import (
     Pricing,
     compute_cost,
 )
-from sagent.providers.lib.hotspare import _HotSpare
-from sagent.providers.lib.mcp_bridge import _ToolsBridge
+from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
 if TYPE_CHECKING:
@@ -218,11 +218,11 @@ class _GoogleCLIModel:
         self._system_hash: str = ""
         self._turn_count = 0
         self._last_input_tokens = 0
-        self._tools_bridge: _ToolsBridge | None = None
+        self._tools_bridge: ToolsBridge | None = None
         self._next_rpc_id = 1
         self._session_id: str = ""
         self._tmpdir: Path | None = None
-        self._hot_spare = _HotSpare(self._spawn_initialized)
+        self._hot_spare = HotSpare(self._spawn_initialized)
         self._pending_system: str = ""
         self._sent_history_head: HistoryEntry | None = None
 
@@ -426,7 +426,7 @@ class _GoogleCLIModel:
 
     async def _exchange_turn(
         self,
-        proc: _Subproc,
+        proc: Subproc,
         request: ModelRequest,
         on_text: Callable[[str], None] | None,
         on_thinking: Callable[[str], None] | None,
@@ -454,7 +454,7 @@ class _GoogleCLIModel:
 
     async def _send_prompt(
         self,
-        proc: _Subproc,
+        proc: Subproc,
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
@@ -531,15 +531,15 @@ class _GoogleCLIModel:
             total_cost=total_cost,
         )
 
-    async def _spawn_initialized(self) -> _Subproc:
+    async def _spawn_initialized(self) -> Subproc:
         """Spawn ``gemini`` and run the ACP handshake to a live ``sessionId``."""
         if self._tools_bridge is None:
-            self._tools_bridge = _ToolsBridge(tools=[])
+            self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
         tmpdir = Path(tempfile.mkdtemp(prefix="sagent-google-cli-"))
         _populate_google_tmpdir(tmpdir, self._provider.account, self._pending_system)
         workdir = tmpdir / "workdir"
-        proc = _Subproc(
+        proc = Subproc(
             ["gemini", "--experimental-acp", "--model", self._model_id],
             env=_google_subprocess_env(tmpdir),
             tmpdir=tmpdir,
@@ -553,7 +553,7 @@ class _GoogleCLIModel:
         self._tmpdir = tmpdir
         return proc
 
-    async def _acp_handshake(self, proc: _Subproc, workdir: Path) -> None:
+    async def _acp_handshake(self, proc: Subproc, workdir: Path) -> None:
         """Run ``initialize`` → ``authenticate`` → ``session/new`` (§3.2)."""
         assert self._tools_bridge is not None
         await _rpc_call(
@@ -744,7 +744,7 @@ _GEMINI_SETTINGS: MutableJSON = cast(
 
 
 async def _rpc_call(
-    proc: _Subproc,
+    proc: Subproc,
     request_id: int,
     method: str,
     params: dict[str, object],
@@ -762,7 +762,7 @@ async def _rpc_call(
 
 
 async def _rpc_send(
-    proc: _Subproc,
+    proc: Subproc,
     request_id: int,
     method: str,
     params: dict[str, object],

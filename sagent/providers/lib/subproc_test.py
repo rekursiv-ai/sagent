@@ -11,14 +11,14 @@ import json
 
 import pytest
 
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_write_and_read_json_round_trip(tmp_path: Path) -> None:
     """Round-trip one NDJSON line through a Python echo subprocess."""
-    proc = _Subproc(["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"])
+    proc = Subproc(["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"])
     await proc.start()
     await proc.write_line(json.dumps({"a": 1}))
     assert proc._proc is not None
@@ -41,7 +41,7 @@ async def test_read_json_line_skips_non_json_when_requested() -> None:
         "sys.stdout.write('{\"id\":1}\\n');"
         "sys.stdout.flush()"
     )
-    proc = _Subproc(["python3", "-c", script])
+    proc = Subproc(["python3", "-c", script])
     await proc.start()
     msg = await proc.read_json_line(skip_non_json=True)
     assert msg == {"id": 1}
@@ -52,7 +52,7 @@ async def test_read_json_line_skips_non_json_when_requested() -> None:
 @pytest.mark.asyncio
 async def test_read_json_line_raises_on_malformed_when_strict() -> None:
     """Default (``skip_non_json=False``) raises ``ValueError`` on a non-JSON line."""
-    proc = _Subproc(
+    proc = Subproc(
         [
             "python3",
             "-c",
@@ -69,7 +69,7 @@ async def test_read_json_line_raises_on_malformed_when_strict() -> None:
 @pytest.mark.asyncio
 async def test_eof_returns_none() -> None:
     """``read_json_line`` returns ``None`` once stdout has closed."""
-    proc = _Subproc(["python3", "-c", "pass"])
+    proc = Subproc(["python3", "-c", "pass"])
     await proc.start()
     assert await proc.read_json_line() is None
     await proc.close()
@@ -79,7 +79,7 @@ async def test_eof_returns_none() -> None:
 @pytest.mark.asyncio
 async def test_stderr_tail_captures_diagnostics() -> None:
     """Stderr is drained into the bounded ring buffer for diagnostics."""
-    proc = _Subproc(
+    proc = Subproc(
         ["python3", "-c", "import sys; sys.stderr.write('boom\\n'); sys.stderr.flush()"]
     )
     await proc.start()
@@ -101,7 +101,7 @@ async def test_close_removes_tmpdir(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
     owned.mkdir()
     (owned / "marker").write_text("x", encoding="utf-8")
-    proc = _Subproc(["python3", "-c", "pass"], tmpdir=owned)
+    proc = Subproc(["python3", "-c", "pass"], tmpdir=owned)
     await proc.start()
     await proc.close()
     assert not owned.exists()
@@ -111,7 +111,7 @@ async def test_close_removes_tmpdir(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_close_is_idempotent() -> None:
     """A second call to ``close`` is a no-op."""
-    proc = _Subproc(["python3", "-c", "pass"])
+    proc = Subproc(["python3", "-c", "pass"])
     await proc.start()
     await proc.close()
     await proc.close()
@@ -121,7 +121,7 @@ async def test_close_is_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_write_after_subprocess_exit_raises_runtime_error() -> None:
     """Writing to a closed-stdin subprocess surfaces a clean ``RuntimeError``."""
-    proc = _Subproc(["python3", "-c", "pass"])
+    proc = Subproc(["python3", "-c", "pass"])
     await proc.start()
     # Wait for the child to exit.
     assert proc._proc is not None

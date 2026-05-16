@@ -40,11 +40,11 @@ from sagent.custom_types import (
 from sagent.lib.json import MutableJSON, int_val
 from sagent.providers.anthropic import Anthropic, _strip_context_tag
 from sagent.providers.lib.cost import ModelProfile, Pricing
-from sagent.providers.lib.hotspare import _HotSpare
-from sagent.providers.lib.mcp_bridge import _ToolsBridge
+from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
 if TYPE_CHECKING:
@@ -207,8 +207,8 @@ class _AnthropicCLIModel:
         self._system_hash: str = ""
         self._turn_count = 0
         self._last_input_tokens = 0
-        self._tools_bridge: _ToolsBridge | None = None
-        self._hot_spare = _HotSpare(self._spawn_initialized)
+        self._tools_bridge: ToolsBridge | None = None
+        self._hot_spare = HotSpare(self._spawn_initialized)
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
         self._sent_history_head: HistoryEntry | None = None
@@ -416,7 +416,7 @@ class _AnthropicCLIModel:
 
     async def _send_new_entries(
         self,
-        proc: _Subproc,
+        proc: Subproc,
         history: list[HistoryEntry],
     ) -> None:
         """Write each new history entry to stdin as a user-line."""
@@ -430,7 +430,7 @@ class _AnthropicCLIModel:
 
     async def _drain_until_result(
         self,
-        proc: _Subproc,
+        proc: Subproc,
         on_text: Callable[[str], None] | None,
         on_thinking: Callable[[str], None] | None,
     ) -> ModelResponse:
@@ -475,10 +475,10 @@ class _AnthropicCLIModel:
             fallback_message_id=message_id,
         )
 
-    async def _spawn_initialized(self) -> _Subproc:
+    async def _spawn_initialized(self) -> Subproc:
         """Spawn a fresh ``claude`` subprocess ready to receive user lines."""
         if self._tools_bridge is None:
-            self._tools_bridge = _ToolsBridge(tools=[])
+            self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
         tmpdir = Path(tempfile.mkdtemp(prefix="sagent-anthropic-cli-"))
         _populate_anthropic_tmpdir(tmpdir, self._provider.account)
@@ -488,7 +488,7 @@ class _AnthropicCLIModel:
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,
         )
-        proc = _Subproc(
+        proc = Subproc(
             argv,
             env=_anthropic_subprocess_env(tmpdir),
             tmpdir=tmpdir,
