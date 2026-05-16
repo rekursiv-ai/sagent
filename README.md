@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  Typed Python library and CLI for multi-provider, multi-agent LLM applications.
+  The self-mutating multi-provider coding-agent CLI and typed Python library.
 </p>
 
 <p align="center">
@@ -45,6 +45,46 @@
   <a href="https://github.com/rekursiv-ai/sagent/tree/main/examples">Examples</a>
 </p>
 
+## Better CLI
+
+Things Claude Code, Codex CLI, and Gemini CLI don't do:
+
+- **One CLI, every provider.** Anthropic, OpenAI, Google, Moonshot,
+  DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted
+  HuggingFace models, and a managed `llama.cpp` server — all behind
+  one binary.
+- **Unified cost tracking.** One USD total across every provider in
+  a session; sub-agent costs roll up to the root automatically.
+  `--max-budget-usd N` caps the whole tree.
+- **Hot self-mutation.** *"Switch to OpenAI then back."* Mid-session,
+  no restart.
+- **Conversational self-diagnostics.** *"How many tokens are in your
+  context?"* Answered by the agent itself.
+- **Interruptible and detachable tasks.** *"The task is stuck."*
+  *"Detach `foo` and let it keep running."*
+- **Richer built-in tools.** `PaperSearch` and `PaperFetch` walk
+  citation graphs and fetch PDFs, multi-backend `WebSearch`,
+  `WebFetch` with markdown extraction, atomic read/write tracking
+  on file tools.
+- **Unix-aligned and pipeable.** `stdin`, `stdout`, exit codes, and
+  `--output-format json` are first-class — not a non-interactive
+  escape hatch. Pipes like `jq`, REPLs like `ipython` (same
+  `prompt_toolkit` underneath).
+
+## Uniquely also an API
+
+- **One runtime, every surface.** The same `Agent` class powers the
+  CLI, your application code, and recursive sub-agents.
+- **Typed Python objects.** `Agent`, `Tool`, `Model`, `Provider`,
+  and `Message` are protocols and dataclasses you import, compose,
+  and unit-test.
+- **Peer-to-peer agent messaging.** Any spawned agent can `AgentSend`
+  to any other named peer — not just its parent. Like user input,
+  peer messages preempt the receiving agent's tool calls, so no agent
+  blocks waiting on a stuck child.
+
+Use it as a library:
+
 ```python
 from sagent import tools
 from sagent.agent import Agent
@@ -59,42 +99,6 @@ agent = Agent(
 result = await agent.run(json_freeze({"prompt": "analyze the CSV in ./data/"}))
 print(result.content)
 ```
-
-## Why sagent exists
-
-Most serious coding agents are CLIs, editor extensions, hosted
-assistants, or non-Python runtimes. Sagent gives you the agent runtime
-as typed Python objects you can import, compose, test, and embed. The
-CLI is one entry point over the library, not the center of the design.
-
-Use Sagent when you want:
-
-- a Python API first and a CLI second;
-- provider swapping without changing the agent loop;
-- custom tools as normal Python objects;
-- session persistence and compaction;
-- child agents and peer messaging for review, delegation, and map-reduce work.
-
-Three pieces make Sagent distinctive:
-
-- **Hot-swappable providers.** The same agent, tools, session, and
-  compactor can run against Anthropic, OpenAI, Google, Moonshot,
-  DashScope, MiniMax, a managed local llama.cpp server, or any
-  OpenAI-compatible endpoint.
-- **Multi-agent primitives.** `AgentSelf`, `AgentSpawn`, and
-  `AgentSend` let agents inspect themselves, spawn isolated children,
-  and send messages to named peers.
-- **Typed runtime objects.** `Agent`, `Tool`, `Message`, `Model`, and
-  `Provider` are Python protocols and dataclasses that can be used
-  directly from application code.
-
-## What sagent does
-
-- Runs agents against Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, local llama.cpp servers, and OpenAI-compatible endpoints.
-- Exposes tools for local files, shell commands, web access, paper search, and agent coordination.
-- Keeps the same `Agent` behind CLI, Slack, parent agents, and application code.
-- Represents provider responses, tool calls, tool results, and user messages as typed `Message` objects.
-- Lets agents call `AgentSelf`, `AgentSpawn`, and `AgentSend` as ordinary tools.
 
 ## Install
 
@@ -286,98 +290,6 @@ The [`examples/`](examples/) directory contains small, runnable examples:
 
 Start with the [tutorial](docs/tutorial.md), then use the examples as copyable patterns. See [Examples](examples/) and [Tools](docs/tools.md).
 
-## Concepts
-
-Sagent has five core contracts: `Message`, `Tool`, `Model`, `Provider`, and `Agent`.
-
-- `Message` is the typed payload that crosses providers, tools, sessions, compaction, and UI surfaces.
-- `Tool` receives a JSON directive in a message and returns a message.
-- `Model` is the backend request/response interface.
-- `Provider` owns authentication and constructs models.
-- `Agent` owns the loop, model, tools, inbox, session, and compactor.
-
-`TextMessage` is intentionally central: it is the common communication interface across the runtime.
-
-See [Concepts](docs/concepts.md) and [Architecture](docs/architecture.md).
-
-### Inbox zero
-
-Most agent frameworks are turn-based: user sends a message, agent
-processes it, agent responds, repeat. Sagent instead uses a
-drain-run-check loop:
-
-```text
-while True:
-    drain inbox into user messages
-    call model
-    if tool calls exist: dispatch tools and loop
-    if inbox is empty and model is done: go idle
-```
-
-The agent goes idle only when the inbox is empty and the model has
-nothing left to do. It wakes when anything lands in the inbox.
-
-Every surface - REPL, Slack, CLI, parent agent, or application code -
-puts messages in the same inbox. User input, background task results,
-and agent-to-agent messages use the same mechanism instead of separate
-plumbing. User messages go to the front; background and peer messages
-append at the back.
-
-Context-affecting slash commands follow the same rule. `/clear` is
-queued and interpreted at the agent's single inbox drain point. Surface
-local commands that do not mutate model context, such as `/model`, may
-be handled by the REPL before entering the inbox.
-
-### Message: typed payloads plus graph edges
-
-Sagent messages use MIME-style descriptors for heterogeneous payloads,
-plus ids and parent ids for graph structure. The public `Message` union
-contains `TextMessage`, `BytesMessage`, `JsonMessage`, and
-`MultipartMessage`.
-
-`MultipartMessage` content is recursive: compound messages hold nested
-messages. An assistant turn containing text, thinking, and tool calls
-uses the same message graph as a single text chunk. Descriptors such as
-`text/plain`, `multipart/x-tool-call`, and `application/x-done` tell
-callers how to interpret the payload.
-
-### Tool: one input message, one output message
-
-Tools are normal Python objects with a small protocol:
-
-```python
-class Tool(Protocol):
-    name: str
-    tool_id: str
-    description: str
-    directive_schema: JSON
-    supports_microcompaction: bool
-
-    def summary(self, msg: Message) -> str: ...
-    def prompt(self) -> str | None: ...
-    async def run(self, msg: Message) -> Message: ...
-```
-
-Input is a `Message` with a JSON directive. Output is a `Message`.
-Expected tool failures return `descriptor="text/x-error"` rather than
-raising through the agent loop.
-
-`Agent` follows the same interface pattern as a tool. `AgentSpawn` is
-a tool that builds a child `Agent`, runs it, and returns the child's
-final output as a tool response. That is what makes recursive agent
-composition work without a separate orchestration layer.
-
-### AgentSelf, AgentSpawn, AgentSend
-
-- `AgentSelf` lets an agent inspect or mutate its own state: update
-  status, compact context, clear context, change model, inspect
-  diagnostics, and adjust token limits.
-- `AgentSpawn` creates child agents with explicit tool/depth limits for
-  isolated reviews, subtasks, and map-reduce work.
-- `AgentSend` delivers a message to another live named agent's inbox.
-  This makes multi-agent coordination peer-to-peer rather than only
-  parent-to-child.
-
 ## Security and privacy
 
 Sagent is an agent runtime, not a sandbox. Enabled tools run with the current
@@ -391,19 +303,12 @@ prompts so sessions and auto-memory are disabled, and run Sagent inside your own
 OS/container sandbox when a task needs hard isolation. See
 [Security](docs/security.md).
 
-## Current scope
+## Comparison
 
-Sagent does not currently include:
+<details>
+<summary>How Sagent compares to aider, LangChain, Claude Code, Codex CLI, Gemini CLI, and other adjacent projects</summary>
 
-- MCP integration;
-- LSP integration;
-- native sandboxing;
-- a desktop UI;
-- a tree-sitter repo map;
-- a hosted service;
-- browser automation.
-
-## Adjacent projects
+Not yet in Sagent: MCP, LSP, native sandboxing, desktop UI, tree-sitter repo map, hosted service, browser automation.
 
 This comparison focuses on the runtime shape rather than every feature
 of each project.
@@ -536,20 +441,7 @@ gemini-cli tools for Gemini) and subagent spawn primitives. Categories above
 reflect what an Attractor-conformant implementation must support; the actual
 runtime shape depends on whoever builds it.
 
-## Architecture map
-
-| Module | Role |
-| --- | --- |
-| `bin/cli.py` | Terminal entry point |
-| `bin/slack.py` | Slack Socket Mode entry point |
-| `agent/` | Turn loop, retry, dispatch, sessions |
-| `compactor.py` | Structured compaction and prompt-too-long retry |
-| `custom_types.py` | Message, Tool, Model, Provider protocols |
-| `providers/` | Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible, LlamaCpp |
-| `tools/` | Built-in tools for files, shell, web, search, and agent coordination |
-| `repl/` | prompt_toolkit REPL and diff rendering |
-| `sessions.py` | Per-cwd session storage |
-| `prompt.py` | System prompt assembly |
+</details>
 
 ## Name
 
