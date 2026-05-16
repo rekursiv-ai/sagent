@@ -29,7 +29,7 @@ from sagent.providers.google_cli import (
     _serialize_prompt_blocks,
     _user_prompt_blocks,
 )
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
 _CRED_PAYLOAD: dict[str, object] = {
@@ -285,7 +285,7 @@ def test_should_respawn_triggers() -> None:
     class _DummyActive:
         pass
 
-    model._hot_spare._active = cast(_Subproc, _DummyActive())
+    model._hot_spare._active = cast(Subproc, _DummyActive())
     user = UserMessage(text="hi")
     request = ModelRequest(messages=[user])
 

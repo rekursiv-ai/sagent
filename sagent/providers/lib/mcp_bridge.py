@@ -5,7 +5,7 @@ protocol: tools must come from MCP servers registered at startup
 (claude's ``--mcp-config``) or session creation (gemini ACP's
 ``mcpServers``). This module stands one up.
 
-``_ToolsBridge`` binds a free localhost port, runs an MCP
+``ToolsBridge`` binds a free localhost port, runs an MCP
 streamable-http server in the agent's asyncio loop, advertises the
 sagent ``Tool`` list, and routes each ``tool_use`` callback through to
 ``tool.run(args)``. The URL is handed to the CLI subprocess via the
@@ -54,7 +54,7 @@ from sagent.custom_types import Tool
 from sagent.lib.json import json_unfreeze
 
 
-__all__ = ["_ToolsBridge"]
+__all__ = ["ToolsBridge"]
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ _MCP_PATH = "/mcp"
 _STARTUP_TIMEOUT_SEC = 10.0
 
 
-class _ToolsBridge:
+class ToolsBridge:
     """MCP streamable-http server proxying a mutable list of sagent tools.
 
     Args:

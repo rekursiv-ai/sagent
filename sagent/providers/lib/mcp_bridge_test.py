@@ -15,7 +15,7 @@ import pytest
 from sagent.agent.runtime import ToolResult
 from sagent.custom_types import Tool
 from sagent.lib.json import JSON
-from sagent.providers.lib.mcp_bridge import _ToolsBridge
+from sagent.providers.lib.mcp_bridge import ToolsBridge
 
 
 class _EchoTool:
@@ -55,7 +55,7 @@ class _EchoTool:
 @pytest.mark.asyncio
 async def test_start_then_stop_lifecycle() -> None:
     """The bridge binds a localhost URL on start and releases on stop."""
-    bridge = _ToolsBridge([cast(Tool, _EchoTool())])
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
     url = bridge.url
     assert url.startswith("http://127.0.0.1:")
@@ -75,7 +75,7 @@ async def test_unknown_tool_path_returns_404() -> None:
     while uvicorn waits for its turn to respond; punt to a worker thread
     so both sides progress.
     """
-    bridge = _ToolsBridge([cast(Tool, _EchoTool())])
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
     try:
         base = bridge.url.rsplit("/", 1)[0]
@@ -102,7 +102,7 @@ async def test_update_tools_replaces_registry() -> None:
     call time, so replacing the dict takes effect for subsequent
     invocations without restarting the server.
     """
-    bridge = _ToolsBridge([cast(Tool, _EchoTool())])
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
     try:
         assert "Echo" in bridge._tools
@@ -120,7 +120,7 @@ async def test_handlers_route_tool_call() -> None:
     Validates the bridge in isolation by invoking the registered
     handlers directly, sidestepping the network handshake.
     """
-    bridge = _ToolsBridge([cast(Tool, _EchoTool())])
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
     try:
         server = bridge._server

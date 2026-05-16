@@ -9,7 +9,7 @@ to swap a pointer.
 
 The class is generic over the provider's per-subprocess init recipe:
 the caller supplies a ``factory`` coroutine that returns a ready-to-
-talk ``_Subproc``. ``_HotSpare`` owns active/spare state, serialises
+talk ``Subproc``. ``HotSpare`` owns active/spare state, serialises
 respawns behind an ``asyncio.Lock``, and warms a replacement spare in
 the background after each swap.
 """
@@ -22,19 +22,19 @@ from typing import Any
 import asyncio
 import logging
 
-from sagent.providers.lib.subproc import _Subproc
+from sagent.providers.lib.subproc import Subproc
 
 
-__all__ = ["_HotSpare"]
+__all__ = ["HotSpare"]
 
 logger = logging.getLogger(__name__)
 
 
-class _HotSpare:
+class HotSpare:
     """Manage one active subprocess plus one prewarmed spare.
 
     Args:
-      factory: Coroutine factory producing a fully-initialised ``_Subproc``.
+      factory: Coroutine factory producing a fully-initialised ``Subproc``.
           Called once per warm-up; must include any provider-specific
           handshake (claude has none, gemini's ACP ``initialize`` /
           ``authenticate`` / ``session/new`` lives here).
@@ -43,16 +43,16 @@ class _HotSpare:
 
     def __init__(
         self,
-        factory: Callable[[], Coroutine[Any, Any, _Subproc]],
+        factory: Callable[[], Coroutine[Any, Any, Subproc]],
     ) -> None:
         self._factory = factory
-        self._active: _Subproc | None = None
-        self._spare: _Subproc | None = None
-        self._spare_task: asyncio.Task[_Subproc] | None = None
+        self._active: Subproc | None = None
+        self._spare: Subproc | None = None
+        self._spare_task: asyncio.Task[Subproc] | None = None
         self._respawn_lock = asyncio.Lock()
         self._closed = False
 
-    async def acquire(self) -> _Subproc:
+    async def acquire(self) -> Subproc:
         """Return the active subprocess, promoting a spare if needed.
 
         Returns:
@@ -63,7 +63,7 @@ class _HotSpare:
 
         """
         if self._closed:
-            raise RuntimeError("_HotSpare: pool is closed")
+            raise RuntimeError("HotSpare: pool is closed")
         if self._active is None:
             async with self._respawn_lock:
                 if self._active is None:
@@ -71,7 +71,7 @@ class _HotSpare:
             self._kick_warm()
         return self._active
 
-    async def respawn(self) -> _Subproc:
+    async def respawn(self) -> Subproc:
         """Close the active subprocess and promote the spare.
 
         Returns:
@@ -116,11 +116,11 @@ class _HotSpare:
             self._active = None
 
     @property
-    def active(self) -> _Subproc | None:
+    def active(self) -> Subproc | None:
         """The currently-active subprocess, ``None`` before first acquire."""
         return self._active
 
-    async def _take_or_make_spare(self) -> _Subproc:
+    async def _take_or_make_spare(self) -> Subproc:
         """Consume the warmed spare; spawn synchronously if it isn't ready."""
         task = self._spare_task
         self._spare_task = None
