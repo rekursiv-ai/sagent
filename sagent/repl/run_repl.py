@@ -468,23 +468,42 @@ def _resolve_model_target(
     parsed: _ParsedModelArgs,
     spec: ModelSpec,
 ) -> tuple[str, str, str | None, str]:
-    """Layer parsed args onto ``spec``; fill model_id from cross-session memory.
+    """Layer parsed args onto ``spec``; resolve the destination model_id.
 
-    When the user switches provider but doesn't name a model, look up
-    the last model used for that provider in
-    ``~/.sagent/last-models.json``. Fall back to the provider class's
-    ``DEFAULT_MODEL`` if this provider hasn't been used before.
+    Cross-provider with no user-supplied model:
+    1. Prefer ``spec.model_id`` when the new provider's catalog already
+       knows it, so switching between providers with a shared catalog keeps
+       the same model.
+    2. Else use the last model id recorded for the new provider in
+       ``~/.sagent/last-models.json``.
+    3. Else fall back to the new provider's ``DEFAULT_MODEL``.
     """
     prov_name = parsed.provider or spec.provider
     auth = parsed.auth or spec.auth
     account = parsed.account if parsed.account_set else spec.account
     if parsed.model_id is not None:
         model_id = parsed.model_id
-    elif prov_name == spec.provider:
+    elif prov_name == spec.provider or _provider_knows_model(prov_name, spec.model_id):
         model_id = spec.model_id
     else:
         model_id = last_models.get(prov_name) or _default_model_for(prov_name)
     return prov_name, auth, account, model_id
+
+
+def _provider_knows_model(prov_name: str, model_id: str) -> bool:
+    """Return True when the provider class's catalog includes ``model_id``.
+
+    Used to decide whether a cross-provider swap can keep the current
+    model. Reads ``cls.KNOWN_MODELS`` without instantiating the provider
+    so the check is side-effect-free (no credential lookup).
+    """
+    cls = getattr(providers, prov_name, None)
+    if cls is None:
+        return False
+    known = getattr(cls, "KNOWN_MODELS", None)
+    if not isinstance(known, dict):
+        return False
+    return model_id in known
 
 
 def _default_model_for(prov_name: str) -> str:

@@ -474,7 +474,10 @@ class Agent:
 
         Clears ``thinking`` / ``effort`` when the new model lacks
         support so the agent's user-visible state matches what the
-        provider will actually receive.
+        provider will actually receive. Schedules ``close()`` on the
+        swapped-out model so CLI providers' subprocess pools (the
+        ``claude`` / ``gemini`` process plus its warming-spare task)
+        don't leak past the swap.
 
         Args:
           model: New rich provider model.
@@ -494,6 +497,7 @@ class Agent:
                 f"budget.max_response_tokens={self._budget.max_response_tokens:,}"
                 f" exceeds new model's {model.max_response_tokens:,}",
             )
+        old = self.model
         self.model = model
         self.model_spec = spec
         self._agent_model.set_inner(model)
@@ -504,6 +508,7 @@ class Agent:
             self._effort = None
         if spec is not None:
             last_models.record(spec.provider, spec.model_id)
+        _schedule_close(old)
 
     def system_prompt(self) -> str:
         """Assemble the full system prompt (system + tool contributions).
@@ -887,6 +892,46 @@ class Agent:
             return
         self.runtime.history.clear()
         self.runtime.history.extend(summary)
+
+
+def _schedule_close(model: RichModel) -> None:
+    """Fire-and-forget async teardown for a swapped-out model.
+
+    CLI-style providers (``AnthropicCLI``, ``GoogleCLI``) own subprocess
+    pools via ``HotSpare`` and define ``async def close()``; API-key
+    providers don't. Schedule the teardown on the running loop so the
+    prior subprocess and its warming-spare task don't outlive the swap.
+    No-op when no event loop is running (e.g. ``Agent.resume`` before
+    ``serve_forever``): the model hasn't been used yet so there is
+    nothing to close.
+    """
+    close = getattr(model, "close", None)
+    if not callable(close):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    coro = close()
+    if not asyncio.iscoroutine(coro):
+        return
+    task = loop.create_task(coro)
+    task.add_done_callback(_log_close_errors)
+
+
+def _log_close_errors(task: asyncio.Task[object]) -> None:
+    """Surface failures from the swapped-out model's ``close()``.
+
+    Parameter is ``Task[object]`` -- not ``Task[None]`` -- because the
+    coroutine type is recovered via duck-typing ``getattr(model, "close")``
+    rather than from a typed reference, so the inferred task is generic
+    over ``object`` rather than ``None``.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log_exception_or_warning(logger, "swapped-out model close failed", exc)
 
 
 class _AgentModel:

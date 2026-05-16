@@ -87,9 +87,6 @@ class GoogleCLI(Google):
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    DEFAULT_MODEL = "gemini-2.5-flash"
-    DEFAULT_UTILITY_MODEL = "gemini-2.5-flash-lite"
-
     def __init__(self, *, account: str | None = None) -> None:
         # Skip Google.__init__: the CLI provides auth, no api_key needed.
         self._account = account

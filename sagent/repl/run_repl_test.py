@@ -160,14 +160,26 @@ def test_provider_switch_uses_last_used_when_known(
 ) -> None:
     """``/model provider=Google`` prefers the last-used Google model over the default.
 
-    When ``~/.sagent/last-models.json`` already records a model_id for
-    Google (because the user previously typed e.g. ``/model
-    gemini-2.5-experimental``), the resolver picks that up. The
-    ``Google.DEFAULT_MODEL`` fallback only applies on cold-start.
+    The current spec's ``claude-opus-4-7`` is not in ``Google.KNOWN_MODELS``
+    so cross-provider preservation falls through. With a recorded last-used
+    Google model in ``~/.sagent/last-models.json``, the resolver picks
+    that up. ``Google.DEFAULT_MODEL`` is the cold-start fallback.
     """
     monkeypatch.setattr(last_models, "load", lambda: {"Google": "remembered-model"})
     out = _parse("provider=Google")
     assert out == ("Google", _DEFAULT_AUTH, None, "remembered-model")
+
+
+def test_provider_switch_preserves_current_model_when_new_provider_knows_it() -> None:
+    """``/model provider=AnthropicCLI`` from ``Anthropic/claude-opus-4-7`` keeps the model.
+
+    AnthropicCLI inherits ``KNOWN_MODELS`` from ``Anthropic`` so the
+    current model id is valid on the new provider. The resolver must
+    preserve it across the swap rather than demoting to last_models
+    or ``DEFAULT_MODEL``.
+    """
+    out = _parse("provider=AnthropicCLI")
+    assert out == ("AnthropicCLI", _DEFAULT_AUTH, None, _DEFAULT_MODEL)
 
 
 @dataclass(slots=True, kw_only=True)

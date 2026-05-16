@@ -959,394 +959,421 @@ class AgentRuntime:
         queued: list[UserQueuedMessage] = []
 
         while True:
-            self._collect_detached()
-            items = await self.inbox.drain()
+            try:
+                self._collect_detached()
+                items = await self.inbox.drain()
 
-            for item_idx, item in enumerate(items):
-                match item:
-                    case Quit():
-                        if self.model_call:
-                            self.model_call.cancel()
-                        if self.compact_task:
-                            self.compact_task.cancel()
-                        for t in self.running_tools.values():
-                            t.cancel()
-                        return
-
-                    case Halt():
-                        if self.model_call:
-                            self.model_call.cancel()
-                            self.model_call = None
-                        # Preserve any mid-stream typed content: commit
-                        # it to history (alternation-coalesce handles
-                        # back-to-back UserMessages) and publish the
-                        # coalesced bar -- the preview drops, the bar
-                        # appears, single UI transition.
-                        coalesced = self._drain_mid_stream_queue()
-                        if coalesced is not None:
-                            self.publish(coalesced)
-                        self.inbox.push_front(
-                            AWAIT_USER,
-                            *items[item_idx + 1 :],
-                        )
-                        break
-
-                    case Clear():
-                        if self.model_call:
-                            self.model_call.cancel()
-                            self.model_call = None
-                        self._stub_running_tools_and_let_finish()
-                        self.running_tools = {}
-                        self.cohort.clear()
-                        cohort_seen = False
-                        queued.clear()
-                        self._mid_stream_queue.clear()
-                        self.history.clear()
-                        self.inbox.push_front(
-                            AWAIT_USER,
-                            *items[item_idx + 1 :],
-                        )
-                        break
-
-                    case ModelResponseError(exception=exc):
-                        self.model_call = None
-                        self._append_or_coalesce_user(
-                            UserMessage(
-                                text=f"[Error: {type(exc).__name__}: {exc}]",
-                            ),
-                        )
-                        self.publish(item)
-                        # Preserve mid-stream content past the error;
-                        # commit + publish the coalesced bar so the
-                        # pending preview transitions to a permanent
-                        # entry.
-                        coalesced = self._drain_mid_stream_queue()
-                        if coalesced is not None:
-                            self.publish(coalesced)
-                        self.inbox.push_front(
-                            AWAIT_USER,
-                            *items[item_idx + 1 :],
-                        )
-                        break
-
-                    case Kill(call_id=cid):
-                        if cid is None:
+                for item_idx, item in enumerate(items):
+                    match item:
+                        case Quit():
+                            if self.model_call:
+                                self.model_call.cancel()
+                            if self.compact_task:
+                                self.compact_task.cancel()
                             for t in self.running_tools.values():
                                 t.cancel()
-                            self.running_tools = {}
-                            self.cohort.clear()
-                            cohort_seen = False
-                        elif cid in self.running_tools:
-                            self.running_tools.pop(cid).cancel()
-                            self.cohort.discard(cid)
+                            return
 
-                    case Detach(call_id=cid):
-                        if cid is None:
-                            self._stub_running_tools_and_let_finish()
-                            self.running_tools = {}
-                            self.cohort.clear()
-                            cohort_seen = False
-                        elif cid in self.running_tools:
-                            task = self.running_tools.pop(cid)
-                            self.cohort.discard(cid)
-                            self.history.append(
-                                ToolResult(
-                                    call_id=cid,
-                                    content="[detached]",
-                                ),
-                            )
-                            self.detached[cid] = task
-
-                    case Undetach(call_id=cid):
-                        if cid is None:
-                            for did in self.detached:
-                                self.cohort.add(did)
-                        elif cid in self.detached:
-                            self.cohort.add(cid)
-
-                    case Compact(args=args) | Recompact(args=args):
-                        if self.compact_task and not self.compact_task.done():
-                            continue
-                        if self.model_call:
-                            self.model_call.cancel()
-                            self.model_call = None
-                        self._stub_running_tools_and_let_finish()
-                        self.running_tools = {}
-                        self.cohort.clear()
-                        cohort_seen = False
-                        queued.clear()
-                        # Capture buffered mid-stream input into the snapshot
-                        # the compactor will see; publish the coalesced
-                        # bar so the pending preview transitions to a
-                        # committed entry.
-                        coalesced = self._drain_mid_stream_queue()
-                        if coalesced is not None:
-                            self.publish(coalesced)
-                        self.compact_task = asyncio.create_task(
-                            self._compact_and_post(args),
-                        )
-                        self.publish(CompactStarted())
-
-                    case CompactComplete(
-                        summary=summary,
-                        snapshot_len=n,
-                    ):
-                        self.compact_task = None
-                        new_items = self.history[n:]
-                        self.history.clear()
-                        self.history.extend(summary)
-                        self.history.extend(new_items)
-                        self.publish(item)
-
-                    case UserMessage():
-                        if self.model_call is not None:
-                            # Mid-stream: buffer only. The ``queued_input_pane``
-                            # in the REPL renders ``pending_mid_stream()`` as
-                            # a dim preview while the buffer is non-empty,
-                            # so the user has immediate visual feedback
-                            # without a duplicate bar in console. The bar
-                            # appears on drain (ModelResponseComplete /
-                            # Halt / ModelResponseError / Compact) when
-                            # the coalesced UserMessage is published --
-                            # at which point the preview drops because the
-                            # buffer is empty. One UI surface at a time.
-                            self._mid_stream_queue.append(item)
-                        else:
-                            # Mid-cohort or idle: preempt and append.
-                            # Coalesce on the alternation-invariant helper
-                            # so two same-batch Enters (or a post-halt
-                            # follow-up) don't stack as consecutive user
-                            # turns in history.
-                            self._stub_running_tools_and_let_finish()
-                            self.running_tools = {}
-                            self.cohort.clear()
-                            cohort_seen = False
-                            self._append_or_coalesce_user(item)
-                            self.publish(item)
-
-                    case UserQueuedMessage():
-                        queued.append(item)
-
-                    case ModelResponsePartial():
-                        self.publish(item)
-
-                    case ModelResponseThinking():
-                        self.publish(item)
-
-                    case ModelResponseComplete(message=msg):
-                        self.model_call = None
-                        self.history.append(msg)
-                        self.publish(item)
-                        if self._mid_stream_queue:
-                            # User typed mid-stream. Cut their content in
-                            # line: relegate any tool calls to background
-                            # (placeholder + detached task; the result
-                            # splices in via ``DetachedResult`` when the
-                            # tool finishes), then append the coalesced
-                            # user content so the gate fires for it next.
-                            # No ``CohortStarted`` / ``ModelIdle`` here:
-                            # this round did not idle (a follow-up is
-                            # about to fire) and no cohort gates the model.
-                            for tc in msg.tool_calls:
-                                self.history.append(
-                                    ToolResult(
-                                        call_id=tc.id,
-                                        parent_id=msg.id,
-                                        content="[detached]",
-                                    ),
-                                )
-                                self.detached[tc.id] = asyncio.create_task(
-                                    self._run_tool_and_post(tc, parent_id=msg.id),
-                                )
-                            # Commit mid-stream input to history and
-                            # publish the coalesced bar -- the pending
-                            # preview drops as the buffer empties and
-                            # the bar appears in console, single UI
-                            # transition.
+                        case Halt():
+                            if self.model_call:
+                                self.model_call.cancel()
+                                self.model_call = None
+                            # Preserve any mid-stream typed content: commit
+                            # it to history (alternation-coalesce handles
+                            # back-to-back UserMessages) and publish the
+                            # coalesced bar -- the preview drops, the bar
+                            # appears, single UI transition.
                             coalesced = self._drain_mid_stream_queue()
                             if coalesced is not None:
                                 self.publish(coalesced)
-                        elif msg.tool_calls:
-                            cohort_seen = True
-                            self.publish(CohortStarted())
-                            for tc in msg.tool_calls:
-                                self.cohort.add(tc.id)
-                                self.running_tools[tc.id] = asyncio.create_task(
-                                    self._run_tool_and_post(tc, parent_id=msg.id),
-                                )
-                        else:
-                            self.publish(ModelIdle())
+                            self.inbox.push_front(
+                                AWAIT_USER,
+                                *items[item_idx + 1 :],
+                            )
+                            break
 
-                    case ModelResponseCancelled():
-                        self.model_call = None
-                        self.publish(item)
+                        case Clear():
+                            if self.model_call:
+                                self.model_call.cancel()
+                                self.model_call = None
+                            self._stub_running_tools_and_let_finish()
+                            self.running_tools = {}
+                            self.cohort.clear()
+                            cohort_seen = False
+                            queued.clear()
+                            self._mid_stream_queue.clear()
+                            self.history.clear()
+                            self.inbox.push_front(
+                                AWAIT_USER,
+                                *items[item_idx + 1 :],
+                            )
+                            break
 
-                    case ToolResultPartial():
-                        self.publish(item)
-
-                    case ToolResult(call_id=cid) if cid in self.cohort:
-                        self.cohort.discard(cid)
-                        self.running_tools.pop(cid, None)
-                        self.history.append(item)
-                        self.publish(item)
-
-                    case ToolResult(call_id=cid) if cid in self.detached:
-                        # In-batch race: the tool task completed before
-                        # ``_stub_running_tools_and_let_finish`` reclassified
-                        # its call_id as detached. The ``ToolResult`` was
-                        # pushed as a regular result (because the task
-                        # ran ``self.detached`` check before the stub),
-                        # but a peer item in the same drain batch (e.g.
-                        # a tool-pushed ``UserMessage``) triggered a
-                        # preempt that cleared the cohort. Without this
-                        # case the result would fall through to ``_`` and
-                        # leave the assistant's ``tool_use`` paired only
-                        # with the ``[detached]`` placeholder forever.
-                        # Splice the real content into the placeholder
-                        # exactly like ``DetachedResult`` does.
-                        del self.detached[cid]
-                        for i, prior in enumerate(self.history):
-                            if isinstance(prior, ToolResult) and prior.call_id == cid:
-                                self.history[i] = dataclasses.replace(
-                                    prior,
-                                    content=item.content,
-                                    is_error=item.is_error,
-                                )
-                                self.publish(
-                                    HistoryEntryUpdated(entry=self.history[i]),
-                                )
-                                break
-                        self.publish(item)
-
-                    case DetachedResult():
-                        self.cohort.discard(item.call_id)
-                        # Splice into the existing placeholder so the
-                        # model sees the real result in the slot it
-                        # already expects, without duplicating the
-                        # full content into a phantom user message.
-                        # Both ``[detached]`` (preempt) and ``[Running
-                        # in background: ...]`` (explicit-bg)
-                        # placeholders match by ``call_id``.
-                        spliced = False
-                        for i, prior in enumerate(self.history):
-                            if (
-                                isinstance(prior, ToolResult)
-                                and prior.call_id == item.call_id
-                            ):
-                                self.history[i] = dataclasses.replace(
-                                    prior,
-                                    content=item.content,
-                                    is_error=item.is_error,
-                                )
-                                self.publish(
-                                    HistoryEntryUpdated(entry=self.history[i]),
-                                )
-                                spliced = True
-                                break
-                        if not spliced:
-                            # No placeholder to splice into (rare: result
-                            # arrived before the stub was inserted). Fall
-                            # back to a user message so the content isn't
-                            # silently dropped.
-                            self.history.append(
+                        case ModelResponseError(exception=exc):
+                            self.model_call = None
+                            self._append_or_coalesce_user(
                                 UserMessage(
-                                    text=(
-                                        f"[Tool {item.call_id} completed]\n"
-                                        f"{item.content}"
+                                    text=f"[Error: {type(exc).__name__}: {exc}]",
+                                ),
+                            )
+                            self.publish(item)
+                            # Preserve mid-stream content past the error;
+                            # commit + publish the coalesced bar so the
+                            # pending preview transitions to a permanent
+                            # entry.
+                            coalesced = self._drain_mid_stream_queue()
+                            if coalesced is not None:
+                                self.publish(coalesced)
+                            self.inbox.push_front(
+                                AWAIT_USER,
+                                *items[item_idx + 1 :],
+                            )
+                            break
+
+                        case Kill(call_id=cid):
+                            if cid is None:
+                                for t in self.running_tools.values():
+                                    t.cancel()
+                                self.running_tools = {}
+                                self.cohort.clear()
+                                cohort_seen = False
+                            elif cid in self.running_tools:
+                                self.running_tools.pop(cid).cancel()
+                                self.cohort.discard(cid)
+
+                        case Detach(call_id=cid):
+                            if cid is None:
+                                self._stub_running_tools_and_let_finish()
+                                self.running_tools = {}
+                                self.cohort.clear()
+                                cohort_seen = False
+                            elif cid in self.running_tools:
+                                task = self.running_tools.pop(cid)
+                                self.cohort.discard(cid)
+                                self.history.append(
+                                    ToolResult(
+                                        call_id=cid,
+                                        content="[detached]",
                                     ),
-                                ),
+                                )
+                                self.detached[cid] = task
+
+                        case Undetach(call_id=cid):
+                            if cid is None:
+                                for did in self.detached:
+                                    self.cohort.add(did)
+                            elif cid in self.detached:
+                                self.cohort.add(cid)
+
+                        case Compact(args=args) | Recompact(args=args):
+                            if self.compact_task and not self.compact_task.done():
+                                continue
+                            if self.model_call:
+                                self.model_call.cancel()
+                                self.model_call = None
+                            self._stub_running_tools_and_let_finish()
+                            self.running_tools = {}
+                            self.cohort.clear()
+                            cohort_seen = False
+                            queued.clear()
+                            # Capture buffered mid-stream input into the snapshot
+                            # the compactor will see; publish the coalesced
+                            # bar so the pending preview transitions to a
+                            # committed entry.
+                            coalesced = self._drain_mid_stream_queue()
+                            if coalesced is not None:
+                                self.publish(coalesced)
+                            self.compact_task = asyncio.create_task(
+                                self._compact_and_post(args),
                             )
-                        elif isinstance(self.history[-1], AssistantMessage):
-                            # Splice landed after the preempted round
-                            # already responded. History tail is an
-                            # ``AssistantMessage``, so the end-of-loop
-                            # model-call gate won't fire on its own.
-                            # Append a terse notification (the real
-                            # content is already in its proper slot
-                            # above) so the model wakes and can react
-                            # to the now-real tool result.
-                            self.history.append(
-                                UserMessage(
-                                    text=(f"[Detached tool {item.call_id} completed]"),
-                                ),
-                            )
-                        self.publish(item)
+                            self.publish(CompactStarted())
 
-                    case ModelSwitch():
-                        # Buffer the switch; applied below once the
-                        # in-flight model call / compaction (if any)
-                        # completes. The OLD model finishes recording
-                        # its cost before the swap lands.
-                        self._pending_switch = item
+                        case CompactComplete(
+                            summary=summary,
+                            snapshot_len=n,
+                        ):
+                            self.compact_task = None
+                            new_items = self.history[n:]
+                            self.history.clear()
+                            self.history.extend(summary)
+                            self.history.extend(new_items)
+                            self.publish(item)
 
-                    case _:
-                        pass
+                        case UserMessage():
+                            if self.model_call is not None:
+                                # Mid-stream: buffer only. The ``queued_input_pane``
+                                # in the REPL renders ``pending_mid_stream()`` as
+                                # a dim preview while the buffer is non-empty,
+                                # so the user has immediate visual feedback
+                                # without a duplicate bar in console. The bar
+                                # appears on drain (ModelResponseComplete /
+                                # Halt / ModelResponseError / Compact) when
+                                # the coalesced UserMessage is published --
+                                # at which point the preview drops because the
+                                # buffer is empty. One UI surface at a time.
+                                self._mid_stream_queue.append(item)
+                            else:
+                                # Mid-cohort or idle: preempt and append.
+                                # Coalesce on the alternation-invariant helper
+                                # so two same-batch Enters (or a post-halt
+                                # follow-up) don't stack as consecutive user
+                                # turns in history.
+                                self._stub_running_tools_and_let_finish()
+                                self.running_tools = {}
+                                self.cohort.clear()
+                                cohort_seen = False
+                                self._append_or_coalesce_user(item)
+                                self.publish(item)
 
-            if (
-                self._pending_switch is not None
-                and self.model_call is None
-                and self.compact_task is None
-            ):
-                pending = self._pending_switch
-                self._pending_switch = None
-                pending.apply()
-                self.publish(pending)
+                        case UserQueuedMessage():
+                            queued.append(item)
 
-            if not self.cohort and cohort_seen:
-                self.publish(CohortComplete())
-                cohort_seen = False
+                        case ModelResponsePartial():
+                            self.publish(item)
 
-            # ``UserQueuedMessage`` drains at ``ModelIdle``, not
-            # ``CohortComplete``. The ``not self._should_call_model()``
-            # check distinguishes "round chain ended" (history tail is
-            # ``AssistantMessage`` with no tool_calls, i.e. the gate
-            # would not fire on its own) from "between rounds" (history
-            # tail is ``ToolResult``, the gate would fire next round).
-            # Under the former, draining is correct; under the latter,
-            # we'd be cutting the queued content into a chain the user
-            # didn't intend to interrupt.
-            if (
-                not self.cohort
-                and self.model_call is None
-                and self.compact_task is None
-                and not self._should_call_model()
-                and queued
-            ):
-                coalesced = UserMessage(
-                    text="\n\n".join(q.text for q in queued),
-                    attachments=sum(
-                        (q.attachments for q in queued),
-                        (),
-                    ),
-                )
-                self._append_or_coalesce_user(coalesced)
-                queued.clear()
-                # Publish so observers (renderers, persistence, the
-                # REPL's ``make_queued_input_clearer``) see the
-                # commit. Without this, the user bar never renders
-                # in ``console_pane`` and ``queued_input`` is never
-                # cleared.
-                self.publish(coalesced)
+                        case ModelResponseThinking():
+                            self.publish(item)
 
-            if (
-                not self.cohort
-                and self.model_call is None
-                and self.compact_task is None
-                and not self.inbox.gate_armed
-                and self._should_call_model()
-            ):
-                # ``inbox.gate_armed`` blocks firing while ``AWAIT_USER``
-                # is pending (armed by ``Halt`` / ``ModelResponseError``).
-                # Without this guard the model would fire on the stale
-                # ``UserMessage`` still at history.tail, treating the
-                # cancellation as a retry rather than waiting for the
-                # user's next input.
-                self.model_call = asyncio.create_task(
-                    self._stream_and_post(),
-                )
-                self.publish(ModelCallStarted())
+                        case ModelResponseComplete(message=msg):
+                            self.model_call = None
+                            self.history.append(msg)
+                            self.publish(item)
+                            if self._mid_stream_queue:
+                                # User typed mid-stream. Cut their content in
+                                # line: relegate any tool calls to background
+                                # (placeholder + detached task; the result
+                                # splices in via ``DetachedResult`` when the
+                                # tool finishes), then append the coalesced
+                                # user content so the gate fires for it next.
+                                # No ``CohortStarted`` / ``ModelIdle`` here:
+                                # this round did not idle (a follow-up is
+                                # about to fire) and no cohort gates the model.
+                                for tc in msg.tool_calls:
+                                    self.history.append(
+                                        ToolResult(
+                                            call_id=tc.id,
+                                            parent_id=msg.id,
+                                            content="[detached]",
+                                        ),
+                                    )
+                                    self.detached[tc.id] = asyncio.create_task(
+                                        self._run_tool_and_post(tc, parent_id=msg.id),
+                                    )
+                                # Commit mid-stream input to history and
+                                # publish the coalesced bar -- the pending
+                                # preview drops as the buffer empties and
+                                # the bar appears in console, single UI
+                                # transition.
+                                coalesced = self._drain_mid_stream_queue()
+                                if coalesced is not None:
+                                    self.publish(coalesced)
+                            elif msg.tool_calls:
+                                cohort_seen = True
+                                self.publish(CohortStarted())
+                                for tc in msg.tool_calls:
+                                    self.cohort.add(tc.id)
+                                    self.running_tools[tc.id] = asyncio.create_task(
+                                        self._run_tool_and_post(tc, parent_id=msg.id),
+                                    )
+                            else:
+                                self.publish(ModelIdle())
 
-            self.publish(SaveSession())
+                        case ModelResponseCancelled():
+                            self.model_call = None
+                            self.publish(item)
+
+                        case ToolResultPartial():
+                            self.publish(item)
+
+                        case ToolResult(call_id=cid) if cid in self.cohort:
+                            self.cohort.discard(cid)
+                            self.running_tools.pop(cid, None)
+                            self.history.append(item)
+                            self.publish(item)
+
+                        case ToolResult(call_id=cid) if cid in self.detached:
+                            # In-batch race: the tool task completed before
+                            # ``_stub_running_tools_and_let_finish`` reclassified
+                            # its call_id as detached. The ``ToolResult`` was
+                            # pushed as a regular result (because the task
+                            # ran ``self.detached`` check before the stub),
+                            # but a peer item in the same drain batch (e.g.
+                            # a tool-pushed ``UserMessage``) triggered a
+                            # preempt that cleared the cohort. Without this
+                            # case the result would fall through to ``_`` and
+                            # leave the assistant's ``tool_use`` paired only
+                            # with the ``[detached]`` placeholder forever.
+                            # Splice the real content into the placeholder
+                            # exactly like ``DetachedResult`` does.
+                            del self.detached[cid]
+                            for i, prior in enumerate(self.history):
+                                if (
+                                    isinstance(prior, ToolResult)
+                                    and prior.call_id == cid
+                                ):
+                                    self.history[i] = dataclasses.replace(
+                                        prior,
+                                        content=item.content,
+                                        is_error=item.is_error,
+                                    )
+                                    self.publish(
+                                        HistoryEntryUpdated(entry=self.history[i]),
+                                    )
+                                    break
+                            self.publish(item)
+
+                        case DetachedResult():
+                            self.cohort.discard(item.call_id)
+                            # Splice into the existing placeholder so the
+                            # model sees the real result in the slot it
+                            # already expects, without duplicating the
+                            # full content into a phantom user message.
+                            # Both ``[detached]`` (preempt) and ``[Running
+                            # in background: ...]`` (explicit-bg)
+                            # placeholders match by ``call_id``.
+                            spliced = False
+                            for i, prior in enumerate(self.history):
+                                if (
+                                    isinstance(prior, ToolResult)
+                                    and prior.call_id == item.call_id
+                                ):
+                                    self.history[i] = dataclasses.replace(
+                                        prior,
+                                        content=item.content,
+                                        is_error=item.is_error,
+                                    )
+                                    self.publish(
+                                        HistoryEntryUpdated(entry=self.history[i]),
+                                    )
+                                    spliced = True
+                                    break
+                            if not spliced:
+                                # No placeholder to splice into (rare: result
+                                # arrived before the stub was inserted). Fall
+                                # back to a user message so the content isn't
+                                # silently dropped.
+                                self.history.append(
+                                    UserMessage(
+                                        text=(
+                                            f"[Tool {item.call_id} completed]\n"
+                                            f"{item.content}"
+                                        ),
+                                    ),
+                                )
+                            elif isinstance(self.history[-1], AssistantMessage):
+                                # Splice landed after the preempted round
+                                # already responded. History tail is an
+                                # ``AssistantMessage``, so the end-of-loop
+                                # model-call gate won't fire on its own.
+                                # Append a terse notification (the real
+                                # content is already in its proper slot
+                                # above) so the model wakes and can react
+                                # to the now-real tool result.
+                                self.history.append(
+                                    UserMessage(
+                                        text=(
+                                            f"[Detached tool {item.call_id} completed]"
+                                        ),
+                                    ),
+                                )
+                            self.publish(item)
+
+                        case ModelSwitch():
+                            # Buffer the switch; applied below once the
+                            # in-flight model call / compaction (if any)
+                            # completes. The OLD model finishes recording
+                            # its cost before the swap lands.
+                            self._pending_switch = item
+
+                        case _:
+                            pass
+
+                if (
+                    self._pending_switch is not None
+                    and self.model_call is None
+                    and self.compact_task is None
+                ):
+                    pending = self._pending_switch
+                    self._pending_switch = None
+                    # ``apply`` runs slash-handler-supplied code
+                    # (``Agent.swap_model``), the only synchronous user-facing
+                    # raiser in the per-iteration gates. Isolate so a
+                    # rejected swap (e.g. new model's window < current
+                    # budget) doesn't skip the remaining gates -- the
+                    # model-call gate must still fire on this iteration
+                    # or the next drain blocks with no live state to wake
+                    # it. ``publish`` only on success: observers treat
+                    # ``ModelSwitch`` as "the swap landed."
+                    try:
+                        pending.apply()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 -- surface swap errors without halting the engine
+                        log_exception_or_warning(
+                            logger, f"model swap rejected ({pending.label})", exc
+                        )
+                    else:
+                        self.publish(pending)
+
+                if not self.cohort and cohort_seen:
+                    self.publish(CohortComplete())
+                    cohort_seen = False
+
+                # ``UserQueuedMessage`` drains at ``ModelIdle``, not
+                # ``CohortComplete``. The ``not self._should_call_model()``
+                # check distinguishes "round chain ended" (history tail is
+                # ``AssistantMessage`` with no tool_calls, i.e. the gate
+                # would not fire on its own) from "between rounds" (history
+                # tail is ``ToolResult``, the gate would fire next round).
+                # Under the former, draining is correct; under the latter,
+                # we'd be cutting the queued content into a chain the user
+                # didn't intend to interrupt.
+                if (
+                    not self.cohort
+                    and self.model_call is None
+                    and self.compact_task is None
+                    and not self._should_call_model()
+                    and queued
+                ):
+                    coalesced = UserMessage(
+                        text="\n\n".join(q.text for q in queued),
+                        attachments=sum(
+                            (q.attachments for q in queued),
+                            (),
+                        ),
+                    )
+                    self._append_or_coalesce_user(coalesced)
+                    queued.clear()
+                    # Publish so observers (renderers, persistence, the
+                    # REPL's ``make_queued_input_clearer``) see the
+                    # commit. Without this, the user bar never renders
+                    # in ``console_pane`` and ``queued_input`` is never
+                    # cleared.
+                    self.publish(coalesced)
+
+                if (
+                    not self.cohort
+                    and self.model_call is None
+                    and self.compact_task is None
+                    and not self.inbox.gate_armed
+                    and self._should_call_model()
+                ):
+                    # ``inbox.gate_armed`` blocks firing while ``AWAIT_USER``
+                    # is pending (armed by ``Halt`` / ``ModelResponseError``).
+                    # Without this guard the model would fire on the stale
+                    # ``UserMessage`` still at history.tail, treating the
+                    # cancellation as a retry rather than waiting for the
+                    # user's next input.
+                    self.model_call = asyncio.create_task(
+                        self._stream_and_post(),
+                    )
+                    self.publish(ModelCallStarted())
+
+                self.publish(SaveSession())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- master catch around the dispatch body; a sync raise (e.g. `pending.apply` for a queued ModelSwitch) must not tear down the engine
+                log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
 
     async def run(self, msg: UserMessage) -> list[HistoryEntry]:
         """Process one user message to completion.

@@ -129,6 +129,21 @@ def test_model_resolves_context_tag_to_profile() -> None:
     assert model.max_request_tokens == 1_000_000
 
 
+def test_default_model_inherits_from_anthropic() -> None:
+    """``AnthropicCLI`` defers to ``Anthropic.DEFAULT_MODEL``.
+
+    Vendor-base classes (``Anthropic``, ``Google``, ``OpenAI``) own the
+    catalog; auth subclasses (``CLI`` / ``Subscription``) should not
+    fork the default unless the transport genuinely demands it.
+    """
+    assert AnthropicCLI.DEFAULT_MODEL == Anthropic.DEFAULT_MODEL
+
+
+def test_default_utility_model_inherits_from_anthropic() -> None:
+    """``AnthropicCLI`` defers to ``Anthropic.DEFAULT_UTILITY_MODEL``."""
+    assert AnthropicCLI.DEFAULT_UTILITY_MODEL == Anthropic.DEFAULT_UTILITY_MODEL
+
+
 def test_utility_model_picks_haiku() -> None:
     """``utility_model`` returns the cheapest Claude in ``KNOWN_MODELS``."""
     provider = AnthropicCLI()

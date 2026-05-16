@@ -58,8 +58,12 @@ Things Claude Code, Codex CLI, and Gemini CLI don't do:
   `--max-budget-usd N` caps the whole tree.
 - **Hot self-mutation.** *"Switch to OpenAI then back."* Mid-session,
   no restart.
-- **Conversational self-diagnostics.** *"How many tokens are in your
-  context?"* Answered by the agent itself.
+- **Self-directing agent fleets.** Agents mutate their own runtime —
+  provider, model, thinking effort, context — in plain English,
+  mid-task. Paired with peer-to-peer `AgentSend`, a coordinator can
+  retune its workers on the fly: *"switch to o1, crank thinking,
+  recompact and drop the file reads."* It can also tell you how many
+  tokens it's holding.
 - **Interruptible and detachable tasks.** *"The task is stuck."*
   *"Detach `foo` and let it keep running."*
 - **Richer built-in tools.** `PaperSearch` and `PaperFetch` walk

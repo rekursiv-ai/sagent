@@ -74,9 +74,6 @@ class AnthropicCLI(Anthropic):
     the CLI emits on the terminal ``result`` event.
     """
 
-    DEFAULT_MODEL = "claude-sonnet-4-6"
-    DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
-
     def __init__(self, *, account: str | None = None) -> None:
         super().__init__(api_key="")
         self._account = account
