@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 # Internal builds keep extra backends; public exports keep only DuckDuckGo.
-SearchBackends: TypeAlias = Literal["duckduckgo", "searxng"]
+_BACKEND_NAMES = Literal["duckduckgo", "searxng"]
 DEFAULT_SEARCH_BACKEND: SearchBackends = "duckduckgo"
+SearchBackends: TypeAlias = _BACKEND_NAMES  # noqa: UP040 -- type keyword breaks get_args() at runtime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
