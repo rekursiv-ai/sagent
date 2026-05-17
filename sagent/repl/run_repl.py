@@ -49,6 +49,7 @@ from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
+from sagent.types.history import ToolResult, UserMessage
 from sagent.types.runtime import (
     ModelIdle,
     RuntimeEvent,
@@ -114,6 +115,7 @@ async def run_repl(
             printer=printer,
         )
         replay_messages(agent, printer)
+        _publish_startup_idle_if_settled(agent.runtime)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:
@@ -149,6 +151,25 @@ async def run_repl(
             "sagent --continue-all     # most recent session across all dirs\n"
             "sagent --resume-all       # interactive picker across all dirs\n"
         )
+
+
+def _publish_startup_idle_if_settled(runtime: agent_runtime.AgentRuntime) -> None:
+    """Publish an initial idle edge when the REPL starts already settled."""
+    if (
+        runtime.model_call is None
+        and runtime.compact_task is None
+        and not runtime.cohort
+        and not runtime.inbox.gate_armed
+        and not _history_triggers_model_call(runtime)
+    ):
+        runtime.publish(ModelIdle())
+
+
+def _history_triggers_model_call(runtime: agent_runtime.AgentRuntime) -> bool:
+    """Return True when persisted history already needs a model turn."""
+    return bool(runtime.history) and isinstance(
+        runtime.history[-1], (ToolResult, UserMessage)
+    )
 
 
 def make_queued_input_committer(

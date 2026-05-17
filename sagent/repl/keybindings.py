@@ -38,6 +38,7 @@ from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
 from sagent.types.history import UserMessage
+from sagent.types.runtime import UserQueuedMessage
 
 
 if TYPE_CHECKING:
@@ -147,6 +148,20 @@ def _commit_queued_and_restore(
     return restored
 
 
+def _flush_deferred_if_ready(agent: Agent, queued_input: list[str]) -> None:
+    """Dispatch deferred input when no active round can produce an idle edge."""
+    if not queued_input:
+        return
+    if agent.runtime.inbox.gate_armed:
+        item = UserMessage(text="\n\n".join(queued_input))
+    elif agent.work is None and not agent.runtime.cohort:
+        item = UserQueuedMessage(text="\n\n".join(queued_input))
+    else:
+        return
+    queued_input.clear()
+    agent.runtime.inbox.push_back(item)
+
+
 def _kb_submit(
     agent: Agent,
     queued_input: list[str],
@@ -185,6 +200,7 @@ def _kb_submit(
         return
     if nav.cursor > 0:
         restored = _commit_queued_and_restore(queued_input, nav, text)
+        _flush_deferred_if_ready(agent, queued_input)
         buf.text = restored
         buf.cursor_position = len(buf.text)
         return
@@ -211,17 +227,18 @@ def _kb_defer(
     to ``snapshot_input`` so the user's pre-navigation typing isn't
     lost.
     """
-    del agent  # No runtime push -- staging is REPL-local until ModelIdle.
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
         return
     if nav.cursor > 0:
         restored = _commit_queued_and_restore(queued_input, nav, text)
+        _flush_deferred_if_ready(agent, queued_input)
         buf.text = restored
         buf.cursor_position = len(buf.text)
         return
     queued_input.append(text)
+    _flush_deferred_if_ready(agent, queued_input)
     buf.append_to_history()
     buf.reset()
 
