@@ -547,6 +547,60 @@ async def test_swap_model_schedules_close_on_old_cli_model() -> None:
     assert old.closed_event.is_set()
 
 
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_swap_model_logs_close_failure_via_log_task_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A crash inside ``close()`` on the swapped-out model lands at ERROR.
+
+    The teardown task is fire-and-forget. Before the unification, the
+    site used a hand-rolled done-callback (``_log_close_errors``) that
+    called ``log_exception_or_warning`` outside any ``except`` block --
+    so ``logger.exception`` read an empty ``sys.exc_info()`` and the
+    traceback never made it into the log record. Replacing it with the
+    shared ``log_task_exception`` helper (which passes ``exc_info=exc``
+    explicitly) preserves the traceback. Pin both contracts here:
+    ERROR level, AND traceback present.
+    """
+    import logging  # noqa: PLC0415 -- test-local
+
+    @dataclass(slots=True, kw_only=True)
+    class CrashingCloseModel(StubModel):
+        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def close(self) -> None:
+            try:
+                raise RuntimeError("simulated close failure")
+            finally:
+                self.closed_event.set()
+
+    old = CrashingCloseModel()
+    a = _build_agent(model=old)
+    logger_name = "sagent.agent.agent"
+    caplog.set_level(logging.DEBUG, logger=logger_name)
+    a.swap_model(StubModel(model_id="stub-2"))
+    # Wait for the close coroutine to start its raise.
+    await asyncio.wait_for(old.closed_event.wait(), timeout=1.0)
+    # The done-callback fires on a later loop tick after the task
+    # transitions to done. Poll a handful of yields rather than
+    # guess the exact tick count.
+    for _ in range(20):
+        await asyncio.sleep(0.001)
+        if any(
+            r.name == logger_name and r.levelname == "ERROR" for r in caplog.records
+        ):
+            break
+    errs = [
+        r for r in caplog.records if r.name == logger_name and r.levelname == "ERROR"
+    ]
+    assert errs, (
+        "swapped-out model close failure must surface at ERROR; "
+        f"records={[(r.levelname, r.getMessage()) for r in caplog.records]!r}"
+    )
+    assert errs[0].exc_info is not None, "close ERROR must carry a traceback"
+
+
 # --- Agent.change_model -----------------------------------------------------
 
 
@@ -1149,6 +1203,234 @@ async def test_compact_now_replaces_history_in_place() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_now_returns_true_on_success() -> None:
+    """``compact_now`` reports whether compaction made progress.
+
+    Recovery logic in ``_AgentModel.stream`` needs to distinguish a
+    successful compaction (history actually shrank; retry the model)
+    from a swallowed failure (compactor raised; history unchanged or
+    longer). Returning bool gives that signal without the caller
+    having to grovel through history mutation.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [types.history.UserMessage(text="[summary]")]
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
+    a.runtime.history.append(types.history.UserMessage(text="old"))
+    ok = await a.compact_now()
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_compact_now_returns_false_on_compactor_failure() -> None:
+    """``compact_now`` returns False when the inner compactor raises.
+
+    Without this signal, ``_AgentModel.stream``'s overflow recovery
+    would re-fire the model with stale (or slightly longer) history
+    and burn ``MAX_OVERFLOW_RECOVERY`` retries on identical failures
+    -- exactly the BUGS34 regression that produced cryptic ``RuntimeError:
+    context overflow recovery failed after 3 compactions`` messages.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            raise RuntimeError("compaction blew up")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
+    a.runtime.history.append(types.history.UserMessage(text="x"))
+    ok = await a.compact_now()
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
+    """No compactor = nothing to do; report success so callers don't loop.
+
+    Returning ``False`` from a no-op would mislead ``_AgentModel.stream``
+    into raising ``ContextOverflowError`` for agents that never asked
+    to manage their own context (subscription providers, tests). The
+    "no compactor" path is intentional configuration, not a failure.
+    """
+    a = _build_agent()
+    a.runtime.history.append(types.history.UserMessage(text="x"))
+    ok = await a.compact_now()
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
+    """``compact_if_needed`` matches ``compact_now``'s no-compactor semantics.
+
+    Before unification, ``compact_if_needed`` returned ``None`` while
+    ``compact_now`` returned ``True`` for the same no-compactor path.
+    The divergence made every caller branch on the bool/None distinction.
+    Unifying on bool gives one type signature, one contract: ``True``
+    means "nothing further to do (success or no-op)", ``False`` means
+    "tried to compact and the inner compactor raised".
+    """
+    a = _build_agent()
+    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_returns_true_when_should_compact_false() -> None:
+    """When the compactor decides headroom is fine, ``compact_if_needed`` succeeds.
+
+    Pre-unification, the no-trigger path returned ``None`` implicitly.
+    Same contract as the no-compactor path: ``True`` = "no further work
+    needed", with the gate result rolled up into the bool.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _NeverCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            raise AssertionError("compact must not run when should_compact False")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_NeverCompactor())
+    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
+    """When ``compact_now`` reports False, ``compact_if_needed`` propagates it.
+
+    The bool flows up so future callers (proactive sites beyond the
+    ``_AgentModel.stream`` overflow loop) can short-circuit on the same
+    "history did not shrink" signal that bool was introduced for.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _CompactBrokenButGatedTrue:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            raise RuntimeError("compaction blew up")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(model=StubModel(), tools=[], compactor=_CompactBrokenButGatedTrue())
+    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is False
+
+
+@pytest.mark.asyncio
 async def test_compact_now_failure_appends_error_user_message() -> None:
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
@@ -1370,8 +1652,133 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
+    """``should_compact`` -> True forces compaction BEFORE the provider call.
+
+    The reactive path (overflow recovery on 400) is necessary but not
+    sufficient: some providers happily accept oversized prompts up to
+    a hard ceiling and only 400 at that ceiling, by which point the
+    cost is already paid. The proactive path consults
+    ``Compactor.should_compact`` ahead of each stream and runs
+    ``compact_now`` when it returns True -- so the headroom buffer
+    actually buys headroom.
+
+    Failure mode without the wiring: a session at ~1.07M tokens with
+    zero ``Compact`` events ever fired (see
+    ``~/.sagent/.../session.jsonl`` from the wedged run).
+    """
+    order: list[str] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _OneShotCompactor:
+        triggered: bool = False
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            if self.triggered:
+                return False
+            self.triggered = True
+            return True
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            order.append("compact")
+            return [types.history.UserMessage(text="[compact]")]
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingModel:
+        order_log: list[str]
+        model_id: str = "rec"
+        max_request_tokens: int = 100_000
+        max_response_tokens: int = 1_024
+        supports_streaming: bool = True
+        supports_thinking: bool = False
+        supports_effort: bool = False
+        supports_cache_control: bool = False
+        valid_service_tiers: tuple[str, ...] = ()
+        supports_context_management: bool = False
+        supports_persistent_retry: bool = False
+        supports_account_auth: bool = False
+        max_image_dim: int = 8_000
+        max_image_bytes: int = 5 * 1024 * 1024
+
+        @property
+        def pricing(self) -> types.model.Pricing:
+            return types.model.Pricing()
+
+        def estimate_text_token_count(self, text: str) -> int:
+            return max(1, len(text) // 4)
+
+        def estimate_image_token_count(self, data: bytes) -> int:
+            del data
+            return 256
+
+        def is_context_overflow(self, error: Exception) -> bool:
+            del error
+            return False
+
+        def is_retryable_provider_error(self, error: Exception) -> bool:
+            del error
+            return False
+
+        async def buffer(
+            self, request: types.model.ModelRequest
+        ) -> types.model.ModelResponse:
+            return await self.stream(request)
+
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            on_text: object = None,
+            on_thinking: object = None,
+        ) -> types.model.ModelResponse:
+            del request, on_text, on_thinking
+            self.order_log.append("stream")
+            return types.model.ModelResponse(
+                message=types.history.AssistantMessage(text="ok"),
+            )
+
+    model = _RecordingModel(order_log=order)
+    a = Agent(model=model, tools=[], compactor=_OneShotCompactor())
+    async for _ in a.run(types.history.UserMessage(text="hi")):
+        pass
+    assert order == ["compact", "stream"], order
+
+
+@pytest.mark.asyncio
 async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
-    """Exhaust MAX_OVERFLOW_RECOVERY: types.exceptions.PromptTooLongError surfaces."""
+    """Exhaust MAX_OVERFLOW_RECOVERY: surface a user-facing context-overflow.
+
+    The bare ``PromptTooLongError`` text ("too long") is not actionable
+    for the user; the renderer prefixes it with ``ClassName:`` which is
+    pure noise. After all overflow retries fail, the agent surfaces a
+    :class:`types.exceptions.ContextOverflowError` (a ``UserFacingError``
+    subclass) whose message names the remediations the user can take
+    -- ``/clear``, ``/compact``, ``/model`` with a larger window.
+    """
 
     @dataclass(slots=True, kw_only=True)
     class _NoOpCompactor:
@@ -1409,7 +1816,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
 
     model = _OverflowModel(overflow_count=10)  # always overflow
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
-    with pytest.raises(types.exceptions.PromptTooLongError):
+    with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
             history=[types.history.UserMessage(text="x")],
             system="",
@@ -1417,6 +1824,88 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
+    msg = str(ei.value)
+    assert "/clear" in msg
+    assert "/compact" in msg
+    assert isinstance(ei.value.__cause__, types.exceptions.PromptTooLongError)
+    # The polished message should not embed the underlying exception
+    # again -- ``__cause__`` already carries it. Duplicating the cause
+    # in the message dilutes the actionable text with Python internals.
+    assert "Underlying error" not in msg, (
+        f"message should not duplicate __cause__; got {msg!r}"
+    )
+    assert "PromptTooLongError" not in msg, (
+        f"message should not leak ClassName: prefix; got {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> None:
+    """When ``compact_now`` returns False, recovery stops immediately.
+
+    BUGS34 regression coverage: previously the recovery loop called the
+    model again with effectively unchanged history after every failed
+    compaction, burning ``MAX_OVERFLOW_RECOVERY`` retries on identical
+    400s. With the bool signal the agent surfaces
+    :class:`ContextOverflowError` after the FIRST failed compaction so
+    the user gets a halt while we still know what went wrong.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenCompactor:
+        calls: int = 0
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            self.calls += 1
+            raise RuntimeError("compaction blew up")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    model = _OverflowModel(overflow_count=10)
+    compactor = _BrokenCompactor()
+    a = Agent(model=model, tools=[], compactor=compactor)
+    with pytest.raises(types.exceptions.ContextOverflowError):
+        await a._agent_model.stream(
+            history=[types.history.UserMessage(text="x")],
+            system="",
+            tools=[],
+            on_text=lambda _t: None,
+            on_thinking=lambda _t: None,
+        )
+    # Model was hit once (first attempt), compactor once (the failed
+    # recovery). No further retries.
+    assert model.call_index == 1, (
+        f"model must not retry after failed compaction; got {model.call_index} calls"
+    )
+    assert compactor.calls == 1, (
+        f"compactor must not retry on itself; got {compactor.calls} calls"
+    )
 
 
 @pytest.mark.asyncio

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 
 import asyncio
 import contextlib
 import json
+import logging
 
 import pytest
 
@@ -134,6 +135,49 @@ async def test_write_after_subprocess_exit_raises_runtime_error() -> None:
 def test_unused_argument_holders() -> None:
     """Static placeholder to satisfy basedpyright's import-tracking on ``cast``."""
     _ = cast
+
+
+class _BoomDrainSubproc(Subproc):
+    """Subproc whose stderr drainer raises on first scheduling."""
+
+    @override
+    async def _drain_stderr(self) -> None:
+        raise RuntimeError("simulated drainer crash")
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_stderr_drain_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A crash inside ``_drain_stderr`` surfaces at ``ERROR`` immediately.
+
+    The drainer is fire-and-forget: ``close()`` joins it eventually and
+    logs at ``debug``, but the failure may be hours old by then. Wire
+    a ``log_task_exception`` callback so the failure shows up in logs
+    at the moment it happens.
+    """
+    logger_name = "sagent.providers.lib.subproc"
+    proc = _BoomDrainSubproc(["python3", "-c", "import time; time.sleep(60)"])
+    with caplog.at_level(logging.DEBUG, logger=logger_name):
+        await proc.start()
+        # Yield so the drainer task gets scheduled and raises.
+        for _ in range(5):
+            await asyncio.sleep(0)
+            if any(
+                r.name == logger_name and r.levelname == "ERROR" for r in caplog.records
+            ):
+                break
+        await proc.close()
+    errs = [
+        r for r in caplog.records if r.name == logger_name and r.levelname == "ERROR"
+    ]
+    assert errs, (
+        "drainer crash was not surfaced at ERROR; "
+        f"records={[(r.levelname, r.getMessage()) for r in caplog.records]!r}"
+    )
+    assert errs[0].exc_info is not None, "drainer ERROR must carry a traceback"
+    assert "stderr" in errs[0].getMessage().lower()
 
 
 if __name__ == "__main__":

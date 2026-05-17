@@ -24,6 +24,7 @@ import logging
 import shutil
 
 from sagent.lib.json import MutableJSON
+from sagent.types.exceptions import log_task_exception
 
 
 __all__ = ["Subproc"]
@@ -80,6 +81,9 @@ class Subproc:
             cwd=str(self._cwd) if self._cwd is not None else None,
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._stderr_task.add_done_callback(
+            log_task_exception(logger, "subprocess stderr drainer crashed"),
+        )
 
     async def write_line(self, line: str) -> None:
         """Write one NDJSON line (newline appended) to the child's stdin.

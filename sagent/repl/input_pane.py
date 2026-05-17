@@ -138,6 +138,7 @@ from sagent.tools.core import agent_registry
 from sagent.types.exceptions import (
     UserFacingError,
     log_exception_or_warning,
+    log_task_exception,
 )
 from sagent.types.history import UserMessage
 from sagent.types.runtime import (
@@ -216,6 +217,9 @@ def spawn_repl_pump(
 
     """
     task = asyncio.create_task(_input_pump(agent, source, printer))
+    task.add_done_callback(
+        log_task_exception(logger, "REPL input pump crashed"),
+    )
     agent.register_background(
         REPL_PUMP_KEY,
         BackgroundTaskEntry(

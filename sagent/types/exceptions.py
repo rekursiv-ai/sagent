@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import asyncio
     import logging
 
     from sagent.types.model import ModelResponse
@@ -13,11 +16,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AuthRefreshError",
+    "ContextOverflowError",
     "ModelTerminationError",
     "PromptTooLongError",
     "StreamInterruptedError",
     "UserFacingError",
     "log_exception_or_warning",
+    "log_task_exception",
 ]
 
 
@@ -44,6 +49,21 @@ class AuthRefreshError(UserFacingError):
     """
 
 
+class ContextOverflowError(UserFacingError):
+    """Context window exhausted; auto-compaction could not make progress.
+
+    Raised by ``_AgentModel.stream`` when reactive overflow recovery
+    has run its course -- either ``compact_now`` itself failed (the
+    compactor call raised, typically because the compaction request
+    was also too large) or ``MAX_OVERFLOW_RECOVERY`` retries elapsed
+    without the history shrinking enough to fit. The message embeds
+    the recommended remediation (``/clear``, ``/compact <hints>``,
+    ``/model`` to a larger window) so the REPL renderer can show it
+    verbatim without ``ClassName:`` noise. The original provider
+    exception is preserved via ``__cause__``.
+    """
+
+
 def log_exception_or_warning(
     logger: logging.Logger, msg: str, exc: BaseException
 ) -> None:
@@ -63,6 +83,43 @@ def log_exception_or_warning(
         logger.warning("%s: %s", msg, exc)
     else:
         logger.exception(msg)
+
+
+def log_task_exception(
+    logger: logging.Logger, where: str
+) -> Callable[[asyncio.Task[object]], None]:
+    """Build an ``asyncio.Task`` done-callback that logs unhandled errors.
+
+    Fire-and-forget ``asyncio.create_task`` sites swallow exceptions
+    silently -- ``asyncio`` only surfaces them as
+    ``Task exception was never retrieved`` warnings at GC, which arrive
+    too late and too quietly to be actionable. Attach this callback
+    to every such site to log the failure at the moment it happens.
+
+    Usage::
+
+        task = asyncio.create_task(work())
+        task.add_done_callback(log_task_exception(logger, "what worker"))
+
+    Policy mirrors :func:`log_exception_or_warning`: ``UserFacingError``
+    logs at ``WARNING`` with no traceback (the message is already
+    polished remediation text); anything else logs at ``ERROR`` with
+    ``exc_info`` so the operator gets a traceback. ``CancelledError``
+    and clean completion are silent.
+    """
+
+    def _cb(task: asyncio.Task[object]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if isinstance(exc, UserFacingError):
+            logger.warning("%s: %s", where, exc)
+        else:
+            logger.error("%s", where, exc_info=exc)
+
+    return _cb
 
 
 class PromptTooLongError(Exception):

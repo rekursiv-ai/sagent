@@ -51,10 +51,13 @@ def test_prompt_lists_other_agents() -> None:
         agent_label_var.reset(token_self)
     assert "Alice" in p
     assert "Bob" in p
-    assert "Me" not in p
+    # ``Me`` surfaces as the self-identity anchor (``Your agent label is
+    # 'Me'.``) but is excluded from the addressable peers listing.
+    assert "Your agent label is 'Me'." in p
+    assert "Active agents you can message: Alice, Bob" in p
 
 
-def test_prompt_empty_when_alone() -> None:
+def test_prompt_self_only_returns_identity() -> None:
     t = AgentSend()
     token = agent_label_var.set("Me")
     agent_registry["Me"] = FakeAgent()
@@ -63,7 +66,7 @@ def test_prompt_empty_when_alone() -> None:
     finally:
         agent_registry.pop("Me", None)
         agent_label_var.reset(token)
-    assert p == ""
+    assert p == "Your agent label is 'Me'."
 
 
 @pytest.mark.asyncio
@@ -168,6 +171,60 @@ def test_deliver_dead_target_is_noop(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING"):
         send_module._deliver(None, "Me", "x", 3)
     assert any("Delayed message to dead agent" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_self_send_nudge_fires_when_to_matches_sender() -> None:
+    """Undelayed self-send surfaces the soft loop-detection nudge.
+
+    Pin the intended trigger: sender label_var is set AND ``to`` matches.
+    The nudge protects against LLM self-loop bugs (see pinger incident);
+    this test fixes the contract so the fallthrough-default fix below
+    can't accidentally suppress the legitimate case.
+    """
+    t = AgentSend()
+    me = FakeAgent()
+    agent_registry["Me"] = me
+    token = agent_label_var.set("Me")
+    try:
+        with with_fake_agent():
+            result = await t.run({"to": "Me", "content": "hello self"})
+    finally:
+        agent_registry.pop("Me", None)
+        agent_label_var.reset(token)
+    assert not result.is_error
+    assert "sending a message to yourself" in result.content
+
+
+@pytest.mark.asyncio
+async def test_no_nudge_when_sender_label_unset() -> None:
+    """No nudge when the caller's ``agent_label_var`` isn't set.
+
+    Before the guard, ``agent_label_var.get("unknown")`` produced the
+    sentinel string ``"unknown"``. A target agent registered under the
+    literal label ``"unknown"`` would falsely match the unset sender
+    and trigger the self-send nudge -- a phantom warning for a routine
+    cross-agent message. Pin the guard: nudge fires only when label_var
+    is genuinely set AND equals ``to``.
+    """
+    t = AgentSend()
+    target = FakeAgent()
+    # ``unknown`` is the literal value of the prior nudge's default
+    # sender sentinel; verify it no longer self-matches.
+    agent_registry["unknown"] = target
+    try:
+        # No ``agent_label_var.set(...)`` -- the sender label_var is
+        # at its default empty value, modelling a tool call from a
+        # context that didn't establish identity (test harnesses,
+        # FakeAgent, root before serve_forever).
+        with with_fake_agent():
+            result = await t.run({"to": "unknown", "content": "hi"})
+    finally:
+        agent_registry.pop("unknown", None)
+    assert not result.is_error
+    assert "sending a message to yourself" not in result.content, (
+        f"unset sender must not phantom-match an 'unknown' target; got {result.content!r}"
+    )
 
 
 if __name__ == "__main__":
