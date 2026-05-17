@@ -23,6 +23,7 @@ import asyncio
 import logging
 
 from sagent.providers.lib.subproc import Subproc
+from sagent.types.exceptions import log_task_exception
 
 
 __all__ = ["HotSpare"]
@@ -142,3 +143,6 @@ class HotSpare:
         if self._spare_task is not None or self._spare is not None:
             return
         self._spare_task = asyncio.create_task(self._factory())
+        self._spare_task.add_done_callback(
+            log_task_exception(logger, "hot spare warm-up crashed"),
+        )

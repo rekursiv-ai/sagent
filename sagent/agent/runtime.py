@@ -223,7 +223,10 @@ import contextvars
 import dataclasses
 import logging
 
-from sagent.types.exceptions import log_exception_or_warning
+from sagent.types.exceptions import (
+    log_exception_or_warning,
+    log_task_exception,
+)
 
 # Engine consumes a subset of the types. No re-export shim -- callers
 # must import message types and event vocabulary from
@@ -690,6 +693,9 @@ class AgentRuntime:
                             self.compact_task = asyncio.create_task(
                                 self._compact_and_post(args),
                             )
+                            self.compact_task.add_done_callback(
+                                log_task_exception(logger, "compaction task crashed"),
+                            )
                             self.publish(CompactStarted())
 
                         case CompactComplete(
@@ -770,9 +776,16 @@ class AgentRuntime:
                                             content="[detached]",
                                         ),
                                     )
-                                    self.detached[tc.id] = asyncio.create_task(
+                                    detached_task = asyncio.create_task(
                                         self._run_tool_and_post(tc, parent_id=msg.id),
                                     )
+                                    detached_task.add_done_callback(
+                                        log_task_exception(
+                                            logger,
+                                            f"detached tool {tc.name!r} crashed",
+                                        ),
+                                    )
+                                    self.detached[tc.id] = detached_task
                                 # Commit mid-stream input to history and
                                 # publish the coalesced bar -- the pending
                                 # preview drops as the buffer empties and
@@ -786,9 +799,16 @@ class AgentRuntime:
                                 self.publish(CohortStarted())
                                 for tc in msg.tool_calls:
                                     self.cohort.add(tc.id)
-                                    self.running_tools[tc.id] = asyncio.create_task(
+                                    tool_task = asyncio.create_task(
                                         self._run_tool_and_post(tc, parent_id=msg.id),
                                     )
+                                    tool_task.add_done_callback(
+                                        log_task_exception(
+                                            logger,
+                                            f"cohort tool {tc.name!r} crashed",
+                                        ),
+                                    )
+                                    self.running_tools[tc.id] = tool_task
                             else:
                                 self.publish(ModelIdle())
 
@@ -987,6 +1007,9 @@ class AgentRuntime:
                     self.model_call = asyncio.create_task(
                         self._stream_and_post(),
                     )
+                    self.model_call.add_done_callback(
+                        log_task_exception(logger, "model-call task crashed"),
+                    )
                     self.publish(ModelCallStarted())
 
                 self.publish(SaveSession())
@@ -1019,6 +1042,9 @@ class AgentRuntime:
 
         self.observers.append(_watch)
         task = asyncio.create_task(self.run_forever())
+        task.add_done_callback(
+            log_task_exception(logger, "run_forever driver task crashed"),
+        )
 
         await done.wait()
         self.inbox.push_back(Quit())

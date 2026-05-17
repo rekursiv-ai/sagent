@@ -5,18 +5,25 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import override
 
+import asyncio
 import itertools
+import logging
 
 import pytest
 
 from sagent.agent.agent import Agent
+from sagent.agent.state import agent_registry
 from sagent.testing import MockModelCaps
+from sagent.tools import agent_spawn as _agent_spawn_mod
 from sagent.tools.agent_spawn import (
     AgentSpawn,
     _last_assistant_result,
+    _persistent_tasks,
     _pick_field,
 )
+from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import (
     agent_counter_var,
     agent_label_var,
@@ -27,6 +34,9 @@ from sagent.tools.core import (
 )
 from sagent.types.history import AssistantMessage, ToolResult
 from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
+
+
+_AGENT_SPAWN_LOGGER = _agent_spawn_mod.__name__
 
 
 @dataclass(slots=True, kw_only=True)
@@ -229,6 +239,60 @@ def test_resolve_tools_explicit_empty_honored() -> None:
     assert out == []
 
 
+def test_resolve_tools_auto_bundles_background_task_with_agent_spawn() -> None:
+    """Granting AgentSpawn must auto-grant BackgroundTask.
+
+    The principle: any agent that can create persistent / background
+    work must also be able to list, cancel, and foreground that work.
+    Bundling avoids the "spawned a runaway child, no way to kill it"
+    failure mode.
+    """
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[spawn, BackgroundTask()],
+    )
+    out = spawn._resolve_tools(["AgentSpawn"], parent)
+    assert isinstance(out, list)
+    assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
+
+
+def test_resolve_tools_no_bundle_when_agent_spawn_absent() -> None:
+    """Without AgentSpawn, no need to bundle BackgroundTask."""
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[spawn, BackgroundTask()],
+    )
+    out = spawn._resolve_tools(["BackgroundTask"], parent)
+    assert isinstance(out, list)
+    assert {t.name for t in out} == {"BackgroundTask"}
+
+
+def test_resolve_tools_bundle_respects_explicit_empty() -> None:
+    """``names=[]`` returns empty regardless of bundle rule."""
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[spawn, BackgroundTask()],
+    )
+    assert spawn._resolve_tools([], parent) == []
+
+
+def test_resolve_tools_bundle_when_parent_lacks_background_task() -> None:
+    """If parent has AgentSpawn but no BackgroundTask, factory adds a
+    fresh BackgroundTask -- the cancel capability is non-negotiable.
+    """
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[spawn],
+    )
+    out = spawn._resolve_tools(["AgentSpawn"], parent)
+    assert isinstance(out, list)
+    assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
+
+
 def test_resolve_system_llm_wins() -> None:
     parent = _make_parent()
     t = AgentSpawn(system="factory-default")
@@ -312,6 +376,164 @@ async def test_run_custom_label_used() -> None:
         t = AgentSpawn()
         result = await t.run({"prompt": "p", "label": "Sub_007"})
     assert not result.is_error
+
+
+class _BoomAgent(Agent):
+    """Agent whose ``serve_forever`` raises immediately.
+
+    Models a child that fails at startup (e.g. its provider rejects
+    the very first model call). Subclassing keeps the override
+    type-safe versus monkey-patching an instance attribute.
+    """
+
+    @override
+    async def serve_forever(self) -> None:
+        raise RuntimeError("simulated crash")
+
+
+@pytest.mark.asyncio
+async def test_persistent_run_logs_unhandled_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A crash inside ``serve_forever`` must be logged with the agent label.
+
+    The ``_run`` wrapper around ``serve_forever`` previously had only
+    ``try/finally`` -- exceptions from the child were stored on the
+    asyncio task and silently lost. Persistent agents that crashed at
+    startup appeared "alive" in the registry but produced no work and
+    no diagnostic. This test pins the contract: any exception out of
+    ``serve_forever`` lands in the logger at ERROR or higher, with the
+    failing child's label in the message.
+    """
+    parent = _make_parent()
+    child = _BoomAgent(
+        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+        tools=[],
+    )
+
+    t = AgentSpawn()
+    with (
+        _parent_context(parent),
+        caplog.at_level(logging.ERROR, logger=_AGENT_SPAWN_LOGGER),
+    ):
+        result = t._spawn_persistent(child, "doomed", "p")
+        assert not result.is_error
+        task = _persistent_tasks.get("doomed")
+        assert task is not None
+        # The whole point: ``_run`` must catch -- never re-raise -- so
+        # the task completes cleanly with the exception logged. In
+        # production, nothing awaits this task; an uncaught raise
+        # would be lost to asyncio's "exception never retrieved"
+        # GC warning.
+        await task
+
+    assert any(
+        "doomed" in record.getMessage() and record.levelno >= logging.ERROR
+        for record in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> None:
+    """A persistent child must NOT clobber ``agent_registry['Agent']``.
+
+    Repro for the AgentSend-doesn't-wake-the-parent bug: the persistent
+    child's task inherits ``agent_label_var`` from the parent task
+    (``asyncio.create_task`` copies the current context). In
+    ``Agent._install_contextvars`` the line ``base_label =
+    agent_label_var.get("") or self.name`` then returns the parent's
+    label (``"Agent"``) rather than the child's own ``self.name``
+    (``"child1"``). For persistent agents, ``label = base_label``, so
+    ``agent_registry["Agent"] = child`` silently overwrites the parent's
+    entry. After this, every ``AgentSend("Agent", ...)`` from any sub
+    (including back from this same child) routes to the child, not to
+    the running parent. The parent never wakes.
+
+    The fix: persistent agents have a definite ``self.name`` set by
+    ``_spawn_persistent``; the label must come from that, not from the
+    inherited ``agent_label_var``.
+    """
+    parent = _make_parent()
+    with _parent_context(parent):
+        # Simulate the parent having registered itself under "Agent"
+        # (which it does inside its own serve_forever's
+        # _install_contextvars). The parent context manager already
+        # sets agent_label_var="Agent" so the child task will inherit
+        # it via asyncio.create_task.
+        agent_registry["Agent"] = parent
+        child = Agent(
+            model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+            tools=[],
+        )
+        t = AgentSpawn()
+        try:
+            result = t._spawn_persistent(child, "child1", "p")
+            assert not result.is_error
+            # Yield to scheduler so the child's task enters
+            # serve_forever -> _install_contextvars (the bug site).
+            for _ in range(20):
+                await asyncio.sleep(0.005)
+                if agent_registry.get("Agent") is not parent:
+                    break
+
+            assert agent_registry.get("Agent") is parent, (
+                "persistent child clobbered parent's 'Agent' registry"
+                f" entry; got {agent_registry.get('Agent')!r}"
+            )
+            assert agent_registry.get("child1") is child, (
+                "persistent child must remain reachable under its own"
+                f" label; got {agent_registry.get('child1')!r}"
+            )
+        finally:
+            child.shutdown(force=True)
+            task = _persistent_tasks.get("child1")
+            if task is not None:
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except (TimeoutError, Exception):  # noqa: BLE001
+                    _ = task.cancel()
+            agent_registry.pop("Agent", None)
+            agent_registry.pop("child1", None)
+
+
+@pytest.mark.asyncio
+async def test_spawn_persistent_rejects_duplicate_label() -> None:
+    """Duplicate label must error -- silent overwrite orphans the prior agent.
+
+    A persistent agent's label is its addressable identity for AgentSend.
+    Silently doing ``agent_registry[label] = child`` over an existing
+    entry orphans the prior agent (its background task keeps running but
+    is unreachable) and routes every subsequent ``AgentSend`` to the new
+    instance only. Worse, when the prior agent eventually terminates,
+    its ``finally`` block does ``agent_registry.pop(label, None)`` --
+    popping the NEW entry, leaving the new agent unreachable too.
+
+    Reject the duplicate spawn so the user kills the prior agent first.
+    """
+    parent = _make_parent()
+    child1 = _BoomAgent(
+        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+        tools=[],
+    )
+    child2 = _BoomAgent(
+        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+        tools=[],
+    )
+
+    t = AgentSpawn()
+    with _parent_context(parent):
+        first = t._spawn_persistent(child1, "dup-label", "p1")
+        assert not first.is_error
+        second = t._spawn_persistent(child2, "dup-label", "p2")
+        assert second.is_error, f"second spawn must error, got {second.content!r}"
+        assert "dup-label" in second.content
+        # The first agent's task is still scheduled; let it run to
+        # completion so cleanup pops its own registry entry rather than
+        # leaving litter for the next test.
+        task1 = _persistent_tasks.get("dup-label")
+        assert task1 is not None
+        await task1
 
 
 if __name__ == "__main__":

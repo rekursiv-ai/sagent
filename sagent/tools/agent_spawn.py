@@ -492,7 +492,26 @@ class AgentSpawn:
         forwarder as an observer, seeds the child's inbox with the prompt,
         spawns ``serve_forever`` as a visible bg job under
         ``parent._bg``. Returns immediately with the label.
+
+        Rejects duplicate labels: a persistent agent's label is its
+        addressable identity for ``AgentSend``. Silently overwriting
+        ``agent_registry[label]`` would orphan the prior agent (whose
+        background task keeps running but becomes unreachable) and --
+        because the prior agent's cleanup ``finally`` does
+        ``agent_registry.pop(label, None)`` -- eventually pop the NEW
+        entry too, leaving both agents unreachable. The caller must
+        kill the prior agent first.
         """
+        if label in agent_registry:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Persistent agent {label!r} is already running."
+                    " Kill it via BackgroundTask before spawning a"
+                    " replacement with the same label."
+                ),
+                is_error=True,
+            )
         child._persistent = True  # noqa: SLF001 -- cross-layer flag
         child.name = label
         if self._session_root_dir is not None:
@@ -510,6 +529,11 @@ class AgentSpawn:
         async def _run() -> None:
             try:
                 await child.serve_forever()
+            except Exception:
+                _logger.exception(
+                    "persistent agent %r crashed in serve_forever",
+                    label,
+                )
             finally:
                 if forwarder is not None and forwarder in child.runtime.observers:
                     child.runtime.observers.remove(forwarder)
@@ -668,6 +692,12 @@ class AgentSpawn:
           Honored - don't silently upgrade to inherit.
         - ``names == ["Read", ...]``: subset by ``.name``; error on
           unknown.
+
+        Bundling rule: ``BackgroundTask`` rides along whenever
+        ``AgentSpawn`` is granted. Any agent that can create
+        persistent / background work must be able to list, cancel,
+        and foreground that work -- decoupling the two is how
+        runaway children become uncancellable.
         """
         available: list[Tool]
         if self._tools is not None:
@@ -678,7 +708,7 @@ class AgentSpawn:
             available = []
 
         if names is None:
-            return available
+            return _bundle_background_task(available)
 
         by_name = {t.name: t for t in available}
         missing = [n for n in names if n not in by_name]
@@ -688,7 +718,7 @@ class AgentSpawn:
                 content=f"Unknown tools: {missing}. Available: {list(by_name)}",
                 is_error=True,
             )
-        return [by_name[n] for n in names]
+        return _bundle_background_task([by_name[n] for n in names])
 
     def _child_session_dir(
         self,
@@ -721,6 +751,28 @@ def _pick_field(
     if fac_val is not None:
         return fac_val
     return spec_val
+
+
+def _bundle_background_task(tools: list[Tool]) -> list[Tool]:
+    """Append ``BackgroundTask`` when ``AgentSpawn`` is present.
+
+    Cancel/foreground are non-negotiable companion capabilities to
+    spawn: every code path that resolves a non-empty child toolset
+    runs through this gate. The fresh ``BackgroundTask()`` is
+    stateless -- safe to mint on demand when the parent didn't
+    carry one. Returns ``tools`` unchanged if either ``AgentSpawn``
+    is absent or ``BackgroundTask`` is already present.
+    """
+    names = {t.name for t in tools}
+    if "AgentSpawn" not in names or "BackgroundTask" in names:
+        return tools
+    # Local import sidesteps the ``tools/__init__.py`` cycle that
+    # imports ``agent_spawn`` early.
+    from sagent.tools.background_task import (  # noqa: PLC0415
+        BackgroundTask,
+    )
+
+    return [*tools, BackgroundTask()]
 
 
 # Verbosity -> set of RuntimeEvent subclasses forwarded to the parent observer.

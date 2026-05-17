@@ -96,17 +96,21 @@ class AgentSend:
         return None
 
     def prompt(self) -> str:
-        """Return a listing of active agents available for messaging.
+        """Return a self-identity + active-agents listing.
 
         Returns:
-          contribution: ``Active agents you can message: ...`` or empty.
+          contribution: ``Your agent label is X. Active agents you can
+              message: ...`` -- surfaces the agent's own label so the LLM
+              can recognize ``[from <self>]:`` messages as self-sourced.
 
         """
         my_label = agent_label_var.get("")
         others = sorted(k for k in agent_registry if k != my_label)
+        identity = f"Your agent label is {my_label!r}." if my_label else ""
         if not others:
-            return ""
-        return f"Active agents you can message: {', '.join(others)}"
+            return identity
+        listing = f"Active agents you can message: {', '.join(others)}"
+        return f"{identity} {listing}" if identity else listing
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Deliver a message to the target agent's inbox.
@@ -138,7 +142,15 @@ class AgentSend:
                 is_error=True,
             )
 
-        sender = agent_label_var.get("unknown")
+        # Empty string sentinel for "no identity established": a tool
+        # call from a context that never set ``agent_label_var`` (root
+        # before serve_forever, FakeAgent test harnesses) lands here.
+        # The ``[from <sender>]:`` envelope still uses ``"unknown"`` so
+        # the recipient sees something readable; the self-send check
+        # below uses the empty sentinel so an agent registered under
+        # the literal label ``"unknown"`` doesn't phantom-match.
+        my_label = agent_label_var.get("")
+        sender = my_label or "unknown"
         if delay is not None and delay > 0:
             asyncio.get_running_loop().call_later(
                 delay,
@@ -153,4 +165,20 @@ class AgentSend:
         target.runtime.inbox.push_back(
             UserMessage(text=f"[from {sender}]: {content}"),
         )
+        # Soft nudge on undelayed self-send: legitimate self-messages
+        # carry a ``delay`` (scheduled reminders). Without one, this is
+        # almost certainly an LLM loop -- inform the model so it can
+        # course-correct instead of looping silently. Gate on
+        # ``my_label`` (not ``sender``) so an unidentified context
+        # sending to an agent literally named ``"unknown"`` doesn't
+        # trip the nudge.
+        if my_label and to == my_label:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Delivered to {to}. Note: you are sending a message"
+                    " to yourself without delay. This is likely not"
+                    " intentional."
+                ),
+            )
         return ToolResult(call_id="", content=f"Delivered to {to}.")

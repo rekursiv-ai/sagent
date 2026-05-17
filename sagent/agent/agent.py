@@ -779,6 +779,11 @@ class Agent:
         try:
             self.runtime.inbox.push_back(msg)
             drive = asyncio.create_task(self.serve_forever())
+            drive.add_done_callback(
+                types.exceptions.log_task_exception(
+                    logger, "Agent.run drive task crashed"
+                ),
+            )
             try:
                 while True:
                     get_task = asyncio.create_task(events.get())
@@ -828,8 +833,21 @@ class Agent:
         )
         parent_state = tool_state_var.get(None)
         self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
-        base_label = agent_label_var.get("") or self.name
-        label = base_label if self._persistent else unique_registry_label(base_label)
+        # Persistent agents have a definite ``self.name`` set by
+        # ``AgentSpawn._spawn_persistent`` and own their own task; their
+        # identity must come from ``self.name`` directly. Inheriting
+        # ``agent_label_var`` from the parent task (``asyncio.create_task``
+        # copies the current context) would silently overwrite the parent's
+        # registry entry -- e.g. spawning persistent ``"reviewer-opus"``
+        # from a parent with label ``"Agent"`` would set
+        # ``agent_registry["Agent"] = reviewer_opus``, and then every
+        # ``AgentSend("Agent", ...)`` from any sub would route to the
+        # reviewer instead of the running parent.
+        if self._persistent:
+            label = self.name
+        else:
+            base_label = agent_label_var.get("") or self.name
+            label = unique_registry_label(base_label)
         label_token = agent_label_var.set(label)
         counter_token = agent_counter_var.set(itertools.count())
         state_token = tool_state_var.set(self.tool_state)
@@ -1002,15 +1020,59 @@ class Agent:
         """
         self._bg[job_id] = entry
 
-    async def compact_now(self) -> None:
+    async def compact_if_needed(
+        self,
+        history: list[types.history.HistoryEntry],
+        model: types.model.Model,
+    ) -> bool:
+        """Proactively compact when the compactor says headroom is gone.
+
+        Bridges the inner compactor's ``should_compact`` decision (which
+        the runtime's lean ``Compactor`` protocol does not expose) to the
+        synchronous ``compact_now`` path used for overflow recovery.
+
+        Returns:
+          progressed: ``True`` when no compaction was needed, or when
+              compaction completed. ``False`` when ``compact_now``
+              tried and failed. The bool mirrors :meth:`compact_now`'s
+              contract so callers don't have to special-case the
+              proactive vs reactive path.
+
+        Args:
+          history: Pre-compaction history snapshot (mutated in place if
+              ``compact_now`` runs; same list as ``runtime.history``).
+          model: Rich model whose tokenizer estimates seed the headroom
+              check and whose ``max_request_tokens`` caps the budget.
+
+        """
+        if self._agent_compactor is None:
+            return True
+        used = estimate_total_tokens(self.system_prompt(), history, model)
+        if not await self._agent_compactor.should_compact(
+            input_tokens=used,
+            max_request_tokens=model.max_request_tokens,
+            max_response_tokens=self.max_response_tokens,
+        ):
+            return True
+        return await self.compact_now()
+
+    async def compact_now(self) -> bool:
         """Synchronous compact path used by ``_AgentModel`` for overflow recovery.
 
         Bypasses the inbox (the runtime would cancel our task if we
         pushed ``types.runtime.Compact``). Calls the inner compactor directly,
         replaces ``runtime.history`` in place.
+
+        Returns:
+          progressed: ``True`` when compaction completed (or no compactor is
+              wired, which is the agent's chosen configuration); ``False``
+              when the inner compactor raised. The overflow-recovery caller
+              uses this signal to short-circuit instead of looping on
+              unchanged history.
+
         """
         if self._agent_compactor is None:
-            return
+            return True
         try:
             summary = await self._agent_compactor.compact(
                 list(self.runtime.history),
@@ -1028,9 +1090,30 @@ class Agent:
                     text=f"[Compaction error: {type(exc).__name__}: {exc}]"
                 ),
             )
-            return
+            return False
         self.runtime.history.clear()
         self.runtime.history.extend(summary)
+        return True
+
+
+def _context_overflow_error() -> types.exceptions.ContextOverflowError:
+    """Build the user-facing exhaustion error.
+
+    The renderer treats ``UserFacingError`` specially -- no ``ClassName:``
+    prefix, no traceback -- so this message is what the user actually
+    reads after recovery exhausts. Keep it actionable: name the verbs
+    (``/clear``, ``/compact``, ``/model``) so the halt screen tells the
+    user what to do, not just what went wrong.
+
+    The underlying provider exception travels via ``__cause__`` at the
+    raise site; operators inspecting logs see the technical detail via
+    the exception chain, while end users see only the polished verbs.
+    """
+    return types.exceptions.ContextOverflowError(
+        "Context window exhausted after auto-compaction. "
+        "Use /clear to wipe history, /compact <hints> to retry with custom "
+        "guidance, or /model to switch to a larger-window model.",
+    )
 
 
 def _resolve_target_spec(
@@ -1112,24 +1195,9 @@ def _schedule_close(model: types.model.Model) -> None:
     if not asyncio.iscoroutine(coro):
         return
     task = loop.create_task(coro)
-    task.add_done_callback(_log_close_errors)
-
-
-def _log_close_errors(task: asyncio.Task[object]) -> None:
-    """Surface failures from the swapped-out model's ``close()``.
-
-    Parameter is ``Task[object]`` -- not ``Task[None]`` -- because the
-    coroutine type is recovered via duck-typing ``getattr(model, "close")``
-    rather than from a typed reference, so the inferred task is generic
-    over ``object`` rather than ``None``.
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        types.exceptions.log_exception_or_warning(
-            logger, "swapped-out model close failed", exc
-        )
+    task.add_done_callback(
+        types.exceptions.log_task_exception(logger, "swapped-out model close failed"),
+    )
 
 
 class _AgentModel:
@@ -1185,6 +1253,18 @@ class _AgentModel:
         # Microcompact in place (no event; just mutate history).
         self._agent.microcompact_history(history)
 
+        # Proactive compaction: ask the compactor whether headroom is
+        # exhausted BEFORE handing the prompt to the provider. Without
+        # this gate, ``compact_now`` only runs reactively (after a
+        # provider 400 classified as overflow) -- which costs a full
+        # round trip and depends on the provider rejecting the request
+        # at all. Some providers accept oversized prompts up to a hard
+        # ceiling, so the reactive path leaves a wide window where the
+        # buffer's headroom (``ContextBudget.buffer_tokens``) is paid
+        # for but never spent. ``compact_now`` mutates ``runtime.history``
+        # in place; the local ``history`` reference is the same list.
+        await self._agent.compact_if_needed(history, self._inner)
+
         # Re-evaluate the system spec per request so callable sections
         # (e.g. cwd-aware ``environment``) stay live after ``cd``. The
         # runtime-passed ``system`` is a one-shot snapshot from
@@ -1211,8 +1291,6 @@ class _AgentModel:
             self._agent.service_tier if self._inner.valid_service_tiers else None
         )
 
-        last_err: Exception | None = None
-        response: types.model.ModelResponse | None = None
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             fresh_system = self._agent.system_prompt()
             request = types.model.ModelRequest(
@@ -1238,7 +1316,6 @@ class _AgentModel:
                     ),
                     on_discarded_response=self._agent.record_response,
                 )
-                break
             except Exception as exc:
                 # Catch any exception the provider classifies as
                 # context overflow, not just ``PromptTooLongError``.
@@ -1247,21 +1324,30 @@ class _AgentModel:
                 # canonical signal is ``is_context_overflow``.
                 if not self._inner.is_context_overflow(exc):
                     raise
-                last_err = exc
                 if attempt >= MAX_OVERFLOW_RECOVERY:
-                    raise
+                    raise _context_overflow_error() from exc
                 logger.info("Context overflow recovery attempt %d", attempt)
-                await self._agent.compact_now()
-        if response is None:
-            raise RuntimeError(
-                "context overflow recovery failed after "
-                f"{MAX_OVERFLOW_RECOVERY} compactions",
-            ) from last_err
-
-        # Record cost out-of-band; the runtime's types.runtime.ModelResponseComplete
-        # event has tokens=0 by design (the runtime can't see tokens).
-        self._agent.record_response(response)
-        return response.message
+                # Short-circuit when compaction itself failed -- looping
+                # to retry the model on unchanged (or slightly longer)
+                # history burns the retry budget on the same 400 (the
+                # BUGS34 regression: three identical "Compaction failed"
+                # lines followed by a cryptic RuntimeError).
+                if not await self._agent.compact_now():
+                    raise _context_overflow_error() from exc
+                continue
+            # Record cost out-of-band; the runtime's
+            # types.runtime.ModelResponseComplete event has tokens=0 by
+            # design (the runtime can't see tokens). Returning inside
+            # the loop avoids the dead ``response is not None`` assert
+            # the prior shape needed for type narrowing.
+            self._agent.record_response(response)
+            return response.message
+        # Unreachable: the loop either ``return``s on success or raises
+        # on the final attempt. Kept as a typed safety net under -O
+        # where any ``assert`` would be elided.
+        raise RuntimeError(
+            "unreachable: overflow recovery loop must return or raise",
+        )
 
 
 class _AgentTool:
@@ -1338,6 +1424,11 @@ class _AgentTool:
             task = asyncio.create_task(
                 self._run_bg(call_id, clean_args, delay_sec),
             )
+            task.add_done_callback(
+                types.exceptions.log_task_exception(
+                    logger, f"background tool {self._inner.name!r} crashed"
+                ),
+            )
             self._agent.register_background(
                 call_id,
                 BackgroundTaskEntry(
@@ -1410,6 +1501,27 @@ class _AgentCompactor:
     def __init__(self, inner: types.compactor.Compactor, agent: Agent) -> None:
         self._inner = inner
         self._agent = agent
+
+    async def should_compact(
+        self,
+        input_tokens: int,
+        max_request_tokens: int,
+        max_response_tokens: int = 0,
+    ) -> bool:
+        """Delegate to the inner compactor.
+
+        The runtime's lean ``Compactor`` Protocol does not include
+        ``should_compact`` (the runtime never asks; compaction is
+        explicitly driven by ``Compact`` / ``Recompact`` events). The
+        Agent layer's :class:`_AgentModel` invokes this on the wrapper
+        directly to gate proactive compaction ahead of each provider
+        call.
+        """
+        return await self._inner.should_compact(
+            input_tokens=input_tokens,
+            max_request_tokens=max_request_tokens,
+            max_response_tokens=max_response_tokens,
+        )
 
     async def compact(
         self,

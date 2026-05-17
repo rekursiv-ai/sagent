@@ -51,6 +51,7 @@ else:
     uvicorn = lazy_import("uvicorn")
 
 from sagent.lib.json import json_unfreeze
+from sagent.types.exceptions import log_task_exception
 from sagent.types.tools import Tool
 
 
@@ -112,6 +113,9 @@ class ToolsBridge:
         server = uvicorn.Server(config)
         self._uvicorn_server = server
         self._serve_task = asyncio.create_task(server.serve())
+        self._serve_task.add_done_callback(
+            log_task_exception(logger, "MCP bridge uvicorn serve crashed"),
+        )
         await self._wait_started()
         self._port = self._extract_port()
 
