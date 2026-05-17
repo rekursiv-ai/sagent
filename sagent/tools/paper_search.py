@@ -19,7 +19,6 @@ import re
 
 import cachetools
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, MutableJSON, bool_val, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description, opt_int
@@ -32,6 +31,7 @@ from sagent.tools.paper_common import (
     s2_paper_to_record,
     truncation_notice,
 )
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

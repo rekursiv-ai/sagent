@@ -26,17 +26,6 @@ import os
 import shutil
 import tempfile
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-)
 from sagent.lib.json import MutableJSON, int_val
 from sagent.providers.anthropic import Anthropic, _strip_context_tag
 from sagent.providers.lib.cost import ModelProfile, Pricing
@@ -45,6 +34,13 @@ from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.subproc import Subproc
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 if TYPE_CHECKING:
@@ -244,6 +240,11 @@ class _AnthropicCLIModel:
     def supports_cache_control(self) -> bool:
         """``False``: prompt cache is the CLI's concern, not ours."""
         return False
+
+    @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """The CLI manages tier selection itself; no per-request knob."""
+        return ()
 
     @property
     def supports_context_management(self) -> bool:

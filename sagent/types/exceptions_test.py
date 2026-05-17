@@ -1,4 +1,4 @@
-"""Tests for ``custom_exceptions``: domain exception types."""
+"""Tests for ``types.exceptions``: domain exception types."""
 
 from __future__ import annotations
 
@@ -6,8 +6,7 @@ import logging
 
 import pytest
 
-from sagent.agent.runtime import AssistantMessage, ToolCall
-from sagent.custom_exceptions import (
+from sagent.types.exceptions import (
     AuthRefreshError,
     ModelTerminationError,
     PromptTooLongError,
@@ -15,7 +14,8 @@ from sagent.custom_exceptions import (
     UserFacingError,
     log_exception_or_warning,
 )
-from sagent.custom_types import ModelResponse
+from sagent.types.history import AssistantMessage, ToolCall
+from sagent.types.model import ModelResponse
 
 
 def test_prompt_too_long_default_message() -> None:

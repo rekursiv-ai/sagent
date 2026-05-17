@@ -23,7 +23,7 @@ import logging
 import os
 import tempfile
 
-from sagent.agent.runtime import ToolResult
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

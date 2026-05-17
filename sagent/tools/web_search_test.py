@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.web.search import SearchResult
 from sagent.tools.web_search import WebSearch, _build_query
+from sagent.types.history import ToolResult
 
 
 def test_websearch_metadata() -> None:

@@ -9,13 +9,6 @@ import json
 
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import ModelRequest
 from sagent.lib.json import MutableJSON
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.anthropic_cli import (
@@ -29,6 +22,13 @@ from sagent.providers.anthropic_cli import (
     _user_line,
 )
 from sagent.providers.lib.subproc import Subproc
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest
 
 
 _CRED_PAYLOAD: dict[str, object] = {

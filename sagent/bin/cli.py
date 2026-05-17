@@ -47,6 +47,7 @@ from typing import cast
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -57,23 +58,9 @@ from sagent import (
     providers,
     sessions,
     tools,
+    types,
 )
 from sagent.agent import Agent
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    HistoryEntryUpdated,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    Quit,
-    RuntimeEvent,
-    SaveSession,
-    StatusChanged,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
 from sagent.agent.session_io import (
     SessionMeta,
     append_session,
@@ -81,7 +68,6 @@ from sagent.agent.session_io import (
     serialize_tool_state,
 )
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import Model, ModelSpec, Provider, Tool
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.prompt import build_system
 from sagent.providers import build_provider
@@ -116,7 +102,7 @@ DEFAULT_TOOLS = [
 ]
 
 
-def resolve_tools(names: list[str]) -> list[Tool]:
+def resolve_tools(names: list[str]) -> list[types.tools.Tool]:
     """Instantiate tools by class name from the ``tools`` module.
 
     Bash is constructed last with ``peers=`` set to its sibling tools
@@ -135,7 +121,7 @@ def resolve_tools(names: list[str]) -> list[Tool]:
     """
     if names == ["none"]:
         return []
-    non_bash: dict[str, Tool] = {}
+    non_bash: dict[str, types.tools.Tool] = {}
     for name in names:
         if name == "Bash":
             continue
@@ -143,7 +129,7 @@ def resolve_tools(names: list[str]) -> list[Tool]:
         if cls is None:
             raise SystemExit(f"unknown tool: {name!r}")
         non_bash[name] = cls()
-    resolved: list[Tool] = []
+    resolved: list[types.tools.Tool] = []
     peers = tuple(non_bash.values())
     for name in names:
         if name == "Bash":
@@ -249,6 +235,7 @@ def parse_agent_args(
       parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
 
     """
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser.add_argument(
         "--provider",
         default=_DEFAULT_PROVIDER,
@@ -372,7 +359,17 @@ def parse_agent_args(
         metavar="N",
         help="Maximum response tokens for one model call. Default: model limit.",
     )
-    return parser.parse_known_args(argv)
+    args, remaining = parser.parse_known_args(raw_argv)
+    args.provider_explicit = _flag_present(raw_argv, "--provider")
+    args.auth_explicit = _flag_present(raw_argv, "--auth")
+    args.account_explicit = _flag_present(raw_argv, "--account")
+    args.model_explicit = _flag_present(raw_argv, "--model")
+    return args, remaining
+
+
+def _flag_present(argv: list[str], flag: str) -> bool:
+    """Return True when ``flag`` appears as ``--flag`` or ``--flag=value``."""
+    return any(tok == flag or tok.startswith(flag + "=") for tok in argv)
 
 
 def _parse_cli_args(
@@ -478,7 +475,7 @@ def _parse_cli_args(
 
 def _build_provider_model(
     args: argparse.Namespace,
-) -> tuple[Provider, Model, str]:
+) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Build the provider/model pair requested by CLI flags."""
     auth = str(args.auth)
     model_id = cast(str | None, args.model)
@@ -489,6 +486,33 @@ def _build_provider_model(
     provider = build_provider(str(args.provider), auth, account=args.account)
     model = provider.model(model_lookup)
     return provider, model, auth
+
+
+def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) -> None:
+    """Layer persisted model metadata under explicit CLI model flags."""
+    if meta.provider and not bool(getattr(args, "provider_explicit", False)):
+        args.provider = meta.provider
+    if meta.auth and not bool(getattr(args, "auth_explicit", False)):
+        args.auth = meta.auth
+    if meta.account and not bool(getattr(args, "account_explicit", False)):
+        args.account = meta.account
+    if not bool(getattr(args, "model_explicit", False)):
+        args.model = meta.model_id or args.model
+        if (
+            bool(getattr(args, "provider_explicit", False))
+            and args.model is not None
+            and not _provider_knows_model(str(args.provider), str(args.model))
+        ):
+            args.model = None
+
+
+def _provider_knows_model(provider_name: str, model_id: str) -> bool:
+    """Return True when the named provider's catalog includes ``model_id``."""
+    cls = getattr(providers, provider_name, None)
+    if cls is None:
+        return False
+    known = getattr(cls, "KNOWN_MODELS", None)
+    return isinstance(known, dict) and model_id in known
 
 
 def _configure_logging(level: str | None) -> None:
@@ -603,26 +627,26 @@ def _parse_stream_json(raw: str) -> str:
     return "\n\n".join(prompts)
 
 
-def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
+def _event_to_json_record(event: types.runtime.RuntimeEvent) -> MutableJSON | None:
     """Serialize a ``RuntimeEvent`` for stream-json output, or skip."""
-    if isinstance(event, ModelResponsePartial):
+    if isinstance(event, types.runtime.ModelResponsePartial):
         return {"descriptor": "text/plain", "content": event.text}
-    if isinstance(event, ModelResponseThinking):
+    if isinstance(event, types.runtime.ModelResponseThinking):
         return {"descriptor": "text/x-thinking", "content": event.text}
-    if isinstance(event, ToolLabel):
+    if isinstance(event, types.runtime.ToolLabel):
         return {
             "descriptor": "text/x-tool-label",
             "content": event.text,
             "call_id": event.call_id,
         }
-    if isinstance(event, ToolResult):
+    if isinstance(event, types.history.ToolResult):
         return {
             "descriptor": "application/x-tool-result",
             "call_id": event.call_id,
             "content": event.content,
             "is_error": event.is_error,
         }
-    if isinstance(event, ModelResponseError):
+    if isinstance(event, types.runtime.ModelResponseError):
         exc = event.exception
         return {
             "descriptor": "application/x-error",
@@ -674,7 +698,7 @@ async def _run_headless(
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)
 
-    user_msg = UserMessage(text=prompt)
+    user_msg = types.history.UserMessage(text=prompt)
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
             record = _event_to_json_record(event)
@@ -697,10 +721,10 @@ async def _run_headless(
         sys.stdout.write("\n")
 
 
-def _last_assistant_text(history: list[HistoryEntry]) -> str:
+def _last_assistant_text(history: list[types.history.HistoryEntry]) -> str:
     """Return the text from the most recent ``AssistantMessage`` in ``history``."""
     for entry in reversed(history):
-        if isinstance(entry, AssistantMessage):
+        if isinstance(entry, types.history.AssistantMessage):
             return entry.text
     return ""
 
@@ -714,7 +738,7 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
         if triggered:
             os._exit(1)
         triggered = True
-        agent.runtime.inbox.push_back(Quit())
+        agent.runtime.inbox.push_back(types.runtime.Quit())
 
     return _on_signal
 
@@ -736,15 +760,17 @@ def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
     persisted_len = len(agent.history)
     meta_written = False
     last_status = agent.status
-    pending_updates: dict[int, ToolResult] = {}
+    pending_updates: dict[int, types.history.ToolResult] = {}
 
-    def _on_event(event: RuntimeEvent) -> None:
+    def _on_event(event: types.runtime.RuntimeEvent) -> None:
         nonlocal persisted_len, meta_written, last_status
-        if isinstance(event, HistoryEntryUpdated):
-            if isinstance(event.entry, ToolResult):
+        if isinstance(event, types.runtime.HistoryEntryUpdated):
+            if isinstance(event.entry, types.history.ToolResult):
                 pending_updates[event.entry.id] = event.entry
             return
-        if not isinstance(event, (SaveSession, StatusChanged)):
+        if not isinstance(
+            event, (types.runtime.SaveSession, types.runtime.StatusChanged)
+        ):
             return
         delta = agent.history[persisted_len:]
         # Drop pending updates whose id is in the delta -- the delta
@@ -815,24 +841,41 @@ def main() -> None:
     _configure_logging(args.log_level)
     if args.recipe is not None:
         set_recipe(args.recipe)
+    session_dir = None if args.no_session else _resolve_session_dir(args)
+    loaded_session = None
+    if session_dir is not None:
+        loaded_session = load_session(Path(session_dir), {})
+        if loaded_session is not None:
+            _apply_resume_model_defaults(args, loaded_session[0])
     try:
         provider, model, resolved_auth = _build_provider_model(args)
     except (AttributeError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
-    model_spec = ModelSpec(
+    model_spec = types.model.ModelSpec(
         provider=args.provider,
         auth=resolved_auth,
         model_id=model.model_id,
         account=args.account,
     )
+    if loaded_session is not None:
+        meta, history, tool_state = loaded_session
+        loaded_session = (
+            dataclasses.replace(
+                meta,
+                provider=model_spec.provider,
+                auth=model_spec.auth,
+                model_id=model_spec.model_id,
+                account=model_spec.account or "",
+            ),
+            history,
+            tool_state,
+        )
     compactor = SummaryCompactor() if args.compact else None
 
     headless = not sys.stdin.isatty()
     if not headless:
         sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
-
-    session_dir = None if args.no_session else _resolve_session_dir(args)
 
     tool_names = args.tools or DEFAULT_TOOLS
     agent_tools = resolve_tools(tool_names)
@@ -871,10 +914,9 @@ def main() -> None:
     if args.max_response_tokens is not None:
         agent.max_response_tokens = args.max_response_tokens
 
+    if loaded_session is not None:
+        agent.resume(*loaded_session)
     if session_dir is not None:
-        loaded = load_session(Path(session_dir), {})
-        if loaded is not None:
-            agent.resume(*loaded)
         _install_session_persistence(agent, Path(session_dir))
 
     agent.tool_state.additional_dirs = list(args.add_dir)

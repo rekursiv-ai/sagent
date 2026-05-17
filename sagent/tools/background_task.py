@@ -23,13 +23,10 @@ import asyncio
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    DetachedResult,
-    RuntimeEvent,
-    ToolResult,
-)
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import current_agent_var, load_tool_description
+from sagent.types.history import ToolResult
+from sagent.types.runtime import DetachedResult, RuntimeEvent
 
 
 if TYPE_CHECKING:

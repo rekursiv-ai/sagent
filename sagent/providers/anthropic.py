@@ -36,21 +36,6 @@ else:
     anthropic = lazy_import("anthropic")  # 569ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import (
-    PromptTooLongError,
-    StreamInterruptedError,
-)
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-)
 from sagent.lib import debug_log
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
@@ -60,6 +45,17 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.exceptions import (
+    PromptTooLongError,
+    StreamInterruptedError,
+)
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 logger = logging.getLogger(__name__)
@@ -370,9 +366,11 @@ class Anthropic:
 
 _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
 
-# Statusless Anthropic errors with ``body["type"]`` in this set are
+# Statusless Anthropic errors with body-declared types in this set are
 # transient retryables that the shared status-code classifier misses.
-_RETRYABLE_BODY_TYPES = frozenset({"rate_limit_error", "server_error"})
+_RETRYABLE_BODY_TYPES = frozenset(
+    {"api_error", "overloaded_error", "rate_limit_error", "server_error"}
+)
 
 
 def _is_prompt_too_long_text(msg: str) -> bool:
@@ -392,6 +390,17 @@ def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
         actual = int(m.group(1).replace(",", ""))
         limit = int(m.group(2).replace(",", ""))
     raise PromptTooLongError(raw, actual_tokens=actual, limit_tokens=limit) from e
+
+
+def _anthropic_error_type(body: Mapping[object, object]) -> object:
+    """Extract the Anthropic error type from flat or nested error bodies."""
+    error_type = body.get("type")
+    if error_type != "error":
+        return error_type
+    nested = body.get("error")
+    if not isinstance(nested, Mapping):
+        return error_type
+    return cast(Mapping[object, object], nested).get("type")
 
 
 def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
@@ -511,6 +520,16 @@ class _AnthropicModel:
         return True
 
     @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Anthropic Messages API accepts ``auto`` (default) or ``standard_only``.
+
+        ``auto`` uses Priority Tier capacity when available, falling back
+        to standard; ``standard_only`` opts a single request out of any
+        Priority commitment. See https://platform.claude.com/docs/en/api/service-tiers.
+        """
+        return ("auto", "standard_only")
+
+    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return self._provider.subscription
@@ -604,8 +623,7 @@ class _AnthropicModel:
         body = getattr(error, "body", None)
         if not isinstance(body, Mapping):
             return False
-        body_map = cast(Mapping[object, object], body)
-        error_type = body_map.get("type")
+        error_type = _anthropic_error_type(cast(Mapping[object, object], body))
         return isinstance(error_type, str) and error_type in _RETRYABLE_BODY_TYPES
 
     def _build_kwargs(
@@ -645,6 +663,11 @@ class _AnthropicModel:
             ]
         if request.effort is not None:
             kwargs["output_config"] = {"effort": request.effort}
+        if (
+            request.service_tier is not None
+            and request.service_tier in self.valid_service_tiers
+        ):
+            kwargs["service_tier"] = request.service_tier
         body = self._provider.extra_body(
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,

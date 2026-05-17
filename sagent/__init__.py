@@ -62,7 +62,7 @@ Three protocols stacked:
 
 - ``runtime.Tool`` (in ``agent/runtime.py``) -- ``name`` + ``run`` only;
   what the runtime dispatches.
-- ``custom_types.Tool`` -- rich surface (``description``,
+- ``types.tools.Tool`` -- rich surface (``description``,
   ``directive_schema``, ``summary``, ``summary_result``, ``prompt``,
   ``supports_microcompaction``); what providers and the system prompt
   consume.
@@ -75,7 +75,7 @@ Three protocols stacked:
 Providers
 ---------
 Each provider class exposes a richer model surface
-(``custom_types.Model``) with ``buffer(request) -> ModelResponse`` /
+(``types.model.Model``) with ``buffer(request) -> ModelResponse`` /
 ``stream(request, on_text=, on_thinking=) -> ModelResponse``. The
 ``_AgentModel`` bridge wraps this into the runtime's lean
 ``stream(history, system, tools, on_text, on_thinking) ->

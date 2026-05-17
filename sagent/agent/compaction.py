@@ -10,19 +10,16 @@ import logging
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
+from sagent.agent.state import ToolState
+from sagent.lib.compaction import reattach_files
+from sagent.types.compactor import CompactRestorable
+from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
     UserMessage,
 )
-from sagent.agent.state import ToolState
-from sagent.custom_types import (
-    CompactRestorable,
-    ContextBudget,
-    Model,
-    Tool,
-)
-from sagent.lib.compaction import reattach_files
+from sagent.types.model import ContextBudget, Model
+from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)

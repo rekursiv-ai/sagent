@@ -22,13 +22,13 @@ from __future__ import annotations
 
 from typing import ClassVar, override
 
-from sagent.custom_types import ModelRequest
 from sagent.lib.json import MutableJSON
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.model import ModelRequest
 
 
 # Qwen3 "thinking" models always emit reasoning. Hybrid models toggle.

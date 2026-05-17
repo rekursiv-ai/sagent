@@ -24,7 +24,10 @@ import json
 import logging
 import time
 
-from sagent.agent.runtime import (
+from sagent.agent.state import ReadCacheEntry, ToolState
+from sagent.lib.json import float_val, int_val
+from sagent.lib.lazy_import import lazy_import
+from sagent.types.history import (
     AssistantMessage,
     BytesMessage,
     HistoryEntry,
@@ -33,10 +36,7 @@ from sagent.agent.runtime import (
     UserMessage,
     reset_id_counter,
 )
-from sagent.agent.state import ReadCacheEntry, ToolState
-from sagent.custom_types import Model, ModelSpec, TokenCount
-from sagent.lib.json import float_val, int_val
-from sagent.lib.lazy_import import lazy_import
+from sagent.types.model import Model, ModelSpec, TokenCount
 
 
 providers_lib = lazy_import("sagent.providers")
@@ -595,7 +595,9 @@ def _apply_update(history: list[HistoryEntry], rec: Mapping[str, object]) -> Non
             return
 
 
-def repair_dangling_tool_calls(history: list[HistoryEntry]) -> list[HistoryEntry]:
+def repair_dangling_tool_calls(
+    history: list[HistoryEntry],
+) -> list[HistoryEntry]:
     """Synthesize ``[interrupted]`` results for orphan ``tool_use`` blocks.
 
     A session can be interrupted mid-tool (Ctrl+C during execution):
@@ -705,7 +707,9 @@ def rebuild_content_cache(history: list[HistoryEntry], state: ToolState) -> None
         state.mark_read(fp, content=content)
 
 
-def restore_model(meta: SessionMeta) -> tuple[Model, ModelSpec] | None:
+def restore_model(
+    meta: SessionMeta,
+) -> tuple[Model, ModelSpec] | None:
     """Rebuild model + spec from persisted ``provider``/``auth``/``model_id``.
 
     Args:

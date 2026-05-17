@@ -14,11 +14,12 @@ from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
 )
-from sagent.agent.runtime import DetachedResult, ToolResult
 from sagent.lib.json import json_freeze
 from sagent.testing import with_fake_agent
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import current_agent_var
+from sagent.types.history import ToolResult
+from sagent.types.runtime import DetachedResult
 
 
 class _DummyInner:

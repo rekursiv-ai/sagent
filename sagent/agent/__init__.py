@@ -42,7 +42,7 @@ from sagent.agent.agent import (
 )
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import CompactionState
-from sagent.custom_types import ContextBudget
+from sagent.types.model import ContextBudget
 
 
 __all__ = [

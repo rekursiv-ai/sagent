@@ -7,9 +7,9 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.slack import Slack
+from sagent.types.history import ToolResult
 
 
 _TOKEN = "test-token-placeholder"  # noqa: S105 -- fake test token

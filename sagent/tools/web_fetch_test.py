@@ -21,7 +21,6 @@ if "trafilatura" not in sys.modules:
     _stub.__dict__["extract"] = MagicMock(return_value="")
     sys.modules["trafilatura"] = _stub
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
@@ -30,6 +29,7 @@ from sagent.tools.web_fetch import (
     _match_http_fetch,
     _url_is_safe,
 )
+from sagent.types.history import ToolResult
 
 
 def test_webfetch_metadata() -> None:

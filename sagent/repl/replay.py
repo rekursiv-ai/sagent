@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sagent.agent.runtime import (
+from sagent.repl.render import render_tool_result
+from sagent.types.history import (
     AssistantMessage,
     ToolResult,
     UserMessage,
 )
-from sagent.repl.render import render_tool_result
 
 
 if TYPE_CHECKING:

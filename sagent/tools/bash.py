@@ -20,7 +20,6 @@ import signal
 import subprocess
 import time
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -30,6 +29,7 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, cached_parse_bash
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

@@ -10,21 +10,17 @@ from typing import override
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.runtime import (
-    AssistantMessage,
-    Clear,
-    Compact,
-    Recompact,
-)
-from sagent.custom_types import (
+from sagent.testing import MockModelCaps
+from sagent.tools.agent_self import AgentSelf
+from sagent.tools.core import current_agent_var, tool_state_var
+from sagent.types.history import AssistantMessage
+from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     ModelSpec,
     Pricing,
 )
-from sagent.testing import MockModelCaps
-from sagent.tools.agent_self import AgentSelf
-from sagent.tools.core import current_agent_var, tool_state_var
+from sagent.types.runtime import Clear, Compact, Recompact
 
 
 @dataclass(slots=True, kw_only=True)
@@ -380,6 +376,67 @@ async def test_model_options_unsupported_key_errors() -> None:
         result = await t.run({"model_options": {"thinking": True}})
     assert result.is_error
     assert "Unsupported model_options" in result.content
+
+
+@dataclass(slots=True, kw_only=True)
+class TierStubModel(StubProviderModel):
+    """``StubProviderModel`` advertising a non-empty service-tier set."""
+
+    valid_service_tiers: tuple[str, ...] = ("auto", "default", "flex", "priority")
+
+
+@pytest.mark.asyncio
+async def test_service_tier_unsupported_when_model_lacks_capability() -> None:
+    agent = _make_agent()  # StubProviderModel.valid_service_tiers = ()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"service_tier": "priority"}})
+    assert result.is_error
+    assert "Unsupported model_options" in result.content
+
+
+@pytest.mark.asyncio
+async def test_service_tier_rejects_unknown_value() -> None:
+    agent = Agent(model=TierStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"service_tier": "turbo"}})
+    assert result.is_error
+    assert "service_tier" in result.content
+    assert "must be one of" in result.content
+
+
+@pytest.mark.asyncio
+async def test_service_tier_priority_applied() -> None:
+    agent = Agent(model=TierStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"service_tier": "priority"}})
+    assert not result.is_error
+    assert agent.service_tier == "priority"
+    assert "service_tier=priority" in result.content
+
+
+@pytest.mark.asyncio
+async def test_service_tier_null_clears() -> None:
+    agent = Agent(model=TierStubModel(), tools=[])
+    agent.service_tier = "priority"
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"service_tier": None}})
+    assert not result.is_error
+    assert agent.service_tier is None
+    assert "service_tier=unset" in result.content
+
+
+@pytest.mark.asyncio
+async def test_service_tier_listed_in_supported_diagnostics() -> None:
+    agent = Agent(model=TierStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True})
+    assert "service_tier" in result.content
+    assert "Service tier:" in result.content
 
 
 @pytest.mark.asyncio

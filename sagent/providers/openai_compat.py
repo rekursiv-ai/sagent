@@ -44,19 +44,6 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    AssistantMessage as _AssistantMessage,  # noqa: F401 -- re-export friendly
-    BytesMessage,
-    ToolCall,
-    UserMessage,
-)
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-)
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
@@ -70,6 +57,14 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
+    AssistantMessage,
+    BytesMessage,
+    ToolCall,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 logger = logging.getLogger(__name__)
@@ -246,6 +241,11 @@ class OpenAICompatModel:
         return False
 
     @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """OpenAI-compat vendors (Moonshot, MiniMax, DashScope) have no tier knob."""
+        return ()
+
+    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return False
@@ -377,6 +377,11 @@ class OpenAICompatModel:
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
         if request.effort is not None and self.supports_effort:
             body["reasoning_effort"] = request.effort
+        if (
+            request.service_tier is not None
+            and request.service_tier in self.valid_service_tiers
+        ):
+            body["service_tier"] = request.service_tier
         if request.tools:
             body["tools"] = cast(
                 MutableJSONValue,

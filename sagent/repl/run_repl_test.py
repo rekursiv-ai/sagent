@@ -5,31 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import asyncio
+import dataclasses
 import inspect
 
 import pytest
 
-from sagent.agent.agent import Agent
+from sagent.agent import runtime as agent_runtime
+from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    AgentRuntime,
-    AssistantMessage,
-    HistoryEntry,
-    ModelIdle,
-    ModelResponseError,
-    ModelSwitch,
-    Quit,
-    RuntimeEvent,
-    Tool,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-    UserQueuedMessage,
-)
-from sagent.custom_types import ModelSpec
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.render import (
@@ -38,12 +24,26 @@ from sagent.repl.render import (
 )
 from sagent.repl.run_repl import (
     _parse_model_args,
-    _resolve_model_target,
     do_login,
     do_switch_model,
     format_tasks,
     make_queued_input_committer,
     run_repl,
+)
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelSpec
+from sagent.types.runtime import (
+    ModelIdle,
+    ModelResponseError,
+    Quit,
+    RuntimeEvent,
+    UserQueuedMessage,
 )
 
 
@@ -60,15 +60,21 @@ _DEFAULT_SPEC = ModelSpec(
 
 
 def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
-    """Parse + resolve helper: mirrors the old _parse_model_args contract.
-
-    Tests assert against the final resolved 4-tuple; this composes the
-    two-stage parser+resolver into one call.
+    """Parse + resolve helper: composes the slash-syntax parser with
+    the Agent's resolver and projects the resolved ``ModelSpec`` back
+    into the legacy ``(provider, auth, account, model_id)`` tuple.
     """
     parsed = _parse_model_args(list(tokens))
     if isinstance(parsed, str):
         return parsed
-    return _resolve_model_target(parsed, _DEFAULT_SPEC)
+    target = _resolve_target_spec(
+        _DEFAULT_SPEC,
+        provider=parsed.provider,
+        auth=parsed.auth,
+        model_id=parsed.model_id,
+        account=parsed.account if parsed.account_set else None,
+    )
+    return target.provider, target.auth, target.account, target.model_id
 
 
 def test_parse_model_args_no_tokens_returns_usage_string() -> None:
@@ -212,11 +218,53 @@ class _FakeAgent:
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
     work: object = None
     swap_calls: list[tuple[_FakeModel, ModelSpec | None]] = field(default_factory=list)
+    change_model_calls: list[dict[str, object]] = field(default_factory=list)
+    change_model_result: ModelSpec | None = None
+    change_model_side_effect: BaseException | None = None
+    relogin_calls: int = 0
+    relogin_side_effect: BaseException | None = None
 
     def swap_model(self, model: _FakeModel, *, spec: ModelSpec | None = None) -> None:
         self.swap_calls.append((model, spec))
         self.model = model
         self.model_spec = spec
+
+    def change_model(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelSpec:
+        """Fake delegate matching ``Agent.change_model``."""
+        self.change_model_calls.append(
+            {
+                "provider": provider,
+                "auth": auth,
+                "model_id": model_id,
+                "account": account,
+            }
+        )
+        if self.change_model_side_effect is not None:
+            raise self.change_model_side_effect
+        if self.change_model_result is not None:
+            return self.change_model_result
+        spec = self.model_spec
+        assert spec is not None
+        return dataclasses.replace(
+            spec,
+            provider=provider or spec.provider,
+            auth=auth or spec.auth,
+            model_id=model_id or spec.model_id,
+            account=account if account is not None else spec.account,
+        )
+
+    async def relogin(self) -> None:
+        """Fake delegate matching ``Agent.relogin``."""
+        self.relogin_calls += 1
+        if self.relogin_side_effect is not None:
+            raise self.relogin_side_effect
 
 
 def _as_agent(a: _FakeAgent) -> Agent:
@@ -258,84 +306,65 @@ def test_do_switch_model_unknown_flag_writes_error() -> None:
     assert agent.swap_calls == []
 
 
-def test_do_switch_model_success_queues_swap_event() -> None:
-    """Slash handler pushes a ``ModelSwitch`` event; swap fires when
-    runtime applies the event's ``apply`` callable.
-    """
+def test_do_switch_model_success_delegates_to_change_model() -> None:
+    """Slash handler parses, delegates to ``Agent.change_model``, prints label."""
     agent = _FakeAgent()
     printer = RecordingPrinter()
-    new_model = _FakeModel(model_id="claude-sonnet-4-6")
-    provider = MagicMock()
-    provider.model.return_value = new_model
-    with (
-        patch(
-            "sagent.repl.run_repl.build_provider",
-            return_value=provider,
-        ),
-        patch(
-            "sagent.repl.run_repl.infer_provider",
-            return_value=None,
-        ),
+    with patch(
+        "sagent.repl.run_repl.infer_provider",
+        return_value=None,
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
-    assert agent.swap_calls == []  # deferred until runtime applies
-    assert len(agent.runtime.inbox.pushed) == 1
-    switch_event = agent.runtime.inbox.pushed[0]
-    assert isinstance(switch_event, ModelSwitch)
-    switch_event.apply()
-    assert len(agent.swap_calls) == 1
-    swapped_model, spec = agent.swap_calls[0]
-    assert swapped_model is new_model
-    assert spec is not None
-    assert spec.model_id == "claude-sonnet-4-6"
+    assert agent.change_model_calls == [
+        {
+            "provider": None,
+            "auth": None,
+            "model_id": "claude-sonnet-4-6",
+            "account": None,
+        }
+    ]
     assert any("claude-sonnet-4-6" in line for line in printer.lines)
 
 
 def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
-    # When inference returns a (provider, auth) pair and the user passed
-    # a bare model id whose declared provider matches the current spec,
-    # the inferred pair takes over.
+    """A bare model id whose ``infer_provider`` matches a foreign provider
+    rewrites the provider/auth before calling ``change_model``.
+    """
     agent = _FakeAgent()
     printer = RecordingPrinter()
-    new_model = _FakeModel(model_id="gemini-3-pro")
-    provider = MagicMock()
-    provider.model.return_value = new_model
-    with (
-        patch(
-            "sagent.repl.run_repl.build_provider",
-            return_value=provider,
-        ),
-        patch(
-            "sagent.repl.run_repl.infer_provider",
-            return_value=("Google", "sub"),
-        ),
+    agent.change_model_result = ModelSpec(
+        provider="Google", auth="sub", model_id="gemini-3-pro"
+    )
+    with patch(
+        "sagent.repl.run_repl.infer_provider",
+        return_value=("Google", "sub"),
     ):
         do_switch_model(_as_agent(agent), "gemini-3-pro", printer)
-    switch_event = agent.runtime.inbox.pushed[0]
-    assert isinstance(switch_event, ModelSwitch)
-    switch_event.apply()
-    assert len(agent.swap_calls) == 1
-    _, spec = agent.swap_calls[0]
-    assert spec is not None
-    assert spec.provider == "Google"
-    assert spec.auth == "sub"
-    # Cross-provider label: "Anthropic/old -> Google/new".
+    assert agent.change_model_calls == [
+        {
+            "provider": "Google",
+            "auth": "sub",
+            "model_id": "gemini-3-pro",
+            "account": None,
+        }
+    ]
     assert any(
         "Anthropic/claude-opus-4-7 -> Google/gemini-3-pro" in line
         for line in printer.lines
     )
 
 
-def test_do_switch_model_provider_build_failure_writes_error() -> None:
+def test_do_switch_model_change_model_error_writes_to_printer() -> None:
+    """``Agent.change_model`` errors surface verbatim to the printer."""
     agent = _FakeAgent()
+    agent.change_model_side_effect = ValueError("no credentials")
     printer = RecordingPrinter()
     with patch(
-        "sagent.repl.run_repl.build_provider",
-        side_effect=RuntimeError("no credentials"),
+        "sagent.repl.run_repl.infer_provider",
+        return_value=None,
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
     assert any("no credentials" in line for line in printer.lines)
-    assert agent.swap_calls == []
 
 
 @pytest.mark.asyncio
@@ -347,103 +376,23 @@ async def test_do_login_no_spec_writes_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_do_login_unknown_provider_writes_error() -> None:
-    agent = _FakeAgent(
-        model_spec=ModelSpec(provider="NotAProvider", auth="api", model_id="x"),
-    )
+async def test_do_login_success_delegates_to_relogin() -> None:
+    """Slash handler delegates to ``Agent.relogin`` and prints confirmation."""
+    agent = _FakeAgent()
     printer = RecordingPrinter()
     await do_login(_as_agent(agent), printer)
-    assert any("unknown provider" in line for line in printer.lines)
-
-
-@pytest.mark.asyncio
-async def test_do_login_provider_without_login_writes_error() -> None:
-    agent = _FakeAgent()
-    printer = RecordingPrinter()
-    fake_cls = type("FakeProvider", (), {})  # no login attr
-    with patch(
-        "sagent.repl.run_repl.providers",
-        MagicMock(Anthropic=fake_cls),
-    ):
-        await do_login(_as_agent(agent), printer)
-    assert any("no login method" in line for line in printer.lines)
-
-
-@pytest.mark.asyncio
-async def test_do_login_success_writes_confirmation() -> None:
-    agent = _FakeAgent()
-    printer = RecordingPrinter()
-    fake_cls = MagicMock()
-    with patch(
-        "sagent.repl.run_repl.providers",
-        MagicMock(Anthropic=fake_cls),
-    ):
-        await do_login(_as_agent(agent), printer)
-    fake_cls.login.assert_called_once()
+    assert agent.relogin_calls == 1
     assert any("re-authenticated" in line for line in printer.lines)
 
 
 @pytest.mark.asyncio
-async def test_do_login_failure_writes_error() -> None:
+async def test_do_login_relogin_error_writes_to_printer() -> None:
+    """``Agent.relogin`` errors surface verbatim to the printer."""
     agent = _FakeAgent()
+    agent.relogin_side_effect = RuntimeError("oauth failed")
     printer = RecordingPrinter()
-    fake_cls = MagicMock()
-    fake_cls.login.side_effect = RuntimeError("oauth failed")
-    with patch(
-        "sagent.repl.run_repl.providers",
-        MagicMock(Anthropic=fake_cls),
-    ):
-        await do_login(_as_agent(agent), printer)
+    await do_login(_as_agent(agent), printer)
     assert any("oauth failed" in line for line in printer.lines)
-
-
-@pytest.mark.asyncio
-async def test_do_login_reloads_running_provider_credentials() -> None:
-    """After ``login_fn()`` succeeds, the live provider must reload its creds.
-
-    Bug: ``/login`` runs ``provider_cls.login()`` which writes new
-    credentials to disk, but the running provider INSTANCE keeps using
-    its in-memory (now-revoked) refresh token. The next model call
-    posts the stale refresh token to ``oauth/token`` -> 400 ->
-    ``AuthRefreshError``, so ``/login`` appears to succeed yet the
-    error persists. Fix: after login, call ``handle_auth_error`` on
-    the running provider so it reloads from disk.
-    """
-    agent = _FakeAgent()
-    # Wire a provider hook the live model holds onto.
-    provider = MagicMock()
-    provider.handle_auth_error = AsyncMock()
-    agent.model._provider = provider
-    printer = RecordingPrinter()
-    fake_cls = MagicMock()
-    with patch(
-        "sagent.repl.run_repl.providers",
-        MagicMock(Anthropic=fake_cls),
-    ):
-        await do_login(_as_agent(agent), printer)
-    fake_cls.login.assert_called_once()
-    provider.handle_auth_error.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_do_login_skips_reload_when_provider_has_no_hook() -> None:
-    """Non-Anthropic providers (no ``handle_auth_error``) must not crash.
-
-    Defensive contract: ``do_login`` duck-types the reload hook so
-    providers without OAuth state machinery (or providers that have
-    not yet adopted the hook) work without an error.
-    """
-    agent = _FakeAgent()
-    # Bare provider with no ``handle_auth_error`` attribute.
-    agent.model._provider = object()
-    printer = RecordingPrinter()
-    fake_cls = MagicMock()
-    with patch(
-        "sagent.repl.run_repl.providers",
-        MagicMock(Anthropic=fake_cls),
-    ):
-        await do_login(_as_agent(agent), printer)
-    assert any("re-authenticated" in line for line in printer.lines)
 
 
 def test_format_tasks_no_registry_header_only() -> None:
@@ -522,7 +471,7 @@ def test_run_repl_invokes_replay_messages() -> None:
 async def test_make_queued_input_committer_pushes_user_queued_on_model_idle() -> None:
     """``ModelIdle`` with non-empty queue → coalesced ``UserQueuedMessage`` pushed; queue cleared."""
     queued_input = ["elephant", "banana", "chair"]
-    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     observer = make_queued_input_committer(runtime, queued_input)
     observer(ModelIdle())
     assert queued_input == []
@@ -536,7 +485,7 @@ async def test_make_queued_input_committer_pushes_user_queued_on_model_idle() ->
 def test_make_queued_input_committer_ignores_non_idle_events() -> None:
     """Non-``ModelIdle`` events leave ``queued_input`` and the inbox untouched."""
     queued_input = ["elephant"]
-    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     observer = make_queued_input_committer(runtime, queued_input)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
@@ -547,7 +496,7 @@ def test_make_queued_input_committer_ignores_non_idle_events() -> None:
 def test_make_queued_input_committer_ignores_idle_when_queue_empty() -> None:
     """``ModelIdle`` with an empty queue is a no-op (no spurious push)."""
     queued_input: list[str] = []
-    runtime = AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     observer = make_queued_input_committer(runtime, queued_input)
     observer(ModelIdle())
     assert runtime.inbox._queue.empty()
@@ -563,7 +512,7 @@ class _TextOnlyModel:
         self,
         history: list[HistoryEntry],
         system: str,
-        tools: list[Tool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -586,7 +535,7 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     at the next gate-section pass and fires a fresh round.
     """
     queued_input = ["elephant", "banana", "chair"]
-    agent = AgentRuntime(model=_TextOnlyModel(text="committed"))
+    agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="committed"))
     agent.observers.append(make_queued_input_committer(agent, queued_input))
 
     second_round = asyncio.Event()
@@ -623,7 +572,7 @@ async def test_staging_path_end_to_end_renders_user_bar() -> None:
     empty buffer with a non-empty queue.
     """
     printer = RecordingPrinter()
-    agent = AgentRuntime(model=_TextOnlyModel(text="ack"))
+    agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ack"))
     agent.observers.append(make_render_observer(printer))
 
     agent.inbox.push_back(UserMessage(text="hello world"))
@@ -693,7 +642,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -714,7 +663,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 
     tool = _BlockingTool()
     model = _TwoRoundModel()
-    runtime = AgentRuntime(model=model, tools=[tool])
+    runtime = agent_runtime.AgentRuntime(model=model, tools=[tool])
 
     # Round 1 trigger.
     runtime.inbox.push_back(UserMessage(text="initial"))

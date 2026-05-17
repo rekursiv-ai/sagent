@@ -4,28 +4,32 @@ from __future__ import annotations
 
 from typing import cast, override
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ChildDoneEvent,
-    ChildEvent,
-    ModelResponseComplete,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolCall,
-    ToolLabel,
-    ToolResult,
-    ToolResultPartial,
-    UserMessage,
-)
-from sagent.custom_exceptions import AuthRefreshError
 from sagent.repl.render import (
     HALT_MESSAGE,
     HELP_TEXT,
     RecordingPrinter,
     make_render_observer,
     render_tool_result,
+)
+from sagent.types.exceptions import AuthRefreshError
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.runtime import (
+    BudgetReset,
+    ChildDoneEvent,
+    ChildEvent,
+    ModelResponseComplete,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    ModelSwitchRejected,
+    RuntimeEvent,
+    ToolLabel,
+    ToolResultPartial,
 )
 
 
@@ -75,6 +79,33 @@ def test_user_message_flushes_stream_then_writes_bar() -> None:
     # Flush should emit the buffered text as markdown, then bar.
     assert p.markdowns == ["incomplete"]
     assert p.user_bars == ["hello"]
+
+
+def test_model_switch_rejected_emits_error_without_halt() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelSwitchRejected(exception=ValueError("too small")))
+    assert p.tool_errors == ["ValueError: too small"]
+    assert p.halts == []
+
+
+def test_budget_reset_emits_notification_line() -> None:
+    """``BudgetReset`` surfaces as a ``[/model] budget reset ...`` line."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(
+        BudgetReset(
+            model_id="claude-sonnet-4-6",
+            prior_max_request_tokens=1_000_000,
+            prior_max_response_tokens=32_000,
+            new_max_request_tokens=200_000,
+            new_max_response_tokens=16_000,
+        )
+    )
+    assert len(p.lines) == 1
+    assert "claude-sonnet-4-6" in p.lines[0]
+    assert "1,000,000" in p.lines[0]
+    assert "200,000" in p.lines[0]
 
 
 def test_user_message_with_empty_buffer() -> None:
@@ -223,7 +254,12 @@ def test_dispatch_handles_unknown_events_silently() -> None:
     obs = make_render_observer(p)
     # ``ToolCall`` is part of an AssistantMessage but never a top-level event.
     # The dispatcher should hit the ``case _`` branch -- no observable effect.
-    obs(cast("RuntimeEvent", ToolCall(id="x", name="y", args={})))
+    obs(
+        cast(
+            "RuntimeEvent",
+            ToolCall(id="x", name="y", args={}),
+        )
+    )
     assert p.markdowns == []
     assert p.tool_errors == []
 

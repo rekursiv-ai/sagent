@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import MutableJSON
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.paper_common import (
@@ -30,6 +29,7 @@ from sagent.tools.paper_common import (
     short_id,
     truncation_notice,
 )
+from sagent.types.history import ToolResult
 
 
 if TYPE_CHECKING:

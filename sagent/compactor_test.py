@@ -9,7 +9,17 @@ from typing import override
 
 import pytest
 
-from sagent.agent.runtime import (
+from sagent.compactor import (
+    MICROCOMPACT_KEEP_RECENT,
+    SummaryCompactor,
+    build_continuation,
+    microcompact,
+)
+from sagent.lib.compaction import CLEARED
+from sagent.lib.json import JSON
+from sagent.testing import MockModelCaps
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
     AssistantMessage,
     BytesMessage,
     HistoryEntry,
@@ -17,21 +27,8 @@ from sagent.agent.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.compactor import (
-    MICROCOMPACT_KEEP_RECENT,
-    SummaryCompactor,
-    build_continuation,
-    microcompact,
-)
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    Tool as RichTool,
-)
-from sagent.lib.compaction import CLEARED
-from sagent.lib.json import JSON
-from sagent.testing import MockModelCaps
+from sagent.types.model import ModelRequest, ModelResponse
+from sagent.types.tools import Tool
 
 
 @dataclass(slots=True, kw_only=True)
@@ -197,7 +194,7 @@ async def test_should_compact_subtracts_response_tokens() -> None:
 def test_maintain_calls_microcompact_in_place() -> None:
     compactor = SummaryCompactor()
     history = _history_with_n_clearable_results(8)
-    tools: dict[str, RichTool] = {"Bash": _Tool()}
+    tools: dict[str, Tool] = {"Bash": _Tool()}
     compactor.maintain(history, tools)
     # Five results kept; three cleared.
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
@@ -206,7 +203,7 @@ def test_maintain_calls_microcompact_in_place() -> None:
 
 def test_microcompact_clears_old_clearable_results() -> None:
     history = _history_with_n_clearable_results(8)
-    tools: dict[str, RichTool] = {"Bash": _Tool()}
+    tools: dict[str, Tool] = {"Bash": _Tool()}
     microcompact(history, tools, keep_recent=3)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 5
@@ -215,7 +212,7 @@ def test_microcompact_clears_old_clearable_results() -> None:
 def test_microcompact_skips_non_clearable_tools() -> None:
     """Tool with ``supports_microcompaction=False`` is preserved."""
     history = _history_with_n_clearable_results(3)
-    tools: dict[str, RichTool] = {"Bash": _Tool(supports_microcompaction=False)}
+    tools: dict[str, Tool] = {"Bash": _Tool(supports_microcompaction=False)}
     microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert cleared == []
@@ -226,7 +223,7 @@ def test_microcompact_skips_already_cleared_results() -> None:
     history = _history_with_n_clearable_results(2)
     # history[2] is the first ToolResult (call_id c0); pre-clear it.
     history[2] = ToolResult(call_id="c0", content=CLEARED)
-    tools: dict[str, RichTool] = {"Bash": _Tool()}
+    tools: dict[str, Tool] = {"Bash": _Tool()}
     microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     # Two: the pre-cleared one + the still-live one we just cleared.
@@ -243,7 +240,7 @@ def test_microcompact_unknown_tool_is_ignored() -> None:
 
 def test_microcompact_keep_recent_zero_clears_all() -> None:
     history = _history_with_n_clearable_results(3)
-    tools: dict[str, RichTool] = {"Bash": _Tool()}
+    tools: dict[str, Tool] = {"Bash": _Tool()}
     microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 3
@@ -403,7 +400,10 @@ async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
     body = "summary"
     model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
-    history: list[HistoryEntry] = [UserMessage(text="m1"), AssistantMessage(text="a1")]
+    history: list[HistoryEntry] = [
+        UserMessage(text="m1"),
+        AssistantMessage(text="a1"),
+    ]
     result = await compactor.compact(history, model, direction="from", keep_recent=10)
     # Keep-recent saturates: tail preserved verbatim + continuation prepended.
     assert isinstance(result[0], UserMessage)
@@ -484,7 +484,10 @@ def _history_with_n_clearable_results(n: int) -> list[HistoryEntry]:
     """Build a history that has ``n`` ``Bash`` tool calls + matching results."""
     calls = tuple(ToolCall(id=f"c{i}", name="Bash", args={}) for i in range(n))
     asst = AssistantMessage(text="", tool_calls=calls)
-    entries: list[HistoryEntry] = [UserMessage(text="go"), asst]
+    entries: list[HistoryEntry] = [
+        UserMessage(text="go"),
+        asst,
+    ]
     entries.extend(ToolResult(call_id=f"c{i}", content=f"out-{i}") for i in range(n))
     return entries
 

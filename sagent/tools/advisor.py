@@ -17,17 +17,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from sagent.agent.runtime import (
-    AgentRuntime,
+from sagent.agent import runtime as agent_runtime
+from sagent.lib import debug_log
+from sagent.lib.json import JSON, json_freeze
+from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
-    Tool as RuntimeTool,
     ToolResult,
     UserMessage,
 )
-from sagent.custom_types import Model, ModelRequest
-from sagent.lib import debug_log
-from sagent.lib.json import JSON, json_freeze
+from sagent.types.model import Model, ModelRequest
 
 
 _SYSTEM = (
@@ -77,7 +76,7 @@ class _AdvisorModel:
         self,
         history: list[HistoryEntry],
         system: str,
-        tools: list[RuntimeTool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -196,7 +195,7 @@ class Advisor:
             uses=self._uses,
             max_uses=self._max_uses,
         )
-        runtime = AgentRuntime(
+        runtime = agent_runtime.AgentRuntime(
             model=_AdvisorModel(self._model),
             system=self._system,
             tools=[],

@@ -12,10 +12,10 @@ import urllib.request
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
-from sagent.custom_types import Tool
 from sagent.lib.json import JSON
 from sagent.providers.lib.mcp_bridge import ToolsBridge
+from sagent.types.history import ToolResult
+from sagent.types.tools import Tool
 
 
 class _EchoTool:

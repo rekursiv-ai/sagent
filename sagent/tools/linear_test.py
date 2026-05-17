@@ -8,9 +8,9 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.linear import Linear
+from sagent.types.history import ToolResult
 
 
 if TYPE_CHECKING:

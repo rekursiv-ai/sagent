@@ -23,11 +23,6 @@ import dataclasses
 import logging
 import re
 
-from sagent.agent.runtime import (
-    HistoryEntry,
-    ToolResult,
-    UserMessage,
-)
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
@@ -36,6 +31,7 @@ from sagent.tools.core import (
     load_tool_description,
 )
 from sagent.tools.prompt_text import escape_prompt_text
+from sagent.types.history import HistoryEntry, ToolResult, UserMessage
 
 
 logger = logging.getLogger(__name__)

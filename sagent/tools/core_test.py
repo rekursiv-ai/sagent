@@ -12,7 +12,6 @@ import time
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import with_fake_agent
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -39,6 +38,7 @@ from sagent.tools.core import (
     tool_state_context,
     truncate,
 )
+from sagent.types.history import ToolResult
 
 
 def _schema_property(schema: object, name: str) -> Mapping[str, object]:

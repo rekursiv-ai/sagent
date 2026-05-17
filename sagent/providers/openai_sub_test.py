@@ -16,14 +16,6 @@ import httpx
 import openai
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import AuthRefreshError
-from sagent.custom_types import ModelRequest
 from sagent.lib.json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.cost import ModelProfile
@@ -40,6 +32,14 @@ from sagent.providers.openai_sub import (
     _parse_tool_arguments,
     _subscription_profile,
 )
+from sagent.types.exceptions import AuthRefreshError
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest
 
 
 # Minimal ``Tool``-shaped stub for the builders (Protocol consumers).
@@ -363,6 +363,13 @@ def test_subscription_model_overrides_supports_thinking_false() -> None:
     m = _make_provider().model("gpt-5.5")
     assert m.supports_thinking is False
     assert m.supports_account_auth is True
+
+
+def test_subscription_valid_service_tiers_priority_only() -> None:
+    # Codex ``/fast`` slash command sets service_tier="priority"; the
+    # subscription endpoint accepts no other values.
+    m = _make_provider().model("gpt-5.5")
+    assert m.valid_service_tiers == ("priority",)
 
 
 def test_subscription_context_overflow_detection() -> None:

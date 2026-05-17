@@ -11,15 +11,6 @@ import itertools
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolResult,
-)
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    ModelSpec,
-)
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_spawn import (
     AgentSpawn,
@@ -34,6 +25,8 @@ from sagent.tools.core import (
     max_depth_var,
     tool_state_var,
 )
+from sagent.types.history import AssistantMessage, ToolResult
+from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 
 
 @dataclass(slots=True, kw_only=True)

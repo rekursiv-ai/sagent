@@ -33,12 +33,8 @@ else:
 
     httpx = lazy_import("httpx")  # 168ms
 
-from sagent.custom_exceptions import StreamInterruptedError
-from sagent.custom_types import (
-    Model,
-    ModelRequest,
-    ModelResponse,
-)
+from sagent.types.exceptions import StreamInterruptedError
+from sagent.types.model import Model, ModelRequest, ModelResponse
 
 
 logger = logging.getLogger(__name__)

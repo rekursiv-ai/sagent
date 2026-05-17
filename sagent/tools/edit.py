@@ -14,7 +14,6 @@ import asyncio
 import difflib
 import re
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.tools.core import (
@@ -24,6 +23,7 @@ from sagent.tools.core import (
     resolve_tool_path,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.types.history import ToolResult
 
 
 # Simple ``s/OLD/NEW/[g]`` - no escaped delimiters, no alternate

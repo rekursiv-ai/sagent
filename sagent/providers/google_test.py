@@ -7,15 +7,6 @@ from typing import cast
 import httpx
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import ModelRequest, Pricing, Tool
 from sagent.lib.json import MutableJSON, MutableJSONValue
 from sagent.providers.google import (
     Google,
@@ -23,6 +14,16 @@ from sagent.providers.google import (
     _parse_response,
     _strip_additional_properties,
 )
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, Pricing
+from sagent.types.tools import Tool
 
 
 def test_strip_additional_properties_removes_top_level_key() -> None:

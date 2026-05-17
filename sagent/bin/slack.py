@@ -75,33 +75,35 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx
 
 from sagent.agent import Agent
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ModelResponseError,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     parse_agent_args,
     resolve_tools,
 )
 from sagent.compactor import SummaryCompactor
-from sagent.custom_types import ModelSpec
 from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelSpec
+from sagent.types.runtime import (
+    ModelResponseError,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
+)
 
 
 if TYPE_CHECKING:
     from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
 
-    from sagent.custom_types import Model
+    from sagent.types.model import Model
 
 logger = logging.getLogger(__name__)
 

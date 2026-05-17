@@ -47,6 +47,8 @@ import logging
 import time
 import uuid
 
+from sagent import providers, types
+from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
@@ -60,33 +62,6 @@ from sagent.agent.compaction import (
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.result_storage import post_process_result
 from sagent.agent.retry import send_with_retry
-from sagent.agent.runtime import (
-    AgentRuntime,
-    AssistantMessage,
-    Clear,
-    Compact,
-    CompactComplete,
-    DetachedResult,
-    Halt,
-    HistoryEntry,
-    Kill,
-    Model as RuntimeModel,
-    ModelCallStarted,
-    ModelIdle,
-    ModelResponseCancelled,
-    ModelResponseComplete,
-    ModelResponseError,
-    ModelResponsePartial,
-    Quit,
-    Recompact,
-    RuntimeEvent,
-    StatusChanged,
-    Tool as RuntimeTool,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-    current_call_id_var,
-)
 from sagent.agent.session_io import (
     SessionMeta,
     rebuild_content_cache,
@@ -101,17 +76,6 @@ from sagent.agent.state import (
     current_agent_var,
     tool_state_var,
     unique_registry_label,
-)
-from sagent.custom_exceptions import log_exception_or_warning
-from sagent.custom_types import (
-    Compactor as RichCompactor,
-    ContextBudget,
-    Model as RichModel,
-    ModelRequest,
-    ModelResponse,
-    ModelSpec,
-    TokenCount,
-    Tool as RichTool,
 )
 from sagent.lib import last_models
 from sagent.lib.compaction import write_pre_compact_transcript
@@ -142,15 +106,15 @@ class ActivityTracker:
     """Characters streamed so far in the current response."""
 
     active: bool = False
-    """True between ``ModelCallStarted`` and ``ModelResponseComplete`` /
-    ``ModelIdle`` for the current call."""
+    """True between ``types.runtime.ModelCallStarted`` and ``types.runtime.ModelResponseComplete`` /
+    ``types.runtime.ModelIdle`` for the current call."""
 
     num_tool_call_rounds: int = 0
     """Cumulative count of responses that included tool calls."""
 
 
 class Agent:
-    """Conversation agent: composes :class:`AgentRuntime` with wrappers.
+    """Conversation agent: composes :class:`agent_runtime.AgentRuntime` with wrappers.
 
     Args:
       model: Rich provider model the agent calls.
@@ -158,16 +122,16 @@ class Agent:
       system: Static system prompt string or a no-arg factory rebuilt
           each request.
       tools: Rich tools advertised to the model.
-      compactor: Rich compactor used on ``Compact`` / ``Recompact`` and
+      compactor: Rich compactor used on ``types.runtime.Compact`` / ``types.runtime.Recompact`` and
           on overflow recovery.
       session_dir: Directory for session persistence and pre-compact
           transcripts; ``None`` disables both.
-      budget: Context budget; defaults to ``ContextBudget.from_model``.
+      budget: Context budget; defaults to ``types.model.ContextBudget.from_model``.
       max_attempts: Retry attempts inside ``send_with_retry``.
       name: Human-readable agent label.
       description: Agent description for parent agents and the UI.
       max_tool_call_rounds: Cap on tool-call rounds before the agent
-          forces ``ModelResponseError``.
+          forces ``types.runtime.ModelResponseError``.
       thinking: Extended-thinking mode; passed through when supported.
       effort: Effort hint; passed through when supported.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
@@ -178,13 +142,13 @@ class Agent:
     def __init__(
         self,
         *,
-        model: RichModel,
-        model_spec: ModelSpec | None = None,
+        model: types.model.Model,
+        model_spec: types.model.ModelSpec | None = None,
         system: SystemPromptArg = "",
-        tools: list[RichTool] | None = None,
-        compactor: RichCompactor | None = None,
+        tools: list[types.tools.Tool] | None = None,
+        compactor: types.compactor.Compactor | None = None,
         session_dir: str | Path | None = None,
-        budget: ContextBudget | None = None,
+        budget: types.model.ContextBudget | None = None,
         max_attempts: int = 5,
         name: str = "Agent",
         description: str = "An AI agent.",
@@ -201,16 +165,17 @@ class Agent:
         if model_spec is not None:
             last_models.record(model_spec.provider, model_spec.model_id)
         self._system_spec: SystemPromptArg = system
-        self._tools_list: list[RichTool] = list(tools or [])
+        self._tools_list: list[types.tools.Tool] = list(tools or [])
         self.compactor = compactor
         if budget is None:
-            budget = ContextBudget.from_model(model)
+            budget = types.model.ContextBudget.from_model(model)
         self._budget = budget
         self.max_attempts = max_attempts
         self.max_tool_call_rounds = max_tool_call_rounds
         self._thinking = thinking
         self._effort = effort
         self._cache_ttl: str = "5m"
+        self._service_tier: str | None = None
         self.persistent_retry = persistent_retry
         self._max_budget_usd = max_budget_usd
 
@@ -219,7 +184,7 @@ class Agent:
         self.tool_state = ToolState()
         self.compaction_state = CompactionState()
         self._bg: dict[str, BackgroundTaskEntry] = {}
-        self.observers: list[Callable[[RuntimeEvent], None]] = []
+        self.observers: list[Callable[[types.runtime.RuntimeEvent], None]] = []
         # ``_tool_registry`` maps cohort call_id → (tool_name, started_at)
         # so ``background`` can synthesize ``BackgroundTaskEntry`` rows
         # for detached cohort members.
@@ -240,15 +205,15 @@ class Agent:
         # consumer sites pass through. The schema-augmenting
         # ``BackgroundAwareTool`` wrapper is applied per request in
         # ``_AgentModel.stream`` when building the provider tool list.
-        self._tools_map: dict[str, RichTool] = {}
-        agent_tools: list[RuntimeTool] = []
+        self._tools_map: dict[str, types.tools.Tool] = {}
+        agent_tools: list[agent_runtime.Tool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
             agent_tools.append(_AgentTool(t, self))
         self._agent_compactor = (
             _AgentCompactor(compactor, self) if compactor is not None else None
         )
-        self.runtime = AgentRuntime(
+        self.runtime = agent_runtime.AgentRuntime(
             model=self._agent_model,
             tools=agent_tools,
             compactor=self._agent_compactor,
@@ -265,7 +230,7 @@ class Agent:
     # -- Properties / config surface ----------------------------------
 
     @property
-    def budget(self) -> ContextBudget:
+    def budget(self) -> types.model.ContextBudget:
         """Context budget; auto-derived from the model when unset."""
         return self._budget
 
@@ -317,7 +282,7 @@ class Agent:
 
     def reset_budget(self) -> None:
         """Reset budget to model-derived defaults."""
-        self._budget = ContextBudget.from_model(self.model)
+        self._budget = types.model.ContextBudget.from_model(self.model)
 
     @property
     def thinking(self) -> str | None:
@@ -375,6 +340,37 @@ class Agent:
         self._cache_ttl = value
 
     @property
+    def service_tier(self) -> str | None:
+        """OpenAI processing-tier hint, or ``None`` when unset."""
+        return self._service_tier
+
+    @service_tier.setter
+    def service_tier(self, value: str | None) -> None:
+        """Set the OpenAI service-tier hint; rejected when unsupported.
+
+        Args:
+          value: Tier name (``"auto"`` / ``"default"`` / ``"flex"`` /
+              ``"priority"``), or ``None`` to clear.
+
+        Raises:
+          ValueError: If the model does not support a service-tier hint
+              or ``value`` is not one of the accepted tiers.
+
+        """
+        if value is not None:
+            valid = self.model.valid_service_tiers
+            if not valid:
+                raise ValueError(
+                    f"Model {self.model.model_id!r} does not support service_tier.",
+                )
+            if value not in valid:
+                quoted = ", ".join(repr(t) for t in valid)
+                raise ValueError(
+                    f"service_tier must be one of {quoted}, got {value!r}",
+                )
+        self._service_tier = value
+
+    @property
     def session_id(self) -> str:
         """Short hex id assigned at agent construction."""
         return self._session_id
@@ -386,7 +382,7 @@ class Agent:
 
     @status.setter
     def status(self, value: str) -> None:
-        """Set the status string (rendered in the status pane) and publish a ``StatusChanged`` event.
+        """Set the status string (rendered in the status pane) and publish a ``types.runtime.StatusChanged`` event.
 
         Args:
           value: New status string.
@@ -395,16 +391,16 @@ class Agent:
         if value == self._status:
             return
         self._status = value
-        self.runtime.publish(StatusChanged(text=value))
+        self.runtime.publish(types.runtime.StatusChanged(text=value))
 
     @property
-    def history(self) -> list[HistoryEntry]:
+    def history(self) -> list[types.history.HistoryEntry]:
         """Conversation history (read/write view of runtime.history)."""
         return self.runtime.history
 
     @property
     def inbox(self):
-        """The runtime's inbox (``GatedDeque[RuntimeEvent]``)."""
+        """The runtime's inbox (``GatedDeque[types.runtime.RuntimeEvent]``)."""
         return self.runtime.inbox
 
     @property
@@ -413,12 +409,12 @@ class Agent:
         return self.runtime.model_call or self.runtime.compact_task
 
     @property
-    def tools_map(self) -> dict[str, RichTool]:
+    def tools_map(self) -> dict[str, types.tools.Tool]:
         """Map of tool name → rich tool (pre-wrap)."""
         return self._tools_map
 
     @property
-    def tools(self) -> list[RichTool]:
+    def tools(self) -> list[types.tools.Tool]:
         """Rich tools in registration order (pre-wrap copies)."""
         return list(self._tools_map.values())
 
@@ -433,7 +429,7 @@ class Agent:
         return self.cost_tracker.total_cost_usd
 
     @property
-    def total_tokens(self) -> TokenCount:
+    def total_tokens(self) -> types.model.TokenCount:
         """Cumulative token counts across all recorded responses."""
         return self.cost_tracker.total
 
@@ -458,7 +454,7 @@ class Agent:
         merged.update(self._bg)
         return merged
 
-    def publish(self, event: RuntimeEvent) -> None:
+    def publish(self, event: types.runtime.RuntimeEvent) -> None:
         """Forward an event to the runtime's observer list.
 
         Args:
@@ -469,7 +465,9 @@ class Agent:
 
     # -- Mutation methods ---------------------------------------------
 
-    def swap_model(self, model: RichModel, *, spec: ModelSpec | None = None) -> None:
+    def swap_model(
+        self, model: types.model.Model, *, spec: types.model.ModelSpec | None = None
+    ) -> None:
         """Replace the active model.
 
         Clears ``thinking`` / ``effort`` when the new model lacks
@@ -510,6 +508,108 @@ class Agent:
             last_models.record(spec.provider, spec.model_id)
         _schedule_close(old)
 
+    def change_model(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> types.model.ModelSpec:
+        """Resolve, build, and queue a model swap. The high-level API.
+
+        Kwarg semantics: each defaults to ``None`` meaning "inherit from
+        the current ``model_spec``." Note that ``account=None`` therefore
+        inherits the current account override; setting ``account`` to
+        the default backend account (literal ``None``) is not expressible
+        via this API -- construct a ``types.model.ModelSpec`` and call
+        :meth:`swap_model` directly for that corner.
+
+        Cross-provider resolution when ``model_id`` is omitted:
+        1. Prefer the current model id when the new provider's catalog
+           knows it (same vendor, different auth subclass).
+        2. Else use the last model recorded for the new provider in
+           ``~/.sagent/last-models.json``.
+        3. Else fall back to the new provider's ``DEFAULT_MODEL``.
+
+        Queues a :class:`types.runtime.ModelSwitch` through the runtime inbox so any
+        in-flight model call finishes against the OLD model (cost
+        attribution, retry state) before the new model goes live.
+
+        Args:
+          provider: New provider class name, e.g. ``"AnthropicCLI"``.
+          auth: New auth-method suffix.
+          model_id: New provider-specific model id.
+          account: New credential account override.
+
+        Returns:
+          target: Resolved target spec (the spec the swap will land on).
+
+        Raises:
+          ValueError: ``model_spec`` is unset, the resolved provider is
+              unknown, or the resolved model id is rejected by the
+              provider's catalog.
+
+        """
+        spec = self.model_spec
+        if spec is None:
+            raise ValueError("agent has no model_spec; cannot change_model")
+        target = _resolve_target_spec(
+            spec,
+            provider=provider,
+            auth=auth,
+            model_id=model_id,
+            account=account,
+        )
+        provider_obj = providers.build_provider(
+            target.provider, target.auth, account=target.account
+        )
+        new_model = provider_obj.model(target.model_id)
+        if target.provider != spec.provider:
+            label = (
+                f"{spec.provider}/{spec.model_id} -> "
+                f"{target.provider}/{target.model_id}"
+            )
+        else:
+            label = f"{spec.model_id} -> {target.model_id}"
+        self.runtime.inbox.push_back(
+            types.runtime.ModelSwitch(
+                apply=lambda: self._apply_model_change(new_model, target),
+                label=label,
+            ),
+        )
+        return target
+
+    async def relogin(self) -> None:
+        """Re-authenticate the current provider; hot-reload live creds.
+
+        Drives the provider class's ``login`` classmethod (which writes
+        fresh OAuth credentials to disk), then re-reads them into the
+        running provider's in-memory token state via
+        :class:`types.providers.AuthReloadable.handle_auth_error`. Without the reload
+        the in-memory ``_refresh_token`` is still the revoked one and
+        the next refresh returns 400 -- so ``/login`` would appear to
+        succeed but the auth error would keep firing.
+
+        Raises:
+          ValueError: ``model_spec`` is unset, the provider class is
+              unknown, or the provider has no ``login`` classmethod.
+
+        """
+        spec = self.model_spec
+        if spec is None:
+            raise ValueError("agent has no model_spec; cannot relogin")
+        prov_cls = getattr(providers, spec.provider, None)
+        if prov_cls is None:
+            raise ValueError(f"unknown provider {spec.provider!r}")
+        login_fn = getattr(prov_cls, "login", None)
+        if login_fn is None:
+            raise ValueError(f"provider {spec.provider!r} has no login method")
+        login_fn()
+        live_provider = getattr(self.model, "_provider", None)
+        if isinstance(live_provider, types.providers.AuthReloadable):
+            await live_provider.handle_auth_error()
+
     def system_prompt(self) -> str:
         """Assemble the full system prompt (system + tool contributions).
 
@@ -519,10 +619,36 @@ class Agent:
         """
         return self._build_system()
 
+    def _apply_model_change(
+        self, model: types.model.Model, spec: types.model.ModelSpec
+    ) -> None:
+        """Apply a high-level model change, resetting stale derived budgets.
+
+        Publishes ``BudgetReset`` when the prior budget couldn't fit the
+        new model -- the reset is destructive of any ``ContextBudget``
+        customisation, so renderers surface a notification.
+        """
+        if (
+            self._budget.max_request_tokens > model.max_request_tokens
+            or self._budget.max_response_tokens > model.max_response_tokens
+        ):
+            prior = self._budget
+            self._budget = types.model.ContextBudget.from_model(model)
+            self.runtime.publish(
+                types.runtime.BudgetReset(
+                    model_id=model.model_id,
+                    prior_max_request_tokens=prior.max_request_tokens,
+                    prior_max_response_tokens=prior.max_response_tokens,
+                    new_max_request_tokens=self._budget.max_request_tokens,
+                    new_max_response_tokens=self._budget.max_response_tokens,
+                )
+            )
+        self.swap_model(model, spec=spec)
+
     def resume(
         self,
         meta: SessionMeta,
-        history: list[HistoryEntry],
+        history: list[types.history.HistoryEntry],
         tool_state: ToolState,
     ) -> None:
         """Apply a persisted session snapshot to this agent.
@@ -562,7 +688,7 @@ class Agent:
 
     def halt(self) -> None:
         """Cancel the current model call; wait for user input."""
-        self.runtime.inbox.push_back(Halt())
+        self.runtime.inbox.push_back(types.runtime.Halt())
 
     def kill_tool(self, qid: str) -> None:
         """Cancel one outstanding tool task.
@@ -571,11 +697,11 @@ class Agent:
           qid: Cohort call id of the task to cancel.
 
         """
-        self.runtime.inbox.push_back(Kill(call_id=qid))
+        self.runtime.inbox.push_back(types.runtime.Kill(call_id=qid))
 
     def kill_all_tools(self) -> None:
         """Cancel every outstanding tool task."""
-        self.runtime.inbox.push_back(Kill())
+        self.runtime.inbox.push_back(types.runtime.Kill())
 
     def shutdown(self, *, force: bool = False) -> None:
         """End ``serve_forever`` cleanly.
@@ -590,7 +716,7 @@ class Agent:
             for job in list(self._bg.values()):
                 if not job.hidden and not job.task.done():
                     _ = job.task.cancel()
-        self.runtime.inbox.push_back(Quit())
+        self.runtime.inbox.push_back(types.runtime.Quit())
 
     # -- Strategy methods ---------------------------------------------
 
@@ -601,7 +727,9 @@ class Agent:
           args: Free-form compaction instructions forwarded to the compactor.
 
         """
-        await self._await_event(Compact(args=args), CompactComplete)
+        await self._await_event(
+            types.runtime.Compact(args=args), types.runtime.CompactComplete
+        )
 
     async def recompact(self, args: str = "") -> None:
         """Reload the most recent pre-compact transcript and re-run compaction.
@@ -610,19 +738,23 @@ class Agent:
           args: Free-form compaction instructions forwarded to the compactor.
 
         """
-        await self._await_event(Recompact(args=args), CompactComplete)
+        await self._await_event(
+            types.runtime.Recompact(args=args), types.runtime.CompactComplete
+        )
 
     async def clear(self) -> None:
         """Preempt and wipe history + file-tracking caches."""
         self.tool_state.reset_file_tracking()
-        self.runtime.inbox.push_back(Clear())
+        self.runtime.inbox.push_back(types.runtime.Clear())
 
     async def serve_forever(self) -> None:
         """Drive the agent until ``shutdown`` is called."""
         with self._install_contextvars():
             await self.runtime.run_forever()
 
-    async def run(self, msg: UserMessage) -> AsyncGenerator[RuntimeEvent, None]:
+    async def run(
+        self, msg: types.history.UserMessage
+    ) -> AsyncGenerator[types.runtime.RuntimeEvent, None]:
         """Process one inbound message; drive rounds until idle.
 
         Convenience entrypoint used by tests and non-``serve_forever``
@@ -632,15 +764,15 @@ class Agent:
           msg: User message to push and run to idle.
 
         Yields:
-          event: Each ``RuntimeEvent`` published until ``ModelIdle``.
+          event: Each ``types.runtime.RuntimeEvent`` published until ``types.runtime.ModelIdle``.
 
         """
-        events: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
+        events: asyncio.Queue[types.runtime.RuntimeEvent] = asyncio.Queue()
         idle = asyncio.Event()
 
-        def _watch(event: RuntimeEvent) -> None:
+        def _watch(event: types.runtime.RuntimeEvent) -> None:
             events.put_nowait(event)
-            if isinstance(event, ModelIdle):
+            if isinstance(event, types.runtime.ModelIdle):
                 idle.set()
 
         self.runtime.observers.append(_watch)
@@ -656,7 +788,7 @@ class Agent:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     # Drain any pending event before checking idle so the
-                    # consumer sees the ModelIdle that triggered the flag.
+                    # consumer sees the types.runtime.ModelIdle that triggered the flag.
                     if get_task in done:
                         yield get_task.result()
                     else:
@@ -715,12 +847,14 @@ class Agent:
             current_agent_var.reset(agent_token)
 
     async def _await_event(
-        self, push: RuntimeEvent, complete: type[RuntimeEvent]
+        self,
+        push: types.runtime.RuntimeEvent,
+        complete: type[types.runtime.RuntimeEvent],
     ) -> None:
         """Push ``push`` and resolve when an event of ``complete`` type arrives."""
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-        def resolver(ev: RuntimeEvent) -> None:
+        def resolver(ev: types.runtime.RuntimeEvent) -> None:
             if isinstance(ev, complete) and not fut.done():
                 fut.set_result(None)
 
@@ -745,7 +879,7 @@ class Agent:
 
     # -- Observers ----------------------------------------------------
 
-    def record_response(self, response: ModelResponse) -> None:
+    def record_response(self, response: types.model.ModelResponse) -> None:
         """Record a completed response into ``cost_tracker``.
 
         Writes through to ``cost_root_var.get(self.cost_tracker)`` so
@@ -769,33 +903,36 @@ class Agent:
                 f" >= ${self._max_budget_usd:.2f}",
             )
 
-    def _track_activity(self, event: RuntimeEvent) -> None:
+    def _track_activity(self, event: types.runtime.RuntimeEvent) -> None:
         """Bracket round-chain elapsed time + count streamed chars.
 
-        A round chain spans from the first ``ModelCallStarted`` of a
-        user turn through ``ModelIdle`` (or terminal cancel). Mid-chain
-        ``ModelResponseComplete`` events with ``tool_calls`` do not
+        A round chain spans from the first ``types.runtime.ModelCallStarted`` of a
+        user turn through ``types.runtime.ModelIdle`` (or terminal cancel). Mid-chain
+        ``types.runtime.ModelResponseComplete`` events with ``tool_calls`` do not
         reset ``active`` so the status-pane spinner keeps ticking
         through tool execution windows -- the user sees continuous
         activity until the agent truly idles.
         """
-        if isinstance(event, ModelCallStarted):
+        if isinstance(event, types.runtime.ModelCallStarted):
             if not self.activity.active:
                 self.activity.active = True
                 self.activity.current_call_start = asyncio.get_running_loop().time()
             self.activity.live_response_chars = 0
-        elif isinstance(event, ModelResponsePartial):
+        elif isinstance(event, types.runtime.ModelResponsePartial):
             self.activity.live_response_chars += len(event.text)
-        elif isinstance(event, ModelResponseComplete) and event.message.tool_calls:
+        elif (
+            isinstance(event, types.runtime.ModelResponseComplete)
+            and event.message.tool_calls
+        ):
             # Tool calls follow; spinner keeps ticking through the cohort.
             pass
         elif isinstance(
             event,
             (
-                ModelResponseComplete,
-                ModelIdle,
-                ModelResponseCancelled,
-                ModelResponseError,
+                types.runtime.ModelResponseComplete,
+                types.runtime.ModelIdle,
+                types.runtime.ModelResponseCancelled,
+                types.runtime.ModelResponseError,
             ),
         ):
             if self.activity.active:
@@ -806,25 +943,25 @@ class Agent:
                 self.activity.active = False
                 self.activity.current_call_start = 0.0
 
-    def _track_tool_registry(self, event: RuntimeEvent) -> None:
+    def _track_tool_registry(self, event: types.runtime.RuntimeEvent) -> None:
         """Populate the cohort id → (tool_name, started) registry."""
-        if isinstance(event, ModelResponseComplete):
+        if isinstance(event, types.runtime.ModelResponseComplete):
             now = time.time()
             for tc in event.message.tool_calls:
                 self._tool_registry[tc.id] = (tc.name, now)
             if event.message.tool_calls:
                 self.activity.num_tool_call_rounds += 1
 
-    def _enforce_caps(self, event: RuntimeEvent) -> None:
-        """Push ``ModelResponseError`` when caps are hit."""
+    def _enforce_caps(self, event: types.runtime.RuntimeEvent) -> None:
+        """Push ``types.runtime.ModelResponseError`` when caps are hit."""
         if (
-            isinstance(event, ModelResponseComplete)
+            isinstance(event, types.runtime.ModelResponseComplete)
             and self.max_tool_call_rounds is not None
             and self.activity.num_tool_call_rounds >= self.max_tool_call_rounds
             and event.message.tool_calls
         ):
             self.runtime.inbox.push_back(
-                ModelResponseError(
+                types.runtime.ModelResponseError(
                     RuntimeError(
                         "Tool-call-round limit reached"
                         f" ({self.max_tool_call_rounds} rounds)."
@@ -833,7 +970,7 @@ class Agent:
                 )
             )
 
-    def microcompact_history(self, history: list[HistoryEntry]) -> None:
+    def microcompact_history(self, history: list[types.history.HistoryEntry]) -> None:
         """Apply the compactor's in-place microcompaction to ``history``.
 
         No-op when no rich compactor is wired. Used by the model
@@ -869,7 +1006,7 @@ class Agent:
         """Synchronous compact path used by ``_AgentModel`` for overflow recovery.
 
         Bypasses the inbox (the runtime would cancel our task if we
-        pushed ``Compact``). Calls the inner compactor directly,
+        pushed ``types.runtime.Compact``). Calls the inner compactor directly,
         replaces ``runtime.history`` in place.
         """
         if self._agent_compactor is None:
@@ -881,20 +1018,79 @@ class Agent:
                 "",
             )
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
-            log_exception_or_warning(
+            types.exceptions.log_exception_or_warning(
                 logger,
                 "synchronous compaction failed during overflow recovery",
                 exc,
             )
             self.runtime.history.append(
-                UserMessage(text=f"[Compaction error: {type(exc).__name__}: {exc}]"),
+                types.history.UserMessage(
+                    text=f"[Compaction error: {type(exc).__name__}: {exc}]"
+                ),
             )
             return
         self.runtime.history.clear()
         self.runtime.history.extend(summary)
 
 
-def _schedule_close(model: RichModel) -> None:
+def _resolve_target_spec(
+    spec: types.model.ModelSpec,
+    *,
+    provider: str | None,
+    auth: str | None,
+    model_id: str | None,
+    account: str | None,
+) -> types.model.ModelSpec:
+    """Resolve a ``change_model`` kwargs payload to a complete ``types.model.ModelSpec``.
+
+    ``None`` kwargs inherit from ``spec``. The model-id branch implements
+    the cross-provider preservation rule documented on
+    :meth:`Agent.change_model`.
+    """
+    prov_name = provider or spec.provider
+    final_auth = auth or spec.auth
+    final_account = account if account is not None else spec.account
+    if model_id is not None:
+        final_model_id = model_id
+    elif prov_name == spec.provider or _provider_knows_model(prov_name, spec.model_id):
+        final_model_id = spec.model_id
+    else:
+        final_model_id = last_models.get(prov_name) or _default_model_for(prov_name)
+    return types.model.ModelSpec(
+        provider=prov_name,
+        auth=final_auth,
+        account=final_account,
+        model_id=final_model_id,
+    )
+
+
+def _provider_knows_model(prov_name: str, model_id: str) -> bool:
+    """Return True when the provider class's catalog includes ``model_id``.
+
+    Reads ``cls.KNOWN_MODELS`` without instantiating so the probe is
+    side-effect-free (no credential lookup).
+    """
+    cls = getattr(providers, prov_name, None)
+    if cls is None:
+        return False
+    known = getattr(cls, "KNOWN_MODELS", None)
+    if not isinstance(known, dict):
+        return False
+    return model_id in known
+
+
+def _default_model_for(prov_name: str) -> str:
+    """Return ``Provider.DEFAULT_MODEL`` for the named provider class."""
+    cls = getattr(providers, prov_name, None)
+    if cls is None:
+        raise ValueError(f"unknown provider: {prov_name!r}")
+    default = getattr(cls, "DEFAULT_MODEL", None)
+    if not isinstance(default, str) or not default:
+        raise ValueError(f"provider {prov_name!r} has no DEFAULT_MODEL")
+    return default
+
+
+def _schedule_close(model: types.model.Model) -> None:
     """Fire-and-forget async teardown for a swapped-out model.
 
     CLI-style providers (``AnthropicCLI``, ``GoogleCLI``) own subprocess
@@ -931,7 +1127,9 @@ def _log_close_errors(task: asyncio.Task[object]) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        log_exception_or_warning(logger, "swapped-out model close failed", exc)
+        types.exceptions.log_exception_or_warning(
+            logger, "swapped-out model close failed", exc
+        )
 
 
 class _AgentModel:
@@ -943,11 +1141,11 @@ class _AgentModel:
 
     """
 
-    def __init__(self, inner: RichModel, agent: Agent) -> None:
+    def __init__(self, inner: types.model.Model, agent: Agent) -> None:
         self._inner = inner
         self._agent = agent
 
-    def set_inner(self, inner: RichModel) -> None:
+    def set_inner(self, inner: types.model.Model) -> None:
         """Swap the wrapped model. Used by ``Agent.swap_model``.
 
         Args:
@@ -958,15 +1156,15 @@ class _AgentModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[types.history.HistoryEntry],
         system: str,
-        tools: list[RuntimeTool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
-    ) -> AssistantMessage:
+    ) -> types.history.AssistantMessage:
         """Stream a response with retry + context-overflow recovery.
 
-        Builds a ``ModelRequest`` from agent state, runs
+        Builds a ``types.model.ModelRequest`` from agent state, runs
         ``send_with_retry`` with persistent-mode + overflow recovery,
         records cost out-of-band, returns the final assistant message.
 
@@ -978,7 +1176,7 @@ class _AgentModel:
           on_thinking: Callback for each streamed thinking chunk.
 
         Returns:
-          message: Final ``AssistantMessage`` from the provider.
+          message: Final ``types.history.AssistantMessage`` from the provider.
 
         Raises:
           RuntimeError: Overflow recovery failed after the retry cap.
@@ -993,7 +1191,7 @@ class _AgentModel:
         # construction and is intentionally ignored here.
         del system
 
-        # Build ModelRequest from runtime-passed args + agent state.
+        # Build types.model.ModelRequest from runtime-passed args + agent state.
         # The runtime hands us ``runtime.Tool`` instances (the ``_AgentTool``
         # wrappers), which expose only ``name`` / ``run``. Providers need
         # the full rich Tool surface (``description``, ``directive_schema``,
@@ -1001,7 +1199,7 @@ class _AgentModel:
         # ``tools_map`` by name and wrap with ``BackgroundAwareTool`` so
         # the LLM-visible schema advertises the ``background`` / ``delay``
         # properties without polluting the raw tool's identity.
-        rich_tools: list[RichTool] = [
+        rich_tools: list[types.tools.Tool] = [
             self._agent.tools_map[t.name]
             if t.name == "BackgroundTask"
             else BackgroundAwareTool(self._agent.tools_map[t.name])
@@ -1009,12 +1207,15 @@ class _AgentModel:
         ]
         rich_thinking = self._agent.thinking if self._inner.supports_thinking else None
         rich_effort = self._agent.effort if self._inner.supports_effort else None
+        rich_service_tier = (
+            self._agent.service_tier if self._inner.valid_service_tiers else None
+        )
 
         last_err: Exception | None = None
-        response: ModelResponse | None = None
+        response: types.model.ModelResponse | None = None
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             fresh_system = self._agent.system_prompt()
-            request = ModelRequest(
+            request = types.model.ModelRequest(
                 messages=list(history),
                 system=fresh_system or None,
                 tools=rich_tools or None,
@@ -1022,6 +1223,7 @@ class _AgentModel:
                 thinking=rich_thinking,
                 effort=rich_effort,
                 cache_ttl=self._agent.cache_ttl,
+                service_tier=rich_service_tier,
             )
             try:
                 response = await send_with_retry(
@@ -1056,7 +1258,7 @@ class _AgentModel:
                 f"{MAX_OVERFLOW_RECOVERY} compactions",
             ) from last_err
 
-        # Record cost out-of-band; the runtime's ModelResponseComplete
+        # Record cost out-of-band; the runtime's types.runtime.ModelResponseComplete
         # event has tokens=0 by design (the runtime can't see tokens).
         self._agent.record_response(response)
         return response.message
@@ -1073,12 +1275,12 @@ class _AgentTool:
     - Pre-validate ``args`` against the raw tool's
       ``directive_schema`` (required fields, ``additionalProperties``
       bound). Validation errors surface as
-      ``ToolResult(is_error=True)`` with an ``InputValidationError:``
+      ``types.history.ToolResult(is_error=True)`` with an ``InputValidationError:``
       header carrying the recovery hint so the model can self-correct
       without looping.
-    - Publish ``ToolLabel`` for the REPL renderer.
+    - Publish ``types.runtime.ToolLabel`` for the REPL renderer.
     - When ``background`` / ``delay`` is set: spawn a detached task that
-      will eventually post ``DetachedResult`` to the runtime inbox; the
+      will eventually post ``types.runtime.DetachedResult`` to the runtime inbox; the
       synchronous return is a ``[Running in background: <name>]``
       placeholder. The runtime splices the real result into that
       placeholder slot once the bg task completes.
@@ -1094,7 +1296,7 @@ class _AgentTool:
 
     """
 
-    def __init__(self, inner: RichTool, agent: Agent) -> None:
+    def __init__(self, inner: types.tools.Tool, agent: Agent) -> None:
         self._inner = inner
         self._agent = agent
 
@@ -1103,8 +1305,8 @@ class _AgentTool:
         """Forward to the wrapped tool's name."""
         return self._inner.name
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Validate, publish ``ToolLabel``, dispatch, post-process.
+    async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        """Validate, publish ``types.runtime.ToolLabel``, dispatch, post-process.
 
         Args:
           args: Directive arguments parsed by the runtime; includes the
@@ -1116,19 +1318,21 @@ class _AgentTool:
               ``[Running in background: <name>]`` placeholder.
 
         """
-        call_id = current_call_id_var.get("")
+        call_id = agent_runtime.current_call_id_var.get("")
         bg_requested, delay_sec, clean_args = split_bg_args(args)
         validation_error = _validate_input(
             self._inner.name, self._inner.directive_schema, clean_args
         )
         if validation_error is not None:
-            return ToolResult(
+            return types.history.ToolResult(
                 call_id=call_id,
                 content=validation_error,
                 is_error=True,
             )
         self._agent.runtime.publish(
-            ToolLabel(call_id=call_id, text=self._inner.summary(clean_args)),
+            types.runtime.ToolLabel(
+                call_id=call_id, text=self._inner.summary(clean_args)
+            ),
         )
         if bg_requested or delay_sec > 0:
             task = asyncio.create_task(
@@ -1145,7 +1349,7 @@ class _AgentTool:
                     kind="tool",
                 ),
             )
-            return ToolResult(
+            return types.history.ToolResult(
                 call_id=call_id,
                 content=f"[Running in background: {self._inner.name}]",
             )
@@ -1182,7 +1386,9 @@ class _AgentTool:
             content = f"{type(exc).__name__}: {exc}"
             is_error = True
         self._agent.runtime.inbox.push_back(
-            DetachedResult(call_id=call_id, content=content, is_error=is_error),
+            types.runtime.DetachedResult(
+                call_id=call_id, content=content, is_error=is_error
+            ),
         )
         self._agent.cancel_background(call_id)
 
@@ -1201,16 +1407,16 @@ class _AgentCompactor:
 
     """
 
-    def __init__(self, inner: RichCompactor, agent: Agent) -> None:
+    def __init__(self, inner: types.compactor.Compactor, agent: Agent) -> None:
         self._inner = inner
         self._agent = agent
 
     async def compact(
         self,
-        history: list[HistoryEntry],
-        model: RuntimeModel,
+        history: list[types.history.HistoryEntry],
+        model: agent_runtime.Model,
         args: str = "",
-    ) -> list[HistoryEntry]:
+    ) -> list[types.history.HistoryEntry]:
         """Run the rich compactor and apply post-compact enrichment.
 
         Args:
@@ -1219,8 +1425,8 @@ class _AgentCompactor:
           args: Free-form compaction instructions forwarded to the compactor.
 
         Returns:
-          summary: Compacted history; always ends with a ``UserMessage``
-              or ``ToolResult`` so the runtime gate fires next round.
+          summary: Compacted history; always ends with a ``types.history.UserMessage``
+              or ``types.history.ToolResult`` so the runtime gate fires next round.
 
         """
         del model  # _AgentCompactor uses the agent's rich model directly
@@ -1264,20 +1470,22 @@ class _AgentCompactor:
                 headroom=headroom,
             )
         except Exception as exc:  # noqa: BLE001 -- post_compact_enrich calls the model; catch-all routes UserFacingError to warning, others to exception
-            log_exception_or_warning(
+            types.exceptions.log_exception_or_warning(
                 logger, "post_compact_enrich failed; continuing", exc
             )
         self._agent.compaction_state.compact_count += 1
 
-        # The runtime's gate needs the last entry to be UserMessage or
-        # ToolResult so the next iteration calls the model. If the
+        # The runtime's gate needs the last entry to be types.history.UserMessage or
+        # types.history.ToolResult so the next iteration calls the model. If the
         # compactor returned an empty list or ended elsewhere, append
         # a continuation user message.
-        if not result or not isinstance(result[-1], (UserMessage, ToolResult)):
-            result = [*result, UserMessage(text="[continuation]")]
+        if not result or not isinstance(
+            result[-1], (types.history.UserMessage, types.history.ToolResult)
+        ):
+            result = [*result, types.history.UserMessage(text="[continuation]")]
         return result
 
-    def maintain(self, history: list[HistoryEntry]) -> None:
+    def maintain(self, history: list[types.history.HistoryEntry]) -> None:
         """Forward microcompaction to the inner compactor.
 
         Threads ``cost_tracker.last_response_time`` so the inner

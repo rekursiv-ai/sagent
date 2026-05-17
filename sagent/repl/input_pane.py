@@ -116,17 +116,6 @@ from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    Clear,
-    Compact,
-    Recompact,
-    UserMessage,
-    UserQueuedMessage,
-)
-from sagent.custom_exceptions import (
-    UserFacingError,
-    log_exception_or_warning,
-)
 from sagent.lib.lazy_import import lazy_import
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -146,6 +135,17 @@ from sagent.repl.slash import (
     parse_slash,
 )
 from sagent.tools.core import agent_registry
+from sagent.types.exceptions import (
+    UserFacingError,
+    log_exception_or_warning,
+)
+from sagent.types.history import UserMessage
+from sagent.types.runtime import (
+    Clear,
+    Compact,
+    Recompact,
+    UserQueuedMessage,
+)
 
 
 # Cycle break: ``run_repl`` imports ``spawn_repl_pump`` from this module.

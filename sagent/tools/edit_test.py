@@ -10,10 +10,10 @@ import time
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import with_fake_agent
 from sagent.tools.edit import Edit, make_diff
 from sagent.tools.lib.bash import parse_bash
+from sagent.types.history import ToolResult
 
 
 edit = Edit()

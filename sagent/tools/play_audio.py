@@ -25,13 +25,13 @@ import platform
 import shutil
 import subprocess
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,
     run_sync,
 )
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

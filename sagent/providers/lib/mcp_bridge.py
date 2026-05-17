@@ -50,8 +50,8 @@ else:
     Mount = lazy_import("starlette.routing").Mount
     uvicorn = lazy_import("uvicorn")
 
-from sagent.custom_types import Tool
 from sagent.lib.json import json_unfreeze
+from sagent.types.tools import Tool
 
 
 __all__ = ["ToolsBridge"]

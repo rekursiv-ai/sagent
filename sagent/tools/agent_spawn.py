@@ -28,20 +28,6 @@ import time
 import uuid
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ChildDoneEvent,
-    ChildEvent,
-    HistoryEntry,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import Compactor, Model, ModelSpec, Tool
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.providers import PROVIDER_NAMES, build_provider
@@ -57,6 +43,24 @@ from sagent.tools.core import (
     opt_int,
     opt_str,
 )
+from sagent.types.compactor import Compactor
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import Model, ModelSpec
+from sagent.types.runtime import (
+    ChildDoneEvent,
+    ChildEvent,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
+)
+from sagent.types.tools import Tool
 
 
 agent_lib = lazy_import("sagent.agent")
@@ -724,8 +728,21 @@ def _pick_field(
 # 2: also thinking blocks. Errors are always forwarded.
 _VERBOSITY: dict[int, frozenset[type]] = {
     0: frozenset(),
-    1: frozenset({ToolLabel, ToolResult, ModelResponsePartial}),
-    2: frozenset({ToolLabel, ToolResult, ModelResponsePartial, ModelResponseThinking}),
+    1: frozenset(
+        {
+            ToolLabel,
+            ToolResult,
+            ModelResponsePartial,
+        }
+    ),
+    2: frozenset(
+        {
+            ToolLabel,
+            ToolResult,
+            ModelResponsePartial,
+            ModelResponseThinking,
+        }
+    ),
 }
 
 
@@ -833,7 +850,9 @@ def _build_forwarder(
     )
 
 
-def _last_assistant_result(history: list[HistoryEntry]) -> ToolResult:
+def _last_assistant_result(
+    history: list[HistoryEntry],
+) -> ToolResult:
     """Return the child's last assistant message as a ``ToolResult``."""
     for m in reversed(history):
         if isinstance(m, AssistantMessage):

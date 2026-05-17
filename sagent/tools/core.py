@@ -28,7 +28,6 @@ import typing
 
 import yaml
 
-from sagent.agent.runtime import ToolResult
 from sagent.agent.state import (
     AgentLike,
     ReadCacheEntry,
@@ -45,6 +44,7 @@ from sagent.agent.state import (
     tool_state_var,
 )
 from sagent.lib.json import JSON, int_val, json_freeze
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -468,7 +468,10 @@ class _ToolImpl:
                 await cast(Callable[..., Awaitable[object]], self._fn)(**kwargs),
             )
         else:
-            raw = cast(str | ToolResult, await asyncio.to_thread(self._fn, **kwargs))
+            raw = cast(
+                str | ToolResult,
+                await asyncio.to_thread(self._fn, **kwargs),
+            )
         result = to_result(raw)
         if len(result.content) > self._max_result_chars:
             return dataclasses.replace(

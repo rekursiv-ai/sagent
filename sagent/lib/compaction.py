@@ -14,13 +14,13 @@ import dataclasses
 import json
 import logging
 
-from sagent.agent.runtime import (
+from sagent.lib.atomic_file import atomic_write
+from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.lib.atomic_file import atomic_write
 
 
 logger = logging.getLogger(__name__)

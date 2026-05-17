@@ -88,22 +88,6 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import (
-    AuthRefreshError,
-    PromptTooLongError,
-)
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-    Tool,
-)
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
@@ -120,6 +104,18 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
+from sagent.types.exceptions import (
+    AuthRefreshError,
+    PromptTooLongError,
+)
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)
@@ -668,6 +664,12 @@ class _OpenAISubModel(_OpenAIModel):
 
     @property
     @override
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Codex ``/fast`` slash command sets ``service_tier="priority"``."""
+        return ("priority",)
+
+    @property
+    @override
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account authentication."""
         return True
@@ -756,6 +758,11 @@ class _OpenAISubModel(_OpenAIModel):
             "tools": _build_tools(request.tools) if request.tools else openai.omit,
             "reasoning": reasoning,
         }
+        if (
+            request.service_tier is not None
+            and request.service_tier in self.valid_service_tiers
+        ):
+            create_kwargs["service_tier"] = request.service_tier
         try:
             try:
                 event_stream: AsyncResponseStream = cast(
@@ -786,7 +793,9 @@ class _OpenAISubModel(_OpenAIModel):
             raise
 
 
-def _build_tools(tools: list[Tool]) -> list[oai_responses.FunctionToolParam]:
+def _build_tools(
+    tools: list[Tool],
+) -> list[oai_responses.FunctionToolParam]:
     """Translate each ``Tool`` into a Responses API function-tool param."""
     return [_build_tool(t) for t in tools]
 

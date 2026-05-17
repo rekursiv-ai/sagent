@@ -8,7 +8,17 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import logging
 
-    from sagent.custom_types import ModelResponse
+    from sagent.types.model import ModelResponse
+
+
+__all__ = [
+    "AuthRefreshError",
+    "ModelTerminationError",
+    "PromptTooLongError",
+    "StreamInterruptedError",
+    "UserFacingError",
+    "log_exception_or_warning",
+]
 
 
 class UserFacingError(Exception):

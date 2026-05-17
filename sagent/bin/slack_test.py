@@ -19,16 +19,6 @@ import time
 import pytest
 
 from sagent.agent import Agent as RealAgent
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
 from sagent.bin.slack import (
     SlackAdapter,
     _AgentSlack,
@@ -49,11 +39,23 @@ from sagent.bin.slack import (
     log_tap,
     parse_slack_args,
 )
-from sagent.custom_types import ModelSpec
 from sagent.lib.json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelSpec
+from sagent.types.runtime import (
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
+)
 
 
 @pytest.fixture(autouse=True)

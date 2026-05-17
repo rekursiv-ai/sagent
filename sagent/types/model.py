@@ -1,44 +1,39 @@
-"""Adapter-layer types: ModelRequest, ModelResponse, Tool, Model, ...
+"""Model contract and its data classes.
 
-Splits cleanly from ``agent/runtime.py``:
-
-- ``agent/runtime.py`` (locked): the runtime engine, the dispatch loop,
-  the history dataclasses (``UserMessage``, ``AssistantMessage``,
-  ``ToolResult``, ``ToolCall``, ``BytesMessage``), the ``RuntimeEvent``
-  union, and the minimal ``Tool`` / ``Model`` / ``Compactor`` protocols
-  the runtime consumes.
-
-- This module: the richer interfaces the *wrappers* in ``agent/agent.py``
-  bridge to those minimal protocols. Providers expose ``ProviderModel``
-  with ``buffer(request: ModelRequest) -> ModelResponse``; tools expose
-  ``Tool`` with metadata (``tool_id``, ``description``,
-  ``directive_schema``, ``summary`` / ``summary_result`` / ``prompt``)
-  plus the ``run(args) -> ToolResult`` signature. The Agent layer
-  composes them.
-
-See ``docs/private/agent_v4_contract.md`` for the binding spec.
+The "how do I call a model" types: the ``Model`` Protocol, the request
+and response shapes, the budget and pricing primitives, and the
+``ModelSpec`` recipe used to build a Model from CLI-style strings.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.agent.runtime import (
+from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
-    ToolResult,
 )
-from sagent.lib.json import JSON
 
 
 if TYPE_CHECKING:
-    # ToolState lives in tools/core.py; we forward-reference it on
-    # ``CompactRestorable.post_compact_restore`` to avoid pulling the
-    # tools layer into the runtime types module.
-    from sagent.tools.core import ToolState
+    # ``ModelRequest.tools`` references ``Tool`` from ``tools.py``;
+    # ``tools.py`` references ``ToolResult`` from ``history.py``. No
+    # runtime cycle because ``from __future__ import annotations`` makes
+    # ``Tool`` a forward string at definition time.
+    from sagent.types.tools import Tool
+
+
+__all__ = [
+    "ContextBudget",
+    "Model",
+    "ModelRequest",
+    "ModelResponse",
+    "ModelSpec",
+    "Pricing",
+    "TokenCount",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -124,6 +119,12 @@ class ModelRequest:
     """Prompt-cache TTL (``5m`` or ``1h``); providers without prompt
     caching ignore this field."""
 
+    service_tier: str | None = None
+    """Processing-tier hint; accepted values are provider-specific (see
+    ``Model.valid_service_tiers``). Providers without service-tier
+    support ignore this field. ``None`` omits the hint so the API
+    applies its own default."""
+
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""
 
@@ -161,88 +162,11 @@ class ModelResponse:
 
 
 @runtime_checkable
-class Tool(Protocol):
-    """Tool interface for the wrapper layer.
-
-    The runtime sees only ``name`` + ``run``; the wrapper layer
-    consumes the rest (``tool_id``, ``description``,
-    ``directive_schema``, ``summary``, ``summary_result``, ``prompt``,
-    ``supports_microcompaction``).
-    """
-
-    name: str
-    """Human-readable tool name, e.g. ``"Bash"``."""
-
-    tool_id: str
-    """MIME-style identifier, e.g. ``"application/x-tool-bash"``."""
-
-    description: str
-    """Human/model-facing description rendered into the tool schema."""
-
-    directive_schema: JSON
-    """Frozen JSON Schema for the tool's directive."""
-
-    supports_microcompaction: bool
-    """Whether old results of this tool are eligible for microcompaction
-    (clearing on cache-cold)."""
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Build a short label for a pending invocation.
-
-        Args:
-          args: Directive arguments to be passed to ``run``.
-
-        Returns:
-          label: Pre-execution label for renderers.
-
-        """
-        ...
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Build a short receipt for a completed invocation.
-
-        Args:
-          result: The completed ``ToolResult``.
-
-        Returns:
-          receipt: Short receipt line, or ``None`` to suppress it.
-
-        """
-        ...
-
-    def prompt(self) -> str | None:
-        """Per-request system-prompt contribution for this tool.
-
-        Returns:
-          contribution: Prompt fragment, ``""`` for no contribution this
-              round, or ``None`` to signal "no change since last call"
-              so per-section caches can stay byte-identical.
-
-        """
-        ...
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the tool with parsed args.
-
-        Must not raise; populate ``ToolResult(is_error=True)`` on
-        failure.
-
-        Args:
-          args: Directive arguments parsed from the model output.
-
-        Returns:
-          result: Completed tool result.
-
-        """
-        ...
-
-
-@runtime_checkable
 class Model(Protocol):
     """Provider-side model interface.
 
     The Agent layer's ``_AgentModel`` wrapper bridges this richer
-    interface to ``runtime.Model``'s lean ``stream(history, system,
+    interface to the runtime's lean ``stream(history, system,
     tools, on_text, on_thinking) -> AssistantMessage`` form. Cost is
     recorded out-of-band via ``agent.cost_tracker.record(response)``.
     """
@@ -280,6 +204,18 @@ class Model(Protocol):
     @property
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
+        ...
+
+    @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Accepted ``service_tier`` values; empty when unsupported.
+
+        Provider-specific. OpenAI chat-completions exposes ``"auto"`` /
+        ``"default"`` / ``"flex"`` / ``"priority"``; OpenAI Codex
+        subscription only exposes ``"priority"``; Anthropic Messages
+        exposes ``"auto"`` / ``"standard_only"``. An empty tuple means
+        the request field is dropped.
+        """
         ...
 
     @property
@@ -392,148 +328,6 @@ class Model(Protocol):
 
         """
         ...
-
-
-@runtime_checkable
-class Provider(Protocol):
-    """Factory for model backends. ``None`` → provider's ``DEFAULT_MODEL``."""
-
-    def model(
-        self, model_id: str | None = None, /, max_request_tokens: int | None = None
-    ) -> Model:
-        """Build a model backend.
-
-        Args:
-          model_id: Provider-specific id; ``None`` selects the
-              provider's ``DEFAULT_MODEL``.
-          max_request_tokens: Override for the model's input cap.
-
-        Returns:
-          model: A ``Model`` ready to handle requests.
-
-        """
-        ...
-
-    def utility_model(self) -> Model:
-        """Build the cheapest/fastest model for utility tasks.
-
-        Returns:
-          model: A low-cost ``Model`` for internal use (summarizers, etc.).
-
-        """
-        ...
-
-
-@runtime_checkable
-class Compactor(Protocol):
-    """Conversation compaction strategy.
-
-    The Agent layer's ``_AgentCompactor`` wrapper bridges this rich
-    interface to ``runtime.Compactor``'s lean ``compact(history,
-    model, args) -> list[HistoryEntry]`` form, threading
-    ``transcript_path``, ``direction``, ``keep_recent``,
-    ``custom_instructions``, and ``summary_pointers`` from agent
-    state.
-    """
-
-    async def should_compact(
-        self,
-        input_tokens: int,
-        max_request_tokens: int,
-        max_response_tokens: int = 0,
-    ) -> bool:
-        """Decide whether the conversation should be compacted now.
-
-        Args:
-          input_tokens: Estimated current input token count.
-          max_request_tokens: Budget cap for input tokens.
-          max_response_tokens: Reserved output tokens (subtracted from cap).
-
-        Returns:
-          should: True when compaction should run before the next call.
-
-        """
-        ...
-
-    async def compact(
-        self,
-        history: list[HistoryEntry],
-        model: Model,
-        transcript_path: Path | None = None,
-        direction: Literal["from", "up_to"] = "from",
-        keep_recent: int | None = None,
-        custom_instructions: str | None = None,
-        summary_pointers: list[tuple[str, str]] | None = None,
-    ) -> list[HistoryEntry]:
-        """Summarize the conversation into a compact entry list.
-
-        Args:
-          history: Full conversation history.
-          model: Model used to write the summary.
-          transcript_path: Optional path of the pre-compact transcript on
-              disk (for ``Recompact``).
-          direction: ``"from"`` keeps tail, ``"up_to"`` keeps head.
-          keep_recent: Number of recent entries preserved verbatim.
-          custom_instructions: Extra instructions for the summarizer.
-          summary_pointers: ``(path, topic)`` pairs to surface in the summary.
-
-        Returns:
-          summary: Compacted history.
-
-        """
-        ...
-
-    def maintain(
-        self,
-        history: list[HistoryEntry],
-        tools: dict[str, Tool],
-        *,
-        last_response_time: float = 0.0,
-        gap_sec: float = 3600.0,
-        keep_recent: int = 5,
-    ) -> None:
-        """Apply between-request context maintenance (microcompaction).
-
-        Args:
-          history: Conversation history; mutated in place.
-          tools: Tool registry; consulted for tool-specific trimming rules.
-          last_response_time: Wall-clock seconds of the last response;
-              used to gate microcompaction on cache-cold likelihood.
-              ``0.0`` means "treat as cold (always microcompact)".
-          gap_sec: Microcompaction is skipped when ``time.time() -
-              last_response_time <= gap_sec`` so cache-warm requests
-              aren't disturbed.
-          keep_recent: Number of recent clearable results preserved.
-
-        """
-
-
-@runtime_checkable
-class CompactRestorable(Protocol):
-    """Optional protocol for tools that restore state after compaction.
-
-    Tools opt in by implementing ``post_compact_restore``; the
-    compactor wrapper invokes it on every tool that satisfies the
-    protocol.
-    """
-
-    async def post_compact_restore(
-        self,
-        history: list[HistoryEntry],
-        tool_state: ToolState,
-        *,
-        budget_chars: int = 100_000,
-    ) -> None:
-        """Re-inject tool-specific context into history after compaction.
-
-        Best-effort; failure is logged and swallowed by the caller.
-
-        Args:
-          history: Post-compaction history; mutated in place.
-          tool_state: Active tool state for tool-specific lookups.
-          budget_chars: Character budget the hook should respect.
-
-        """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

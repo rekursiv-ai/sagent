@@ -8,7 +8,6 @@ from pathlib import Path
 import asyncio
 import re
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
@@ -17,6 +16,7 @@ from sagent.tools.core import (
     load_tool_description,
     resolve_tool_path,
 )
+from sagent.types.history import ToolResult
 
 
 # Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.
