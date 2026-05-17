@@ -22,22 +22,17 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
-from sagent.agent.runtime import (
-    AgentRuntime,
-    AssistantMessage,
-    Halt,
-    HistoryEntry,
-    RuntimeEvent,
-    Tool,
-)
-from sagent.custom_types import Pricing
 from sagent.tools.core import (
     ToolState,
     current_agent_var,
     tool_state_var,
 )
+from sagent.types.history import AssistantMessage, HistoryEntry
+from sagent.types.model import Pricing
+from sagent.types.runtime import Halt, RuntimeEvent
 
 
 class MockModelCaps:
@@ -54,6 +49,7 @@ class MockModelCaps:
     supports_thinking: bool = False
     supports_effort: bool = False
     supports_cache_control: bool = False
+    valid_service_tiers: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
@@ -87,7 +83,7 @@ class _NullModel:
         self,
         history: list[HistoryEntry],
         system: str,
-        tools: list[Tool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -95,9 +91,9 @@ class _NullModel:
         return AssistantMessage(text="")
 
 
-def _new_runtime() -> AgentRuntime:
+def _new_runtime() -> agent_runtime.AgentRuntime:
     """Build a fresh ``AgentRuntime`` wired to a null model."""
-    return AgentRuntime(model=_NullModel())
+    return agent_runtime.AgentRuntime(model=_NullModel())
 
 
 @dataclass(slots=True, kw_only=True)
@@ -107,7 +103,7 @@ class FakeAgent:
     tool_state: ToolState = field(default_factory=ToolState)
     """Per-agent tool state (read cache, bash_cwd, etc.)."""
 
-    runtime: AgentRuntime = field(default_factory=_new_runtime)
+    runtime: agent_runtime.AgentRuntime = field(default_factory=_new_runtime)
     """Real ``AgentRuntime`` with a null model; its observers list
     captures every published event."""
 

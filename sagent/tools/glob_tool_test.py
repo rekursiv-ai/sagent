@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import with_fake_agent
 from sagent.tools.glob_tool import Glob, _long_line
 from sagent.tools.lib.bash import parse_bash
+from sagent.types.history import ToolResult
 
 
 glob_tool = Glob()

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
 import asyncio
 import contextlib
@@ -34,18 +34,8 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
-from sagent import providers
-from sagent.agent.runtime import (
-    AgentRuntime,
-    ModelIdle,
-    ModelSwitch,
-    RuntimeEvent,
-    UserQueuedMessage,
-)
-from sagent.custom_exceptions import log_exception_or_warning
-from sagent.custom_types import ModelSpec
-from sagent.lib import last_models
-from sagent.providers import build_provider, infer_provider
+from sagent.agent import runtime as agent_runtime
+from sagent.providers import infer_provider
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -58,6 +48,12 @@ from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
 from sagent.tools.core import agent_registry
+from sagent.types.exceptions import log_exception_or_warning
+from sagent.types.runtime import (
+    ModelIdle,
+    RuntimeEvent,
+    UserQueuedMessage,
+)
 
 
 if TYPE_CHECKING:
@@ -156,7 +152,7 @@ async def run_repl(
 
 
 def make_queued_input_committer(
-    runtime: AgentRuntime,
+    runtime: agent_runtime.AgentRuntime,
     queued_input: list[str],
 ) -> Callable[[RuntimeEvent], None]:
     r"""Observer that commits the Tab-staged ``queued_input`` on ``ModelIdle``.
@@ -197,7 +193,10 @@ def do_switch_model(
     args: str,
     printer: Printer | None,
 ) -> None:
-    """Apply a ``/model`` directive against ``agent.swap_model``.
+    """Render a ``/model`` slash command against :meth:`Agent.change_model`.
+
+    Pure REPL adapter: parses the slash syntax, delegates the swap to
+    the Agent API, prints the resulting label or error.
 
     Args:
       agent: Agent to mutate.
@@ -225,69 +224,38 @@ def do_switch_model(
     if isinstance(parsed, str):
         _write(printer, parsed)
         return
-    try:
-        prov_name, auth, account, model_id = _resolve_model_target(parsed, spec)
-    except AttributeError as exc:
-        _write(printer, f"[/model] {exc}")
-        return
     # Bare model_id on the SAME provider may imply a different provider
     # (e.g. ``/model gemini-3-pro`` while on Anthropic). Infer.
-    if parsed.model_id and prov_name == spec.provider:
-        inferred = infer_provider(model_id, prov_name)
+    prov_override = parsed.provider
+    auth_override = parsed.auth
+    if parsed.model_id and parsed.provider is None:
+        inferred = infer_provider(parsed.model_id, spec.provider)
         if inferred is not None:
-            prov_name, auth = inferred
+            prov_override, auth_override = inferred
+    old_id = agent.model.model_id
     try:
-        provider = build_provider(prov_name, auth, account=account)
-        new_model = provider.model(model_id)
-    except (AttributeError, RuntimeError, ValueError) as exc:
+        target = agent.change_model(
+            provider=prov_override,
+            auth=auth_override,
+            model_id=parsed.model_id,
+            account=parsed.account if parsed.account_set else None,
+        )
+    except (ValueError, RuntimeError) as exc:
         _write(printer, f"[/model] {exc}")
         return
-    old_id = agent.model.model_id
-    new_spec = dataclasses.replace(
-        spec,
-        provider=prov_name,
-        auth=auth,
-        model_id=new_model.model_id,
-        account=account,
-    )
-    if prov_name != spec.provider:
-        label = f"{spec.provider}/{old_id} -> {prov_name}/{new_model.model_id}"
+    if target.provider != spec.provider:
+        label = f"{spec.provider}/{old_id} -> {target.provider}/{target.model_id}"
     else:
-        label = f"{old_id} -> {new_model.model_id}"
-    # Queue the swap through the runtime inbox so it sequences with
-    # any in-flight model call: the OLD model finishes its response
-    # (and records its own cost) before the new one becomes active.
-    agent.runtime.inbox.push_back(
-        ModelSwitch(
-            apply=lambda: agent.swap_model(new_model, spec=new_spec),
-            label=label,
-        ),
-    )
+        label = f"{old_id} -> {target.model_id}"
     queued = " (queued)" if agent.work is not None else ""
     _write(printer, f"[/model] {label}{queued}")
 
 
-@runtime_checkable
-class _AuthReloadable(Protocol):
-    """Provider that can hot-reload OAuth credentials from disk."""
-
-    async def handle_auth_error(self) -> None: ...
-
-
 async def do_login(agent: Agent, printer: Printer | None) -> None:
-    """Re-auth the agent's current provider via its ``login`` classmethod.
+    """Render a ``/login`` slash command against :meth:`Agent.relogin`.
 
-    After the OAuth flow writes fresh credentials to disk, hot-reload
-    the running provider's in-memory token state so the next model
-    call uses the new credentials. Without this reload, the in-memory
-    ``_refresh_token`` is still the revoked one and the next
-    ``_refresh()`` returns 400 -- so ``/login`` appears to succeed but
-    the auth error keeps firing.
-
-    The reload uses ``provider.handle_auth_error`` when available
-    (currently implemented on Anthropic-family providers). Providers
-    without the hook are left untouched -- callers will pick up the
-    new disk creds the next time they construct a provider.
+    Pure REPL adapter: delegates the re-auth flow to the Agent API,
+    prints success or error.
 
     Args:
       agent: Agent whose provider should be re-authenticated.
@@ -298,31 +266,11 @@ async def do_login(agent: Agent, printer: Printer | None) -> None:
     if spec is None:
         _write(printer, "[/login] agent has no model spec")
         return
-    prov_cls = getattr(providers, spec.provider, None)
-    if prov_cls is None:
-        _write(printer, f"[/login] unknown provider {spec.provider!r}")
-        return
-    login_fn = getattr(prov_cls, "login", None)
-    if login_fn is None:
-        _write(printer, f"[/login] {spec.provider} has no login method")
-        return
     try:
-        login_fn()
-    except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
+        await agent.relogin()
+    except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
         _write(printer, f"[/login] {exc}")
         return
-    # Hot-reload the live provider's in-memory credentials so the next
-    # model call uses the freshly-written disk creds, not the stale
-    # in-memory refresh token. ``handle_auth_error`` already implements
-    # the "reload from disk first, fall back to network refresh"
-    # routine we want here.
-    live_provider = getattr(agent.model, "_provider", None)
-    if isinstance(live_provider, _AuthReloadable):
-        try:
-            await live_provider.handle_auth_error()
-        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-            _write(printer, f"[/login] reloaded creds but provider sync failed: {exc}")
-            return
     _write(printer, f"[/login] {spec.provider} re-authenticated")
 
 
@@ -462,58 +410,3 @@ def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
         account_set=account_set,
         model_id=model_id,
     )
-
-
-def _resolve_model_target(
-    parsed: _ParsedModelArgs,
-    spec: ModelSpec,
-) -> tuple[str, str, str | None, str]:
-    """Layer parsed args onto ``spec``; resolve the destination model_id.
-
-    Cross-provider with no user-supplied model:
-    1. Prefer ``spec.model_id`` when the new provider's catalog already
-       knows it, so switching between providers with a shared catalog keeps
-       the same model.
-    2. Else use the last model id recorded for the new provider in
-       ``~/.sagent/last-models.json``.
-    3. Else fall back to the new provider's ``DEFAULT_MODEL``.
-    """
-    prov_name = parsed.provider or spec.provider
-    auth = parsed.auth or spec.auth
-    account = parsed.account if parsed.account_set else spec.account
-    if parsed.model_id is not None:
-        model_id = parsed.model_id
-    elif prov_name == spec.provider or _provider_knows_model(prov_name, spec.model_id):
-        model_id = spec.model_id
-    else:
-        model_id = last_models.get(prov_name) or _default_model_for(prov_name)
-    return prov_name, auth, account, model_id
-
-
-def _provider_knows_model(prov_name: str, model_id: str) -> bool:
-    """Return True when the provider class's catalog includes ``model_id``.
-
-    Used to decide whether a cross-provider swap can keep the current
-    model. Reads ``cls.KNOWN_MODELS`` without instantiating the provider
-    so the check is side-effect-free (no credential lookup).
-    """
-    cls = getattr(providers, prov_name, None)
-    if cls is None:
-        return False
-    known = getattr(cls, "KNOWN_MODELS", None)
-    if not isinstance(known, dict):
-        return False
-    return model_id in known
-
-
-def _default_model_for(prov_name: str) -> str:
-    """Return ``Provider.DEFAULT_MODEL`` for the named provider class."""
-    cls = getattr(providers, prov_name, None)
-    if cls is None:
-        raise AttributeError(f"unknown provider: {prov_name!r}")
-    default = getattr(cls, "DEFAULT_MODEL", None)
-    if not isinstance(default, str) or not default:
-        raise AttributeError(
-            f"provider {prov_name!r} has no DEFAULT_MODEL",
-        )
-    return default

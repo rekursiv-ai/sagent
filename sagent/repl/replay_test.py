@@ -6,19 +6,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from sagent.agent.runtime import (
+from sagent.repl.render import RecordingPrinter
+from sagent.repl.replay import replay_messages
+from sagent.types.history import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.repl.render import RecordingPrinter
-from sagent.repl.replay import replay_messages
 
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
-    from sagent.agent.runtime import HistoryEntry
+    from sagent.types.history import HistoryEntry
 
 
 @dataclass(slots=True, kw_only=True)

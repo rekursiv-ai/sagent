@@ -6,14 +6,13 @@ import io
 
 from rich.console import Console
 
-from sagent.agent.runtime import (
+from sagent.repl.console_pane import ConsolePrinter
+from sagent.types.history import (
     AssistantMessage,
-    ModelResponseThinking,
-    ToolLabel,
     ToolResult,
     UserMessage,
 )
-from sagent.repl.console_pane import ConsolePrinter
+from sagent.types.runtime import ModelResponseThinking, ToolLabel
 
 
 def _printer(width: int = 80) -> tuple[ConsolePrinter, io.StringIO]:

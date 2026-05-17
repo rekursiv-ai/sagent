@@ -7,7 +7,6 @@ from collections.abc import Mapping
 import asyncio
 import logging
 
-from sagent.agent.runtime import ToolResult, UserMessage
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
     AgentLike,
@@ -16,6 +15,7 @@ from sagent.tools.core import (
     load_tool_description,
     opt_int,
 )
+from sagent.types.history import ToolResult, UserMessage
 
 
 logger = logging.getLogger(__name__)

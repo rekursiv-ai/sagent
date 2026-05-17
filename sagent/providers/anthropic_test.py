@@ -9,23 +9,6 @@ import anthropic as anthropic_sdk
 import httpx
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import (
-    PromptTooLongError,
-    StreamInterruptedError,
-)
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    Pricing,
-    TokenCount,
-)
 from sagent.providers.anthropic import (
     Anthropic,
     _assistant_blocks,
@@ -39,9 +22,28 @@ from sagent.providers.anthropic import (
     context_betas,
 )
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.types.exceptions import (
+    PromptTooLongError,
+    StreamInterruptedError,
+)
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    Pricing,
+    TokenCount,
+)
 
 
-def _make_request(messages: list[HistoryEntry]) -> ModelRequest:
+def _make_request(
+    messages: list[HistoryEntry],
+) -> ModelRequest:
     return ModelRequest(messages=messages)
 
 
@@ -142,9 +144,9 @@ def test_user_after_tool_results_coalesces_into_same_wire_msg() -> None:
     assert msgs[0]["role"] == "assistant"
     assert msgs[1]["role"] == "user"
     content = cast(list[dict[str, object]], msgs[1]["content"])
-    types = {b.get("type") for b in content}
-    assert "tool_result" in types
-    assert "text" in types
+    type_names = {b.get("type") for b in content}
+    assert "tool_result" in type_names
+    assert "text" in type_names
 
 
 def test_build_messages_tool_result_id_pairs_with_call() -> None:
@@ -431,6 +433,23 @@ def test_anthropic_model_supports_flags() -> None:
     assert m.supports_persistent_retry is True
     assert m.supports_context_management is False  # API-key, not sub.
     assert m.supports_account_auth is False
+    assert m.valid_service_tiers == ("auto", "standard_only")
+
+
+def test_anthropic_build_kwargs_emits_service_tier() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    req = ModelRequest(messages=[UserMessage(text="x")], service_tier="standard_only")
+    kwargs = m._build_kwargs(req, [])
+    assert kwargs["service_tier"] == "standard_only"
+
+
+def test_anthropic_build_kwargs_omits_unknown_service_tier() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    req = ModelRequest(messages=[UserMessage(text="x")], service_tier="priority")
+    kwargs = m._build_kwargs(req, [])
+    assert "service_tier" not in kwargs
 
 
 def test_anthropic_model_image_limits() -> None:
@@ -457,6 +476,14 @@ def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatus
     return anthropic_sdk.APIStatusError(message, response=response, body=body)
 
 
+class _BodyError(Exception):
+    """Exception with an SDK-like ``body`` attribute."""
+
+    def __init__(self, body: object) -> None:
+        self.body = body
+        super().__init__("x")
+
+
 def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text() -> (
     None
 ):
@@ -477,16 +504,28 @@ def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text()
 def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    err = RuntimeError("x")
-    err.body = {"type": "rate_limit_error"}  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[unresolved-attribute] -- attached for the test
+    err = _BodyError({"type": "rate_limit_error"})
     assert m.is_retryable_provider_error(err) is True
+
+
+def test_anthropic_model_is_retryable_provider_error_nested_api_error() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _BodyError({"type": "error", "error": {"type": "api_error"}})
+    assert m.is_retryable_provider_error(err) is True
+
+
+def test_anthropic_model_is_retryable_provider_error_nested_invalid_request() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _BodyError({"type": "error", "error": {"type": "invalid_request_error"}})
+    assert m.is_retryable_provider_error(err) is False
 
 
 def test_anthropic_model_is_retryable_provider_error_unrelated_type() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    err = RuntimeError("x")
-    err.body = {"type": "permanent_error"}  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[unresolved-attribute] -- attached for the test
+    err = _BodyError({"type": "permanent_error"})
     assert m.is_retryable_provider_error(err) is False
 
 

@@ -38,6 +38,12 @@ class _OpenAIModel(OpenAICompatModel):
         """True for OpenAI reasoning models that accept ``reasoning_effort``."""
         return model_id.startswith(("o1", "o3", "o4", "gpt-5"))
 
+    @property
+    @override
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """OpenAI chat-completions accepts auto/default/flex/priority."""
+        return ("auto", "default", "flex", "priority")
+
 
 class OpenAI(OpenAICompat):
     """OpenAI provider."""

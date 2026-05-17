@@ -21,22 +21,22 @@ from sagent.agent.compaction import (
     is_summary,
     post_compact_enrich,
 )
-from sagent.agent.runtime import (
+from sagent.lib.json import JSON
+from sagent.testing import MockModelCaps
+from sagent.tools.core import ToolState
+from sagent.types.history import (
     AssistantMessage,
     BytesMessage,
     HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.custom_types import (
+from sagent.types.model import (
     ContextBudget,
     ModelRequest,
     ModelResponse,
-    Tool as RichTool,
 )
-from sagent.lib.json import JSON
-from sagent.testing import MockModelCaps
-from sagent.tools.core import ToolState
+from sagent.types.tools import Tool
 
 
 @dataclass(slots=True, kw_only=True)
@@ -167,7 +167,10 @@ def test_extract_topic_falls_back_on_empty() -> None:
 
 
 def test_append_to_first_user_concatenates_when_text_nonempty() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="orig"), AssistantMessage(text="a")]
+    history: list[HistoryEntry] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="a"),
+    ]
     append_to_first_user(history, "more")
     first = history[0]
     assert isinstance(first, UserMessage)
@@ -276,7 +279,7 @@ async def test_post_compact_enrich_writes_summary_file_when_real_summary(
     summary_text = "continued from a previous summary:\nTopic line here."
     result: list[HistoryEntry] = [UserMessage(text=summary_text)]
     history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, RichTool] = {}
+    tools_map: Mapping[str, Tool] = {}
     await post_compact_enrich(
         result=result,
         history=history,
@@ -302,7 +305,7 @@ async def test_post_compact_enrich_skips_summary_save_when_not_a_real_summary(
     state = CompactionState()
     result: list[HistoryEntry] = [UserMessage(text="compaction failed")]
     history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, RichTool] = {}
+    tools_map: Mapping[str, Tool] = {}
     await post_compact_enrich(
         result=result,
         history=history,
@@ -325,7 +328,7 @@ async def test_post_compact_enrich_no_session_dir_skips_summary_save() -> None:
     text = "continued from a previous turn"
     result: list[HistoryEntry] = [UserMessage(text=text)]
     history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, RichTool] = {}
+    tools_map: Mapping[str, Tool] = {}
     await post_compact_enrich(
         result=result,
         history=history,
@@ -362,7 +365,7 @@ async def test_post_compact_enrich_runs_restorable_tool_hook(tmp_path: Path) -> 
 
     state = CompactionState()
     result: list[HistoryEntry] = [UserMessage(text="x")]
-    tools_map: Mapping[str, RichTool] = {"R": Restorable()}
+    tools_map: Mapping[str, Tool] = {"R": Restorable()}
     await post_compact_enrich(
         result=result,
         history=result,
@@ -401,7 +404,7 @@ async def test_post_compact_enrich_swallows_restorable_failures(
 
     state = CompactionState()
     result: list[HistoryEntry] = [UserMessage(text="x")]
-    tools_map: Mapping[str, RichTool] = {"B": BadRestorable()}
+    tools_map: Mapping[str, Tool] = {"B": BadRestorable()}
     await post_compact_enrich(
         result=result,
         history=result,
@@ -429,7 +432,7 @@ async def test_post_compact_enrich_swallows_summary_save_failure(
     blocker = tmp_path / "summary_0.md"
     blocker.mkdir()
     result: list[HistoryEntry] = [UserMessage(text="continued from a previous turn")]
-    tools_map: Mapping[str, RichTool] = {}
+    tools_map: Mapping[str, Tool] = {}
     await post_compact_enrich(
         result=result,
         history=result,
@@ -451,7 +454,7 @@ async def test_post_compact_enrich_injects_background_status(tmp_path: Path) -> 
     state = CompactionState()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
     result: list[HistoryEntry] = history
-    tools_map: Mapping[str, RichTool] = {}
+    tools_map: Mapping[str, Tool] = {}
     bg = {"q9": await _make_bg("Bash", "q9")}
     await post_compact_enrich(
         result=result,

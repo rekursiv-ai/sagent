@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from sagent.providers.openai import OpenAI
+from sagent.types.history import UserMessage
+from sagent.types.model import ModelRequest
 
 
 def test_openai_from_key_constructs() -> None:
@@ -79,6 +81,42 @@ def test_openai_pricing_attached_to_model() -> None:
     m = p.model("gpt-5.5")
     assert m.pricing.request > 0
     assert m.pricing.response > 0
+
+
+def test_openai_valid_service_tiers() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    assert m.valid_service_tiers == ("auto", "default", "flex", "priority")
+
+
+def test_openai_build_body_emits_service_tier() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], service_tier="priority"),
+        stream=False,
+    )
+    assert body["service_tier"] == "priority"
+
+
+def test_openai_build_body_omits_unset_service_tier() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        stream=False,
+    )
+    assert "service_tier" not in body
+
+
+def test_openai_build_body_omits_unknown_service_tier() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], service_tier="bogus"),
+        stream=False,
+    )
+    assert "service_tier" not in body
 
 
 if __name__ == "__main__":

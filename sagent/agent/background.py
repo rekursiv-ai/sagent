@@ -26,8 +26,6 @@ from typing import Any, Literal, cast
 import asyncio
 import dataclasses
 
-from sagent.agent.runtime import ToolResult
-from sagent.custom_types import Tool
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -36,6 +34,8 @@ from sagent.lib.json import (
     int_val,
     json_freeze,
 )
+from sagent.types.history import ToolResult
+from sagent.types.tools import Tool
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)

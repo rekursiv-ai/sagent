@@ -9,7 +9,6 @@ from typing import cast
 import asyncio
 import json
 
-from sagent.agent.runtime import BytesMessage, ToolResult
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -37,6 +36,7 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
+from sagent.types.history import BytesMessage, ToolResult
 
 
 _IMAGE_EXTS = {

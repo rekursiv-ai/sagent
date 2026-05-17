@@ -6,9 +6,9 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.agent.runtime import AssistantMessage, UserMessage
 from sagent.providers import Google
 from sagent.tools import tool
+from sagent.types.history import AssistantMessage, UserMessage
 
 
 @tool(name="WordCount")

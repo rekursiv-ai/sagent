@@ -15,14 +15,6 @@ import pytest
 
 from sagent.agent.agent import Agent as _RealAgent
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    Clear,
-    Compact,
-    Recompact,
-    RuntimeEvent,
-    UserMessage,
-    UserQueuedMessage,
-)
 from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -48,6 +40,14 @@ from sagent.repl.slash import (
     Tasks as SlashTasks,
     Text as SlashText,
     Unknown as SlashUnknown,
+)
+from sagent.types.history import UserMessage
+from sagent.types.runtime import (
+    Clear,
+    Compact,
+    Recompact,
+    RuntimeEvent,
+    UserQueuedMessage,
 )
 
 

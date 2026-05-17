@@ -6,11 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from sagent.agent.runtime import (
-    HistoryEntry,
-    ToolResult,
-    UserMessage,
-)
 from sagent.testing import with_fake_agent
 from sagent.tools import skill as sk
 from sagent.tools.core import ToolState
@@ -20,6 +15,7 @@ from sagent.tools.skill import (
     discover,
     format_listing,
 )
+from sagent.types.history import HistoryEntry, ToolResult, UserMessage
 
 
 def _write_skill(

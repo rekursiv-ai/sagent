@@ -16,13 +16,6 @@ import re
 from rich.console import Console
 from rich.text import Text
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ModelResponseThinking,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
 from sagent.repl.format import (
     print_user_bar,
     set_terminal_title,
@@ -30,6 +23,12 @@ from sagent.repl.format import (
 from sagent.repl.render import render_tool_result
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.runtime import ModelResponseThinking, ToolLabel
 
 
 class ConsolePrinter:

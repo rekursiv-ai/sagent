@@ -11,13 +11,6 @@ from typing import cast
 
 import json
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import ModelRequest, Tool
 from sagent.lib.json import MutableJSON
 from sagent.providers.selfhosted import (
     SelfHostedModel,
@@ -34,6 +27,14 @@ from sagent.providers.selfhosted import (
     _tool_preamble,
     _tool_schema,
 )
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest
+from sagent.types.tools import Tool
 
 
 def test_context_window_top_level_max_position() -> None:

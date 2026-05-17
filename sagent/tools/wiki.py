@@ -21,7 +21,6 @@ from pathlib import Path
 import logging
 import re
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
     get_tool_state,
@@ -29,6 +28,7 @@ from sagent.tools.core import (
     run_sync,
 )
 from sagent.tools.prompt_text import escape_prompt_text
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

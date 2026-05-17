@@ -19,7 +19,6 @@ import json
 import logging
 import os
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
@@ -33,6 +32,7 @@ from sagent.tools.paper_common import (
     s2_wire_id,
     short_id,
 )
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

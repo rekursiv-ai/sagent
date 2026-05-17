@@ -10,13 +10,6 @@ import time
 
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import ModelRequest
 from sagent.lib.json import MutableJSON
 from sagent.providers.google import Google
 from sagent.providers.google_cli import (
@@ -30,6 +23,13 @@ from sagent.providers.google_cli import (
     _user_prompt_blocks,
 )
 from sagent.providers.lib.subproc import Subproc
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest
 
 
 _CRED_PAYLOAD: dict[str, object] = {

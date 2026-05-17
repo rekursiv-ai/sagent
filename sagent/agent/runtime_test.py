@@ -9,20 +9,24 @@ import asyncio
 
 import pytest
 
-from sagent.agent.runtime import (
-    AWAIT_USER,
-    AgentRuntime,
+from sagent.agent import runtime as agent_runtime
+from sagent.types.exceptions import AuthRefreshError
+from sagent.types.history import (
     AssistantMessage,
-    Await,
     BytesMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+    reset_id_counter,
+)
+from sagent.types.runtime import (
     Clear,
     CohortComplete,
     Compact,
     Detach,
     DetachedResult,
-    GatedDeque,
     Halt,
-    HistoryEntry,
     Kill,
     ModelIdle,
     ModelResponseCancelled,
@@ -30,19 +34,13 @@ from sagent.agent.runtime import (
     ModelResponsePartial,
     ModelResponseThinking,
     ModelSwitch,
+    ModelSwitchRejected,
     Quit,
     RuntimeEvent,
-    Tool,
-    ToolCall,
-    ToolResult,
     ToolResultPartial,
     Undetach,
-    UserMessage,
     UserQueuedMessage,
-    current_call_id_var,
-    reset_id_counter,
 )
-from sagent.custom_exceptions import AuthRefreshError
 
 
 @dataclass(kw_only=True, slots=True)
@@ -95,7 +93,7 @@ class ScriptedModel:
         self,
         history: list[HistoryEntry],
         system: str,
-        tools: list[Tool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -133,24 +131,24 @@ class EventCollector:
 
 def make_agent(
     responses: list[AssistantMessage],
-    tools: list[Tool] | None = None,
+    tools: list[agent_runtime.Tool] | None = None,
     model_delay_sec: float = 0.0,
     fail_on_call: int | None = None,
-) -> tuple[AgentRuntime, EventCollector]:
+) -> tuple[agent_runtime.AgentRuntime, EventCollector]:
     """Build an AgentRuntime with a scripted model and event collector."""
     model = ScriptedModel(
         responses=responses,
         delay_sec=model_delay_sec,
         fail_on_call=fail_on_call,
     )
-    agent = AgentRuntime(model=model, tools=tools or [])
+    agent = agent_runtime.AgentRuntime(model=model, tools=tools or [])
     collector = EventCollector()
     agent.observers.append(collector)
     return agent, collector
 
 
 async def run_with_quit(
-    agent: AgentRuntime,
+    agent: agent_runtime.AgentRuntime,
     timeout_sec: float = 2.0,
 ) -> None:
     """Run run_forever, sending Quit after HistoryEntryComplete."""
@@ -169,7 +167,7 @@ async def run_with_quit(
 
 
 async def run_until_quit(
-    agent: AgentRuntime,
+    agent: agent_runtime.AgentRuntime,
     timeout_sec: float = 2.0,
 ) -> None:
     """Run run_forever expecting Quit to arrive externally."""
@@ -338,7 +336,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -364,7 +362,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
             AssistantMessage(text="after halt"),
         ]
     )
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="go"))
@@ -414,7 +412,7 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -423,7 +421,7 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
             await asyncio.sleep(10.0)
             return AssistantMessage(text="unreachable")
 
-    agent = AgentRuntime(model=BlockingModel())
+    agent = agent_runtime.AgentRuntime(model=BlockingModel())
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="go"))
@@ -792,14 +790,14 @@ async def test_user_facing_error_logged_without_traceback(
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
             del history, system, tools, on_text, on_thinking
             raise AuthRefreshError("session expired. Run /login.")
 
-    agent = AgentRuntime(model=AuthFailingModel())
+    agent = agent_runtime.AgentRuntime(model=AuthFailingModel())
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def resume() -> None:
@@ -846,14 +844,14 @@ async def test_plain_exception_logged_with_traceback(
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
             del history, system, tools, on_text, on_thinking
             raise RuntimeError("unexpected")
 
-    agent = AgentRuntime(model=BoomModel())
+    agent = agent_runtime.AgentRuntime(model=BoomModel())
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def resume() -> None:
@@ -907,7 +905,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         """Tool that pushes a ``UserMessage`` to its host inbox + returns ok."""
 
         _name: str = "self_ping"
-        runtime: AgentRuntime | None = None
+        runtime: agent_runtime.AgentRuntime | None = None
 
         @property
         def name(self) -> str:
@@ -927,7 +925,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -942,7 +940,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
             return AssistantMessage(text="done")
 
     tool = SelfPingTool()
-    agent = AgentRuntime(model=PingingModel(), tools=[tool])
+    agent = agent_runtime.AgentRuntime(model=PingingModel(), tools=[tool])
     tool.runtime = agent
     agent.inbox.push_back(UserMessage(text="go"))
 
@@ -1056,7 +1054,7 @@ async def test_model_waits_for_all_tools() -> None:
 async def test_await_user_blocks_non_user_items() -> None:
     """AwaitUser blocks drain until a UserMessage arrives."""
     agent, _ = make_agent([AssistantMessage(text="after wait")])
-    agent.inbox.push_front(AWAIT_USER)
+    agent.inbox.push_front(agent_runtime.AWAIT_USER)
     agent.inbox.push_back(ModelSwitch(apply=lambda: None))
 
     async def send_user_later() -> None:
@@ -1087,7 +1085,7 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
     # Pre-existing user message in the queue.
     agent.inbox.push_back(UserMessage(text="pre-existing"))
     # Now arm the gate (push_front simulates Halt re-queuing).
-    agent.inbox.push_front(AWAIT_USER)
+    agent.inbox.push_front(agent_runtime.AWAIT_USER)
 
     async def send_new_user_later() -> None:
         await asyncio.sleep(0.05)
@@ -1442,7 +1440,7 @@ async def test_no_cohort_complete_on_halt() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -1459,7 +1457,7 @@ async def test_no_cohort_complete_on_halt() -> None:
                     on_text(ch)
             return msg
 
-    agent = AgentRuntime(
+    agent = agent_runtime.AgentRuntime(
         model=BlockingModel2(
             responses=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
@@ -1652,7 +1650,7 @@ async def test_duplicate_tool_names_raises() -> None:
 
     model = ScriptedModel(responses=[AssistantMessage(text="hi")])
     with pytest.raises(ValueError, match="Duplicate tool name"):
-        AgentRuntime(model=model, tools=[t1, t2])
+        agent_runtime.AgentRuntime(model=model, tools=[t1, t2])
 
 
 @pytest.mark.asyncio
@@ -1905,7 +1903,7 @@ async def test_compact_cancels_running_model_call() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -1931,7 +1929,7 @@ async def test_compact_cancels_running_model_call() -> None:
             del history, model, args
             return list(summary)
 
-    agent = AgentRuntime(
+    agent = agent_runtime.AgentRuntime(
         model=_BlockingModel(responses=[AssistantMessage(text="x")]),
         compactor=_StubCompactor(),
     )
@@ -2050,7 +2048,7 @@ async def test_thinking_chunk_published() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2058,7 +2056,7 @@ async def test_thinking_chunk_published() -> None:
             on_thinking("step 1")
             return AssistantMessage(text="ok")
 
-    agent = AgentRuntime(model=_ThinkingModel())
+    agent = agent_runtime.AgentRuntime(model=_ThinkingModel())
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="hi"))
@@ -2088,7 +2086,7 @@ async def test_tool_result_partial_published() -> None:
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
-            cid = current_call_id_var.get("")
+            cid = agent_runtime.current_call_id_var.get("")
             # Tools normally call runtime.publish; here we mimic by
             # pushing the event onto the inbox so the match block sees it.
             return ToolResult(call_id=cid, content="done")
@@ -2159,9 +2157,9 @@ async def test_runtime_run_method_returns_delta_history() -> None:
     """``AgentRuntime.run`` returns only the new history entries for one turn."""
     agent, _ = make_agent([AssistantMessage(text="hello back")])
     delta = await agent.run(UserMessage(text="hi"))
-    types = [type(e).__name__ for e in delta]
-    assert "UserMessage" in types
-    assert "AssistantMessage" in types
+    type_names = [type(e).__name__ for e in delta]
+    assert "UserMessage" in type_names
+    assert "AssistantMessage" in type_names
 
 
 def test_reset_id_counter_changes_next_id() -> None:
@@ -2174,7 +2172,7 @@ def test_reset_id_counter_changes_next_id() -> None:
 @pytest.mark.asyncio
 async def test_gated_deque_push_front_preserves_existing_items() -> None:
     """push_front with prior items keeps them after the new prefix."""
-    dq: GatedDeque[str] = GatedDeque()
+    dq: agent_runtime.GatedDeque[str] = agent_runtime.GatedDeque()
     dq.push_back("a")
     dq.push_back("b")
     dq.push_front("X", "Y")
@@ -2186,17 +2184,17 @@ async def test_gated_deque_push_front_preserves_existing_items() -> None:
 @pytest.mark.asyncio
 async def test_gated_deque_drain_with_gate_waits_for_match() -> None:
     """A gated deque drains until the gated type or Quit appears."""
-    dq: GatedDeque[object] = GatedDeque()
-    dq.push_front(Await((UserMessage,)))
+    dq: agent_runtime.GatedDeque[object] = agent_runtime.GatedDeque()
+    dq.push_front(agent_runtime.Await((UserMessage,)))
     dq.push_back(ModelSwitch(apply=lambda: None))  # not user-shaped
     dq.push_back(UserMessage(text="ok"))
 
     items = await dq.drain()
 
     # All three queued items are returned; the gate cleared on UserMessage.
-    types = [type(i).__name__ for i in items]
-    assert "ModelSwitch" in types
-    assert "UserMessage" in types
+    type_names = [type(i).__name__ for i in items]
+    assert "ModelSwitch" in type_names
+    assert "UserMessage" in type_names
 
 
 @pytest.mark.asyncio
@@ -2235,7 +2233,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2254,7 +2252,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_and_release() -> None:
@@ -2314,7 +2312,7 @@ class _LifecycleModel:
         self,
         history: list[HistoryEntry],
         system: str,
-        tools: list[Tool],
+        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -2339,7 +2337,7 @@ def _make_lifecycle_model() -> tuple[_LifecycleModel, asyncio.Event, asyncio.Eve
 
 
 def _assert_exactly_one_surface(
-    agent: AgentRuntime, text: str, published: list[str]
+    agent: agent_runtime.AgentRuntime, text: str, published: list[str]
 ) -> str:
     """Return which surface holds ``text``; assert exactly one does.
 
@@ -2372,7 +2370,9 @@ def _assert_exactly_one_surface(
 @pytest.mark.real_sleep
 async def test_lifecycle_idle_enter_commits_immediately() -> None:
     """Idle Enter: no pending state. Straight to committed."""
-    agent = AgentRuntime(model=ScriptedModel(responses=[AssistantMessage(text="ok")]))
+    agent = agent_runtime.AgentRuntime(
+        model=ScriptedModel(responses=[AssistantMessage(text="ok")])
+    )
     published: list[str] = []
     agent.observers.append(
         lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
@@ -2388,7 +2388,7 @@ async def test_lifecycle_idle_enter_commits_immediately() -> None:
 async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
     """Mid-stream Enter: pending. Not in history, not published, in queue."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
         lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
@@ -2416,7 +2416,7 @@ async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
 async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
     """Mid-stream Enter: pending -> committed when model finishes."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
         lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
@@ -2448,7 +2448,7 @@ async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
 async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
     r"""N mid-stream Enters: all pending, then one coalesced commit + publish."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
         lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
@@ -2505,7 +2505,7 @@ async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
     Enter) converge on the same committed state.
     """
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
         lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
@@ -2539,14 +2539,14 @@ async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
     await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
 
 
-def _runtime_for_alternation_tests() -> AgentRuntime:
+def _runtime_for_alternation_tests() -> agent_runtime.AgentRuntime:
     """Bare runtime for direct ``_append_or_coalesce_user`` unit tests.
 
     The model is never called; we only exercise the helper that mutates
     history in place.
     """
     model = ScriptedModel(responses=[])
-    return AgentRuntime(model=model)
+    return agent_runtime.AgentRuntime(model=model)
 
 
 class TestUserMessageAlternation:
@@ -2667,7 +2667,7 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2676,7 +2676,7 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
             return AssistantMessage(text="ok")
 
     model = CapturingModel()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
 
     # Push BOTH before the runtime gets a chance to drain. With a single
     # event-loop tick between push and drain, they land in the same batch.
@@ -2747,7 +2747,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2766,7 +2766,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_two_and_release() -> None:
@@ -2852,7 +2852,7 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2872,7 +2872,7 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
             return msg
 
     model = MidStreamModel()
-    agent = AgentRuntime(model=model, tools=[SlowTool()])
+    agent = agent_runtime.AgentRuntime(model=model, tools=[SlowTool()])
     agent.inbox.push_back(UserMessage(text="user1"))
 
     snapshot: dict[str, int] = {"calls_before_tool_release": 0}
@@ -2948,7 +2948,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -2967,7 +2967,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_queued_and_release() -> None:
@@ -3045,7 +3045,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -3063,7 +3063,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
             return msg
 
     model = ThreeRoundModel()
-    agent = AgentRuntime(model=model, tools=[FastEcho()])
+    agent = agent_runtime.AgentRuntime(model=model, tools=[FastEcho()])
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def queue_during_cohort_and_drive() -> None:
@@ -3135,7 +3135,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
             self,
             history: list[HistoryEntry],
             system: str,
-            tools: list[Tool],
+            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
@@ -3156,7 +3156,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
             return msg
 
     model = HaltableModel()
-    agent = AgentRuntime(model=model)
+    agent = agent_runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="first"))
 
     async def halt_then_immediate_resume() -> None:
@@ -3208,13 +3208,14 @@ async def test_run_forever_survives_synchronous_raise_in_pending_apply() -> None
     def _raises() -> None:
         raise ValueError("budget exceeds new model's window")
 
-    agent, _ = make_agent([AssistantMessage(text="after error")])
+    agent, collector = make_agent([AssistantMessage(text="after error")])
     agent.inbox.push_back(ModelSwitch(apply=_raises))
     agent.inbox.push_back(UserMessage(text="hi"))
 
     await run_with_quit(agent)
 
     assert any(isinstance(t, UserMessage) and t.text == "hi" for t in agent.history)
+    assert collector.has(ModelSwitchRejected)
     assistant_msgs = [t for t in agent.history if isinstance(t, AssistantMessage)]
     assert assistant_msgs[-1].text == "after error"
 

@@ -32,7 +32,7 @@ import difflib
 import itertools
 import logging
 
-from sagent.agent.runtime import AgentRuntime
+from sagent.agent import runtime as agent_runtime
 
 
 if TYPE_CHECKING:
@@ -400,7 +400,7 @@ agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 class AgentLike(Protocol):
     """Minimal agent surface for tools that route messages between agents."""
 
-    runtime: AgentRuntime
+    runtime: agent_runtime.AgentRuntime
     """The agent's ``AgentRuntime``; exposes ``inbox``, ``cohort``,
     ``model_call``, ``compact_task``, and ``detached`` for routing
     and liveness inspection."""

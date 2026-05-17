@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import sys
 
-from sagent.custom_types import Provider
+from sagent.types.providers import Provider
 
 
 _MODEL_PROVIDER_MAP: list[tuple[str, str]] = [

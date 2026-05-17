@@ -19,8 +19,15 @@ from typing import Protocol
 
 import logging
 
-from sagent.agent.runtime import (
+from sagent.repl.render_diff import find_stable_boundary
+from sagent.types.exceptions import AuthRefreshError, UserFacingError
+from sagent.types.history import (
     AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.runtime import (
+    BudgetReset,
     ChildDoneEvent,
     ChildEvent,
     ModelResponseCancelled,
@@ -28,18 +35,12 @@ from sagent.agent.runtime import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
+    ModelSwitchRejected,
     RuntimeEvent,
     StatusChanged,
     ToolLabel,
-    ToolResult,
     ToolResultPartial,
-    UserMessage,
 )
-from sagent.custom_exceptions import (
-    AuthRefreshError,
-    UserFacingError,
-)
-from sagent.repl.render_diff import find_stable_boundary
 
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,23 @@ class RenderObserver:
                     self._printer.write_halt(HALT_MESSAGE_AUTH)
                 else:
                     self._printer.write_halt(HALT_MESSAGE)
+            case ModelSwitchRejected(exception=exc):
+                self._flush_stream()
+                if isinstance(exc, UserFacingError):
+                    self._printer.write_tool_error(str(exc))
+                else:
+                    self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
+            case BudgetReset(
+                model_id=model_id,
+                prior_max_request_tokens=prior_in,
+                new_max_request_tokens=new_in,
+            ):
+                self._flush_stream()
+                self._printer.write_line(
+                    f"[/model] budget reset to {model_id} defaults "
+                    f"(max_request_tokens {prior_in:,} -> {new_in:,}); "
+                    f"re-apply customised budget if needed."
+                )
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)
             case ChildDoneEvent(label=label):

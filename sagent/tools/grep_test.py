@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.grep import Grep
 from sagent.tools.lib.bash import parse_bash
+from sagent.types.history import ToolResult
 
 
 grep = Grep()

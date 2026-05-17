@@ -7,7 +7,6 @@ from typing import cast, get_args
 
 import asyncio
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, JSONValue, json_freeze
 from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
 from sagent.tools.core import (
@@ -15,6 +14,7 @@ from sagent.tools.core import (
     load_tool_description,
     truncate,
 )
+from sagent.types.history import ToolResult
 
 
 class WebSearch:

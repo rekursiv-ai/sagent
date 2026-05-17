@@ -37,7 +37,7 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.agent.runtime import UserMessage
+from sagent.types.history import UserMessage
 
 
 if TYPE_CHECKING:

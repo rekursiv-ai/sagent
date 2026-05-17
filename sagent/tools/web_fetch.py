@@ -14,7 +14,6 @@ import socket
 
 import cachetools
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
@@ -24,6 +23,7 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.types.history import ToolResult
 
 
 trafilatura = lazy_import("trafilatura")

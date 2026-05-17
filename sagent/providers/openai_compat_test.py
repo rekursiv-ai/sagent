@@ -9,15 +9,6 @@ import json
 import httpx
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import ModelRequest, Pricing
 from sagent.lib.json import MutableJSON
 from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.openai_compat import (
@@ -27,6 +18,15 @@ from sagent.providers.openai_compat import (
     consume_stream,
     parse_response,
 )
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
+    AssistantMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, Pricing
 
 
 def _make_request(
@@ -670,6 +670,17 @@ def test_build_body_skips_effort_when_not_supported() -> None:
         stream=False,
     )
     assert "reasoning_effort" not in body
+
+
+def test_build_body_skips_service_tier_when_not_supported() -> None:
+    p = _DummyProvider.from_key("k")
+    m = p.model()
+    # Base ``OpenAICompatModel`` has valid_service_tiers=().
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], service_tier="priority"),
+        stream=False,
+    )
+    assert "service_tier" not in body
 
 
 if __name__ == "__main__":

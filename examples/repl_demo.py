@@ -26,15 +26,11 @@ import asyncio
 import sys
 
 from sagent.agent.agent import Agent
-from sagent.agent.runtime import AssistantMessage, UserMessage
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-)
 from sagent.providers import build_provider
 from sagent.repl import run_repl
 from sagent.testing import MockModelCaps
+from sagent.types.history import AssistantMessage, UserMessage
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 class _OfflineEcho(MockModelCaps):

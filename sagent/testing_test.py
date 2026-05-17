@@ -7,19 +7,19 @@ import asyncio
 import pytest
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ModelResponseComplete,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_types import Pricing
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.tools.core import (
     ToolState,
     current_agent_var,
     tool_state_var,
 )
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import Pricing
+from sagent.types.runtime import ModelResponseComplete
 
 
 def test_mock_model_caps_static_flags() -> None:

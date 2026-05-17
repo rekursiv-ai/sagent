@@ -9,14 +9,6 @@ from unittest.mock import patch
 import json
 
 from sagent.agent import session_io
-from sagent.agent.runtime import (
-    AssistantMessage,
-    BytesMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.agent.session_io import (
     SessionMeta,
     append_session,
@@ -29,6 +21,14 @@ from sagent.agent.session_io import (
     serialize_tool_state,
 )
 from sagent.tools.core import ReadCacheEntry, ToolState
+from sagent.types.history import (
+    AssistantMessage,
+    BytesMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 
 
 if TYPE_CHECKING:
@@ -561,7 +561,10 @@ def test_restore_model_success_path() -> None:
 def test_repair_synthesizes_missing_tool_result() -> None:
     """C2: orphan tool_use gets a synthetic ``[interrupted]`` placeholder."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    history: list[HistoryEntry] = [UserMessage(text="do X"), asst]
+    history: list[HistoryEntry] = [
+        UserMessage(text="do X"),
+        asst,
+    ]
     repaired = repair_dangling_tool_calls(history)
     assert len(repaired) == 3
     last = repaired[-1]
@@ -574,7 +577,10 @@ def test_repair_synthesizes_missing_tool_result() -> None:
 def test_repair_is_idempotent() -> None:
     """C2: re-running the repair pass over its own output is a no-op."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    history: list[HistoryEntry] = [UserMessage(text="do X"), asst]
+    history: list[HistoryEntry] = [
+        UserMessage(text="do X"),
+        asst,
+    ]
     repaired = repair_dangling_tool_calls(history)
     again = repair_dangling_tool_calls(repaired)
     assert [type(x) for x in again] == [type(x) for x in repaired]
@@ -584,7 +590,10 @@ def test_repair_is_idempotent() -> None:
 def test_repair_drops_orphan_tool_result_with_no_call() -> None:
     """C2: dangling ToolResult lacking a parent AssistantMessage is dropped."""
     orphan = ToolResult(call_id="ghost", content="leftover")
-    history: list[HistoryEntry] = [UserMessage(text="hi"), orphan]
+    history: list[HistoryEntry] = [
+        UserMessage(text="hi"),
+        orphan,
+    ]
     repaired = repair_dangling_tool_calls(history)
     assert len(repaired) == 1
     assert isinstance(repaired[0], UserMessage)
@@ -594,7 +603,11 @@ def test_repair_preserves_matching_tool_result_pair() -> None:
     """C2: existing tool_use + tool_result pair stays intact."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
     res = ToolResult(call_id="c1", content="OK")
-    history: list[HistoryEntry] = [UserMessage(text="hi"), asst, res]
+    history: list[HistoryEntry] = [
+        UserMessage(text="hi"),
+        asst,
+        res,
+    ]
     repaired = repair_dangling_tool_calls(history)
     assert repaired == history
 

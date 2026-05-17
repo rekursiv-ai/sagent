@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.custom_types import Pricing
 from sagent.providers.lib.cost import ModelProfile, compute_cost
+from sagent.types.model import Pricing
 
 
 def test_compute_cost_zero_pricing_returns_zero() -> None:

@@ -9,7 +9,6 @@ from pathlib import Path
 import asyncio
 import time
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import (
     get_tool_state,
@@ -27,6 +26,7 @@ from sagent.tools.lib.path_sort import (
     safe_size,
     sort_paths,
 )
+from sagent.types.history import ToolResult
 
 
 _NUDGE_PREFIX = "ls via Bash is a bad UX. Use the List tool"

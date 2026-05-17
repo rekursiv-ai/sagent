@@ -25,5 +25,5 @@ Fields:
 - `catalog_provider` -- provider name for `catalog="models"`.
 
 Top-level fields are stable Sagent semantics. Provider-specific controls such
-as `thinking`, `effort`, and `cache_ttl` belong under `model_options` and are
-validated against the active or selected model.
+as `thinking`, `effort`, `cache_ttl`, and `service_tier` belong under
+`model_options` and are validated against the active or selected model.

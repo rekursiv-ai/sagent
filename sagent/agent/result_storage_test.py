@@ -9,7 +9,7 @@ from sagent.agent.result_storage import (
     PERSISTED_TAG,
     post_process_result,
 )
-from sagent.agent.runtime import ToolResult
+from sagent.types.history import ToolResult
 
 
 def test_empty_result_gets_completed_marker() -> None:

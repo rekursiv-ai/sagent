@@ -25,10 +25,10 @@ import asyncio
 import json
 import logging
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
+from sagent.types.history import ToolResult
 
 
 logger = logging.getLogger(__name__)

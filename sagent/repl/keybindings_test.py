@@ -10,8 +10,8 @@ from unittest.mock import MagicMock
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 
 from sagent.agent.agent import Agent
-from sagent.agent.runtime import UserMessage
 from sagent.repl.keybindings import NavState, build_key_bindings
+from sagent.types.history import UserMessage
 
 
 @dataclass(slots=True, kw_only=True)

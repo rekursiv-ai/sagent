@@ -6,11 +6,11 @@ import asyncio
 
 import pytest
 
-from sagent.agent.runtime import ToolResult, UserMessage
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools import agent_send as send_module
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.core import agent_label_var, agent_registry
+from sagent.types.history import ToolResult, UserMessage
 
 
 def test_metadata_basics() -> None:

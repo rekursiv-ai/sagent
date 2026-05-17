@@ -6,9 +6,9 @@ from typing import cast
 
 import pytest
 
-from sagent.custom_types import ModelRequest
 from sagent.lib.json import MutableJSON
 from sagent.providers.dashscope import DashScope, _DashScopeModel
+from sagent.types.model import ModelRequest
 
 
 def test_dashscope_from_key() -> None:

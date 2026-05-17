@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import with_fake_agent
 from sagent.tools.bash import (
     BASH_DEFAULT_TIMEOUT_MS,
@@ -23,6 +22,7 @@ from sagent.tools.bash import (
 )
 from sagent.tools.core import ToolState
 from sagent.tools.lib.bash import Node
+from sagent.types.history import ToolResult
 
 
 class _FakePeer:

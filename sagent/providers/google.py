@@ -34,18 +34,6 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import (
-    ModelRequest,
-    ModelResponse,
-    TokenCount,
-)
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
@@ -58,6 +46,14 @@ from sagent.providers.lib.cost import (
     compute_cost,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 logger = logging.getLogger(__name__)
@@ -256,6 +252,11 @@ class _GeminiModel:
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
         return False
+
+    @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Gemini API has no equivalent of OpenAI's processing tier."""
+        return ()
 
     @property
     def supports_context_management(self) -> bool:

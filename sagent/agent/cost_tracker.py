@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 import time
 
-from sagent.custom_types import ModelResponse, TokenCount
+from sagent.types.model import ModelResponse, TokenCount
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)

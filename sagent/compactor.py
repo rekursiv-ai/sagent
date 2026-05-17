@@ -23,16 +23,17 @@ import logging
 import re
 import time
 
-from sagent.agent.runtime import (
+from sagent.lib.compaction import CLEARED
+from sagent.tools.core import read_asset, recipe_dict
+from sagent.types.exceptions import PromptTooLongError
+from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.custom_exceptions import PromptTooLongError
-from sagent.custom_types import Model, ModelRequest, Tool
-from sagent.lib.compaction import CLEARED
-from sagent.tools.core import read_asset, recipe_dict
+from sagent.types.model import Model, ModelRequest
+from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)
@@ -501,7 +502,9 @@ def _prefix_has_unresolved_tool_use(
     return False
 
 
-def _strip_attachments(history: list[HistoryEntry]) -> list[HistoryEntry]:
+def _strip_attachments(
+    history: list[HistoryEntry],
+) -> list[HistoryEntry]:
     """Drop binary attachments before summarization.
 
     Replaces each attachment with a ``[image]`` / ``[document]`` marker

@@ -22,7 +22,6 @@ from typing import cast
 
 import cachetools
 
-from sagent.agent.runtime import ToolResult
 from sagent.lib.json import (
     JSON,
     MutableJSON,
@@ -41,6 +40,7 @@ from sagent.tools.paper_common import (
     s2_paper_to_record,
     truncation_notice,
 )
+from sagent.types.history import ToolResult
 
 
 _CACHE_TTL_SEC = 15 * 60

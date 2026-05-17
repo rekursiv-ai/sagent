@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sagent.custom_types import Pricing
+from sagent.types.model import Pricing
 
 
 __all__ = ["ModelProfile", "Pricing", "compute_cost"]

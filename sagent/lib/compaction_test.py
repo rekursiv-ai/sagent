@@ -9,13 +9,6 @@ import json
 
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    BytesMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.lib.compaction import (
     CLEARED,
     _serialize_bytes,
@@ -23,12 +16,19 @@ from sagent.lib.compaction import (
     reattach_files,
     write_pre_compact_transcript,
 )
+from sagent.types.history import (
+    AssistantMessage,
+    BytesMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sagent.agent.runtime import HistoryEntry
+    from sagent.types.history import HistoryEntry
 
 
 def test_serialize_user_entry() -> None:

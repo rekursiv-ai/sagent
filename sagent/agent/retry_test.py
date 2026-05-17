@@ -23,10 +23,10 @@ from sagent.agent.retry import (
     is_retryable,
     send_with_retry,
 )
-from sagent.agent.runtime import AssistantMessage
-from sagent.custom_exceptions import StreamInterruptedError
-from sagent.custom_types import ModelRequest, ModelResponse
 from sagent.testing import MockModelCaps
+from sagent.types.exceptions import StreamInterruptedError
+from sagent.types.history import AssistantMessage
+from sagent.types.model import ModelRequest, ModelResponse
 
 
 @dataclass(slots=True, kw_only=True)
@@ -407,7 +407,10 @@ async def test_send_with_retry_persistent_loops_on_429() -> None:
 async def test_send_with_retry_stream_interruption_retries() -> None:
     partial = _resp("partial")
     model = _ScriptedModel(
-        stream_responses=[StreamInterruptedError(partial), _resp("done")],
+        stream_responses=[
+            StreamInterruptedError(partial),
+            _resp("done"),
+        ],
     )
     resp = await send_with_retry(
         model,
@@ -440,7 +443,10 @@ async def test_send_with_retry_stream_interruption_returns_partial_after_cap() -
 async def test_send_with_retry_stream_interrupt_on_discarded_response_called() -> None:
     partial = _resp("partial")
     model = _ScriptedModel(
-        stream_responses=[StreamInterruptedError(partial), _resp("done")],
+        stream_responses=[
+            StreamInterruptedError(partial),
+            _resp("done"),
+        ],
     )
     discarded: list[ModelResponse] = []
     resp = await send_with_retry(

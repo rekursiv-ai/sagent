@@ -13,17 +13,10 @@ import subprocess
 
 import pytest
 
-from sagent.agent.runtime import (
-    AssistantMessage,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    ToolLabel,
-    ToolResult,
-    UserMessage,
-)
+from sagent.agent.session_io import SessionMeta
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
+    _apply_resume_model_defaults,
     _configure_logging,
     _event_to_json_record,
     _install_repl_logging,
@@ -34,12 +27,23 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.runtime import (
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    ToolLabel,
+)
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.agent.runtime import HistoryEntry
+    from sagent.types.history import HistoryEntry
 
 
 def _parse(args: Sequence[str]) -> argparse.Namespace:
@@ -84,6 +88,50 @@ def test_parse_cli_args_resume_no_value() -> None:
 def test_parse_cli_args_resume_with_hash() -> None:
     ns = _parse(["--resume", "abc123"])
     assert ns.resume == "abc123"
+
+
+def test_resume_model_defaults_use_session_meta_when_no_explicit_flags() -> None:
+    ns = _parse(["--resume", "abc123"])
+    meta = SessionMeta(
+        provider="AnthropicCLI",
+        auth="subprocess",
+        model_id="opus-4-7+1m",
+        account="work",
+    )
+    _apply_resume_model_defaults(ns, meta)
+    assert ns.provider == "AnthropicCLI"
+    assert ns.auth == "subprocess"
+    assert ns.model == "opus-4-7+1m"
+    assert ns.account == "work"
+
+
+def test_resume_model_defaults_explicit_provider_uses_provider_default_model() -> None:
+    ns = _parse(["--resume", "abc123", "--provider", "OpenAISubscription"])
+    meta = SessionMeta(
+        provider="AnthropicCLI",
+        auth="subprocess",
+        model_id="opus-4-7+1m",
+        account="work",
+    )
+    _apply_resume_model_defaults(ns, meta)
+    assert ns.provider == "OpenAISubscription"
+    assert ns.auth == "subprocess"
+    assert ns.model is None
+    assert ns.account == "work"
+
+
+def test_resume_model_defaults_explicit_model_overrides_session_meta() -> None:
+    ns = _parse(
+        ["--resume", "abc123", "--provider", "OpenAISubscription", "--model", "gpt-5.5"]
+    )
+    meta = SessionMeta(
+        provider="AnthropicCLI",
+        auth="subprocess",
+        model_id="opus-4-7+1m",
+    )
+    _apply_resume_model_defaults(ns, meta)
+    assert ns.provider == "OpenAISubscription"
+    assert ns.model == "gpt-5.5"
 
 
 def test_parse_agent_args_known_unknown_split() -> None:

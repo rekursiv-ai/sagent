@@ -11,8 +11,8 @@ import pytest
 
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
-from sagent.custom_types import ContextBudget, TokenCount
 from sagent.repl.status_pane import render_status_pane
+from sagent.types.model import ContextBudget, TokenCount
 
 
 @dataclass(slots=True, kw_only=True)

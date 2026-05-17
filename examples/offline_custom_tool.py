@@ -8,19 +8,19 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.agent.runtime import (
+from sagent.tools import tool
+from sagent.types.history import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.custom_types import (
+from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     Pricing,
     TokenCount,
 )
-from sagent.tools import tool
 
 
 @tool(name="Echo")
@@ -47,6 +47,7 @@ class ScriptedModel:
     supports_thinking = False
     supports_effort = False
     supports_cache_control = False
+    valid_service_tiers: tuple[str, ...] = ()
     supports_context_management = False
     supports_persistent_retry = False
     supports_account_auth = False

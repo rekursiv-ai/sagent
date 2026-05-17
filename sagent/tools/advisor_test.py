@@ -8,14 +8,14 @@ from typing import override
 
 import pytest
 
-from sagent.agent.runtime import AssistantMessage, ToolResult
-from sagent.custom_types import ModelRequest, ModelResponse, Pricing
 from sagent.testing import MockModelCaps
 from sagent.tools.advisor import (
     SYSTEM_NUDGE,
     Advisor,
     _AdvisorModel,
 )
+from sagent.types.history import AssistantMessage, ToolResult
+from sagent.types.model import ModelRequest, ModelResponse, Pricing
 
 
 @dataclass(slots=True, kw_only=True)

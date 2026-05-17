@@ -38,21 +38,21 @@ import re
 import time
 import uuid
 
-from sagent.agent.runtime import (
+from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.providers.lib.id_remap import IdRemapper
+from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.history import (
     AssistantMessage,
     ToolCall,
     UserMessage,
 )
-from sagent.custom_types import (
+from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     Pricing,
     TokenCount,
-    Tool,
 )
-from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
@@ -487,6 +487,11 @@ class SelfHostedModel:
     def supports_cache_control(self) -> bool:
         """Return whether cache control is supported."""
         return False
+
+    @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Self-hosted backends have no processing-tier concept."""
+        return ()
 
     @property
     def supports_context_management(self) -> bool:

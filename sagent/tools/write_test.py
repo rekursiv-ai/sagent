@@ -10,9 +10,9 @@ import time
 
 import pytest
 
-from sagent.agent.runtime import ToolResult
 from sagent.testing import with_fake_agent
 from sagent.tools.write import Write
+from sagent.types.history import ToolResult
 
 
 write = Write()
