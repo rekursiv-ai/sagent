@@ -287,7 +287,7 @@ class Await:
     """Event classes that satisfy the gate (``Quit`` always does)."""
 
 
-AWAIT_USER = Await((UserMessage, Quit))
+AWAIT_USER = Await((UserMessage, UserQueuedMessage, Quit))
 
 
 class GatedDeque[T]:
@@ -556,6 +556,7 @@ class AgentRuntime:
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
         cohort_seen: bool = False
+        awaiting_user = False
         queued: list[UserQueuedMessage] = []
 
         while True:
@@ -590,6 +591,7 @@ class AgentRuntime:
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
                             )
+                            awaiting_user = True
                             break
 
                         case Clear():
@@ -607,6 +609,7 @@ class AgentRuntime:
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
                             )
+                            awaiting_user = True
                             break
 
                         case ModelResponseError(exception=exc):
@@ -628,6 +631,7 @@ class AgentRuntime:
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
                             )
+                            awaiting_user = True
                             break
 
                         case Kill(call_id=cid):
@@ -724,9 +728,19 @@ class AgentRuntime:
                                 cohort_seen = False
                                 self._append_or_coalesce_user(item)
                                 self.publish(item)
+                            awaiting_user = False
 
                         case UserQueuedMessage():
-                            queued.append(item)
+                            if awaiting_user:
+                                coalesced = UserMessage(
+                                    text=item.text,
+                                    attachments=item.attachments,
+                                )
+                                self._append_or_coalesce_user(coalesced)
+                                self.publish(coalesced)
+                                awaiting_user = False
+                            else:
+                                queued.append(item)
 
                         case ModelResponsePartial():
                             self.publish(item)

@@ -24,6 +24,7 @@ from sagent.repl.render import (
 )
 from sagent.repl.run_repl import (
     _parse_model_args,
+    _publish_startup_idle_if_settled,
     do_login,
     do_switch_model,
     format_tasks,
@@ -499,6 +500,35 @@ def test_make_queued_input_committer_ignores_idle_when_queue_empty() -> None:
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     observer = make_queued_input_committer(runtime, queued_input)
     observer(ModelIdle())
+    assert runtime.inbox._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
+    """Resume starts already idle, so emit one idle edge for queue flushers."""
+    queued_input = ["were we implementing issue 25?"]
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime.observers.append(make_queued_input_committer(runtime, queued_input))
+
+    _publish_startup_idle_if_settled(runtime)
+
+    assert queued_input == []
+    pushed = await runtime.inbox.drain()
+    assert len(pushed) == 1
+    assert isinstance(pushed[0], UserQueuedMessage)
+    assert pushed[0].text == "were we implementing issue 25?"
+
+
+def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
+    """Startup idle pulse must not mask a pending model-triggering turn."""
+    queued_input = ["for later"]
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime.history.append(UserMessage(text="answer this first"))
+    runtime.observers.append(make_queued_input_committer(runtime, queued_input))
+
+    _publish_startup_idle_if_settled(runtime)
+
+    assert queued_input == ["for later"]
     assert runtime.inbox._queue.empty()
 
 

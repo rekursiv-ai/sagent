@@ -177,6 +177,25 @@ async def run_until_quit(
         pytest.fail("run_forever did not quit within timeout")
 
 
+async def wait_until(predicate: Callable[[], bool], timeout_sec: float = 1.0) -> None:
+    """Wait until a predicate is true without adding fixed sleeps."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while not predicate():
+        if loop.time() >= deadline:
+            pytest.fail("condition did not become true within timeout")
+        await asyncio.sleep(0)
+
+
+def _assistant_texts(agent: agent_runtime.AgentRuntime) -> list[str]:
+    """Return assistant text entries from runtime history."""
+    return [
+        entry.text
+        for entry in agent.history
+        if isinstance(entry, AssistantMessage) and entry.text
+    ]
+
+
 @pytest.mark.asyncio
 async def test_simple_text_response() -> None:
     """User message -> model text response -> turn complete."""
@@ -604,24 +623,39 @@ async def test_splice_wakes_model_after_round_ended() -> None:
     also wakes the model, with the terse notification keeping history
     clean (the real content lives in its proper ``ToolResult`` slot).
     """
-    slow = StubTool(response="real output", delay_sec=0.2)
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SignalingTool:
+        _name: str = "echo"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            tool_started.set()
+            await release_tool.wait()
+            return ToolResult(call_id="", content="real output")
+
     agent, _ = make_agent(
         [
             AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
             AssistantMessage(text="preempted response"),
             AssistantMessage(text="post-splice response"),
         ],
-        tools=[slow],
+        tools=[SignalingTool()],
     )
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def preempt_then_wait_for_splice() -> None:
-        # Let the tool start; preempt with a user message.
-        await asyncio.sleep(0.05)
+        await tool_started.wait()
         agent.inbox.push_back(UserMessage(text="preempt"))
-        # Wait long enough for the tool to finish, the splice to land,
-        # and the awoken round to complete.
-        await asyncio.sleep(0.6)
+        await wait_until(lambda: "preempted response" in _assistant_texts(agent))
+        release_tool.set()
+        await wait_until(lambda: "post-splice response" in _assistant_texts(agent))
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -3125,6 +3159,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     """
     stream_started = asyncio.Event()
     release_stream = asyncio.Event()
+    second_started = asyncio.Event()
 
     @dataclass(kw_only=True, slots=True)
     class HaltableModel:
@@ -3150,6 +3185,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
                 await release_stream.wait()
                 msg = AssistantMessage(text="never-shown")
             else:
+                second_started.set()
                 msg = AssistantMessage(text="answer to second")
             for ch in msg.text:
                 on_text(ch)
@@ -3167,9 +3203,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
         # UserMessage before the runtime has yielded.
         agent.inbox.push_back(Halt())
         agent.inbox.push_back(UserMessage(text="second"))
-        # Give the runtime time to process Halt + the new UserMessage
-        # and fire Round 2.
-        await asyncio.sleep(0.3)
+        await second_started.wait()
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -3189,6 +3223,62 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     user_texts_round2 = [m.text for m in round2_history if isinstance(m, UserMessage)]
     assert any("second" in t for t in user_texts_round2), (
         f"Round 2 did not see 'second' in any UserMessage; got {user_texts_round2!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_halt_then_queued_message_fires_followup_round() -> None:
+    """A deferred message after halt is fresh user input, not idle-only backlog."""
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    second_started = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class HaltableModel:
+        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+
+        async def stream(
+            self,
+            history: list[HistoryEntry],
+            system: str,
+            tools: list[agent_runtime.Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del system, tools, on_thinking
+            self.call_histories.append(list(history))
+            if len(self.call_histories) == 1:
+                stream_started.set()
+                await release_stream.wait()
+                return AssistantMessage(text="never-shown")
+            second_started.set()
+            for ch in "answer to queued":
+                on_text(ch)
+            return AssistantMessage(text="answer to queued")
+
+    model = HaltableModel()
+    agent = agent_runtime.AgentRuntime(model=model)
+    agent.inbox.push_back(UserMessage(text="first"))
+
+    async def halt_then_queue() -> None:
+        await stream_started.wait()
+        agent.inbox.push_back(Halt())
+        await asyncio.sleep(0)
+        agent.inbox.push_back(UserQueuedMessage(text="queued after interrupt"))
+        await second_started.wait()
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        halt_then_queue(),
+    )
+
+    assert len(model.call_histories) >= 2
+    round2_history = model.call_histories[1]
+    user_texts_round2 = [m.text for m in round2_history if isinstance(m, UserMessage)]
+    assert any("queued after interrupt" in t for t in user_texts_round2), (
+        f"Round 2 did not see queued input; got {user_texts_round2!r}"
     )
 
 

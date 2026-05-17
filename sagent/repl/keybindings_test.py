@@ -12,11 +12,13 @@ from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from sagent.agent.agent import Agent
 from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.types.history import UserMessage
+from sagent.types.runtime import UserQueuedMessage
 
 
 @dataclass(slots=True, kw_only=True)
 class _FakeInbox:
     items: list[object] = field(default_factory=list)
+    gate_armed: bool = False
 
     def push_back(self, item: object) -> None:
         self.items.append(item)
@@ -214,22 +216,44 @@ def test_enter_with_trailing_backslash_inserts_newline_no_dispatch() -> None:
     assert agent.runtime.inbox.items == []
 
 
-def test_tab_stages_locally_does_not_dispatch() -> None:
-    """Tab on text stages in ``queued_input``; nothing pushed to runtime.
-
-    Under option 1: Tab is pure REPL-side staging. The runtime is
-    untouched until ``make_queued_input_committer`` fires on
-    ``ModelIdle``. This makes Up-arrow a true retract.
-    """
+def test_tab_idle_dispatches_queued_message() -> None:
+    """Tab on an idle agent dispatches immediately; no future idle edge exists."""
     agent = _idle_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("for later")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queued_input == []
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserQueuedMessage)
+    assert pushed.text == "for later"
+
+
+def test_tab_busy_stages_locally_does_not_dispatch() -> None:
+    """Tab during active work stays local so Up-arrow can retract it."""
+    agent = _busy_agent()
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+    buf = _fake_buf("for later")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
     assert queued_input == ["for later"]
-    assert agent.runtime.inbox.items == [], (
-        "Tab must not push to runtime -- it stages REPL-side until ModelIdle"
-    )
+    assert agent.runtime.inbox.items == []
+
+
+def test_tab_awaiting_user_dispatches_user_message() -> None:
+    """Tab after an interrupt satisfies the runtime's fresh-user gate."""
+    agent = _idle_agent()
+    agent.runtime.inbox.gate_armed = True
+    queued_input: list[str] = []
+    kb = _build(agent, queued_input)
+    buf = _fake_buf("after interrupt")
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queued_input == []
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "after interrupt"
 
 
 def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
@@ -241,7 +265,7 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
     result: queue holds ["hello"] again, runtime untouched -- the user
     walked through navigation without losing anything.
     """
-    agent = _idle_agent()
+    agent = _busy_agent()
     queued_input: list[str] = []
     nav = NavState()
     kb = _build(agent, queued_input, nav)
@@ -273,7 +297,7 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
 
 def test_tab_on_empty_buf_is_noop() -> None:
     """Tab with empty buffer does nothing; queue untouched."""
-    agent = _idle_agent()
+    agent = _busy_agent()
     queued_input: list[str] = []
     kb = _build(agent, queued_input)
     buf = _fake_buf("")
@@ -328,7 +352,7 @@ def test_up_lifts_entire_queue_into_buffer() -> None:
     """
     queued_input = ["a", "b", "c"]
     nav = NavState()
-    kb = _build(_idle_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queued_input, nav)
     buf = _fake_buf("typed")
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "a\n\nb\n\nc"
@@ -377,7 +401,7 @@ def test_figure_case_1_round_trip() -> None:
     nav = NavState()
     queued_input = ["f"]
     history = ["a", "b", "c", "d", "e"]  # oldest-first; history[-1] = "e"
-    kb = _build(_idle_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queued_input, nav)
     buf = _fake_buf("g", history=history)
 
     # t=0: starting state
@@ -466,7 +490,7 @@ def test_enter_after_navigation_commits_buffer_and_restores() -> None:
     nav = NavState()
     queued_input = ["original"]
     history = ["older", "older2", "latest"]
-    kb = _build(_idle_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queued_input, nav)
     buf = _fake_buf("typed-before-up", history=history)
 
     # Up x2: dequeue then walk to history[-1].
@@ -501,7 +525,7 @@ def test_tab_during_navigation_commits_via_navigation_path() -> None:
     User scrolls history, hits Tab to "save this for later" without
     losing their pre-navigation typing.
     """
-    agent = _idle_agent()
+    agent = _busy_agent()
     nav = NavState()
     queued_input = ["existing"]
     history = ["latest"]
