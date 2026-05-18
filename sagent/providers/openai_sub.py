@@ -49,7 +49,7 @@ should prefer the API-key path (``OpenAI.from_key``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterable, Callable, Mapping
 from pathlib import Path
 from typing import (
     IO,
@@ -65,6 +65,7 @@ from urllib.parse import quote_plus
 import asyncio
 import base64
 import contextlib
+import inspect
 import json
 import logging
 import secrets
@@ -143,6 +144,7 @@ _CALLBACK_PORT = 1455
 # rejects an oversized request.
 _SUBSCRIPTION_MAX_REQUEST_TOKENS = 272_000
 _SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
+_STREAM_IDLE_TIMEOUT = 600.0
 
 _EFFORT_PREFIXES = ("o", "gpt-5")
 
@@ -865,7 +867,7 @@ def _build_tool_result_item(
 
 
 async def _consume_stream(
-    stream: AsyncResponseStream,
+    stream: AsyncIterable[object],
     *,
     pricing: Pricing,
     on_text: Callable[[str], None] | None,
@@ -880,43 +882,54 @@ async def _consume_stream(
     message_id = ""
     finish_reason: str | None = None
 
-    async for event in stream:
-        if isinstance(event, oai_responses.ResponseTextDeltaEvent):
-            text_parts.append(event.delta)
-            if on_text is not None:
-                on_text(event.delta)
-        elif isinstance(event, oai_responses.ResponseFunctionCallArgumentsDeltaEvent):
-            tool_args.setdefault(event.item_id, []).append(event.delta)
-        elif isinstance(event, oai_responses.ResponseOutputItemDoneEvent):
-            item = event.item
-            if item.type == "function_call":
-                tc_id = str(item.call_id or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
-                tc_name = str(item.name or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
-                item_id = item.id or ""
-                delta_args = "".join(tool_args.get(item_id, []))
-                done_args = str(item.arguments or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
-                args = _parse_tool_arguments(
-                    delta_args,
-                    done_args,
-                    tool_name=tc_name,
-                    call_id=tc_id,
-                )
-                tool_calls.append(
-                    ToolCall(
-                        id=tc_id,
-                        name=tc_name,
-                        args=cast(Mapping[str, object], args),
-                    )
-                )
-        elif isinstance(event, oai_responses.ResponseCompletedEvent):
-            resp = event.response
-            message_id = resp.id
-            if resp.usage:
-                input_tokens = resp.usage.input_tokens
-                output_tokens = resp.usage.output_tokens
-                if resp.usage.input_tokens_details:
-                    cache_read = resp.usage.input_tokens_details.cached_tokens
-            finish_reason = resp.status
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _STREAM_IDLE_TIMEOUT
+    try:
+        async with asyncio.timeout_at(deadline) as watchdog:
+            async for event in stream:
+                watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
+                if isinstance(event, oai_responses.ResponseTextDeltaEvent):
+                    text_parts.append(event.delta)
+                    if on_text is not None:
+                        on_text(event.delta)
+                elif isinstance(
+                    event,
+                    oai_responses.ResponseFunctionCallArgumentsDeltaEvent,
+                ):
+                    tool_args.setdefault(event.item_id, []).append(event.delta)
+                elif isinstance(event, oai_responses.ResponseOutputItemDoneEvent):
+                    item = event.item
+                    if item.type == "function_call":
+                        tc_id = str(item.call_id or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                        tc_name = str(item.name or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                        item_id = item.id or ""
+                        delta_args = "".join(tool_args.get(item_id, []))
+                        done_args = str(item.arguments or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                        args = _parse_tool_arguments(
+                            delta_args,
+                            done_args,
+                            tool_name=tc_name,
+                            call_id=tc_id,
+                        )
+                        tool_calls.append(
+                            ToolCall(
+                                id=tc_id,
+                                name=tc_name,
+                                args=cast(Mapping[str, object], args),
+                            )
+                        )
+                elif isinstance(event, oai_responses.ResponseCompletedEvent):
+                    resp = event.response
+                    message_id = resp.id
+                    if resp.usage:
+                        input_tokens = resp.usage.input_tokens
+                        output_tokens = resp.usage.output_tokens
+                        if resp.usage.input_tokens_details:
+                            cache_read = resp.usage.input_tokens_details.cached_tokens
+                    finish_reason = resp.status
+    except (asyncio.CancelledError, TimeoutError):
+        await _close_stream(stream)
+        raise
 
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
@@ -947,6 +960,18 @@ async def _consume_stream(
         output_cost=out_cost,
         total_cost=total_cost,
     )
+
+
+async def _close_stream(stream: object) -> None:
+    """Close a Responses stream after timeout or cancellation."""
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        close = getattr(stream, "close", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 def _parse_tool_arguments(
