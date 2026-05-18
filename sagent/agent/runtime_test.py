@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import asyncio
+import logging
 
 import pytest
 
@@ -1254,7 +1255,7 @@ async def test_clear_discards_queued_messages() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_kill_all_tools() -> None:
+async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
     """Kill(call_id=None) cancels all tool tasks."""
     tool_started = asyncio.Event()
 
@@ -1289,14 +1290,19 @@ async def test_kill_all_tools() -> None:
         await asyncio.sleep(0)
         agent.inbox.push_back(Quit())
 
-    await asyncio.gather(
-        run_until_quit(agent, timeout_sec=3.0),
-        kill_all(),
-    )
+    with caplog.at_level(logging.DEBUG, logger=agent_runtime.__name__):
+        await asyncio.gather(
+            run_until_quit(agent, timeout_sec=3.0),
+            kill_all(),
+        )
 
     assert not any(
         isinstance(t, ToolResult) and t.content == "done" for t in agent.history
     )
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("runtime cohort start" in message for message in messages)
+    assert any("runtime kill all tools" in message for message in messages)
+    assert any("runtime tool cancelled" in message for message in messages)
 
 
 @pytest.mark.asyncio

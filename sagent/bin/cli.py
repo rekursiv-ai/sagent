@@ -468,7 +468,10 @@ def _parse_cli_args(
         "--log-level",
         default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Enable stderr logging at this level. Overrides SAGENT_LOG_LEVEL.",
+        help=(
+            "Set Sagent log level. REPL mode writes logs to file;"
+            " headless mode writes to stderr. Overrides SAGENT_LOG_LEVEL."
+        ),
     )
     return parse_agent_args(parser, argv)
 
@@ -533,7 +536,11 @@ def _configure_logging(level: str | None) -> None:
     logging.getLogger("sagent").setLevel(value)
 
 
-def _install_repl_logging() -> None:
+def _install_repl_logging(
+    level: str | None = None,
+    *,
+    session_dir: str | Path | None = None,
+) -> None:
     """REPL mode: never write logs to stderr.
 
     Python's default ``lastResort`` handler emits ``WARNING+`` records
@@ -545,12 +552,16 @@ def _install_repl_logging() -> None:
         implicit fallback is silent.
       - Removes any pre-installed stderr/stdout-bound handlers on the
         root logger (e.g. from a prior ``basicConfig`` call).
-      - When ``SAGENT_LOG_LEVEL`` is set, routes records to
-        ``SAGENT_LOG_FILE`` (defaults to ``~/.sagent/repl.log``) via
-        a ``FileHandler`` so the user can ``tail -f`` for diagnostics
-        without breaking the REPL.
+      - Routes records to ``SAGENT_LOG_FILE`` or, by default,
+        ``<session_dir>/repl.log`` via a ``FileHandler`` so the user
+        can ``tail -f`` for diagnostics without breaking the REPL.
 
     Headless mode (``_configure_logging`` path) is unchanged.
+
+    Args:
+      level: Optional CLI log level; overrides ``SAGENT_LOG_LEVEL``.
+      session_dir: Session directory containing ``session.jsonl``.
+
     """
     logging.lastResort = logging.NullHandler()
     root = logging.getLogger()
@@ -560,9 +571,7 @@ def _install_repl_logging() -> None:
         ) in (sys.stderr, sys.stdout):
             root.removeHandler(cast(logging.Handler, handler))
 
-    raw = os.environ.get("SAGENT_LOG_LEVEL")
-    if not raw:
-        return
+    raw = level or os.environ.get("SAGENT_LOG_LEVEL") or "DEBUG"
     name = raw.upper()
     value = getattr(logging, name, None)
     if not isinstance(value, int):
@@ -571,12 +580,14 @@ def _install_repl_logging() -> None:
         # was set after that point. Be quiet (REPL has no good
         # place to surface this) and fall back to NullHandler-only.
         return
-    log_file = os.environ.get(
-        "SAGENT_LOG_FILE",
-        str(Path.home() / ".sagent" / "repl.log"),
-    )
-    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(log_file)
+    log_file = os.environ.get("SAGENT_LOG_FILE")
+    if log_file is None:
+        base = Path(session_dir) if session_dir is not None else Path.home() / ".sagent"
+        log_path = base / "repl.log"
+    else:
+        log_path = Path(log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_path)
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),
     )
@@ -926,7 +937,7 @@ def main() -> None:
             sys.stderr.write(
                 "Note: --output-format is ignored in interactive REPL mode.\n"
             )
-        _install_repl_logging()
+        _install_repl_logging(args.log_level, session_dir=session_dir)
         asyncio.run(
             _with_signals(
                 agent,
