@@ -282,6 +282,16 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 logger = logging.getLogger(__name__)
 
 
+def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
+    """Return class names for compact debug logging."""
+    return tuple(t.__name__ for t in types)
+
+
+def _item_names(items: Sequence[object]) -> tuple[str, ...]:
+    """Return event class names for compact debug logging."""
+    return tuple(type(item).__name__ for item in items)
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class Await:
     """Drain gate: block until an item matching ``types`` arrives."""
@@ -359,6 +369,12 @@ class GatedDeque[T]:
                     for i in old
                     if isinstance(i, item.types) and not isinstance(i, Quit)
                 )
+                logger.debug(
+                    "runtime inbox gate armed: gate=%s baseline=%d queued=%s",
+                    _type_names(item.types),
+                    self._gate_baseline,
+                    _item_names(old),
+                )
             else:
                 self._queue.put_nowait(item)
         for item in old:
@@ -385,6 +401,13 @@ class GatedDeque[T]:
         if self._gate is not None:
             gate = self._gate
             baseline = self._gate_baseline
+            if not self._gate_satisfied(items, gate, baseline):
+                logger.debug(
+                    "runtime inbox gate waiting: gate=%s baseline=%d buffered=%s",
+                    _type_names(gate),
+                    baseline,
+                    _item_names(items),
+                )
             while not self._gate_satisfied(items, gate, baseline):
                 items.append(await self._queue.get())
                 while not self._queue.empty():
@@ -392,6 +415,12 @@ class GatedDeque[T]:
                         items.append(self._queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
+            logger.debug(
+                "runtime inbox gate released: gate=%s baseline=%d buffered=%s",
+                _type_names(gate),
+                baseline,
+                _item_names(items),
+            )
             self._gate = None
             self._gate_baseline = 0
         return items
@@ -570,6 +599,15 @@ class AgentRuntime:
                 for item_idx, item in enumerate(items):
                     match item:
                         case Quit():
+                            logger.debug(
+                                "runtime quit: model_call=%s compact_task=%s "
+                                "running_tools=%d cohort=%d detached=%d",
+                                self.model_call is not None,
+                                self.compact_task is not None,
+                                len(self.running_tools),
+                                len(self.cohort),
+                                len(self.detached),
+                            )
                             if self.model_call:
                                 self.model_call.cancel()
                             if self.compact_task:
@@ -579,6 +617,17 @@ class AgentRuntime:
                             return
 
                         case Halt():
+                            logger.debug(
+                                "runtime halt: model_call=%s compact_task=%s "
+                                "running_tools=%d cohort=%d detached=%d "
+                                "mid_stream=%d",
+                                self.model_call is not None,
+                                self.compact_task is not None,
+                                len(self.running_tools),
+                                len(self.cohort),
+                                len(self.detached),
+                                len(self._mid_stream_queue),
+                            )
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
@@ -616,6 +665,17 @@ class AgentRuntime:
                             break
 
                         case ModelResponseError(exception=exc):
+                            logger.debug(
+                                "runtime model response error: error=%s "
+                                "model_call=%s compact_task=%s running_tools=%d "
+                                "cohort=%d detached=%d",
+                                type(exc).__name__,
+                                self.model_call is not None,
+                                self.compact_task is not None,
+                                len(self.running_tools),
+                                len(self.cohort),
+                                len(self.detached),
+                            )
                             self.model_call = None
                             self._append_or_coalesce_user(
                                 UserMessage(
@@ -639,22 +699,42 @@ class AgentRuntime:
 
                         case Kill(call_id=cid):
                             if cid is None:
+                                logger.debug(
+                                    "runtime kill all tools: running_tools=%d "
+                                    "cohort=%d detached=%d",
+                                    len(self.running_tools),
+                                    len(self.cohort),
+                                    len(self.detached),
+                                )
                                 for t in self.running_tools.values():
                                     t.cancel()
                                 self.running_tools = {}
                                 self.cohort.clear()
                                 cohort_seen = False
                             elif cid in self.running_tools:
+                                logger.debug("runtime kill tool: call_id=%s", cid)
                                 self.running_tools.pop(cid).cancel()
                                 self.cohort.discard(cid)
+                            else:
+                                logger.debug(
+                                    "runtime kill missed tool: call_id=%s", cid
+                                )
 
                         case Detach(call_id=cid):
                             if cid is None:
+                                logger.debug(
+                                    "runtime detach all tools: running_tools=%d "
+                                    "cohort=%d detached=%d",
+                                    len(self.running_tools),
+                                    len(self.cohort),
+                                    len(self.detached),
+                                )
                                 self._stub_running_tools_and_let_finish()
                                 self.running_tools = {}
                                 self.cohort.clear()
                                 cohort_seen = False
                             elif cid in self.running_tools:
+                                logger.debug("runtime detach tool: call_id=%s", cid)
                                 task = self.running_tools.pop(cid)
                                 self.cohort.discard(cid)
                                 self.history.append(
@@ -664,6 +744,10 @@ class AgentRuntime:
                                     ),
                                 )
                                 self.detached[cid] = task
+                            else:
+                                logger.debug(
+                                    "runtime detach missed tool: call_id=%s", cid
+                                )
 
                         case Undetach(call_id=cid):
                             if cid is None:
@@ -674,7 +758,20 @@ class AgentRuntime:
 
                         case Compact(args=args) | Recompact(args=args):
                             if self.compact_task and not self.compact_task.done():
+                                logger.debug(
+                                    "runtime compact ignored while compact_task active",
+                                )
                                 continue
+                            logger.debug(
+                                "runtime compact start: kind=%s model_call=%s "
+                                "running_tools=%d cohort=%d detached=%d args=%r",
+                                type(item).__name__,
+                                self.model_call is not None,
+                                len(self.running_tools),
+                                len(self.cohort),
+                                len(self.detached),
+                                args,
+                            )
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
@@ -797,6 +894,11 @@ class AgentRuntime:
                             elif msg.tool_calls:
                                 cohort_seen = True
                                 self.publish(CohortStarted())
+                                logger.debug(
+                                    "runtime cohort start: parent_id=%s tools=%s",
+                                    msg.id,
+                                    [(tc.id, tc.name) for tc in msg.tool_calls],
+                                )
                                 for tc in msg.tool_calls:
                                     self.cohort.add(tc.id)
                                     tool_task = asyncio.create_task(
@@ -956,6 +1058,11 @@ class AgentRuntime:
                         self.publish(pending)
 
                 if not self.cohort and cohort_seen:
+                    logger.debug(
+                        "runtime cohort complete: running_tools=%d detached=%d",
+                        len(self.running_tools),
+                        len(self.detached),
+                    )
                     self.publish(CohortComplete())
                     cohort_seen = False
 
@@ -998,6 +1105,12 @@ class AgentRuntime:
                     and not self.inbox.gate_armed
                     and self._should_call_model()
                 ):
+                    logger.debug(
+                        "runtime model call start: history=%d detached=%d queued=%d",
+                        len(self.history),
+                        len(self.detached),
+                        len(queued),
+                    )
                     # ``inbox.gate_armed`` blocks firing while ``AWAIT_USER``
                     # is pending (armed by ``Halt`` / ``ModelResponseError``).
                     # Without this guard the model would fire on the stale
@@ -1231,6 +1344,12 @@ class AgentRuntime:
         """
         tool = self.tools_map.get(call.name)
         if tool is None:
+            logger.debug(
+                "runtime tool unknown: call_id=%s tool=%s parent_id=%s",
+                call.id,
+                call.name,
+                parent_id,
+            )
             self.inbox.push_back(
                 ToolResult(
                     call_id=call.id,
@@ -1245,6 +1364,12 @@ class AgentRuntime:
         # the originating call.
         call_token = current_call_id_var.set(call.id)
         try:
+            logger.debug(
+                "runtime tool start: call_id=%s tool=%s parent_id=%s",
+                call.id,
+                call.name,
+                parent_id,
+            )
             result = await tool.run(call.args)
             replacements: dict[str, object] = {}
             if not result.call_id:
@@ -1254,8 +1379,21 @@ class AgentRuntime:
             if replacements:
                 result = dataclasses.replace(result, **replacements)
         except asyncio.CancelledError:
+            logger.debug(
+                "runtime tool cancelled: call_id=%s tool=%s parent_id=%s",
+                call.id,
+                call.name,
+                parent_id,
+            )
             return
         except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
+            logger.debug(
+                "runtime tool failed: call_id=%s tool=%s parent_id=%s error=%s",
+                call.id,
+                call.name,
+                parent_id,
+                type(exc).__name__,
+            )
             result = ToolResult(
                 call_id=call.id,
                 parent_id=parent_id,
@@ -1265,6 +1403,12 @@ class AgentRuntime:
         finally:
             current_call_id_var.reset(call_token)
         if call.id in self.detached:
+            logger.debug(
+                "runtime tool complete detached: call_id=%s tool=%s is_error=%s",
+                call.id,
+                call.name,
+                result.is_error,
+            )
             del self.detached[call.id]
             self.inbox.push_back(
                 DetachedResult(
@@ -1274,6 +1418,12 @@ class AgentRuntime:
                 ),
             )
         else:
+            logger.debug(
+                "runtime tool complete cohort: call_id=%s tool=%s is_error=%s",
+                call.id,
+                call.name,
+                result.is_error,
+            )
             self.inbox.push_back(result)
 
     async def _compact_and_post(self, args: str) -> None:

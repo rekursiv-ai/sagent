@@ -289,7 +289,9 @@ def test_configure_logging_env_var_used(
 
 
 def test_install_repl_logging_silences_stderr(
-    capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``_install_repl_logging`` must prevent log records reaching stderr.
 
@@ -312,7 +314,7 @@ def test_install_repl_logging_silences_stderr(
         stderr_handler = logging.StreamHandler()  # defaults to stderr
         root.addHandler(stderr_handler)
 
-        _install_repl_logging()
+        _install_repl_logging(session_dir=tmp_path)
 
         logging.getLogger("sagent.test").warning("nope")
         captured = capfd.readouterr()
@@ -326,26 +328,25 @@ def test_install_repl_logging_silences_stderr(
         logging.lastResort = saved_last_resort
 
 
-def test_install_repl_logging_routes_to_file_when_log_level_set(
+def test_install_repl_logging_routes_debug_to_file_by_default(
     capfd: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``SAGENT_LOG_LEVEL`` in REPL mode routes records to a file, not stderr."""
+    """REPL mode saves DEBUG diagnostics to a file by default."""
     log_file = tmp_path / "repl.log"
-    monkeypatch.setenv("SAGENT_LOG_LEVEL", "DEBUG")
-    monkeypatch.setenv("SAGENT_LOG_FILE", str(log_file))
+    monkeypatch.delenv("SAGENT_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SAGENT_LOG_FILE", raising=False)
 
     root = logging.getLogger()
     saved_handlers = list(root.handlers)
     saved_last_resort = logging.lastResort
     try:
         root.handlers.clear()
-        _install_repl_logging()
+        _install_repl_logging(session_dir=tmp_path)
 
         logger = logging.getLogger("sagent.test")
-        logger.setLevel(logging.DEBUG)
-        logger.warning("hello-file")
+        logger.debug("hello-file")
 
         captured = capfd.readouterr()
         assert captured.err == "", (
@@ -357,6 +358,72 @@ def test_install_repl_logging_routes_to_file_when_log_level_set(
         assert "hello-file" in log_file.read_text(), (
             f"expected log content in {log_file}; got {log_file.read_text()!r}"
         )
+    finally:
+        for h in list(root.handlers):
+            h.close()
+            root.removeHandler(h)
+        for h in saved_handlers:
+            root.addHandler(h)
+        logging.lastResort = saved_last_resort
+
+
+def test_install_repl_logging_cli_level_overrides_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The CLI log level still controls the file-backed REPL threshold."""
+    log_file = tmp_path / "repl.log"
+    monkeypatch.delenv("SAGENT_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("SAGENT_LOG_FILE", raising=False)
+
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_last_resort = logging.lastResort
+    try:
+        root.handlers.clear()
+        _install_repl_logging("INFO", session_dir=tmp_path)
+
+        logger = logging.getLogger("sagent.test")
+        logger.debug("debug-hidden")
+        logger.info("info-visible")
+
+        for h in root.handlers:
+            h.flush()
+        text = log_file.read_text()
+        assert "info-visible" in text
+        assert "debug-hidden" not in text
+    finally:
+        for h in list(root.handlers):
+            h.close()
+            root.removeHandler(h)
+        for h in saved_handlers:
+            root.addHandler(h)
+        logging.lastResort = saved_last_resort
+
+
+def test_install_repl_logging_env_file_overrides_session_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``SAGENT_LOG_FILE`` remains an explicit override for REPL logs."""
+    session_dir = tmp_path / "session"
+    override = tmp_path / "override" / "repl.log"
+    monkeypatch.delenv("SAGENT_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("SAGENT_LOG_FILE", str(override))
+
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_last_resort = logging.lastResort
+    try:
+        root.handlers.clear()
+        _install_repl_logging(session_dir=session_dir)
+
+        logging.getLogger("sagent.test").debug("override-visible")
+
+        for h in root.handlers:
+            h.flush()
+        assert "override-visible" in override.read_text()
+        assert not (session_dir / "repl.log").exists()
     finally:
         for h in list(root.handlers):
             h.close()
