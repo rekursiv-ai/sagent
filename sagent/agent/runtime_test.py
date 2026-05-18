@@ -2303,9 +2303,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
         # ``UserMessage("hey")`` while ``model_call`` is still in flight.
         await asyncio.sleep(0)
         release_stream.set()
-        # Give the runtime time to settle: process ModelResponseComplete,
-        # evaluate the gate, optionally fire a follow-up round.
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: len(model.call_histories) == 2)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -2815,7 +2813,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
         agent.inbox.push_back(UserMessage(text="yo"))
         await asyncio.sleep(0)
         release_stream.set()
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: len(model.call_histories) == 2)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -2926,13 +2924,10 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
         # the cohort really did spawn (so "background relegation" is a
         # well-defined claim).
         await asyncio.wait_for(tool_started.wait(), timeout=1.0)
-        # Give the runtime time to fire the follow-up call for "hey"
-        # while the tool is still blocked on ``release_tool``.
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: len(model.call_histories) >= 2)
         snapshot["calls_before_tool_release"] = len(model.call_histories)
-        # Release the tool so the test can drain and exit.
         release_tool.set()
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: not agent.cohort)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -3109,9 +3104,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
     async def queue_during_cohort_and_drive() -> None:
         await tool_started.wait()
         agent.inbox.push_back(UserQueuedMessage(text="queued"))
-        # Allow Round 2 (tool_result) to complete, Round 3 (queued) to
-        # start. Sleeps are upper-bounded by ``run_until_quit``'s timeout.
-        await asyncio.sleep(0.3)
+        await wait_until(lambda: len(model.call_histories) >= 3)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(

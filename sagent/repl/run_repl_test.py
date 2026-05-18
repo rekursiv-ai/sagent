@@ -48,6 +48,20 @@ from sagent.types.runtime import (
 )
 
 
+async def wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout_sec: float = 1.0,
+) -> None:
+    """Wait until a predicate is true without adding fixed sleeps."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while not predicate():
+        if loop.time() >= deadline:
+            pytest.fail("condition did not become true within timeout")
+        await asyncio.sleep(0)
+
+
 _DEFAULT_PROV = "Anthropic"
 _DEFAULT_AUTH = "api"
 _DEFAULT_MODEL = "claude-opus-4-7"
@@ -705,10 +719,11 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
     async def commit_during_cohort() -> None:
         await tool_started.wait()
         runtime.inbox.push_back(UserMessage(text="redirect please"))
-        # Sleep gives the runtime time to preempt + fire Round 2.
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: len(model.call_histories) >= 2)
         release_tool.set()
-        await asyncio.sleep(0.1)
+        await wait_until(
+            lambda: any(isinstance(m, ToolResult) for m in runtime.history)
+        )
         runtime.inbox.push_back(Quit())
 
     async def drive() -> None:
