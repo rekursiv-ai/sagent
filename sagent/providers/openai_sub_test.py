@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
 import base64
 import json
 import time
@@ -18,7 +19,7 @@ import pytest
 
 from sagent.lib.json import JSONValue
 from sagent.providers import OpenAI
-from sagent.providers.lib.cost import ModelProfile
+from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai_sub import (
     OpenAISubscription,
@@ -26,6 +27,7 @@ from sagent.providers.openai_sub import (
     _build_tool,
     _build_tool_result_item,
     _build_tools,
+    _consume_stream,
     _jwt_claim,
     _jwt_exp,
     _jwt_payload,
@@ -64,6 +66,64 @@ class _StubTool:
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         return ToolResult(call_id="", content="")
+
+
+class _NeverYieldingStream:
+    """Responses stream that stays open forever unless the provider closes it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.entered = asyncio.Event()
+
+    def __aiter__(self) -> _NeverYieldingStream:
+        return self
+
+    async def __anext__(self) -> object:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _DelayedStream:
+    """Responses stream that yields events slowly but within the idle budget."""
+
+    def __init__(self, events: list[object], *, delay_sec: float) -> None:
+        self._events = events
+        self._delay_sec = delay_sec
+
+    def __aiter__(self) -> _DelayedStream:
+        return self
+
+    async def __anext__(self) -> object:
+        if not self._events:
+            raise StopAsyncIteration
+        await asyncio.sleep(self._delay_sec)
+        return self._events.pop(0)
+
+
+class _TextDeltaEvent:
+    """Small stand-in for OpenAI's text-delta event class."""
+
+    def __init__(self, delta: str) -> None:
+        self.delta = delta
+
+
+class _CompletedEvent:
+    """Small stand-in for OpenAI's completed event class."""
+
+    def __init__(self) -> None:
+        self.response = _CompletedResponse()
+
+
+class _CompletedResponse:
+    """Small stand-in for OpenAI's completed response payload."""
+
+    id: str = "resp_123"
+    status: str = "completed"
+    usage: object | None = None
 
 
 def _stub_request_messages(
@@ -629,6 +689,71 @@ class TestStreamAuthRetry:
         assert sdk_stale.responses.create.await_count == 1
         assert sdk_fresh.responses.create.await_count == 1
         assert get_sdk.await_count == 2
+
+
+class TestStreamIdleTimeout:
+    """Silent Responses streams must not make the runtime wait forever."""
+
+    @pytest.mark.anyio
+    async def test_silent_stream_times_out_and_closes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stream = _NeverYieldingStream()
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub._STREAM_IDLE_TIMEOUT",
+            0.01,
+        )
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                _consume_stream(stream, pricing=Pricing(), on_text=None),
+                timeout=0.2,
+            )
+
+        assert stream.closed is True
+
+    @pytest.mark.anyio
+    async def test_stream_events_reschedule_idle_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub._STREAM_IDLE_TIMEOUT",
+            0.05,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            _TextDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        stream = _DelayedStream(
+            [_TextDeltaEvent("he"), _TextDeltaEvent("llo"), _CompletedEvent()],
+            delay_sec=0.03,
+        )
+
+        response = await asyncio.wait_for(
+            _consume_stream(stream, pricing=Pricing(), on_text=None),
+            timeout=0.2,
+        )
+
+        assert response.message.text == "hello"
+        assert response.message_id == "resp_123"
+
+    @pytest.mark.anyio
+    async def test_cancelled_stream_closes(self) -> None:
+        stream = _NeverYieldingStream()
+        task = asyncio.create_task(
+            _consume_stream(stream, pricing=Pricing(), on_text=None),
+        )
+        await asyncio.wait_for(stream.entered.wait(), timeout=0.2)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert stream.closed is True
 
 
 class TestRefreshErrors:
