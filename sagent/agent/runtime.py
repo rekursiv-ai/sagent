@@ -215,7 +215,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import asyncio
 import contextlib
@@ -558,6 +558,10 @@ class AgentRuntime:
         # Task[None]: tools/model post results to inbox, not via return.
         self.running_tools: dict[str, asyncio.Task[None]] = {}
         self.cohort: set[str] = set()
+        # ``_cohort_seen`` tracks "we started a cohort and want to publish
+        # ``CohortComplete`` when it naturally drains." Reset by every
+        # stop-cohort path so a preempted cohort doesn't fire complete.
+        self._cohort_seen: bool = False
         self.model_call: asyncio.Task[None] | None = None
         self.compact_task: asyncio.Task[None] | None = None
         # Buffered ModelSwitch awaiting a safe moment (no in-flight
@@ -588,7 +592,6 @@ class AgentRuntime:
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
-        cohort_seen: bool = False
         awaiting_user = False
         queued: list[UserQueuedMessage] = []
 
@@ -632,6 +635,12 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                            # Halt intentionally leaves the cohort intact:
+                            # running tools keep going and their results land
+                            # via the normal cohort gate after the user resumes.
+                            # Do NOT call ``_stop_all_tools`` here -- that's
+                            # for hard preempts (Clear / Compact / mid-cohort
+                            # UserMessage / Detach / Kill), not soft Halt.
                             # Preserve any mid-stream typed content: commit
                             # it to history (alternation-coalesce handles
                             # back-to-back UserMessages) and publish the
@@ -651,10 +660,7 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
-                            self._stub_running_tools_and_let_finish()
-                            self.running_tools = {}
-                            self.cohort.clear()
-                            cohort_seen = False
+                            self._stop_all_tools(mode="detach")
                             queued.clear()
                             self._mid_stream_queue.clear()
                             self.history.clear()
@@ -707,14 +713,14 @@ class AgentRuntime:
                                     len(self.cohort),
                                     len(self.detached),
                                 )
-                                for t in self.running_tools.values():
-                                    t.cancel()
-                                self.running_tools = {}
-                                self.cohort.clear()
-                                cohort_seen = False
+                                self._stop_all_tools(mode="kill")
                             elif cid in self.running_tools:
                                 logger.debug("runtime kill tool: call_id=%s", cid)
-                                self.running_tools.pop(cid).cancel()
+                                self._stop_tool(
+                                    cid,
+                                    self.running_tools.pop(cid),
+                                    mode="kill",
+                                )
                                 self.cohort.discard(cid)
                             else:
                                 logger.debug(
@@ -730,21 +736,15 @@ class AgentRuntime:
                                     len(self.cohort),
                                     len(self.detached),
                                 )
-                                self._stub_running_tools_and_let_finish()
-                                self.running_tools = {}
-                                self.cohort.clear()
-                                cohort_seen = False
+                                self._stop_all_tools(mode="detach")
                             elif cid in self.running_tools:
                                 logger.debug("runtime detach tool: call_id=%s", cid)
-                                task = self.running_tools.pop(cid)
-                                self.cohort.discard(cid)
-                                self.history.append(
-                                    ToolResult(
-                                        call_id=cid,
-                                        content="[detached]",
-                                    ),
+                                self._stop_tool(
+                                    cid,
+                                    self.running_tools.pop(cid),
+                                    mode="detach",
                                 )
-                                self.detached[cid] = task
+                                self.cohort.discard(cid)
                             else:
                                 logger.debug(
                                     "runtime detach missed tool: call_id=%s", cid
@@ -776,10 +776,7 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
-                            self._stub_running_tools_and_let_finish()
-                            self.running_tools = {}
-                            self.cohort.clear()
-                            cohort_seen = False
+                            self._stop_all_tools(mode="detach")
                             queued.clear()
                             # Capture buffered mid-stream input into the snapshot
                             # the compactor will see; publish the coalesced
@@ -838,10 +835,7 @@ class AgentRuntime:
                                 # so two same-batch Enters (or a post-halt
                                 # follow-up) don't stack as consecutive user
                                 # turns in history.
-                                self._stub_running_tools_and_let_finish()
-                                self.running_tools = {}
-                                self.cohort.clear()
-                                cohort_seen = False
+                                self._stop_all_tools(mode="detach")
                                 self._append_or_coalesce_user(item)
                                 self.publish(item)
                             awaiting_user = False
@@ -905,7 +899,7 @@ class AgentRuntime:
                                 if coalesced is not None:
                                     self.publish(coalesced)
                             elif msg.tool_calls:
-                                cohort_seen = True
+                                self._cohort_seen = True
                                 self.publish(CohortStarted())
                                 logger.debug(
                                     "runtime cohort start: parent_id=%s tools=%s",
@@ -942,18 +936,18 @@ class AgentRuntime:
 
                         case ToolResult(call_id=cid) if cid in self.detached:
                             # In-batch race: the tool task completed before
-                            # ``_stub_running_tools_and_let_finish`` reclassified
-                            # its call_id as detached. The ``ToolResult`` was
-                            # pushed as a regular result (because the task
-                            # ran ``self.detached`` check before the stub),
-                            # but a peer item in the same drain batch (e.g.
-                            # a tool-pushed ``UserMessage``) triggered a
-                            # preempt that cleared the cohort. Without this
-                            # case the result would fall through to ``_`` and
-                            # leave the assistant's ``tool_use`` paired only
-                            # with the ``[detached]`` placeholder forever.
-                            # Splice the real content into the placeholder
-                            # exactly like ``DetachedResult`` does.
+                            # ``_stop_all_tools`` reclassified its call_id as
+                            # detached. The ``ToolResult`` was pushed as a
+                            # regular result (because the task ran
+                            # ``self.detached`` check before the stub), but a
+                            # peer item in the same drain batch (e.g. a
+                            # tool-pushed ``UserMessage``) triggered a preempt
+                            # that cleared the cohort. Without this case the
+                            # result would fall through to ``_`` and leave
+                            # the assistant's ``tool_use`` paired only with
+                            # the ``[detached]`` placeholder forever. Splice
+                            # the real content into the placeholder exactly
+                            # like ``DetachedResult`` does.
                             del self.detached[cid]
                             for i, prior in enumerate(self.history):
                                 if (
@@ -1070,14 +1064,14 @@ class AgentRuntime:
                     else:
                         self.publish(pending)
 
-                if not self.cohort and cohort_seen:
+                if not self.cohort and self._cohort_seen:
                     logger.debug(
                         "runtime cohort complete: running_tools=%d detached=%d",
                         len(self.running_tools),
                         len(self.detached),
                     )
                     self.publish(CohortComplete())
-                    cohort_seen = False
+                    self._cohort_seen = False
 
                 # ``UserQueuedMessage`` drains at ``ModelIdle``, not
                 # ``CohortComplete``. The ``not self._should_call_model()``
@@ -1241,31 +1235,50 @@ class AgentRuntime:
         else:
             self.history.append(item)
 
-    def _stub_running_tools_and_let_finish(self) -> None:
-        """Stub all running tools with placeholders; route results via detached.
+    def _stop_tool(
+        self,
+        cid: str,
+        task: asyncio.Task[None],
+        *,
+        mode: Literal["detach", "kill"],
+    ) -> None:
+        """Transition one cohort tool out of the cohort, pairing its tool_use.
 
-        Appends ``[detached]`` placeholders for EVERY ``running_tools``
-        entry, including tasks that have already completed and pushed
-        their ``ToolResult`` to the inbox but whose result has not yet
-        drained. The earlier ``if not task.done()`` guard skipped done
-        tasks under the false assumption that their results were
-        already in history -- they're in the inbox, which the caller
-        then prevents from landing properly by clearing ``cohort`` and
-        ``running_tools``. The dropped result would leave the
-        assistant's ``tool_use`` block in history with no adjacent
-        ``tool_result``, breaking Anthropic alternation.
+        Always appends a ``ToolResult`` placeholder so history alternation
+        stays well-formed; always routes the task into ``self.detached``
+        so any late-arriving content splices into the placeholder via
+        the ``DetachedResult`` path (the cohort gate no longer matches
+        once cid leaves the cohort).
 
-        Moving the call_id into ``self.detached`` reroutes any
-        late-arriving ``ToolResult`` (whether already-in-inbox or
-        still-running) through the ``DetachedResult`` splice path so
-        the real content replaces the ``[detached]`` placeholder when
-        it arrives.
+        ``mode="detach"`` lets the task complete naturally
+        (``[detached]`` placeholder); ``mode="kill"`` cancels the task
+        (``[cancelled]``, ``is_error=True``). The closed mode set is
+        deliberate: any soft path that wants tools to keep running
+        without leaving the cohort (Halt) must NOT call this.
         """
-        for cid, task in self.running_tools.items():
-            self.history.append(
-                ToolResult(call_id=cid, content="[detached]"),
-            )
-            self.detached[cid] = task
+        placeholder, is_error = (
+            ("[cancelled]", True) if mode == "kill" else ("[detached]", False)
+        )
+        self.history.append(
+            ToolResult(call_id=cid, content=placeholder, is_error=is_error),
+        )
+        self.detached[cid] = task
+        if mode == "kill":
+            task.cancel()
+
+    def _stop_all_tools(self, *, mode: Literal["detach", "kill"]) -> None:
+        """Run :meth:`_stop_tool` for every cohort tool; reset cohort state.
+
+        The single choke point for the "preempt the cohort" semantic
+        (Clear, Compact, mid-cohort UserMessage, Detach-all, Kill-all).
+        Halt deliberately does NOT preempt the cohort; do not call from
+        ``Halt`` -- results land via the normal cohort gate after Halt.
+        """
+        for cid, task in list(self.running_tools.items()):
+            self._stop_tool(cid, task, mode=mode)
+        self.running_tools.clear()
+        self.cohort.clear()
+        self._cohort_seen = False
 
     def _drain_mid_stream_queue(self) -> UserMessage | None:
         r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
@@ -1398,7 +1411,17 @@ class AgentRuntime:
                 call.name,
                 parent_id,
             )
-            return
+            # Synthesize a result and fall through to the post block so
+            # the cohort/detached splice gates always pair the assistant's
+            # tool_use with a tool_result. Without this, any asyncio
+            # cancellation (Kill, future paths) orphans the tool_use and
+            # the next provider call fails with HTTP 400.
+            result = ToolResult(
+                call_id=call.id,
+                parent_id=parent_id,
+                content="[cancelled]",
+                is_error=True,
+            )
         except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
             logger.debug(
                 "runtime tool failed: call_id=%s tool=%s parent_id=%s error=%s",
