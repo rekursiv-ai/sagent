@@ -608,10 +608,11 @@ def repair_dangling_tool_calls(
     tool_result blocks``; Gemini has the analogous functionCall rule).
 
     In-memory history never produces orphans: the runtime always pairs
-    tool_use with a result (``[detached]`` on halt, ``is_error=True``
-    on exception). So the corruption only ever comes from disk loads,
-    which is why the repair lives here -- next to ``load_session``,
-    the producer of the only history shape that can have this defect.
+    tool_use with a result (``[detached]`` on halt, ``[cancelled]`` on
+    Kill, ``is_error=True`` on exception). So the corruption only ever
+    comes from disk loads, which is why the repair lives here -- next
+    to ``load_session``, the producer of the only history shape that
+    can have this defect.
 
     Idempotent.
 

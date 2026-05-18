@@ -546,6 +546,19 @@ async def test_kill_one_tool() -> None:
     fast_results = [r for r in results if r.call_id == "f1"]
     assert len(fast_results) == 1
     assert fast_results[0].content == "fast done"
+    # Killed tool must still leave a paired result so history alternation
+    # holds and the next provider call doesn't reject with HTTP 400 on
+    # ``tool_use ids were found without tool_result blocks``.
+    slow_results = [r for r in results if r.call_id == "s1"]
+    assert len(slow_results) == 1
+    assert slow_results[0].content == "[cancelled]"
+    assert slow_results[0].is_error
+    for msg in agent.history:
+        if isinstance(msg, AssistantMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                assert any(r.call_id == tc.id for r in results), (
+                    f"orphan tool_use {tc.id} has no matching ToolResult"
+                )
 
 
 @pytest.mark.asyncio
