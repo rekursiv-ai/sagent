@@ -244,6 +244,7 @@ from sagent.types.runtime import (
     CohortStarted,
     Compact,
     CompactComplete,
+    CompactFailed,
     CompactStarted,
     Detach,
     DetachedResult,
@@ -804,6 +805,18 @@ class AgentRuntime:
                             self.history.clear()
                             self.history.extend(summary)
                             self.history.extend(new_items)
+                            self.publish(item)
+
+                        case CompactFailed(exception=exc):
+                            self.compact_task = None
+                            self._append_or_coalesce_user(
+                                UserMessage(
+                                    text=(
+                                        f"[Compaction error:"
+                                        f" {type(exc).__name__}: {exc}]"
+                                    ),
+                                ),
+                            )
                             self.publish(item)
 
                         case UserMessage():
@@ -1445,7 +1458,5 @@ class AgentRuntime:
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             log_exception_or_warning(logger, "compaction failed", exc)
             self.inbox.push_back(
-                UserMessage(
-                    text=f"[Compaction error: {type(exc).__name__}: {exc}]",
-                ),
+                CompactFailed(exception=exc, snapshot_len=snapshot_len),
             )

@@ -33,6 +33,7 @@ __all__ = [
     "CohortStarted",
     "Compact",
     "CompactComplete",
+    "CompactFailed",
     "CompactStarted",
     "Detach",
     "DetachedResult",
@@ -319,6 +320,25 @@ class CompactComplete:
     that index are preserved post-splice."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompactFailed:
+    """Compaction task raised; runtime keeps prior history.
+
+    Mirror of ``CompactComplete`` for the failure path. The dispatch
+    loop's handler clears ``compact_task`` (so subsequent ``ModelSwitch``
+    / model-call gates unblock) and splices a visible
+    ``[Compaction error: ...]`` ``UserMessage`` into history so the
+    model can react.
+    """
+
+    exception: BaseException
+    """The compactor's raised exception."""
+
+    snapshot_len: int
+    """History length captured before compaction (for symmetry with
+    ``CompactComplete``)."""
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class SaveSession:
     """Signals observers to persist session state."""
@@ -418,6 +438,7 @@ type RuntimeEvent = (
     | Recompact
     | CompactStarted
     | CompactComplete
+    | CompactFailed
     | SaveSession
     | StatusChanged
     | ToolLabel
