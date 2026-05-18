@@ -25,6 +25,7 @@ from sagent.types.runtime import (
     Clear,
     CohortComplete,
     Compact,
+    CompactFailed,
     Detach,
     DetachedResult,
     Halt,
@@ -1832,12 +1833,14 @@ async def test_compact_with_no_compactor_returns_early() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_failure_posts_user_error() -> None:
-    """If the compactor raises (non-cancel), a user error message is appended.
+async def test_compact_failure_posts_compact_failed_event() -> None:
+    """A failing compactor pushes ``CompactFailed`` (not a bare ``UserMessage``).
 
-    Tests ``_compact_and_post`` directly: it pushes a ``UserMessage`` onto
-    the inbox describing the failure. Avoids the run-loop's compact-task
-    bookkeeping (which only clears on ``CompactComplete``).
+    Tests ``_compact_and_post`` directly: it pushes a ``CompactFailed``
+    carrying the exception and snapshot length. The dispatch loop's
+    arm handler is what splices the human-visible error into history
+    AND clears ``compact_task`` -- without that clear, subsequent
+    ``ModelSwitch`` / model-call gates stay blocked on the done() task.
     """
 
     class _Boom:
@@ -1856,12 +1859,52 @@ async def test_compact_failure_posts_user_error() -> None:
     await agent._compact_and_post("")
 
     items = await agent.inbox.drain()
-    error_items = [
-        i
-        for i in items
-        if isinstance(i, UserMessage) and "[Compaction error:" in i.text
-    ]
-    assert len(error_items) == 1
+    failures = [i for i in items if isinstance(i, CompactFailed)]
+    assert len(failures) == 1
+    assert isinstance(failures[0].exception, RuntimeError)
+    assert str(failures[0].exception) == "compactor broke"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
+    """Failed compaction must not block ``ModelSwitch`` forever.
+
+    Bug: ``_compact_and_post`` set ``compact_task`` on entry but never
+    cleared it on failure, so the ``ModelSwitch`` gate
+    (``compact_task is None``) stayed false indefinitely until the
+    next *successful* compaction. The ``CompactFailed`` event's
+    handler clears the task reference so the next gate pass releases.
+    """
+
+    class _Boom:
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            args: str = "",
+        ) -> list[HistoryEntry]:
+            del history, model, args
+            raise RuntimeError("compactor broke")
+
+    agent, _ = make_agent([AssistantMessage(text="post")])
+    agent.compactor = _Boom()
+
+    swap_applied = asyncio.Event()
+
+    def _apply_swap() -> None:
+        swap_applied.set()
+
+    agent.inbox.push_back(Compact())
+    agent.inbox.push_back(ModelSwitch(apply=_apply_swap, label="swap"))
+
+    async def drive() -> None:
+        await asyncio.wait_for(swap_applied.wait(), timeout=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), drive())
+    assert swap_applied.is_set()
+    assert agent.compact_task is None
 
 
 @pytest.mark.asyncio
