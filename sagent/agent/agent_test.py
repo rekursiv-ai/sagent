@@ -1072,6 +1072,16 @@ async def test_activity_active_clears_on_model_response_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_activity_current_compact_start_resets_on_compact_complete() -> None:
+    """``CompactComplete`` clears ``activity.current_compact_start``."""
+    a = _build_agent()
+    a.publish(types.runtime.CompactStarted())
+    assert a.activity.current_compact_start > 0.0
+    a.publish(types.runtime.CompactComplete(summary=[], snapshot_len=0))
+    assert a.activity.current_compact_start == 0.0
+
+
+@pytest.mark.asyncio
 async def test_streaming_chars_recorded_in_activity() -> None:
     """``_track_activity`` accumulates streamed chars on types.runtime.ModelResponsePartial."""
     a = _build_agent()
@@ -1766,6 +1776,69 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
     async for _ in a.run(types.history.UserMessage(text="hi")):
         pass
     assert order == ["compact", "stream"], order
+
+
+@pytest.mark.asyncio
+async def test_agent_model_proactive_compaction_failure_short_circuits() -> None:
+    """Failed proactive compaction must not fall through to the provider.
+
+    The same ``compact_if_needed`` bool used by reactive overflow
+    recovery applies before the first provider call too. Ignoring it
+    lets an unchanged oversized history hit the provider even though
+    compaction already reported that no progress was made.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenProactiveCompactor:
+        calls: int = 0
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            self.calls += 1
+            raise RuntimeError("compaction disconnected")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    model = StubModel()
+    compactor = _BrokenProactiveCompactor()
+    a = Agent(model=model, tools=[], compactor=compactor)
+
+    with pytest.raises(types.exceptions.ContextOverflowError):
+        await a._agent_model.stream(
+            history=[types.history.UserMessage(text="hi")],
+            system="",
+            tools=[],
+            on_text=lambda _t: None,
+            on_thinking=lambda _t: None,
+        )
+
+    assert compactor.calls == 1
+    assert model.received == []
 
 
 @pytest.mark.asyncio

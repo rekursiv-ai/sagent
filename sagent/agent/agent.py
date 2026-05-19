@@ -102,6 +102,9 @@ class ActivityTracker:
     current_call_start: float = 0.0
     """Event-loop time when the current model call started (``0`` when idle)."""
 
+    current_compact_start: float = 0.0
+    """Event-loop time when the current compaction started (``0`` when idle)."""
+
     live_response_chars: int = 0
     """Characters streamed so far in the current response."""
 
@@ -960,6 +963,12 @@ class Agent:
                 self.activity.elapsed_seconds += max(0.0, elapsed)
                 self.activity.active = False
                 self.activity.current_call_start = 0.0
+        elif isinstance(event, types.runtime.CompactStarted):
+            self.activity.current_compact_start = asyncio.get_running_loop().time()
+        elif isinstance(
+            event, (types.runtime.CompactComplete, types.runtime.CompactFailed)
+        ):
+            self.activity.current_compact_start = 0.0
 
     def _track_tool_registry(self, event: types.runtime.RuntimeEvent) -> None:
         """Populate the cohort id → (tool_name, started) registry."""
@@ -1263,7 +1272,8 @@ class _AgentModel:
         # buffer's headroom (``ContextBudget.buffer_tokens``) is paid
         # for but never spent. ``compact_now`` mutates ``runtime.history``
         # in place; the local ``history`` reference is the same list.
-        await self._agent.compact_if_needed(history, self._inner)
+        if not await self._agent.compact_if_needed(history, self._inner):
+            raise _context_overflow_error()
 
         # Re-evaluate the system spec per request so callable sections
         # (e.g. cwd-aware ``environment``) stay live after ``cd``. The

@@ -109,6 +109,12 @@ def test_write_interrupted_writes_marker() -> None:
     assert "[interrupted]" in buf.getvalue()
 
 
+def test_write_dim_line_emits_dim_payload() -> None:
+    printer, buf = _printer()
+    printer.write_dim_line("[compacting history…]")
+    assert "[compacting history…]" in buf.getvalue()
+
+
 def test_write_halt_emits_banner_lines() -> None:
     printer, buf = _printer()
     printer.write_halt("agent halted")
