@@ -181,6 +181,7 @@ class Agent:
         self._service_tier: str | None = None
         self.persistent_retry = persistent_retry
         self._max_budget_usd = max_budget_usd
+        self.last_compact_error: Exception | None = None
 
         self.cost_tracker = CostTracker()
         self.activity = ActivityTracker()
@@ -1074,7 +1075,12 @@ class Agent:
 
         Bypasses the inbox (the runtime would cancel our task if we
         pushed ``types.runtime.Compact``). Calls the inner compactor directly,
-        replaces ``runtime.history`` in place.
+        replaces ``runtime.history`` in place. On failure, stashes the
+        underlying exception on :attr:`last_compact_error` so the
+        proactive / reactive raise sites in :class:`_AgentModel` can
+        distinguish true context overflow (polished remediation
+        message) from a transient transport / auth / generic error
+        (surface verbatim).
 
         Returns:
           progressed: ``True`` when compaction completed (or no compactor is
@@ -1085,6 +1091,7 @@ class Agent:
 
         """
         if self._agent_compactor is None:
+            self.last_compact_error = None
             return True
         snapshot_len = len(self.runtime.history)
         self.publish(types.runtime.CompactStarted())
@@ -1108,6 +1115,7 @@ class Agent:
             self.publish(
                 types.runtime.CompactFailed(exception=exc, snapshot_len=snapshot_len)
             )
+            self.last_compact_error = exc
             return False
         self.runtime.history.clear()
         self.runtime.history.extend(summary)
@@ -1117,6 +1125,7 @@ class Agent:
                 snapshot_len=snapshot_len,
             ),
         )
+        self.last_compact_error = None
         return True
 
 
@@ -1138,6 +1147,37 @@ def _context_overflow_error() -> types.exceptions.ContextOverflowError:
         "Use /clear to wipe history, /compact <hints> to retry with custom "
         "guidance, or /model to switch to a larger-window model.",
     )
+
+
+def _compact_failure_error(
+    last_err: Exception | None, model: types.model.Model
+) -> Exception:
+    """Pick the user-facing error after a failed ``compact_now``.
+
+    When the underlying compactor failure is itself classified as
+    context overflow (true exhaustion: ``PromptTooLongError`` or a
+    provider-specific overflow exception), return the polished
+    :func:`_context_overflow_error` so the halt screen surfaces the
+    ``/clear`` / ``/compact`` / ``/model`` remediation. Otherwise
+    return the underlying exception verbatim so transport drops,
+    auth failures, and other unrelated errors don't masquerade as
+    context exhaustion -- the failure mode that misled session
+    ``bc528d70``.
+
+    Args:
+      last_err: The exception swallowed by ``compact_now``; ``None``
+          when ``compact_now`` was never attempted (no compactor
+          wired) or completed without raising.
+      model: Active model; its ``is_context_overflow`` classifier
+          decides the dispatch.
+
+    Returns:
+      err: Exception to raise at the call site.
+
+    """
+    if last_err is None or model.is_context_overflow(last_err):
+        return _context_overflow_error()
+    return last_err
 
 
 def _resolve_target_spec(
@@ -1288,7 +1328,8 @@ class _AgentModel:
         # for but never spent. ``compact_now`` mutates ``runtime.history``
         # in place; the local ``history`` reference is the same list.
         if not await self._agent.compact_if_needed(history, self._inner):
-            raise _context_overflow_error()
+            last_err = self._agent.last_compact_error
+            raise _compact_failure_error(last_err, self._inner) from last_err
 
         # Re-evaluate the system spec per request so callable sections
         # (e.g. cwd-aware ``environment``) stay live after ``cd``. The
@@ -1358,7 +1399,10 @@ class _AgentModel:
                 # BUGS34 regression: three identical "Compaction failed"
                 # lines followed by a cryptic RuntimeError).
                 if not await self._agent.compact_now():
-                    raise _context_overflow_error() from exc
+                    last_err = self._agent.last_compact_error
+                    raise _compact_failure_error(last_err, self._inner) from (
+                        last_err or exc
+                    )
                 continue
             # Record cost out-of-band; the runtime's
             # types.runtime.ModelResponseComplete event has tokens=0 by

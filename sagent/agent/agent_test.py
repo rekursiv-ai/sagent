@@ -1841,6 +1841,14 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     recovery applies before the first provider call too. Ignoring it
     lets an unchanged oversized history hit the provider even though
     compaction already reported that no progress was made.
+
+    When the compactor's underlying failure is NOT context overflow
+    (transport drop, auth blip, generic ``RuntimeError``), the agent
+    surfaces that error verbatim instead of the polished
+    ``ContextOverflowError`` -- the original session ``bc528d70`` lost
+    the real ``httpx.RemoteProtocolError`` behind a misleading
+    "context window exhausted" message because the proactive path
+    raised the polished error unconditionally.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -1883,7 +1891,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     compactor = _BrokenProactiveCompactor()
     a = Agent(model=model, tools=[], compactor=compactor)
 
-    with pytest.raises(types.exceptions.ContextOverflowError):
+    with pytest.raises(RuntimeError, match="compaction disconnected"):
         await a._agent_model.stream(
             history=[types.history.UserMessage(text="hi")],
             system="",
@@ -1894,6 +1902,71 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
 
     assert compactor.calls == 1
     assert model.received == []
+
+
+@pytest.mark.asyncio
+async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> None:
+    """Compaction failure that IS overflow still surfaces the polished message.
+
+    The agent distinguishes ``compact_now`` failures by whether the
+    underlying error is classified as context overflow by the active
+    model. When it is (``PromptTooLongError``, provider-specific
+    overflow exceptions), the polished ``/clear`` / ``/compact`` /
+    ``/model`` remediation message fires. When it isn't, the
+    underlying error propagates verbatim (covered by
+    ``test_agent_model_proactive_compaction_failure_short_circuits``).
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _OverflowingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            raise types.exceptions.PromptTooLongError("compactor saw overflow")
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    a = Agent(
+        model=_OverflowModel(overflow_count=0),
+        tools=[],
+        compactor=_OverflowingCompactor(),
+    )
+    with pytest.raises(types.exceptions.ContextOverflowError) as ei:
+        await a._agent_model.stream(
+            history=[types.history.UserMessage(text="hi")],
+            system="",
+            tools=[],
+            on_text=lambda _t: None,
+            on_thinking=lambda _t: None,
+        )
+    msg = str(ei.value)
+    assert "/clear" in msg
+    assert "/compact" in msg
+    assert isinstance(ei.value.__cause__, types.exceptions.PromptTooLongError)
 
 
 @pytest.mark.asyncio
@@ -1974,9 +2047,11 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     BUGS34 regression coverage: previously the recovery loop called the
     model again with effectively unchanged history after every failed
     compaction, burning ``MAX_OVERFLOW_RECOVERY`` retries on identical
-    400s. With the bool signal the agent surfaces
-    :class:`ContextOverflowError` after the FIRST failed compaction so
-    the user gets a halt while we still know what went wrong.
+    400s. The agent halts after the FIRST failed compaction so the user
+    gets a halt while we still know what went wrong. When the
+    compactor's failure is NOT context overflow, the underlying error
+    surfaces verbatim rather than being masked by a polished
+    "context window exhausted" message.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -2018,7 +2093,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     model = _OverflowModel(overflow_count=10)
     compactor = _BrokenCompactor()
     a = Agent(model=model, tools=[], compactor=compactor)
-    with pytest.raises(types.exceptions.ContextOverflowError):
+    with pytest.raises(RuntimeError, match="compaction blew up"):
         await a._agent_model.stream(
             history=[types.history.UserMessage(text="x")],
             system="",
