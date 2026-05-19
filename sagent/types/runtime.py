@@ -233,6 +233,22 @@ class ModelIdle:
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class AgentIdle:
+    """Agent has fully drained: about to block on inbox with no work.
+
+    Edge-triggered: fires once per transition into the blocked-on-inbox
+    state, suppressed until the next ``drain()`` returns work. Distinct
+    from :class:`ModelIdle`, which fires per-round when the model
+    produces no tool calls without considering inbox emptiness, cohort,
+    detached tools, compaction, mid-stream buffer, or inbox gate state.
+
+    Not published on cold start (the runtime initializes the
+    ``_was_idle`` flag so the first iteration suppresses publish until
+    the agent has consumed at least one batch of work).
+    """
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class CohortStarted:
     """Tool cohort has been spawned."""
 
@@ -428,6 +444,7 @@ type RuntimeEvent = (
     | ModelResponseCancelled
     | ModelResponseError
     | ModelIdle
+    | AgentIdle
     | CohortStarted
     | ToolResultPartial
     | ToolResult

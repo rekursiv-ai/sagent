@@ -52,6 +52,7 @@ from sagent.types.history import (
 )
 from sagent.types.model import Model, ModelSpec
 from sagent.types.runtime import (
+    AgentIdle,
     ChildDoneEvent,
     ChildEvent,
     ModelResponseError,
@@ -209,6 +210,17 @@ class AgentSpawn:
                         " AgentSend; manage via BackgroundTask."
                     ),
                 },
+                "notify_on_asleep": {
+                    "type": "boolean",
+                    "description": (
+                        "Persistent only. When true, the parent's"
+                        " inbox receives a UserMessage every time the"
+                        " child becomes idle (drained inbox, no work"
+                        " in flight). Lets the parent detect 'child"
+                        " has finished processing my message' without"
+                        " polling. Default false."
+                    ),
+                },
                 "label": {
                     "type": "string",
                     "description": (
@@ -348,6 +360,7 @@ class AgentSpawn:
         max_rounds = opt_int(args, "max_tool_call_rounds")
         max_depth = opt_int(args, "max_depth")
         persistent = bool_val(args.get("persistent"), False)
+        notify_on_asleep = bool_val(args.get("notify_on_asleep"), False)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         parent_depth = get_tool_state().depth
@@ -403,7 +416,9 @@ class AgentSpawn:
         label = custom_label or f"Agent_{child_path}"
 
         if persistent:
-            return self._spawn_persistent(child, label, prompt)
+            return self._spawn_persistent(
+                child, label, prompt, notify_on_asleep=notify_on_asleep
+            )
 
         return await self._execute_child(
             child,
@@ -485,6 +500,8 @@ class AgentSpawn:
         child: _Agent,
         label: str,
         prompt: str,
+        *,
+        notify_on_asleep: bool = False,
     ) -> ToolResult:
         """Start a persistent child agent via ``serve_forever()``.
 
@@ -518,7 +535,12 @@ class AgentSpawn:
             child.session_dir = self._session_root_dir / label
         agent_registry[label] = child
         parent_agent = _current_agent()
-        forwarder = _build_forwarder(label, self._verbosity, parent_agent)
+        forwarder = _build_forwarder(
+            label,
+            self._verbosity,
+            parent_agent,
+            notify_on_asleep=notify_on_asleep,
+        )
         if forwarder is not None:
             child.runtime.observers.append(forwarder)
         bg_key = f"persistent:{label}"
@@ -827,9 +849,22 @@ class _ChildForwarder:
     Tracks per-child stats so the parent's status pane can render running-child
     summaries. Errors and tool results always forward; other events follow
     the verbosity table.
+
+    When ``notify_on_asleep`` is True, the child's ``AgentIdle`` event is
+    additionally rendered as a ``UserMessage`` pushed into the parent's
+    inbox so the parent's model sees "child is idle" in its conversation
+    history (not just its observer pipeline). Distinct from rendering --
+    the inbox push is how persistent-child status reaches the parent's
+    decision layer.
     """
 
-    __slots__ = ("_forward_set", "_label", "_parent_agent", "_stats")
+    __slots__ = (
+        "_forward_set",
+        "_label",
+        "_notify_on_asleep",
+        "_parent_agent",
+        "_stats",
+    )
 
     def __init__(
         self,
@@ -838,11 +873,13 @@ class _ChildForwarder:
         forward_set: frozenset[type],
         stats: ChildStats,
         label: str,
+        notify_on_asleep: bool = False,
     ) -> None:
         self._parent_agent = parent_agent
         self._forward_set = forward_set
         self._stats = stats
         self._label = label
+        self._notify_on_asleep = notify_on_asleep
 
     def __call__(self, event: RuntimeEvent) -> None:
         if isinstance(event, ChildEvent):
@@ -858,6 +895,17 @@ class _ChildForwarder:
                     tokens=event.tokens,
                     cost=event.cost,
                 )
+            )
+            return
+        if isinstance(event, AgentIdle) and self._notify_on_asleep:
+            # Inbox push -- not parent.publish. The parent's model sees
+            # this in its conversation history; the runtime event bus
+            # (observers) is the rendering layer, not the decision
+            # layer. Edge-triggered upstream: AgentRuntime publishes
+            # AgentIdle at most once per idle transition, so we get one
+            # push per idle, not per round.
+            self._parent_agent.runtime.inbox.push_back(
+                UserMessage(text=f"[{self._label} is idle]"),
             )
             return
         if isinstance(event, ModelResponsePartial):
@@ -888,8 +936,16 @@ def _build_forwarder(
     label: str,
     verbosity: int,
     parent_agent: _Agent | None,
+    *,
+    notify_on_asleep: bool = False,
 ) -> _ChildForwarder | None:
-    """Construct a forwarder bound to ``parent_agent`` (or None when at root)."""
+    """Construct a forwarder bound to ``parent_agent`` (or None when at root).
+
+    ``notify_on_asleep`` only takes effect when this forwarder is attached
+    to a persistent child; non-persistent children complete inside one
+    ``child.run()`` call and never publish AgentIdle while the parent is
+    waiting on the result.
+    """
     if parent_agent is None:
         return None
     forward_set = _VERBOSITY.get(verbosity, _VERBOSITY[1])
@@ -899,6 +955,7 @@ def _build_forwarder(
         forward_set=forward_set,
         stats=stats,
         label=label,
+        notify_on_asleep=notify_on_asleep,
     )
 
 

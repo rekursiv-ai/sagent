@@ -37,6 +37,18 @@ Arguments:
 - `max_depth` (optional) — cap on the child's own sub-spawning. 0
   makes the child a leaf; 1 lets the child spawn one generation;
   omit for unbounded.
+- `persistent` (optional) — run the child as a long-running background
+  agent via `serve_forever()`. Returns immediately with the child's
+  label. Send subsequent work via `AgentSend(to=<label>, ...)`; manage
+  the lifecycle (cancel / list) via `BackgroundTask`.
+- `notify_on_asleep` (optional, persistent only) — when true, the
+  parent's inbox receives a `UserMessage` every time the child becomes
+  idle (drained inbox with no work in flight). Lets the parent detect
+  "child has finished processing my message" without polling. Edge-
+  triggered: one notification per idle transition.
+- `label` (optional) — explicit label for the child agent. Auto-
+  generated if omitted. Required to be unique across live persistent
+  agents.
 
 Return value is the child's final assistant message text. If the
 child hits `max_tool_call_rounds`, raises an unhandled error, or its own
