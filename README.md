@@ -64,6 +64,12 @@ Things Claude Code, Codex CLI, and Gemini CLI don't do:
   retune its workers on the fly: *"switch to o1, crank thinking,
   recompact and drop the file reads."* It can also tell you how many
   tokens it's holding.
+- **Recursive agent-to-agent messaging.** Any spawned agent can spawn
+  and `AgentSend` to peers, so coordination is an arbitrary tree of
+  agents, not a flat star. Claude Code's experimental Agent Teams
+  (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) is the closest comparable
+  feature but is flat: one fixed lead, peer teammates, no nested
+  teams. Codex and Gemini CLIs have no peer messaging at all.
 - **Interruptible and detachable tasks.** *"The task is stuck."*
   *"Detach `foo` and let it keep running."*
 - **Richer built-in tools.** `PaperSearch` and `PaperFetch` walk
