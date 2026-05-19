@@ -239,6 +239,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.runtime import (
+    AgentIdle,
     Clear,
     CohortComplete,
     CohortStarted,
@@ -336,6 +337,18 @@ class GatedDeque[T]:
         ``Halt`` / ``ModelResponseError``) is still pending.
         """
         return self._gate is not None
+
+    def empty(self) -> bool:
+        """True iff no items are queued. Snapshot at call time.
+
+        Used by ``AgentRuntime._fully_drained`` to decide whether to
+        publish ``AgentIdle`` before the next blocking ``drain()``.
+        Safe against TOCTOU: callers must read this and act on it
+        within the same synchronous block (no intervening ``await``),
+        which asyncio's cooperative scheduling guarantees no other
+        coroutine will run during.
+        """
+        return self._queue.empty()
 
     def push_back(self, item: T) -> None:
         """Add to back of queue.
@@ -576,6 +589,56 @@ class AgentRuntime:
         # ("type to redirect" UX during streaming, matching the
         # mid-cohort behavior of stub-and-detach).
         self._mid_stream_queue: list[UserMessage] = []
+        # ``AgentIdle`` is edge-triggered: published once when the
+        # runtime is about to block on an empty inbox with no work
+        # in flight, then suppressed until the next ``drain()`` returns
+        # items. Initialized to ``True`` so cold start (drained but
+        # never having processed anything) does NOT publish -- the
+        # signal is "transitioned from working to idle", not "exists
+        # in idle state".
+        self._was_idle: bool = True
+
+    def _fully_drained(self) -> bool:
+        """True iff the agent has no work to do and no gate is armed.
+
+        Sources of work checked:
+
+        * ``inbox`` non-empty -- items waiting to be drained.
+        * ``model_call`` set -- LLM call in flight.
+        * ``compact_task`` set -- compaction in progress.
+        * ``cohort`` non-empty -- tool batch in progress.
+        * ``running_tools`` non-empty -- individual tool tasks live.
+        * ``detached`` non-empty -- backgrounded tools whose results
+          will land later. Treated as work-in-progress: the agent has
+          unfinished business even if it can accept new input.
+        * ``_mid_stream_queue`` non-empty -- buffered ``UserMessage``
+          received while the model was streaming.
+        * ``inbox.gate_armed`` -- the inbox is waiting for a specific
+          event type (e.g. ``AWAIT_USER`` after ``Halt`` /
+          ``ModelResponseError``). Semantically "parked on a particular
+          event," not "idle."
+
+        Local ``run_forever`` state (``awaiting_user``, ``queued``) is
+        not consulted directly: ``awaiting_user`` correlates with
+        ``inbox.gate_armed``, and ``queued`` correlates with
+        ``model_call`` being set (the only case a queued list can
+        survive across iterations).
+
+        Snapshot at call time. The caller must read this and act on it
+        within the same synchronous block (no intervening ``await``),
+        which asyncio's cooperative scheduling guarantees no other
+        coroutine will run during.
+        """
+        return (
+            self.inbox.empty()
+            and self.model_call is None
+            and self.compact_task is None
+            and not self.cohort
+            and not self.running_tools
+            and not self.detached
+            and not self._mid_stream_queue
+            and not self.inbox.gate_armed
+        )
 
     def publish(self, event: RuntimeEvent) -> None:
         """Fan out an event to all observers.
@@ -598,7 +661,18 @@ class AgentRuntime:
         while True:
             try:
                 self._collect_detached()
+                # AgentIdle publish: edge-triggered, fires when we are
+                # about to block on an empty inbox with no work in
+                # flight. Must be entirely synchronous up to the next
+                # ``await`` so no other coroutine can mutate the work
+                # sources between the predicate check and the publish.
+                # ``_was_idle`` resets to ``False`` after ``drain()``
+                # returns items (i.e. we just consumed work).
+                if self._fully_drained() and not self._was_idle:
+                    self.publish(AgentIdle())
+                    self._was_idle = True
                 items = await self.inbox.drain()
+                self._was_idle = False
 
                 for item_idx, item in enumerate(items):
                     match item:

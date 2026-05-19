@@ -19,6 +19,8 @@ from sagent.testing import MockModelCaps
 from sagent.tools import agent_spawn as _agent_spawn_mod
 from sagent.tools.agent_spawn import (
     AgentSpawn,
+    ChildStats,
+    _ChildForwarder,
     _last_assistant_result,
     _persistent_tasks,
     _pick_field,
@@ -32,8 +34,13 @@ from sagent.tools.core import (
     max_depth_var,
     tool_state_var,
 )
-from sagent.types.history import AssistantMessage, ToolResult
+from sagent.types.history import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
 from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
+from sagent.types.runtime import AgentIdle, ModelIdle
 
 
 _AGENT_SPAWN_LOGGER = _agent_spawn_mod.__name__
@@ -534,6 +541,191 @@ async def test_spawn_persistent_rejects_duplicate_label() -> None:
         task1 = _persistent_tasks.get("dup-label")
         assert task1 is not None
         await task1
+
+
+# -- notify_on_asleep --------------------------------------------------------
+#
+# AgentSpawn(persistent=True, notify_on_asleep=True) installs a forwarder
+# that pushes a UserMessage("[<label> is idle]") into the parent's inbox
+# every time the child's runtime publishes AgentIdle (edge-triggered: one
+# per idle transition, suppressed until the next drain returns work).
+#
+# Two layers tested:
+#   1. Forwarder unit: AgentIdle in -> inbox push out (or no push when
+#      notify_on_asleep=False).
+#   2. End-to-end: _spawn_persistent(..., notify_on_asleep=True) wires
+#      the child's serve_forever such that the parent inbox observes
+#      the notification after the child finishes its seeded prompt.
+
+
+def _make_forwarder(
+    parent: Agent, label: str, *, notify_on_asleep: bool
+) -> _ChildForwarder:
+    """Construct a _ChildForwarder bound to ``parent``, no verbosity gating."""
+    import time as _time  # noqa: PLC0415 -- isolated to test helper
+
+    return _ChildForwarder(
+        parent_agent=parent,
+        forward_set=frozenset(),
+        stats=ChildStats(label=label, start=_time.monotonic()),
+        label=label,
+        notify_on_asleep=notify_on_asleep,
+    )
+
+
+def test_forwarder_notify_on_asleep_false_skips_inbox_push() -> None:
+    """Default: AgentIdle never reaches the parent inbox."""
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
+
+    fwd(AgentIdle())
+
+    assert parent.runtime.inbox.empty(), (
+        "AgentIdle leaked into parent inbox with notify_on_asleep=False"
+    )
+
+
+def test_forwarder_notify_on_asleep_true_pushes_one_user_message() -> None:
+    """notify_on_asleep=True: one AgentIdle -> one UserMessage on parent."""
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
+
+    fwd(AgentIdle())
+
+    queue = parent.runtime.inbox._queue
+    assert queue.qsize() == 1
+    msg = queue.get_nowait()
+    assert isinstance(msg, UserMessage)
+    assert msg.text == "[child is idle]"
+
+
+def test_forwarder_notify_on_asleep_one_push_per_event() -> None:
+    """Each AgentIdle is independently translated; edge-trigger lives in
+    the runtime (which we trust), not the forwarder.
+
+    Validates the forwarder is stateless w.r.t. AgentIdle -- it pushes on
+    every event the runtime delivers, relying on the runtime's
+    ``_was_idle`` flag to control cadence.
+    """
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
+
+    fwd(AgentIdle())
+    fwd(AgentIdle())
+    fwd(AgentIdle())
+
+    assert parent.runtime.inbox._queue.qsize() == 3
+
+
+def test_forwarder_notify_on_asleep_ignores_other_events() -> None:
+    """ModelIdle and other non-AgentIdle events do not push to the inbox
+    even when notify_on_asleep=True.
+    """
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
+
+    fwd(ModelIdle())
+
+    assert parent.runtime.inbox.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
+    """End-to-end: a persistent child seeded with a prompt completes one
+    round, becomes idle, and the parent inbox receives the notification.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+    )
+    t = AgentSpawn()
+
+    with _parent_context(parent):
+        result = t._spawn_persistent(
+            child, "watcher-child", "do work", notify_on_asleep=True
+        )
+        assert not result.is_error
+        task = _persistent_tasks.get("watcher-child")
+        assert task is not None
+
+        # Wait until the parent inbox has at least one notification.
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while parent.runtime.inbox.empty():
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail("parent inbox never received the AgentIdle notification")
+            await asyncio.sleep(0.01)
+
+        # First message is the idle ping; subsequent pings are possible
+        # if the agent cycles, but at least one must be present.
+        first = parent.runtime.inbox._queue.get_nowait()
+        assert isinstance(first, UserMessage)
+        assert first.text == "[watcher-child is idle]", (
+            f"unexpected payload: {first.text!r}"
+        )
+
+        # Tear down: child has no further work, but the persistent loop
+        # keeps running. Force shutdown so the task drains.
+        child.shutdown(force=True)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            _ = task.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_persistent_spawn_without_notify_on_asleep_silent() -> None:
+    """Without the flag, the parent inbox stays empty even after the
+    child becomes idle.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+    )
+    t = AgentSpawn()
+
+    with _parent_context(parent):
+        result = t._spawn_persistent(child, "quiet-child", "do work")
+        assert not result.is_error
+        task = _persistent_tasks.get("quiet-child")
+        assert task is not None
+
+        # Let the child run to idle. We can't easily detect idleness
+        # from outside without an observer, so let the task complete
+        # its initial prompt and then wait a small real period for any
+        # spurious inbox push to surface.
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if not child.runtime.inbox.empty():
+                continue
+            # Heuristic: model_call drained and inbox empty -> idle
+            # transition almost certainly fired by now.
+            if child.runtime.model_call is None and not child.history == []:  # noqa: SIM201 -- explicit non-empty check
+                break
+
+        assert parent.runtime.inbox.empty(), (
+            "parent inbox received an unexpected push without notify_on_asleep"
+        )
+
+        child.shutdown(force=True)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            _ = task.cancel()
+
+
+def test_directive_schema_documents_notify_on_asleep() -> None:
+    """The directive schema must advertise the parameter so the LLM
+    can discover and emit it. We verify via string-level inspection
+    because the schema's nested JSON value type (recursive union) makes
+    structural narrowing fragile across type checkers.
+    """
+    rendered = repr(AgentSpawn.directive_schema)
+    assert "'notify_on_asleep'" in rendered
+    assert "'persistent only'" in rendered.lower() or "persistent" in rendered.lower()
 
 
 if __name__ == "__main__":
