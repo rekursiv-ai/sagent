@@ -18,6 +18,23 @@ The agent wakes when new work lands in its inbox. REPL input, background task re
 
 This invariant is what lets Sagent support mid-turn injection, delayed messages, persistent child agents, Slack routing, and background task completion without separate control planes.
 
+### Inbox semantics: root vs subagent
+
+The drain-run-check loop is the *only* execution model. There is no separate "root agent" mode. The CLI's root agent, every `AgentSpawn` child (ephemeral or `persistent=true`), every Slack-routed agent, and every `Agent.run(...)` call from a Python embedder invoke the same `Agent.serve_forever()` → `AgentRuntime.run_forever()` loop.
+
+Consequences:
+
+- `AgentSend` to any live label wakes the recipient identically. `inbox.push_back` resolves the recipient's `inbox.drain()` await; the model-call gate fires on the next iteration when the history tail is a `UserMessage` or `ToolResult`.
+- "Next response" in the `AgentSend` description means the recipient's next *assistant turn*, produced by the model-call gate — not the next time the user types. A delayed self-send (`AgentSend(to=<self>, delay=N)`) wakes the agent N seconds later with no user interaction required.
+- There is no polling. An idle agent is blocked on `await inbox.drain()` consuming zero CPU; the wake is purely event-driven.
+- `persistent=true` on `AgentSpawn` does not enable any extra wake mechanism. It only changes who owns the task that runs `serve_forever()` and how the label is registered. An idle root agent receives `AgentSend` messages with the same semantics as a persistent child.
+
+When `AgentSend` messages appear to land in an inbox but the agent never responds, the cause is almost always one of:
+
+1. A stuck in-flight model call (the gate cannot refire while `self.model_call is not None`; see `docs/private/bugs46.md` for the OpenAISubscription idle-watchdog gap). Stacked `[from X]` previews above the `>` prompt are diagnostic: the runtime is rendering `_mid_stream_queue`. `/tasks` will show `fg=1` on the stuck model call. `Ctrl+C` clears the stream and the queued messages drain.
+2. A label collision routing the message to the wrong agent (regression pinned at `tools/agent_spawn_test.py::test_root_label_collision`).
+3. The response did fire but produced an unremarkable assistant turn that scrolled past unnoticed.
+
 ## Messages
 
 `Message` is a MIME-like typed payload. Text, bytes, JSON, tool calls, tool results, provider responses, and multipart assistant turns all use the same graph-shaped structure.
