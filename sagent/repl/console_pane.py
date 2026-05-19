@@ -102,6 +102,10 @@ class ConsolePrinter:
         """Render the dim ``[interrupted]`` line for cancelled work."""
         self.console.print(Text("[interrupted]", style="dim"))
 
+    def write_dim_line(self, text: str) -> None:
+        """Render a dim status line (compaction, etc.)."""
+        self.console.print(Text(text, style="dim"))
+
     def write_halt(self, text: str) -> None:
         """Render a full-width red banner signaling agent-level halt."""
         width = max(20, self.console.width)

@@ -20,7 +20,11 @@ from typing import Protocol
 import logging
 
 from sagent.repl.render_diff import find_stable_boundary
-from sagent.types.exceptions import AuthRefreshError, UserFacingError
+from sagent.types.exceptions import (
+    AuthRefreshError,
+    ContextOverflowError,
+    UserFacingError,
+)
 from sagent.types.history import (
     AssistantMessage,
     ToolResult,
@@ -30,6 +34,9 @@ from sagent.types.runtime import (
     BudgetReset,
     ChildDoneEvent,
     ChildEvent,
+    CompactComplete,
+    CompactFailed,
+    CompactStarted,
     ModelResponseCancelled,
     ModelResponseComplete,
     ModelResponseError,
@@ -49,6 +56,9 @@ HALT_MESSAGE = "agent halted — type to retry, or /login, /model, /quit"
 HALT_MESSAGE_AUTH = (
     "agent halted — run /login to re-authenticate or /model to switch providers"
 )
+HALT_MESSAGE_CONTEXT = (
+    "agent halted — run /compact <hints>, /clear, or /model to reduce context"
+)
 
 type ChildItem = ToolResult | UserMessage | AssistantMessage
 
@@ -57,6 +67,7 @@ class Printer(Protocol):
     """Sink for REPL output, fully covering the rendering surface."""
 
     def write_line(self, text: str) -> None: ...
+    def write_dim_line(self, text: str) -> None: ...
     def write_chunk(self, text: str) -> None: ...
     def write_markdown(self, text: str) -> None: ...
     def write_user_bar(self, text: str) -> None: ...
@@ -81,6 +92,9 @@ class RecordingPrinter:
 
     lines: list[str]
     """``write_line`` payloads."""
+
+    dim_lines: list[str]
+    """``write_dim_line`` payloads."""
 
     chunks: list[str]
     """``write_chunk`` payloads."""
@@ -123,6 +137,7 @@ class RecordingPrinter:
 
     def __init__(self) -> None:
         self.lines = []
+        self.dim_lines = []
         self.chunks = []
         self.markdowns = []
         self.user_bars = []
@@ -139,6 +154,9 @@ class RecordingPrinter:
 
     def write_line(self, text: str) -> None:
         self.lines.append(text)
+
+    def write_dim_line(self, text: str) -> None:
+        self.dim_lines.append(text)
 
     def write_chunk(self, text: str) -> None:
         self.chunks.append(text)
@@ -269,16 +287,17 @@ class RenderObserver:
                 # ``UserFacingError`` carries a polished, user-actionable
                 # message; the class-name prefix would just add Python-
                 # internals noise to text the user is supposed to read
-                # and act on. ``AuthRefreshError`` further tailors the
-                # halt banner: the generic "type to retry" misleads --
-                # an expired refresh token won't recover via retry, only
-                # via ``/login`` or ``/model``.
+                # and act on. Some user-facing errors further tailor
+                # the halt banner: the generic "type to retry" misleads
+                # when retrying cannot change the failed request.
                 if isinstance(exc, UserFacingError):
                     self._printer.write_tool_error(str(exc))
                 else:
                     self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
                 if isinstance(exc, AuthRefreshError):
                     self._printer.write_halt(HALT_MESSAGE_AUTH)
+                elif isinstance(exc, ContextOverflowError):
+                    self._printer.write_halt(HALT_MESSAGE_CONTEXT)
                 else:
                     self._printer.write_halt(HALT_MESSAGE)
             case ModelSwitchRejected(exception=exc):
@@ -304,6 +323,19 @@ class RenderObserver:
                 self._flush_child(label)
             case StatusChanged(text=text):
                 self._printer.set_terminal_title(text)
+            case CompactStarted():
+                self._flush_stream()
+                self._printer.write_dim_line("[compacting history…]")
+            case CompactComplete(summary=summary, snapshot_len=n):
+                self._flush_stream()
+                self._printer.write_dim_line(
+                    f"[compaction complete: {n} → {len(summary)} entries]",
+                )
+            case CompactFailed(exception=exc):
+                self._flush_stream()
+                self._printer.write_dim_line(
+                    f"[compaction failed: {type(exc).__name__}: {exc}]",
+                )
             case _:
                 pass
 

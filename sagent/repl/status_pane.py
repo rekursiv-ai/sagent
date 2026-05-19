@@ -37,7 +37,11 @@ def render_status_pane(agent: Agent) -> str:
 
     """
     activity = agent.activity
-    if activity.elapsed_seconds <= 0 and not activity.active:
+    if (
+        activity.elapsed_seconds <= 0
+        and not activity.active
+        and activity.current_compact_start <= 0.0
+    ):
         return ""
     tokens = agent.cost_tracker.total
     cost = float(agent.cost_tracker.total_cost_usd)
@@ -58,6 +62,10 @@ def render_status_pane(agent: Agent) -> str:
         f" {format_count(tokens.cache_read_tokens)}↡"
         f" ${cost:.2f}]"
     )
+    if activity.current_compact_start > 0.0:
+        live_delta = asyncio.get_running_loop().time() - activity.current_compact_start
+        frame = _SPINNER[int(live_delta * 5) % len(_SPINNER)]
+        return f"{frame} [compacting] {bracket}"
     if activity.active:
         live_delta = asyncio.get_running_loop().time() - activity.current_call_start
         frame = _SPINNER[int(live_delta * 5) % len(_SPINNER)]

@@ -78,6 +78,8 @@ def _agent(**overrides: object) -> _FakeAgent:
             a.activity.active = cast(bool, v)
         elif k == "current_call_start":
             a.activity.current_call_start = cast(float, v)
+        elif k == "current_compact_start":
+            a.activity.current_compact_start = cast(float, v)
         elif k == "live_response_chars":
             a.activity.live_response_chars = cast(int, v)
     return a
@@ -196,6 +198,21 @@ def test_active_zero_elapsed_renders() -> None:
     a = _agent(active=True, current_call_start=8.0, elapsed_seconds=0.0)
     s = render_status_pane(_as_agent(a))
     assert "[2s 0↑ 0↓ 0↟ 0↡ $0.00]" in s
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_compacting_branch_renders_spinner_and_prefix() -> None:
+    a = _agent(
+        current_compact_start=5.0,
+        elapsed_seconds=0.0,
+        input_tokens=10,
+        output_tokens=20,
+        total_cost_usd=0.05,
+    )
+    s = render_status_pane(_as_agent(a))
+    assert s[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert " [compacting] [" in s
+    assert s.endswith("[0s 10↑ 20↓ 0↟ 0↡ $0.05]")
 
 
 def test_real_agent_cost_tracker_is_compatible() -> None:

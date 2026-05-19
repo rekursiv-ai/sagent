@@ -11,7 +11,10 @@ from sagent.repl.render import (
     make_render_observer,
     render_tool_result,
 )
-from sagent.types.exceptions import AuthRefreshError
+from sagent.types.exceptions import (
+    AuthRefreshError,
+    ContextOverflowError,
+)
 from sagent.types.history import (
     AssistantMessage,
     ToolCall,
@@ -22,6 +25,9 @@ from sagent.types.runtime import (
     BudgetReset,
     ChildDoneEvent,
     ChildEvent,
+    CompactComplete,
+    CompactFailed,
+    CompactStarted,
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
@@ -106,6 +112,32 @@ def test_budget_reset_emits_notification_line() -> None:
     assert "claude-sonnet-4-6" in p.lines[0]
     assert "1,000,000" in p.lines[0]
     assert "200,000" in p.lines[0]
+
+
+def test_compact_started_emits_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(CompactStarted())
+    assert p.dim_lines == ["[compacting history…]"]
+
+
+def test_compact_complete_emits_progress_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(
+        CompactComplete(
+            summary=[UserMessage(text="u"), AssistantMessage(text="a")],
+            snapshot_len=42,
+        )
+    )
+    assert p.dim_lines == ["[compaction complete: 42 → 2 entries]"]
+
+
+def test_compact_failed_emits_error_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(CompactFailed(exception=RuntimeError("ctx full"), snapshot_len=10))
+    assert p.dim_lines == ["[compaction failed: RuntimeError: ctx full]"]
 
 
 def test_user_message_with_empty_buffer() -> None:
@@ -227,6 +259,29 @@ def test_auth_refresh_error_uses_auth_specific_halt_banner() -> None:
         f"auth banner must not suggest retry (typing won't help an "
         f"expired refresh token); got {banner!r}"
     )
+
+
+def test_context_overflow_error_uses_context_specific_halt_banner() -> None:
+    """Context exhaustion needs a repair action, not a plain retry.
+
+    Typing another message after auto-compaction failed just sends the
+    same oversized transcript through the same failing path. The halt
+    banner should point at the actions that can actually change prompt
+    shape: clear, compact with guidance, or switch model.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponseError(exception=ContextOverflowError("context exhausted")))
+
+    assert len(p.halts) == 1
+    banner = p.halts[0]
+    assert banner != HALT_MESSAGE, (
+        f"ContextOverflowError must not use the generic retry banner; got {banner!r}"
+    )
+    assert "/clear" in banner
+    assert "/compact" in banner
+    assert "/model" in banner
+    assert "retry" not in banner.lower()
 
 
 def test_plain_exception_keeps_class_name_prefix_and_generic_banner() -> None:
