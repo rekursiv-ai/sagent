@@ -1779,6 +1779,61 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_now_publishes_compaction_progress_events() -> None:
+    """Direct compaction path emits renderable observer events."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            history: list[types.history.HistoryEntry],
+            model: object,
+            transcript_path: object = None,
+            direction: str = "from",
+            keep_recent: int | None = None,
+            custom_instructions: str | None = None,
+            summary_pointers: object = None,
+        ) -> list[types.history.HistoryEntry]:
+            del history, model, transcript_path, direction, keep_recent
+            del custom_instructions, summary_pointers
+            return [types.history.UserMessage(text="[compact]")]
+
+        def maintain(
+            self,
+            history: list[types.history.HistoryEntry],
+            tools: object,
+            **kwargs: object,
+        ) -> None:
+            del history, tools, kwargs
+
+    events: list[types.runtime.RuntimeEvent] = []
+    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
+    a.runtime.history.append(types.history.UserMessage(text="hi"))
+    a.runtime.observers.append(events.append)
+
+    assert await a.compact_now() is True
+
+    assert [type(event) for event in events] == [
+        types.runtime.CompactStarted,
+        types.runtime.CompactComplete,
+    ]
+    complete = events[-1]
+    assert isinstance(complete, types.runtime.CompactComplete)
+    assert complete.snapshot_len == 1
+    assert a.history == complete.summary
+    assert a.activity.current_compact_start == 0.0
+
+
+@pytest.mark.asyncio
 async def test_agent_model_proactive_compaction_failure_short_circuits() -> None:
     """Failed proactive compaction must not fall through to the provider.
 
