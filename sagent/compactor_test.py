@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
 
+import httpx
 import pytest
 
 from sagent.compactor import (
@@ -425,6 +426,33 @@ async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert "Compaction failed" in first.text
+
+
+@pytest.mark.asyncio
+async def test_compact_retries_on_transient_transport_error() -> None:
+    """A transient ``httpx.TransportError`` mid-stream is retried, not fatal.
+
+    The production failure (session ``bc528d70``) ended with
+    ``httpx.RemoteProtocolError: peer closed connection without sending
+    complete message body`` raised mid-stream from the compactor's
+    summary call. ``RemoteProtocolError`` is a ``TransportError``
+    already classified retryable in :mod:`agent.retry`, but the
+    compactor's ``stream`` call sat outside ``send_with_retry`` so the
+    blip became a hard compaction failure that the agent surfaced as
+    "context window exhausted". Wrapping the compactor's stream in
+    ``send_with_retry`` makes one transient drop recoverable.
+    """
+    err = httpx.RemoteProtocolError("peer closed connection")
+    model = _ScriptedModel(
+        buffer_responses=[err, _summary_resp("recovered after retry")]
+    )
+    compactor = SummaryCompactor()
+    history: list[HistoryEntry] = [UserMessage(text="orig")]
+    result = await compactor.compact(history, model)
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert "recovered after retry" in first.text
+    assert model.buffer_calls == 2
 
 
 @pytest.mark.asyncio

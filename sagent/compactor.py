@@ -23,6 +23,7 @@ import logging
 import re
 import time
 
+from sagent.agent.retry import send_with_retry
 from sagent.lib.compaction import CLEARED
 from sagent.tools.core import read_asset, recipe_dict
 from sagent.types.exceptions import PromptTooLongError
@@ -274,7 +275,15 @@ class SummaryCompactor:
                 tools=None,
             )
             try:
-                response = await compact_model.stream(request)
+                response = await send_with_retry(
+                    compact_model,
+                    request,
+                    max_attempts=self._max_attempts,
+                    persistent_retry=False,
+                    publish_recoverable=lambda text: logger.info(
+                        "compactor recoverable: %s", text
+                    ),
+                )
                 summary_text = response.message.text
                 break
             except PromptTooLongError as exc:
