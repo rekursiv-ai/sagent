@@ -377,7 +377,7 @@ class PromptToolkitInputSource(InputSource):
     async def next_line(self) -> str | None:
         """Return the next line, or ``None`` to terminate the input loop."""
         try:
-            text = await self._session.prompt_async()
+            text = await self._session.prompt_async(set_exception_handler=False)
         except (EOFError, KeyboardInterrupt):
             self._surface_queued_input_on_quit()
             return None

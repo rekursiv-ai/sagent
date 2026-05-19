@@ -557,7 +557,8 @@ def test_render_input_pane_preserves_multi_line_block_content() -> None:
 def test_next_line_returns_typed_text() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         return "hello"
 
     session.prompt_async = _prompt_async
@@ -566,10 +567,27 @@ def test_next_line_returns_typed_text() -> None:
     assert line == "hello"
 
 
+def test_next_line_disables_prompt_toolkit_exception_pause() -> None:
+    session = MagicMock()
+    calls: list[dict[str, object]] = []
+
+    async def _prompt_async(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "hello"
+
+    session.prompt_async = _prompt_async
+    src = PromptToolkitInputSource(session, queued_input=[])
+    line = asyncio.run(src.next_line())
+
+    assert line == "hello"
+    assert calls == [{"set_exception_handler": False}]
+
+
 def test_next_line_quit_returns_none() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         return "/quit"
 
     session.prompt_async = _prompt_async
@@ -581,7 +599,8 @@ def test_next_line_quit_returns_none() -> None:
 def test_next_line_eof_returns_none() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         raise EOFError
 
     session.prompt_async = _prompt_async
@@ -593,7 +612,8 @@ def test_next_line_eof_returns_none() -> None:
 def test_next_line_keyboard_interrupt_returns_none() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         raise KeyboardInterrupt
 
     session.prompt_async = _prompt_async
@@ -605,7 +625,8 @@ def test_next_line_keyboard_interrupt_returns_none() -> None:
 def test_quit_surfaces_queued_input_preview() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         return "/quit"
 
     session.prompt_async = _prompt_async
@@ -621,7 +642,8 @@ def test_quit_surfaces_queued_input_preview() -> None:
 def test_quit_without_console_swallows_preview() -> None:
     session = MagicMock()
 
-    async def _prompt_async() -> str:
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
         return "/quit"
 
     session.prompt_async = _prompt_async
