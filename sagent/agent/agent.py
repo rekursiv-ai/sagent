@@ -1082,6 +1082,8 @@ class Agent:
         """
         if self._agent_compactor is None:
             return True
+        snapshot_len = len(self.runtime.history)
+        self.publish(types.runtime.CompactStarted())
         try:
             summary = await self._agent_compactor.compact(
                 list(self.runtime.history),
@@ -1099,9 +1101,18 @@ class Agent:
                     text=f"[Compaction error: {type(exc).__name__}: {exc}]"
                 ),
             )
+            self.publish(
+                types.runtime.CompactFailed(exception=exc, snapshot_len=snapshot_len)
+            )
             return False
         self.runtime.history.clear()
         self.runtime.history.extend(summary)
+        self.publish(
+            types.runtime.CompactComplete(
+                summary=summary,
+                snapshot_len=snapshot_len,
+            ),
+        )
         return True
 
 
