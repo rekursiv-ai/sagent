@@ -767,16 +767,20 @@ class Agent:
           msg: User message to push and run to idle.
 
         Yields:
-          event: Each ``types.runtime.RuntimeEvent`` published until ``types.runtime.ModelIdle``.
+          event: Each ``types.runtime.RuntimeEvent`` published until
+              ``types.runtime.ModelIdle`` or ``types.runtime.ModelResponseError``.
 
         """
         events: asyncio.Queue[types.runtime.RuntimeEvent] = asyncio.Queue()
-        idle = asyncio.Event()
+        terminal = asyncio.Event()
 
         def _watch(event: types.runtime.RuntimeEvent) -> None:
             events.put_nowait(event)
-            if isinstance(event, types.runtime.ModelIdle):
-                idle.set()
+            if isinstance(
+                event,
+                (types.runtime.ModelIdle, types.runtime.ModelResponseError),
+            ):
+                terminal.set()
 
         self.runtime.observers.append(_watch)
         try:
@@ -790,20 +794,20 @@ class Agent:
             try:
                 while True:
                     get_task = asyncio.create_task(events.get())
-                    idle_task = asyncio.create_task(idle.wait())
+                    terminal_task = asyncio.create_task(terminal.wait())
                     done, _pending = await asyncio.wait(
-                        {get_task, idle_task},
+                        {get_task, terminal_task},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # Drain any pending event before checking idle so the
-                    # consumer sees the types.runtime.ModelIdle that triggered the flag.
+                    # Drain pending events before checking terminal state so
+                    # consumers see the ModelIdle or ModelResponseError event.
                     if get_task in done:
                         yield get_task.result()
                     else:
                         _ = get_task.cancel()
-                    if idle_task not in done:
-                        _ = idle_task.cancel()
-                    if idle.is_set() and events.empty():
+                    if terminal_task not in done:
+                        _ = terminal_task.cancel()
+                    if terminal.is_set() and events.empty():
                         break
             finally:
                 self.shutdown(force=False)

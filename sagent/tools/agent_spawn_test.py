@@ -209,6 +209,34 @@ async def test_run_basic_child_returns_last_assistant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_child_model_error_returns_tool_error() -> None:
+    """One-shot child model failures must resolve the AgentSpawn call."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _FailingModel(StubProviderModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del request, on_text, on_thinking
+            raise RuntimeError("invalid child credentials")
+
+    parent = _make_parent(_FailingModel())
+    with _parent_context(parent):
+        result = await asyncio.wait_for(
+            AgentSpawn().run({"prompt": "do it", "label": "reviewer"}),
+            timeout=0.5,
+        )
+
+    assert result.is_error
+    assert "reviewer" in result.content
+    assert "invalid child credentials" in result.content
+
+
+@pytest.mark.asyncio
 async def test_run_unknown_tool_name_errors() -> None:
     parent = _make_parent()
     with _parent_context(parent):

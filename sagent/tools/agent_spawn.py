@@ -475,8 +475,15 @@ class AgentSpawn:
         label_token = agent_label_var.set(label)
         agent_token = current_agent_var.set(child)
         agent_registry[label] = child
+        child_errors: list[BaseException] = []
+
+        def _capture_error(event: RuntimeEvent) -> None:
+            if isinstance(event, ModelResponseError):
+                child_errors.append(event.exception)
+
         try:
             forwarder = _build_forwarder(label, self._verbosity, parent_agent)
+            child.runtime.observers.append(_capture_error)
             if forwarder is not None:
                 child.runtime.observers.append(forwarder)
             try:
@@ -487,6 +494,17 @@ class AgentSpawn:
                     child.runtime.observers.remove(forwarder)
                 if forwarder is not None:
                     forwarder.emit_done()
+                child.runtime.observers.remove(_capture_error)
+            if child_errors:
+                child_error = child_errors[-1]
+                return ToolResult(
+                    call_id="",
+                    content=(
+                        f"Child agent {label!r} failed:"
+                        f" {type(child_error).__name__}: {child_error}"
+                    ),
+                    is_error=True,
+                )
             return _last_assistant_result(child.history)
         finally:
             agent_registry.pop(label, None)
