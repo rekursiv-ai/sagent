@@ -275,7 +275,13 @@ class Model(Protocol):
         ...
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a request and return the complete response (no streaming).
+        """Send a request and return the complete response.
+
+        Semantically equivalent to ``stream(request, None, None)``:
+        both return the same parsed ``ModelResponse``. Providers
+        implement whichever transport is native to their SDK and
+        delegate the other; callers pick ``buffer`` when they have no
+        use for streaming callbacks.
 
         Args:
           request: Fully-built model request.

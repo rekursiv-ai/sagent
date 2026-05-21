@@ -36,13 +36,10 @@ class _ScriptedModel(MockModelCaps):
     model_id: str = "scripted"
     max_request_tokens: int = 100_000
     stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
-    buffer_responses: list[BaseException | ModelResponse] = field(default_factory=list)
     is_retryable_provider: bool = False
     is_overflow: bool = False
     _stream_idx: int = field(default=0, init=False)
-    _buffer_idx: int = field(default=0, init=False)
     stream_calls: int = field(default=0, init=False)
-    buffer_calls: int = field(default=0, init=False)
 
     @override
     def is_retryable_provider_error(self, error: Exception) -> bool:
@@ -72,13 +69,7 @@ class _ScriptedModel(MockModelCaps):
         return item
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        del request
-        self.buffer_calls += 1
-        item = self.buffer_responses[self._buffer_idx]
-        self._buffer_idx += 1
-        if isinstance(item, BaseException):
-            raise item
-        return item
+        return await self.stream(request, on_text=None, on_thinking=None)
 
 
 def _request() -> ModelRequest:
@@ -280,13 +271,12 @@ async def test_send_with_retry_streaming_first_try() -> None:
     assert resp.message.text == "hi"
     assert chunks == list("hi")
     assert model.stream_calls == 1
-    assert model.buffer_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_buffered_path_no_on_text() -> None:
-    """``on_text=None`` always uses buffer; never streams."""
-    model = _ScriptedModel(buffer_responses=[_resp("ok")])
+async def test_send_with_retry_no_on_text_still_streams() -> None:
+    """``on_text=None`` still streams; buffered transport is never used."""
+    model = _ScriptedModel(stream_responses=[_resp("ok")])
     resp = await send_with_retry(
         model,
         _request(),
@@ -296,8 +286,7 @@ async def test_send_with_retry_buffered_path_no_on_text() -> None:
         publish_recoverable=_silent,
     )
     assert resp.message.text == "ok"
-    assert model.stream_calls == 0
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -460,29 +449,6 @@ async def test_send_with_retry_stream_interrupt_on_discarded_response_called() -
     )
     assert resp.message.text == "done"
     assert discarded == [partial]
-
-
-@pytest.mark.asyncio
-async def test_send_with_retry_falls_back_to_buffer_after_two_stream_failures() -> None:
-    err = _HTTPError(_FakeResponse(503))
-    model = _ScriptedModel(
-        stream_responses=[err, err],
-        buffer_responses=[_resp("buffered ok")],
-    )
-    chunks: list[str] = []
-    resp = await send_with_retry(
-        model,
-        _request(),
-        on_text=chunks.append,
-        max_attempts=5,
-        persistent_retry=False,
-        publish_recoverable=_silent,
-    )
-    assert resp.message.text == "buffered ok"
-    assert model.buffer_calls == 1
-    # The buffered text is re-emitted on the live ``on_text`` callback
-    # so the renderer sees the response.
-    assert "buffered ok" in "".join(chunks)
 
 
 if __name__ == "__main__":

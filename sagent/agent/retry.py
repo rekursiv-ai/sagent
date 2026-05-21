@@ -48,7 +48,6 @@ RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 # self-referencing cycle must not hang us.
 _MAX_CAUSE_DEPTH = 5
 
-_STREAM_FALLBACK_AFTER = 2
 _MAX_STREAM_INTERRUPT_RETRIES = 2
 
 
@@ -162,22 +161,22 @@ async def send_with_retry(
     publish_recoverable: Callable[[str], None],
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
 ) -> ModelResponse:
-    """Send with backoff, error classification, stream fallback.
+    """Send with backoff and error classification.
 
     On retryable errors: exponential backoff with jitter, respects
-    Retry-After headers. After ``_STREAM_FALLBACK_AFTER`` consecutive
-    streaming failures, falls back to non-streaming ``buffer()``.
-    Tracks text already shown live on a failed first attempt and
-    skips that prefix on retry.
+    Retry-After headers. Tracks text already shown live on a failed
+    first attempt and skips that prefix on retry.
 
     Args:
       model: Model to send the request to.
       request: Fully-built model request.
-      on_text: Streaming callback for live text chunks.
+      on_text: Streaming callback for live text chunks. ``None``
+          discards chunks; the request still streams under the hood
+          (buffered transports are unreliable at large prompt sizes).
       on_thinking: Streaming callback for live thinking chunks.
-          Only fires on the first streaming attempt; ignored on
-          retries (the buffered fallback has no separate thinking
-          stream and the renderer would render thinking twice).
+          Only fires on the first attempt; on retry we read thinking
+          from the final response so the renderer never sees the same
+          content twice.
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       publish_recoverable: Callback for transient errors that recovered;
@@ -196,7 +195,6 @@ async def send_with_retry(
       RateLimitError: On 429 in non-persistent mode.
 
     """
-    stream_failures = 0
     last_error: Exception | None = None
     prior_emitted = ""
     attempt = -1
@@ -206,25 +204,17 @@ async def send_with_retry(
         attempt += 1
         if attempt >= max_attempts:
             break
-        use_stream = on_text is not None and stream_failures < _STREAM_FALLBACK_AFTER
-        live = on_text if (use_stream and attempt == 0) else None
-        # Thinking streams only on the first streaming attempt; on
-        # retry we read thinking from the final response so the
-        # renderer never sees the same content twice.
-        live_thinking = on_thinking if (use_stream and attempt == 0) else None
+        live = on_text if attempt == 0 else None
+        live_thinking = on_thinking if attempt == 0 else None
         chunks: list[str] = []
         capture = _make_stream_callback(chunks, live)
         try:
-            if use_stream:
-                resp = await model.stream(
-                    request=request,
-                    on_text=capture,
-                    on_thinking=live_thinking,
-                )
-                full = "".join(chunks)
-            else:
-                resp = await model.buffer(request=request)
-                full = resp.message.text
+            resp = await model.stream(
+                request=request,
+                on_text=capture,
+                on_thinking=live_thinking,
+            )
+            full = "".join(chunks)
             if on_text is not None and live is None and full:
                 suffix = full.removeprefix(prior_emitted)
                 if suffix:
@@ -262,8 +252,6 @@ async def send_with_retry(
             last_error = e
             if live is not None:
                 prior_emitted = "".join(chunks)
-            if use_stream:
-                stream_failures += 1
             status = error_status(e)
             persistent = (
                 persistent_retry
@@ -294,29 +282,21 @@ async def send_with_retry(
                 )
                 if server_delay is not None:
                     delay = max(delay, server_delay)
-            fallback = (
-                " (falling back to non-streaming)"
-                if (on_text is not None and stream_failures >= _STREAM_FALLBACK_AFTER)
-                else ""
-            )
             publish_recoverable(
-                f"retry attempt {attempt}, waiting {delay:.1f}s"
-                f"{fallback}: {type(e).__name__}: {e}"
+                f"retry attempt {attempt}, waiting {delay:.1f}s:"
+                f" {type(e).__name__}: {e}"
             )
             logger.warning(
-                "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs%s.",
+                "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.",
                 attempt + 1,
                 max_attempts,
                 type(e).__name__,
                 f" {status}" if status is not None else "",
                 e,
                 delay,
-                fallback,
             )
             if on_text is not None:
-                on_text(
-                    f"\n[error, retrying in {delay:.0f}s{fallback}...]\n",
-                )
+                on_text(f"\n[error, retrying in {delay:.0f}s...]\n")
             await asyncio.sleep(delay)
     raise RetriesExhaustedError(
         f"Failed after {max_attempts} attempts: {last_error}",

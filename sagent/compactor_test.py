@@ -34,22 +34,13 @@ from sagent.types.tools import Tool
 
 @dataclass(slots=True, kw_only=True)
 class _ScriptedModel(MockModelCaps):
-    """Returns scripted responses from ``buffer``; tracks call count."""
+    """Returns scripted responses from ``stream``; tracks call count."""
 
     model_id: str = "compact-model"
     max_request_tokens: int = 200_000
-    buffer_responses: list[BaseException | ModelResponse] = field(default_factory=list)
-    _buffer_idx: int = field(default=0, init=False)
-    buffer_calls: int = field(default=0, init=False)
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        del request
-        self.buffer_calls += 1
-        item = self.buffer_responses[self._buffer_idx]
-        self._buffer_idx += 1
-        if isinstance(item, BaseException):
-            raise item
-        return item
+    stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
+    _stream_idx: int = field(default=0, init=False)
+    stream_calls: int = field(default=0, init=False)
 
     async def stream(
         self,
@@ -57,8 +48,16 @@ class _ScriptedModel(MockModelCaps):
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        del on_text, on_thinking
-        return await self.buffer(request)
+        del request, on_text, on_thinking
+        self.stream_calls += 1
+        item = self.stream_responses[self._stream_idx]
+        self._stream_idx += 1
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request, on_text=None, on_thinking=None)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -99,7 +98,7 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     body = "structured 9-section summary here"
     text = f"<analysis>private scratch</analysis>\n<summary>\n{body}\n</summary>"
     model = _ScriptedModel(
-        buffer_responses=[ModelResponse(message=AssistantMessage(text=text))]
+        stream_responses=[ModelResponse(message=AssistantMessage(text=text))]
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
@@ -118,7 +117,7 @@ async def test_compact_truncates_long_fallback_summary() -> None:
     """No ``<summary>`` tag and length > cap → text truncated."""
     text = "x" * 12_000
     model = _ScriptedModel(
-        buffer_responses=[ModelResponse(message=AssistantMessage(text=text))]
+        stream_responses=[ModelResponse(message=AssistantMessage(text=text))]
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
@@ -250,7 +249,7 @@ def test_microcompact_keep_recent_zero_clears_all() -> None:
 @pytest.mark.asyncio
 async def test_compact_with_keep_recent_preserves_tail() -> None:
     body = "partial summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor(keep_recent=2)
     history: list[HistoryEntry] = [
         UserMessage(text="m1"),
@@ -270,7 +269,7 @@ async def test_compact_with_keep_recent_preserves_tail() -> None:
 @pytest.mark.asyncio
 async def test_compact_direction_up_to_keeps_prefix() -> None:
     body = "summary content"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [
         UserMessage(text="early1"),
@@ -288,43 +287,43 @@ async def test_compact_direction_up_to_keeps_prefix() -> None:
 @pytest.mark.asyncio
 async def test_compact_includes_custom_instructions_in_request() -> None:
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="x")]
     _ = await compactor.compact(history, model, custom_instructions="focus on errors")
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_compact_ignores_blank_custom_instructions() -> None:
     """Whitespace-only custom instructions are skipped."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="x")]
     _ = await compactor.compact(history, model, custom_instructions="   ")
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_compact_strips_image_attachments() -> None:
     """Image attachments are replaced with ``[image]`` markers."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     history: list[HistoryEntry] = [UserMessage(text="see", attachments=(img,))]
     _ = await compactor.compact(history, model)
     # The request the model saw had no binary payload (verified via the
     # buffer call succeeding without any attachment-related branching).
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
     """``_safe_split`` avoids slicing through an unfinished tool_use pair."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     tc = ToolCall(id="t1", name="Bash", args={"cmd": "ls"})
     # Without snap-left the split would orphan the tool_use at idx 1.
@@ -343,7 +342,7 @@ async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
 async def test_compact_strips_tool_result_attachments() -> None:
     """``_strip_attachments`` handles ``ToolResult`` attachments separately."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     pdf = BytesMessage(data=b"%PDF", descriptor="application/pdf")
@@ -352,7 +351,7 @@ async def test_compact_strips_tool_result_attachments() -> None:
         ToolResult(call_id="c1", content="ran", attachments=(img, pdf)),
     ]
     _ = await compactor.compact(history, model)
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -361,7 +360,7 @@ async def test_compact_drops_groups_on_prompt_too_long() -> None:
     body = "post-shrink summary"
     overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)
     model = _ScriptedModel(
-        buffer_responses=[overflow, _summary_resp(body)],
+        stream_responses=[overflow, _summary_resp(body)],
     )
     compactor = SummaryCompactor(max_attempts=3)
     history: list[HistoryEntry] = [
@@ -371,7 +370,7 @@ async def test_compact_drops_groups_on_prompt_too_long() -> None:
         AssistantMessage(text="resp2"),
     ]
     result = await compactor.compact(history, model)
-    assert model.buffer_calls == 2
+    assert model.stream_calls == 2
     assert isinstance(result[0], UserMessage)
     assert "post-shrink summary" in result[0].text
 
@@ -381,7 +380,7 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
     """``token_gap=None`` triggers the fallback group-drop heuristic."""
     body = "post-shrink"
     overflow = PromptTooLongError()  # actual/limit both unset → gap=None
-    model = _ScriptedModel(buffer_responses=[overflow, _summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[overflow, _summary_resp(body)])
     compactor = SummaryCompactor(max_attempts=3)
     tc = ToolCall(id="t1", name="Bash", args={"cmd": "ls"})
     history: list[HistoryEntry] = [
@@ -399,7 +398,7 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
 async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
     """``keep_recent >= len(history)`` after snap-left returns the prefix."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [
         UserMessage(text="m1"),
@@ -415,7 +414,7 @@ async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
 async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
     """Every attempt fails → fallback ``UserMessage`` returned."""
     overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)
-    model = _ScriptedModel(buffer_responses=[overflow, overflow, overflow])
+    model = _ScriptedModel(stream_responses=[overflow, overflow, overflow])
     compactor = SummaryCompactor(max_attempts=3)
     history: list[HistoryEntry] = [
         UserMessage(text="round1"),
@@ -444,7 +443,7 @@ async def test_compact_retries_on_transient_transport_error() -> None:
     """
     err = httpx.RemoteProtocolError("peer closed connection")
     model = _ScriptedModel(
-        buffer_responses=[err, _summary_resp("recovered after retry")]
+        stream_responses=[err, _summary_resp("recovered after retry")]
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
@@ -452,21 +451,21 @@ async def test_compact_retries_on_transient_transport_error() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert "recovered after retry" in first.text
-    assert model.buffer_calls == 2
+    assert model.stream_calls == 2
 
 
 @pytest.mark.asyncio
 async def test_compact_inserts_user_bridge_when_groups_lead_with_assistant() -> None:
     """When the leading message isn't a User, a bridge is injected."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [
         AssistantMessage(text="leads-with-assistant"),
         ToolResult(call_id="c1", content="ran"),
     ]
     result = await compactor.compact(history, model)
-    assert model.buffer_calls == 1
+    assert model.stream_calls == 1
     first = result[0]
     assert isinstance(first, UserMessage)
     assert body in first.text
@@ -476,7 +475,7 @@ async def test_compact_inserts_user_bridge_when_groups_lead_with_assistant() -> 
 async def test_compact_includes_summary_pointers(tmp_path: Path) -> None:
     """``summary_pointers`` arg is rendered into the continuation."""
     body = "summary"
-    model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     transcript = tmp_path / "pre.jsonl"
     pointers = [("/old/sum_0.md", "earlier topic")]
@@ -496,13 +495,13 @@ async def test_compact_includes_summary_pointers(tmp_path: Path) -> None:
 async def test_compactor_uses_alternate_model_when_provided() -> None:
     """An explicit override model is used instead of the passed-in one."""
     body = "via override"
-    override_model = _ScriptedModel(buffer_responses=[_summary_resp(body)])
-    primary_model = _ScriptedModel(buffer_responses=[])
+    override_model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    primary_model = _ScriptedModel(stream_responses=[])
     compactor = SummaryCompactor(model=override_model)
     history: list[HistoryEntry] = [UserMessage(text="x")]
     result = await compactor.compact(history, primary_model)
-    assert override_model.buffer_calls == 1
-    assert primary_model.buffer_calls == 0
+    assert override_model.stream_calls == 1
+    assert primary_model.stream_calls == 0
     first = result[0]
     assert isinstance(first, UserMessage)
     assert body in first.text

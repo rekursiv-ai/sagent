@@ -680,7 +680,11 @@ class _AnthropicModel:
         return kwargs
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a buffered request to Claude and return a ``ModelResponse``.
+        """Send a request via the streaming path with no callbacks.
+
+        The Anthropic SDK rejects non-streaming requests whose prompt
+        size may exceed a 10-minute wall, so the buffered path always
+        routes through ``stream`` to keep large compaction calls valid.
 
         Args:
           request: Fully-built model request.
@@ -692,64 +696,7 @@ class _AnthropicModel:
           PromptTooLongError: Server reports context overflow.
 
         """
-        messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
-        sdk = await self._provider.get_sdk()
-        kwargs = self._build_kwargs(request, messages)
-        logger.debug(
-            "API call: model=%s, messages=%d",
-            self._model_id,
-            len(messages),
-        )
-        debug_log.trace(
-            "api_call",
-            kind="buffer",
-            model=self._model_id,
-            roles=debug_log.role_sequence(messages),
-            n_messages=len(messages),
-            n_tools=len(kwargs.get("tools") or []),  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- kwargs.tools always list
-            thinking=kwargs.get("thinking"),
-        )
-        try:
-            raw = cast(
-                anthropic.types.Message,
-                await sdk.messages.create(**kwargs),  # pyright: ignore[reportArgumentType, reportCallIssue]  # ty: ignore[no-matching-overload] -- dynamic kwargs
-            )
-        except anthropic.AuthenticationError:
-            await self._provider.handle_auth_error()
-            sdk = await self._provider.get_sdk()
-            kwargs["system"] = self._provider.build_system(request.system, messages)
-            raw = cast(
-                anthropic.types.Message,
-                await sdk.messages.create(**kwargs),  # pyright: ignore[reportArgumentType, reportCallIssue]  # ty: ignore[no-matching-overload] -- dynamic kwargs
-            )
-        except anthropic.APIStatusError as e:
-            if not _is_prompt_too_long_text(str(e)):
-                raise
-            debug_log.trace_error(
-                "bad_request",
-                kind="buffer",
-                model=self._model_id,
-                error=str(e),
-                status=getattr(e, "status_code", None),
-                request_id=_request_id(e),
-                roles=debug_log.role_sequence(messages),
-                messages=debug_log.summarize_messages(messages),
-                tools=_tool_names_from_kwargs(kwargs),
-                thinking=kwargs.get("thinking"),
-                system_preview=str(kwargs.get("system", ""))[:400],
-            )
-            _raise_if_prompt_too_long(e)
-            raise
-        resp = _parse_response(raw, self._profile.pricing)
-        self._last_response_time = time.time()
-        logger.debug(
-            "API response: tokens=%d/%d, stop=%s",
-            resp.tokens.input_tokens,
-            resp.tokens.output_tokens,
-            resp.stop_reason,
-        )
-        _guard_stream_interrupt(resp, kind="buffer", model_id=self._model_id)
-        return resp
+        return await self.stream(request, on_text=None, on_thinking=None)
 
     async def stream(
         self,

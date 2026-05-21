@@ -344,11 +344,13 @@ class _GeminiModel:
         del error
         return False
 
-    async def buffer(
-        self,
-        request: ModelRequest,
-    ) -> ModelResponse:
-        """Send a buffered request to Gemini.
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        """Send a request via the streaming path with no callbacks.
+
+        The non-streaming ``:generateContent`` endpoint has a hard 120 s
+        client timeout that fails on large compaction prompts; routing
+        through ``:streamGenerateContent`` uses an idle-based timeout
+        that scales with response time.
 
         Args:
           request: Fully-built model request.
@@ -361,33 +363,7 @@ class _GeminiModel:
           ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
-        url = f"{_API_BASE}/models/{self._model_id}:generateContent"
-        body = _build_request(request, self.max_image_dim, self.max_image_bytes)
-        client = await self._get_client()
-        r = await client.post(
-            url,
-            json=body,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": self._provider.api_key,
-            },
-            timeout=120.0,
-        )
-        if 400 <= r.status_code < 500:
-            msg = r.text.lower()
-            if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
-                raise PromptTooLongError(r.text)
-            if r.status_code == 400:
-                raise ValueError(f"Google API 400: {r.text}")
-        r.raise_for_status()
-        resp = _parse_response(r.json(), self._profile.pricing)
-        logger.debug(
-            "API response: tokens=%d/%d, stop=%s",
-            resp.tokens.input_tokens,
-            resp.tokens.output_tokens,
-            resp.stop_reason,
-        )
-        return resp
+        return await self.stream(request, on_text=None, on_thinking=None)
 
     async def stream(
         self,
@@ -697,47 +673,6 @@ async def _consume_gemini_stream(
     )
 
 
-def _parse_response(data: MutableJSON, pricing: Pricing) -> ModelResponse:
-    """Convert Gemini's non-streaming response body to ModelResponse."""
-    candidates_raw = cast(list[MutableJSON], data.get("candidates") or [])
-    if not candidates_raw:
-        raise ValueError("Gemini response contains no candidates.")
-    candidate = candidates_raw[0]
-    content_obj = cast(MutableJSON, candidate.get("content") or {})
-    raw_parts = cast(list[MutableJSON], content_obj.get("parts") or [])
-
-    text_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    for part in raw_parts:
-        if "text" in part:
-            text_parts.append(str(part["text"]))
-        elif "functionCall" in part:
-            fc = cast(MutableJSON, part["functionCall"])
-            fc_name = str(fc.get("name") or "")
-            tc_id = f"call_{uuid.uuid4().hex[:24]}"
-            tool_calls.append(
-                ToolCall(
-                    id=tc_id,
-                    name=fc_name,
-                    args=cast(
-                        Mapping[str, object],
-                        cast(MutableJSON, fc.get("args") or {}),
-                    ),
-                )
-            )
-
-    finish_reason_raw = candidate.get("finishReason")
-    return _build_response(
-        text="".join(text_parts),
-        tool_calls=tool_calls,
-        usage=cast(MutableJSON, data.get("usageMetadata") or {}),
-        finish_reason=(
-            finish_reason_raw if isinstance(finish_reason_raw, str) else None
-        ),
-        pricing=pricing,
-    )
-
-
 def _build_response(
     *,
     text: str,
@@ -746,7 +681,7 @@ def _build_response(
     finish_reason: str | None,
     pricing: Pricing,
 ) -> ModelResponse:
-    """Shared ModelResponse construction for buffer + stream."""
+    """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
     input_tokens = int_val(usage.get("promptTokenCount"), 0)
     output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
     cache_read = int_val(usage.get("cachedContentTokenCount"), 0)

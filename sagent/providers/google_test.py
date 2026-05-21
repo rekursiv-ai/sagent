@@ -11,7 +11,7 @@ from sagent.lib.json import MutableJSON, MutableJSONValue
 from sagent.providers.google import (
     Google,
     _build_request,
-    _parse_response,
+    _build_response,
     _strip_additional_properties,
 )
 from sagent.types.exceptions import PromptTooLongError
@@ -159,120 +159,83 @@ def test_build_request_empty_user_emits_placeholder() -> None:
     assert parts == [{"text": ""}]
 
 
-def test_parse_response_text_only() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "candidates": [
-                {
-                    "content": {"parts": [{"text": "hello"}]},
-                    "finishReason": "STOP",
-                }
-            ],
-            "usageMetadata": {
-                "promptTokenCount": 10,
-                "candidatesTokenCount": 5,
-            },
-        },
+@pytest.mark.asyncio
+async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
+    """Stream consumer extracts text, function calls, finish reason."""
+    sse_body = (
+        b'data: {"candidates":[{"content":{"parts":[{"text":"calling"},'
+        b'{"functionCall":{"name":"Bash","args":{"cmd":"ls"}}}],'
+        b'"role":"model"},"finishReason":"STOP"}],'
+        b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}\n\n'
     )
 
-    resp = _parse_response(data, Pricing())
-    assert resp.message.text == "hello"
-    assert resp.stop_reason == "model_finished"
-    assert resp.tokens.input_tokens == 10
-    assert resp.tokens.output_tokens == 5
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
 
-
-def test_parse_response_function_call_extracted() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {"text": "calling"},
-                            {
-                                "functionCall": {
-                                    "name": "Bash",
-                                    "args": {"cmd": "ls"},
-                                }
-                            },
-                        ]
-                    },
-                    "finishReason": "STOP",
-                }
-            ],
-        },
-    )
-
-    resp = _parse_response(data, Pricing())
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert resp.message.text == "calling"
     assert len(resp.message.tool_calls) == 1
     tc = resp.message.tool_calls[0]
     assert tc.name == "Bash"
     assert dict(tc.args) == {"cmd": "ls"}
-    # Stop reason is STOP but tool calls present → upgraded.
+    # STOP + tool calls → upgraded to model_tool_use.
     assert resp.stop_reason == "model_tool_use"
-
-
-def test_parse_response_max_tokens_finish_reason() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "candidates": [
-                {
-                    "content": {"parts": [{"text": "trunc"}]},
-                    "finishReason": "MAX_TOKENS",
-                }
-            ],
-        },
-    )
-
-    resp = _parse_response(data, Pricing())
-    assert resp.stop_reason == "max_tokens"
-
-
-def test_parse_response_no_candidates_raises() -> None:
-
-    with pytest.raises(ValueError, match="no candidates"):
-        _parse_response(cast(MutableJSON, {"candidates": []}), Pricing())
-
-
-def test_parse_response_synthesized_message_id() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "candidates": [
-                {"content": {"parts": [{"text": "x"}]}, "finishReason": "STOP"},
-            ],
-        },
-    )
-
-    resp = _parse_response(data, Pricing())
+    assert resp.tokens.input_tokens == 10
+    assert resp.tokens.output_tokens == 5
     assert resp.message_id.startswith("gemini_")
-    # Same id used for request_id (Gemini has no separate header).
     assert resp.request_id == resp.message_id
 
 
-def test_parse_response_cache_read_tokens_split() -> None:
+@pytest.mark.asyncio
+async def test_google_stream_max_tokens_finish_reason() -> None:
+    """``MAX_TOKENS`` finish reason normalizes to ``max_tokens``."""
+    sse_body = (
+        b'data: {"candidates":[{"content":{"parts":[{"text":"trunc"}]},'
+        b'"finishReason":"MAX_TOKENS"}]}\n\n'
+    )
 
-    data = cast(
-        MutableJSON,
-        {
-            "candidates": [
-                {"content": {"parts": [{"text": ""}]}, "finishReason": "STOP"},
-            ],
-            "usageMetadata": {
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert resp.stop_reason == "max_tokens"
+
+
+def test_google_build_response_cache_tokens_split_input_cost() -> None:
+    """``cache_read`` is subtracted from input before the request-rate charge."""
+    pricing = Pricing(request=1.0, response=2.0, cache_read=0.5)
+    resp = _build_response(
+        text="",
+        tool_calls=[],
+        usage=cast(
+            MutableJSON,
+            {
                 "promptTokenCount": 1000,
                 "candidatesTokenCount": 100,
                 "cachedContentTokenCount": 300,
             },
-        },
+        ),
+        finish_reason="STOP",
+        pricing=pricing,
     )
-    pricing = Pricing(request=1.0, response=2.0, cache_read=0.5)
-    resp = _parse_response(data, pricing)
     assert resp.tokens.cache_read_tokens == 300
-    # (1000-300)*1 + 300*0.5 = 700 + 150 = 850 / 1M = 0.00085.
+    # (1000-300)*1 + 300*0.5 = 850 / 1M = 0.00085.
     assert resp.input_cost == pytest.approx(0.00085)
 
 
@@ -350,47 +313,7 @@ def test_google_model_text_token_estimate_floor_division() -> None:
 
 
 @pytest.mark.asyncio
-async def test_google_buffer_parses_via_mock_transport() -> None:
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "candidates": [
-                    {
-                        "content": {"parts": [{"text": "pong"}]},
-                        "finishReason": "STOP",
-                    }
-                ],
-                "usageMetadata": {
-                    "promptTokenCount": 1,
-                    "candidatesTokenCount": 1,
-                },
-            },
-        )
-
-    transport = httpx.MockTransport(handle)
-    p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
-    resp = await m.buffer(ModelRequest(messages=[UserMessage(text="ping")]))
-    assert resp.message.text == "pong"
-
-
-@pytest.mark.asyncio
-async def test_google_buffer_400_too_large_raises_prompt_too_long() -> None:
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="Input too large for model context.")
-
-    transport = httpx.MockTransport(handle)
-    p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
-    with pytest.raises(PromptTooLongError):
-        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
-
-
-@pytest.mark.asyncio
-async def test_google_buffer_413_too_large_raises_prompt_too_long() -> None:
+async def test_google_stream_413_too_large_raises_prompt_too_long() -> None:
     """Status code is not the signal: any 4xx with overflow body normalizes."""
 
     def handle(_request: httpx.Request) -> httpx.Response:
@@ -401,11 +324,11 @@ async def test_google_buffer_413_too_large_raises_prompt_too_long() -> None:
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
-        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 
 @pytest.mark.asyncio
-async def test_google_buffer_400_exceeds_maximum_normalizes() -> None:
+async def test_google_stream_400_exceeds_maximum_normalizes() -> None:
     """The ``exceeds the maximum`` substring is the canonical Gemini overflow phrase."""
 
     def handle(_request: httpx.Request) -> httpx.Response:
@@ -418,7 +341,7 @@ async def test_google_buffer_400_exceeds_maximum_normalizes() -> None:
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
-        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 
 @pytest.mark.asyncio
@@ -457,24 +380,7 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
 
 
 @pytest.mark.asyncio
-async def test_google_buffer_500_with_overflow_keyword_is_http_error_not_overflow() -> (
-    None
-):
-    """5xx server errors are infrastructure, never overflow."""
-
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="internal error: request context lost")
-
-    transport = httpx.MockTransport(handle)
-    p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
-    with pytest.raises(httpx.HTTPStatusError):
-        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
-
-
-@pytest.mark.asyncio
-async def test_google_buffer_400_other_raises_value_error() -> None:
+async def test_google_stream_400_other_raises_value_error() -> None:
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, text="malformed request body")
 
@@ -483,7 +389,7 @@ async def test_google_buffer_400_other_raises_value_error() -> None:
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
     with pytest.raises(ValueError, match="Google API 400"):
-        await m.buffer(ModelRequest(messages=[UserMessage(text="x")]))
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 
 class _StubTool:
