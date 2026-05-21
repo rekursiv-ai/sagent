@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from sagent.types.history import HistoryEntry
 from sagent.types.model import Model
+from sagent.types.runtime import CompactionResult
 from sagent.types.tools import Tool
 
 
@@ -67,7 +68,7 @@ class Compactor(Protocol):
         keep_recent: int | None = None,
         custom_instructions: str | None = None,
         summary_pointers: list[tuple[str, str]] | None = None,
-    ) -> list[HistoryEntry]:
+    ) -> CompactionResult | list[HistoryEntry]:
         """Summarize the conversation into a compact entry list.
 
         Args:
@@ -81,7 +82,7 @@ class Compactor(Protocol):
           summary_pointers: ``(path, topic)`` pairs to surface in the summary.
 
         Returns:
-          summary: Compacted history.
+          result: Compacted history plus optional fallback metadata.
 
         """
         ...

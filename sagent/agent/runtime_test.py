@@ -28,7 +28,10 @@ from sagent.types.runtime import (
     CohortComplete,
     CohortStarted,
     Compact,
+    CompactComplete,
     CompactFailed,
+    CompactFallback,
+    CompactionResult,
     Detach,
     DetachedResult,
     Halt,
@@ -1879,6 +1882,38 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
     assert len(failures) == 1
     assert isinstance(failures[0].exception, RuntimeError)
     assert str(failures[0].exception) == "compactor broke"
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_posts_compact_fallback_event() -> None:
+    """A safe fallback is its own runtime transition, not success text."""
+
+    class _Fallback:
+        async def compact(
+            self,
+            history: list[HistoryEntry],
+            model: object,
+            args: str = "",
+        ) -> CompactionResult:
+            del history, model, args
+            return CompactionResult(
+                summary=[UserMessage(text="[fallback]"), UserMessage(text="continue")],
+                fallback_reason="summary failed after 3 attempts",
+                preserved_tail_count=1,
+            )
+
+    agent, _ = make_agent([AssistantMessage(text="ok")])
+    agent.compactor = _Fallback()
+
+    await agent._compact_and_post("")
+
+    items = await agent.inbox.drain()
+    fallbacks = [i for i in items if isinstance(i, CompactFallback)]
+    completes = [i for i in items if isinstance(i, CompactComplete)]
+    assert len(fallbacks) == 1
+    assert fallbacks[0].fallback_reason == "summary failed after 3 attempts"
+    assert fallbacks[0].preserved_tail_count == 1
+    assert not completes
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ from sagent.types.runtime import (
     ChildEvent,
     CompactComplete,
     CompactFailed,
+    CompactFallback,
     CompactStarted,
     ModelResponseComplete,
     ModelResponseError,
@@ -138,6 +139,22 @@ def test_compact_failed_emits_error_dim_line() -> None:
     obs = make_render_observer(p)
     obs(CompactFailed(exception=RuntimeError("ctx full"), snapshot_len=10))
     assert p.dim_lines == ["[compaction failed: RuntimeError: ctx full]"]
+
+
+def test_compact_fallback_emits_progress_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(
+        CompactFallback(
+            summary=[UserMessage(text="tail")],
+            snapshot_len=10,
+            fallback_reason="summary failed after 3 attempts",
+            preserved_tail_count=1,
+        )
+    )
+    assert p.dim_lines == [
+        "[compaction fallback: summary failed after 3 attempts; preserved 1 tail entry]"
+    ]
 
 
 def test_user_message_with_empty_buffer() -> None:

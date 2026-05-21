@@ -34,7 +34,9 @@ __all__ = [
     "Compact",
     "CompactComplete",
     "CompactFailed",
+    "CompactFallback",
     "CompactStarted",
+    "CompactionResult",
     "Detach",
     "DetachedResult",
     "Halt",
@@ -325,6 +327,20 @@ class CompactStarted:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class CompactionResult:
+    """Compactor replacement history plus non-summary fallback metadata."""
+
+    summary: list[HistoryEntry]
+    """Replacement history produced by the compactor."""
+
+    fallback_reason: str = ""
+    """Why the compactor used fallback history instead of a summary."""
+
+    preserved_tail_count: int = 0
+    """Number of tail entries preserved verbatim in fallback mode."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CompactComplete:
     """Compaction finished; splice summary into history."""
 
@@ -334,6 +350,24 @@ class CompactComplete:
     snapshot_len: int
     """History length captured before compaction; entries appended after
     that index are preserved post-splice."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompactFallback:
+    """Compaction could not summarize but produced safe replacement history."""
+
+    summary: list[HistoryEntry]
+    """Fallback replacement history to splice into history."""
+
+    snapshot_len: int
+    """History length captured before compaction; entries appended after
+    that index are preserved post-splice."""
+
+    fallback_reason: str
+    """Why fallback history was used instead of a model-written summary."""
+
+    preserved_tail_count: int
+    """Number of tail entries preserved verbatim in the fallback."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -455,6 +489,7 @@ type RuntimeEvent = (
     | Recompact
     | CompactStarted
     | CompactComplete
+    | CompactFallback
     | CompactFailed
     | SaveSession
     | StatusChanged
