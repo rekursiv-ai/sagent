@@ -400,7 +400,11 @@ class OpenAICompatModel:
         return self._transform_body(body, request)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a non-streaming chat-completions request.
+        """Send a request via the streaming path with no callbacks.
+
+        The non-streaming POST has a fixed client timeout that fails
+        on large compaction prompts; the streaming path uses an idle-
+        based timeout that scales with response time.
 
         Args:
           request: Fully-built model request.
@@ -412,31 +416,7 @@ class OpenAICompatModel:
           PromptTooLongError: Server reports context overflow.
 
         """
-        body = self._build_body(request, stream=False)
-        client = await self._get_client()
-        r = await client.post(
-            self._endpoint,
-            json=body,
-            headers=self._headers,
-            timeout=120.0,
-        )
-        if 400 <= r.status_code < 500:
-            msg = r.text.lower()
-            if "context_length_exceeded" in msg or "too long" in msg:
-                raise PromptTooLongError(r.text)
-        r.raise_for_status()
-        resp = parse_response(
-            r.json(),
-            pricing=self._profile.pricing,
-            reasoning_field=self._reasoning_field,
-        )
-        logger.debug(
-            "API response: tokens=%d/%d, stop=%s",
-            resp.tokens.input_tokens,
-            resp.tokens.output_tokens,
-            resp.stop_reason,
-        )
-        return resp
+        return await self.stream(request, on_text=None, on_thinking=None)
 
     async def stream(
         self,
