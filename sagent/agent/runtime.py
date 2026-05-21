@@ -246,6 +246,8 @@ from sagent.types.runtime import (
     Compact,
     CompactComplete,
     CompactFailed,
+    CompactFallback,
+    CompactionResult,
     CompactStarted,
     Detach,
     DetachedResult,
@@ -292,6 +294,15 @@ def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
 def _item_names(items: Sequence[object]) -> tuple[str, ...]:
     """Return event class names for compact debug logging."""
     return tuple(type(item).__name__ for item in items)
+
+
+def normalize_compaction_result(
+    result: CompactionResult | list[HistoryEntry],
+) -> CompactionResult:
+    """Normalize legacy compactor outputs to first-class result metadata."""
+    if isinstance(result, CompactionResult):
+        return result
+    return CompactionResult(summary=result)
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -520,7 +531,7 @@ class Compactor(Protocol):
         history: list[HistoryEntry],
         model: Model,
         args: str = "",
-    ) -> list[HistoryEntry]:
+    ) -> CompactionResult | list[HistoryEntry]:
         """Summarize history into a shorter sequence.
 
         Args:
@@ -529,7 +540,7 @@ class Compactor(Protocol):
           args: Custom compaction instructions.
 
         Returns:
-          summary: Compacted history.
+          result: Compacted history plus optional fallback metadata.
 
         """
         ...
@@ -867,9 +878,12 @@ class AgentRuntime:
                             )
                             self.publish(CompactStarted())
 
-                        case CompactComplete(
-                            summary=summary,
-                            snapshot_len=n,
+                        case (
+                            CompactComplete(
+                                summary=summary,
+                                snapshot_len=n,
+                            )
+                            | CompactFallback(summary=summary, snapshot_len=n)
                         ):
                             self.compact_task = None
                             new_items = self.history[n:]
@@ -1542,14 +1556,29 @@ class AgentRuntime:
             return
         snapshot_len = len(self.history)
         try:
-            summary = await self.compactor.compact(
-                list(self.history),
-                self.model,
-                args,
+            result = normalize_compaction_result(
+                await self.compactor.compact(
+                    list(self.history),
+                    self.model,
+                    args,
+                )
             )
-            self.inbox.push_back(
-                CompactComplete(summary=summary, snapshot_len=snapshot_len),
-            )
+            if result.fallback_reason:
+                self.inbox.push_back(
+                    CompactFallback(
+                        summary=result.summary,
+                        snapshot_len=snapshot_len,
+                        fallback_reason=result.fallback_reason,
+                        preserved_tail_count=result.preserved_tail_count,
+                    ),
+                )
+            else:
+                self.inbox.push_back(
+                    CompactComplete(
+                        summary=result.summary,
+                        snapshot_len=snapshot_len,
+                    ),
+                )
         except asyncio.CancelledError:
             pass
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception

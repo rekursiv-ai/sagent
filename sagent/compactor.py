@@ -34,6 +34,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.model import Model, ModelRequest
+from sagent.types.runtime import CompactionResult
 from sagent.types.tools import Tool
 
 
@@ -203,7 +204,7 @@ class SummaryCompactor:
         keep_recent: int | None = None,
         custom_instructions: str | None = None,
         summary_pointers: list[tuple[str, str]] | None = None,
-    ) -> list[HistoryEntry]:
+    ) -> CompactionResult | list[HistoryEntry]:
         """Summarize ``history`` with a structured format.
 
         Args:
@@ -224,6 +225,8 @@ class SummaryCompactor:
         compact_model = self._model or model
         history = _strip_attachments(history)
         effective_keep = self._keep_recent if keep_recent is None else keep_recent
+        if direction == "from":
+            effective_keep = max(effective_keep, _trailing_user_tail_len(history))
 
         if effective_keep > 0 and len(history) > effective_keep:
             if direction == "from":
@@ -298,11 +301,18 @@ class SummaryCompactor:
 
         if summary_text is None:
             logger.warning("Compaction failed after %d attempts.", self._max_attempts)
-            return [
-                UserMessage(
-                    text="Compaction failed. Previous context lost. Start fresh.",
-                ),
-            ]
+            fallback = UserMessage(
+                text="Compaction failed. Previous context summarized on disk only.",
+            )
+            if direction == "from":
+                summary = [fallback, *to_keep]
+            else:
+                summary = [*to_keep, fallback]
+            return CompactionResult(
+                summary=summary,
+                fallback_reason=f"summary failed after {self._max_attempts} attempts",
+                preserved_tail_count=len(to_keep),
+            )
 
         raw = summary_text or "(compaction produced no output)"
         summary = _format_summary(raw)
@@ -322,8 +332,8 @@ class SummaryCompactor:
             ),
         )
         if direction == "from":
-            return [continuation, *to_keep]
-        return [*to_keep, continuation]
+            return CompactionResult(summary=[continuation, *to_keep])
+        return CompactionResult(summary=[*to_keep, continuation])
 
 
 def microcompact(
@@ -467,6 +477,16 @@ def _group_history_by_round(
     if current:
         groups.append(current)
     return groups
+
+
+def _trailing_user_tail_len(history: list[HistoryEntry]) -> int:
+    """Count consecutive user messages at the end of ``history``."""
+    count = 0
+    for entry in reversed(history):
+        if not isinstance(entry, UserMessage):
+            break
+        count += 1
+    return count
 
 
 def _safe_split(

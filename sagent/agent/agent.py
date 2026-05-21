@@ -732,7 +732,8 @@ class Agent:
 
         """
         await self._await_event(
-            types.runtime.Compact(args=args), types.runtime.CompactComplete
+            types.runtime.Compact(args=args),
+            (types.runtime.CompactComplete, types.runtime.CompactFallback),
         )
 
     async def recompact(self, args: str = "") -> None:
@@ -743,7 +744,8 @@ class Agent:
 
         """
         await self._await_event(
-            types.runtime.Recompact(args=args), types.runtime.CompactComplete
+            types.runtime.Recompact(args=args),
+            (types.runtime.CompactComplete, types.runtime.CompactFallback),
         )
 
     async def clear(self) -> None:
@@ -875,7 +877,8 @@ class Agent:
     async def _await_event(
         self,
         push: types.runtime.RuntimeEvent,
-        complete: type[types.runtime.RuntimeEvent],
+        complete: type[types.runtime.RuntimeEvent]
+        | tuple[type[types.runtime.RuntimeEvent], ...],
     ) -> None:
         """Push ``push`` and resolve when an event of ``complete`` type arrives."""
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -971,7 +974,12 @@ class Agent:
         elif isinstance(event, types.runtime.CompactStarted):
             self.activity.current_compact_start = asyncio.get_running_loop().time()
         elif isinstance(
-            event, (types.runtime.CompactComplete, types.runtime.CompactFailed)
+            event,
+            (
+                types.runtime.CompactComplete,
+                types.runtime.CompactFallback,
+                types.runtime.CompactFailed,
+            ),
         ):
             self.activity.current_compact_start = 0.0
 
@@ -1096,10 +1104,12 @@ class Agent:
         snapshot_len = len(self.runtime.history)
         self.publish(types.runtime.CompactStarted())
         try:
-            summary = await self._agent_compactor.compact(
-                list(self.runtime.history),
-                self._agent_model,
-                "",
+            result = agent_runtime.normalize_compaction_result(
+                await self._agent_compactor.compact(
+                    list(self.runtime.history),
+                    self._agent_model,
+                    "",
+                )
             )
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             types.exceptions.log_exception_or_warning(
@@ -1118,13 +1128,23 @@ class Agent:
             self.last_compact_error = exc
             return False
         self.runtime.history.clear()
-        self.runtime.history.extend(summary)
-        self.publish(
-            types.runtime.CompactComplete(
-                summary=summary,
-                snapshot_len=snapshot_len,
-            ),
-        )
+        self.runtime.history.extend(result.summary)
+        if result.fallback_reason:
+            self.publish(
+                types.runtime.CompactFallback(
+                    summary=result.summary,
+                    snapshot_len=snapshot_len,
+                    fallback_reason=result.fallback_reason,
+                    preserved_tail_count=result.preserved_tail_count,
+                ),
+            )
+        else:
+            self.publish(
+                types.runtime.CompactComplete(
+                    summary=result.summary,
+                    snapshot_len=snapshot_len,
+                ),
+            )
         self.last_compact_error = None
         return True
 
@@ -1597,7 +1617,7 @@ class _AgentCompactor:
         history: list[types.history.HistoryEntry],
         model: agent_runtime.Model,
         args: str = "",
-    ) -> list[types.history.HistoryEntry]:
+    ) -> types.runtime.CompactionResult | list[types.history.HistoryEntry]:
         """Run the rich compactor and apply post-compact enrichment.
 
         Args:
@@ -1619,15 +1639,18 @@ class _AgentCompactor:
         )
         if transcript_path is not None:
             write_pre_compact_transcript(transcript_path, history)
-        result = await self._inner.compact(
-            history=history,
-            model=self._agent.model,
-            transcript_path=transcript_path,
-            direction="from",
-            keep_recent=self._agent.budget.keep_recent_on_compact,
-            custom_instructions=args or None,
-            summary_pointers=self._agent.compaction_state.summary_pointers or None,
+        compaction_result = agent_runtime.normalize_compaction_result(
+            await self._inner.compact(
+                history=history,
+                model=self._agent.model,
+                transcript_path=transcript_path,
+                direction="from",
+                keep_recent=self._agent.budget.keep_recent_on_compact,
+                custom_instructions=args or None,
+                summary_pointers=self._agent.compaction_state.summary_pointers or None,
+            )
         )
+        result = compaction_result.summary
 
         # Post-compact enrich. ``compact_count`` is incremented AFTER so
         # ``pre_compact_{n}.jsonl`` and ``summary_{n}.md`` agree on ``n``.
@@ -1664,7 +1687,9 @@ class _AgentCompactor:
             result[-1], (types.history.UserMessage, types.history.ToolResult)
         ):
             result = [*result, types.history.UserMessage(text="[continuation]")]
-        return result
+        if result is compaction_result.summary:
+            return compaction_result
+        return dataclasses.replace(compaction_result, summary=result)
 
     def maintain(self, history: list[types.history.HistoryEntry]) -> None:
         """Forward microcompaction to the inner compactor.

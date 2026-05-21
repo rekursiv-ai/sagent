@@ -36,6 +36,7 @@ from sagent.types.runtime import (
     ChildEvent,
     CompactComplete,
     CompactFailed,
+    CompactFallback,
     CompactStarted,
     ModelResponseCancelled,
     ModelResponseComplete,
@@ -335,6 +336,15 @@ class RenderObserver:
                 self._flush_stream()
                 self._printer.write_dim_line(
                     f"[compaction failed: {type(exc).__name__}: {exc}]",
+                )
+            case CompactFallback(
+                fallback_reason=reason,
+                preserved_tail_count=count,
+            ):
+                self._flush_stream()
+                entry = "entry" if count == 1 else "entries"
+                self._printer.write_dim_line(
+                    f"[compaction fallback: {reason}; preserved {count} tail {entry}]",
                 )
             case _:
                 pass
