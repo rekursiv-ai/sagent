@@ -213,12 +213,15 @@ class AgentSpawn:
                 "notify_on_asleep": {
                     "type": "boolean",
                     "description": (
-                        "Persistent only. When true, the parent's"
-                        " inbox receives a UserMessage every time the"
-                        " child becomes idle (drained inbox, no work"
-                        " in flight). Lets the parent detect 'child"
-                        " has finished processing my message' without"
-                        " polling. Default false."
+                        "Persistent only. When true (the default),"
+                        " the parent's inbox receives a UserMessage"
+                        " carrying the child's last assistant text"
+                        " every time the child becomes idle (drained"
+                        " inbox, no work in flight) -- shape"
+                        " '[<label> is idle] <last text>'. Pass false"
+                        " to suppress idle pings entirely. Edge-"
+                        " triggered: one notification per idle"
+                        " transition."
                     ),
                 },
                 "label": {
@@ -360,7 +363,7 @@ class AgentSpawn:
         max_rounds = opt_int(args, "max_tool_call_rounds")
         max_depth = opt_int(args, "max_depth")
         persistent = bool_val(args.get("persistent"), False)
-        notify_on_asleep = bool_val(args.get("notify_on_asleep"), False)
+        notify_on_asleep = bool_val(args.get("notify_on_asleep"), True)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         parent_depth = get_tool_state().depth
@@ -482,7 +485,9 @@ class AgentSpawn:
                 child_errors.append(event.exception)
 
         try:
-            forwarder = _build_forwarder(label, self._verbosity, parent_agent)
+            forwarder = _build_forwarder(
+                label, self._verbosity, parent_agent, child=child
+            )
             child.runtime.observers.append(_capture_error)
             if forwarder is not None:
                 child.runtime.observers.append(forwarder)
@@ -519,7 +524,7 @@ class AgentSpawn:
         label: str,
         prompt: str,
         *,
-        notify_on_asleep: bool = False,
+        notify_on_asleep: bool = True,
     ) -> ToolResult:
         """Start a persistent child agent via ``serve_forever()``.
 
@@ -527,6 +532,11 @@ class AgentSpawn:
         forwarder as an observer, seeds the child's inbox with the prompt,
         spawns ``serve_forever`` as a visible bg job under
         ``parent._bg``. Returns immediately with the label.
+
+        Augments the child's system prompt with the persistent-agent IPC
+        rule so the child's LLM knows its plain assistant text is
+        invisible to the parent and that ``AgentSend(to=<parent>)`` is
+        the only reliable reply channel.
 
         Rejects duplicate labels: a persistent agent's label is its
         addressable identity for ``AgentSend``. Silently overwriting
@@ -547,16 +557,24 @@ class AgentSpawn:
                 ),
                 is_error=True,
             )
+        parent_agent = _current_agent()
+        parent_label = agent_label_var.get("") or (
+            parent_agent.name if parent_agent is not None else "parent"
+        )
         child._persistent = True  # noqa: SLF001 -- cross-layer flag
         child.name = label
+        child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the persistent IPC rule
+            child._system_spec,  # noqa: SLF001 -- see above
+            parent_label=parent_label,
+        )
         if self._session_root_dir is not None:
             child.session_dir = self._session_root_dir / label
         agent_registry[label] = child
-        parent_agent = _current_agent()
         forwarder = _build_forwarder(
             label,
             self._verbosity,
             parent_agent,
+            child=child,
             notify_on_asleep=notify_on_asleep,
         )
         if forwarder is not None:
@@ -605,9 +623,24 @@ class AgentSpawn:
             )
         if self.on_persistent_spawn is not None and external_queue is not None:
             self.on_persistent_spawn(label, external_queue)
+        if notify_on_asleep:
+            reply_path = (
+                f"Replies arrive in your inbox as '[from {label}]: ...'"
+                f" via AgentSend; when the child becomes idle you also"
+                f" receive '[{label} is idle] <last assistant text>'"
+                f" automatically. Set notify_on_asleep=false to suppress"
+                f" idle pings."
+            )
+        else:
+            reply_path = (
+                f"Replies arrive in your inbox as '[from {label}]: ...'"
+                f" via AgentSend. Idle pings are suppressed; if the"
+                f" child only emits plain assistant text you will not"
+                f" hear from it."
+            )
         return ToolResult(
             call_id="",
-            content=f"Persistent agent started: {label}",
+            content=f"Persistent agent started: {label}. {reply_path}",
         )
 
     def _inherit(self, name: str, parent_agent: _Agent | None) -> object:
@@ -877,6 +910,7 @@ class _ChildForwarder:
     """
 
     __slots__ = (
+        "_child",
         "_forward_set",
         "_label",
         "_notify_on_asleep",
@@ -888,12 +922,14 @@ class _ChildForwarder:
         self,
         *,
         parent_agent: _Agent,
+        child: _Agent,
         forward_set: frozenset[type],
         stats: ChildStats,
         label: str,
         notify_on_asleep: bool = False,
     ) -> None:
         self._parent_agent = parent_agent
+        self._child = child
         self._forward_set = forward_set
         self._stats = stats
         self._label = label
@@ -922,9 +958,18 @@ class _ChildForwarder:
             # layer. Edge-triggered upstream: AgentRuntime publishes
             # AgentIdle at most once per idle transition, so we get one
             # push per idle, not per round.
-            self._parent_agent.runtime.inbox.push_back(
-                UserMessage(text=f"[{self._label} is idle]"),
+            #
+            # Carry the child's last assistant text so a child that
+            # replied with plain assistant text instead of AgentSend
+            # still reaches the parent's model context. Without this,
+            # the persistent reply channel silently drops content.
+            last_text = _last_assistant_result(self._child.history).content
+            body = (
+                f"[{self._label} is idle] {last_text}"
+                if last_text
+                else f"[{self._label} is idle]"
             )
+            self._parent_agent.runtime.inbox.push_back(UserMessage(text=body))
             return
         if isinstance(event, ModelResponsePartial):
             self._stats.model_response_chars += len(event.text)
@@ -955,6 +1000,7 @@ def _build_forwarder(
     verbosity: int,
     parent_agent: _Agent | None,
     *,
+    child: _Agent,
     notify_on_asleep: bool = False,
 ) -> _ChildForwarder | None:
     """Construct a forwarder bound to ``parent_agent`` (or None when at root).
@@ -962,7 +1008,9 @@ def _build_forwarder(
     ``notify_on_asleep`` only takes effect when this forwarder is attached
     to a persistent child; non-persistent children complete inside one
     ``child.run()`` call and never publish AgentIdle while the parent is
-    waiting on the result.
+    waiting on the result. The ``child`` handle lets the forwarder read
+    ``child.history`` at idle time so the parent's inbox notification
+    can carry the child's last assistant text.
     """
     if parent_agent is None:
         return None
@@ -970,6 +1018,7 @@ def _build_forwarder(
     stats = ChildStats(label=label, start=time.monotonic())
     return _ChildForwarder(
         parent_agent=parent_agent,
+        child=child,
         forward_set=forward_set,
         stats=stats,
         label=label,
@@ -985,6 +1034,46 @@ def _last_assistant_result(
         if isinstance(m, AssistantMessage):
             return ToolResult(call_id="", content=m.text)
     return ToolResult(call_id="", content="")
+
+
+def _augment_system_for_persistent(
+    spec: SystemPromptArg,
+    *,
+    parent_label: str,
+) -> SystemPromptArg:
+    """Append the persistent-agent IPC rule to a system-prompt spec.
+
+    The persistent reply channel is asymmetric: a child's plain
+    assistant text is invisible to the parent's model. The only
+    reliable way for the child to talk back is to call
+    ``AgentSend(to=<parent label>)``. Telling the child this in its
+    system prompt closes the loop -- without it, the child's LLM
+    naturally responds with assistant text and gets ghosted.
+
+    Args:
+      spec: Existing system-prompt spec (string or zero-arg factory).
+      parent_label: Label of the spawning agent for the AgentSend
+          directive embedded in the rule.
+
+    Returns:
+      augmented: Spec of the same shape (string or factory) with the
+          IPC rule appended after a blank line.
+
+    """
+    rule = (
+        f"You are a persistent agent whose output is only known to"
+        f" your creator via AgentSend(to={parent_label!r}, ...). Any"
+        f" other output is invisible to the parent and unless you"
+        f" AgentSend them, they will be stuck indefinitely."
+    )
+    if isinstance(spec, str):
+        return f"{spec}\n\n{rule}" if spec else rule
+
+    def _composed() -> str:
+        base = spec()
+        return f"{base}\n\n{rule}" if base else rule
+
+    return _composed
 
 
 _logger = logging.getLogger(__name__)

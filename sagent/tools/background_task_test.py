@@ -365,7 +365,7 @@ async def test_foreground_reads_pre_existing_spliced_result() -> None:
                 task=task, tool_name="Dummy", queue_id="j", started=0.0
             ),
         )
-        agent.runtime.history.append(
+        agent.runtime.append_history(
             ToolResult(call_id="j", content="prior result"),
         )
         result = await t.run({"operation": "foreground", "id": "j"})

@@ -537,7 +537,7 @@ def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
     """Startup idle pulse must not mask a pending model-triggering turn."""
     queued_input = ["for later"]
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
-    runtime.history.append(UserMessage(text="answer this first"))
+    runtime.append_history(UserMessage(text="answer this first"))
     runtime.observers.append(make_queued_input_committer(runtime, queued_input))
 
     _publish_startup_idle_if_settled(runtime)
@@ -601,7 +601,9 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     await task
 
     assert queued_input == [], f"expected queued_input cleared, got {queued_input}"
-    queued_texts = [m.text for m in agent.history if isinstance(m, UserMessage)]
+    queued_texts = [
+        m.text for m in agent.context().messages if isinstance(m, UserMessage)
+    ]
     assert "elephant\n\nbanana\n\nchair" in queued_texts
 
 
@@ -722,7 +724,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         await wait_until(lambda: len(model.call_histories) >= 2)
         release_tool.set()
         await wait_until(
-            lambda: any(isinstance(m, ToolResult) for m in runtime.history)
+            lambda: any(isinstance(m, ToolResult) for m in runtime.context().messages)
         )
         runtime.inbox.push_back(Quit())
 
@@ -748,13 +750,13 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
     # the cohort got stubbed to background rather than blocking the gate).
     placeholders = [
         m
-        for m in runtime.history
+        for m in runtime.context().messages
         if isinstance(m, ToolResult) and m.content in {"[detached]", "completed late"}
     ]
     assert placeholders, (
         f"Expected the slow tool to be detached or eventually splice"
         f" 'completed late' into history; saw history:"
-        f" {[type(m).__name__ for m in runtime.history]}"
+        f" {[type(m).__name__ for m in runtime.context().messages]}"
     )
 
 

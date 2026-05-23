@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast, override
@@ -32,6 +32,28 @@ from sagent.agent.state import agent_registry
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
+from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+
+
+def _summary_override(
+    summary: list[types.history.HistoryEntry],
+    mint_ref: Callable[[], TapeRef],
+    *,
+    strategy: str = "summary",
+    fallback_reason: str = "",
+    preserved_tail_count: int = 0,
+) -> ContextOverride:
+    """Build a barrier override carrying ``summary`` as its payload."""
+    return ContextOverride(
+        ref=mint_ref(),
+        suppresses=(),
+        inject_after=None,
+        payload=tuple(summary),
+        strategy=strategy,
+        barrier=True,
+        fallback_reason=fallback_reason,
+        preserved_tail_count=preserved_tail_count,
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -190,6 +212,9 @@ def test_agent_register_and_cancel_background() -> None:
         a.cancel_background("job-1")
         assert "job-1" not in a.background
         _ = task.cancel()
+        # Drive the loop so the cancellation propagates; otherwise the
+        # ``Task`` is GC'd in pending state and CPython logs the warning.
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:
         loop.close()
 
@@ -197,11 +222,11 @@ def test_agent_register_and_cancel_background() -> None:
 def test_agent_microcompact_history_noop_without_compactor() -> None:
     a = _build_agent()
     msg = types.history.UserMessage(text="hi")
-    history: list[types.history.HistoryEntry] = [msg]
-    a.microcompact_history(history)
-    # No compactor wired -- history unchanged identity.
-    assert history == [msg]
-    assert history[0] is msg
+    a.runtime.append_history(msg)
+    a.microcompact_history()
+    # No compactor wired -- resolved context unchanged.
+    assert a.runtime.context().messages == [msg]
+    assert a.runtime.context().messages[0] is msg
 
 
 def test_agent_system_string_to_factory() -> None:
@@ -504,6 +529,9 @@ def test_background_merges_detached_and_explicit() -> None:
         assert merged["det-1"].kind == "detached"
         _ = det_task.cancel()
         _ = ex_task.cancel()
+        loop.run_until_complete(
+            asyncio.gather(det_task, ex_task, return_exceptions=True),
+        )
     finally:
         loop.close()
 
@@ -896,25 +924,27 @@ async def test_compact_awaits_compact_complete_event() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[summary]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
 
@@ -950,25 +980,27 @@ async def test_recompact_awaits_compact_complete_event() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[recompacted]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[recompacted]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
     drive_task = asyncio.create_task(a.serve_forever())
@@ -1089,7 +1121,7 @@ async def test_activity_current_compact_start_resets_on_compact_complete() -> No
     a = _build_agent()
     a.publish(types.runtime.CompactStarted())
     assert a.activity.current_compact_start > 0.0
-    a.publish(types.runtime.CompactComplete(summary=[], snapshot_len=0))
+    a.publish(types.runtime.CompactComplete(records=()))
     assert a.activity.current_compact_start == 0.0
 
 
@@ -1144,40 +1176,73 @@ class _MaintainStubCompactor:
 
     async def compact(
         self,
-        history: list[types.history.HistoryEntry],
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.history.HistoryEntry],
         model: object,
-        transcript_path: object = None,
-        direction: str = "from",
-        keep_recent: int | None = None,
+        mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
-        summary_pointers: object = None,
-    ) -> list[types.history.HistoryEntry]:
-        del model, transcript_path, direction, keep_recent
-        del custom_instructions, summary_pointers
-        return list(history)
+    ) -> ContextOverride:
+        del tape, model
+        del custom_instructions
+        return _summary_override(list(context), mint_ref)
 
     def maintain(
-        self, history: list[types.history.HistoryEntry], tools: object, **kwargs: object
-    ) -> None:
-        del tools, kwargs
-        self.maintained.append(list(history))
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.history.HistoryEntry],
+        tools: object,
+        mint_ref: Callable[[], TapeRef],
+    ) -> tuple[ContextOverride, ...]:
+        del tape, tools, mint_ref
+        self.maintained.append(list(context))
+        return ()
 
 
 def test_microcompact_history_forwards_to_compactor() -> None:
     compactor = _MaintainStubCompactor()
     a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
-    a.microcompact_history(history)
+    # Force the cache-warm gate open: a fresh ``CostTracker`` sets
+    # ``last_response_time = time.time()``, which would otherwise make
+    # the wrapper skip ``maintain()`` for the first hour.
+    a.cost_tracker.last_response_time = 0.0
+    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.microcompact_history()
     assert compactor.maintained, "maintain() should have been called"
+
+
+def test_microcompact_gate_skips_when_cache_warm() -> None:
+    """Microcompact must not run when the previous response was recent.
+
+    Regression: the C3 protocol change dropped the per-call
+    ``last_response_time`` kwarg that the legacy
+    ``_AgentCompactor.maintain`` threaded from ``cost_tracker``.
+    The inner compactor's gate read its own ``self._last_response_time``
+    (None when constructed with no callable) and always fell through,
+    so microcompact ran on every model send. The model then saw
+    ``{"_microcompacted": "..."}`` stubbed args every turn and began
+    mimicking the stub format -- emitting ``Read`` calls with empty
+    ``file_path``. Cache-warm gate prevents that by skipping
+    microcompact for any send within the gap window.
+    """
+    compactor = _MaintainStubCompactor()
+    a = Agent(model=StubModel(), tools=[], compactor=compactor)
+    # Default cost_tracker.last_response_time = time.time(), so any
+    # immediate call falls inside the gap window.
+    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.microcompact_history()
+    assert not compactor.maintained, (
+        f"maintain() must skip while cache is warm "
+        f"(prev response < gap_sec ago); called {len(compactor.maintained)} times"
+    )
 
 
 @pytest.mark.asyncio
 async def test_compact_now_no_compactor_is_noop() -> None:
     a = _build_agent()
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
     await a.compact_now()
     # History untouched: no compactor wired.
-    assert len(a.runtime.history) == 1
+    assert len(a.runtime.context().messages) == 1
 
 
 @pytest.mark.asyncio
@@ -1195,31 +1260,33 @@ async def test_compact_now_replaces_history_in_place() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[summary]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_ReplaceCompactor())
-    a.runtime.history.append(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.history.UserMessage(text="old"))
     await a.compact_now()
-    assert len(a.runtime.history) == 1
-    entry = a.runtime.history[0]
+    assert len(a.runtime.context().messages) == 1
+    entry = a.runtime.context().messages[0]
     assert isinstance(entry, types.history.UserMessage)
     assert entry.text == "[summary]"
 
@@ -1248,28 +1315,30 @@ async def test_compact_now_returns_true_on_success() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[summary]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.history.append(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.history.UserMessage(text="old"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -1298,28 +1367,28 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             raise RuntimeError("compaction blew up")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is False
 
@@ -1334,7 +1403,7 @@ async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
     "no compactor" path is intentional configuration, not a failure.
     """
     a = _build_agent()
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -1378,25 +1447,25 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             raise AssertionError("compact must not run when should_compact False")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_NeverCompactor())
     history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
@@ -1426,30 +1495,135 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             raise RuntimeError("compaction blew up")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_CompactBrokenButGatedTrue())
     history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is False
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> None:
+    """``compact_if_needed`` returns False without invoking compactor after N failures."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _AlwaysBroken:
+        call_count: int = 0
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref, custom_instructions
+            self.call_count += 1
+            raise RuntimeError("always broken")
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    compactor = _AlwaysBroken()
+    a = Agent(model=StubModel(), tools=[], compactor=compactor)
+    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+
+    # First 3 calls invoke the compactor and fail.
+    for _ in range(3):
+        progressed = await a.compact_if_needed(history, a.model)
+        assert progressed is False
+    assert compactor.call_count == 3
+    assert a.compaction_state.compact_failures == 3
+
+    # 4th call hits the circuit breaker -- compactor is NOT invoked.
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is False
+    assert compactor.call_count == 3, (
+        "circuit breaker should have short-circuited the 4th call"
+    )
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_resets_on_successful_compaction() -> None:
+    """A successful compaction zeroes ``compact_failures``."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _SuccessfulCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextOverride:
+            del tape, context, model, custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_SuccessfulCompactor())
+    # Pre-populate failure count -- simulating prior auto-failures.
+    a.compaction_state.compact_failures = 2
+    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is True
+    assert a.compaction_state.compact_failures == 0
 
 
 @pytest.mark.asyncio
@@ -1467,32 +1641,32 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             raise RuntimeError("compaction failed")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
     await a.compact_now()
     err = [
         e
-        for e in a.runtime.history
+        for e in a.runtime.context().messages
         if isinstance(e, types.history.UserMessage) and "[Compaction error:" in e.text
     ]
     assert len(err) == 1
@@ -1664,26 +1838,28 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
             compact_calls.append(1)
-            return [types.history.UserMessage(text="[compact]")]
+            return _summary_override(
+                [types.history.UserMessage(text="[compact]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     model = _OverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
@@ -1733,26 +1909,28 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
             order.append("compact")
-            return [types.history.UserMessage(text="[compact]")]
+            return _summary_override(
+                [types.history.UserMessage(text="[compact]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     @dataclass(slots=True, kw_only=True)
     class _RecordingModel:
@@ -1843,29 +2021,31 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[compact]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[compact]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     events: list[types.runtime.RuntimeEvent] = []
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.history.append(types.history.UserMessage(text="hi"))
+    a.runtime.append_history(types.history.UserMessage(text="hi"))
     a.runtime.observers.append(events.append)
 
     assert await a.compact_now() is True
@@ -1876,8 +2056,8 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
     ]
     complete = events[-1]
     assert isinstance(complete, types.runtime.CompactComplete)
-    assert complete.snapshot_len == 1
-    assert a.history == complete.summary
+    assert len(complete.records) == 1
+    assert a.history == list(complete.records[0].payload)
     assert a.activity.current_compact_start == 0.0
 
 
@@ -1914,26 +2094,26 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             self.calls += 1
             raise RuntimeError("compaction disconnected")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     model = StubModel()
     compactor = _BrokenProactiveCompactor()
@@ -1978,25 +2158,25 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             raise types.exceptions.PromptTooLongError("compactor saw overflow")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(
         model=_OverflowModel(overflow_count=0),
@@ -2042,26 +2222,28 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
             # Returns short summary; model keeps overflowing.
-            return [types.history.UserMessage(text="[compact]")]
+            return _summary_override(
+                [types.history.UserMessage(text="[compact]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     model = _OverflowModel(overflow_count=10)  # always overflow
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
@@ -2117,26 +2299,26 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref
+            del custom_instructions
             self.calls += 1
             raise RuntimeError("compaction blew up")
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     model = _OverflowModel(overflow_count=10)
     compactor = _BrokenCompactor()
@@ -2185,26 +2367,28 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
             compact_calls.append(1)
-            return [types.history.UserMessage(text="[compact]")]
+            return _summary_override(
+                [types.history.UserMessage(text="[compact]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     model = _RawOverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
@@ -2257,25 +2441,27 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.AssistantMessage(text="model said")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.AssistantMessage(text="model said")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     a = Agent(
         model=StubModel(),
@@ -2283,14 +2469,12 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
         compactor=_AssistantTerminatedCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
     await a.compact_now()
     # The continuation user-message terminator was appended.
-    last = a.runtime.history[-1]
+    last = a.runtime.context().messages[-1]
     assert isinstance(last, types.history.UserMessage)
     assert last.text == "[continuation]"
-    # Pre-compact transcript was written.
-    assert (tmp_path / "pre_compact_0.jsonl").exists()
 
 
 @pytest.mark.asyncio
@@ -2312,25 +2496,27 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
 
         async def compact(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             model: object,
-            transcript_path: object = None,
-            direction: str = "from",
-            keep_recent: int | None = None,
+            mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-            summary_pointers: object = None,
-        ) -> list[types.history.HistoryEntry]:
-            del history, model, transcript_path, direction, keep_recent
-            del custom_instructions, summary_pointers
-            return [types.history.UserMessage(text="[summary]")]
+        ) -> ContextOverride:
+            del tape, context, model
+            del custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
 
         def maintain(
             self,
-            history: list[types.history.HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
             tools: object,
-            **kwargs: object,
-        ) -> None:
-            del history, tools, kwargs
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     async def _boom(**kwargs: object) -> None:
         del kwargs
@@ -2342,7 +2528,7 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
         compactor=_OkCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.history.append(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.history.UserMessage(text="x"))
 
     monkeypatch.setattr("sagent.agent.agent.post_compact_enrich", _boom)
     await a.compact_now()
@@ -2350,7 +2536,7 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
     # Summary still survived; the enrich failure was swallowed.
     assert any(
         isinstance(e, types.history.UserMessage) and e.text == "[summary]"
-        for e in a.runtime.history
+        for e in a.runtime.context().messages
     )
 
 

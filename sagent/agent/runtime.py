@@ -223,14 +223,19 @@ import contextvars
 import dataclasses
 import logging
 
+# Engine consumes a subset of the types. No re-export shim -- callers
+# must import message types and event vocabulary from
+# ``sagent.types.history`` / ``sagent.types.runtime`` directly.
+from sagent.agent.context import (
+    InvalidContextError,
+    ResolvedContext,
+    resolve_context,
+    validate_context,
+)
 from sagent.types.exceptions import (
     log_exception_or_warning,
     log_task_exception,
 )
-
-# Engine consumes a subset of the types. No re-export shim -- callers
-# must import message types and event vocabulary from
-# ``sagent.types.history`` / ``sagent.types.runtime`` directly.
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
@@ -246,13 +251,10 @@ from sagent.types.runtime import (
     Compact,
     CompactComplete,
     CompactFailed,
-    CompactFallback,
-    CompactionResult,
     CompactStarted,
     Detach,
     DetachedResult,
     Halt,
-    HistoryEntryUpdated,
     Kill,
     ModelCallStarted,
     ModelIdle,
@@ -271,6 +273,13 @@ from sagent.types.runtime import (
     Undetach,
     UserQueuedMessage,
 )
+from sagent.types.tape import (
+    ContextClear,
+    ContextOverride,
+    HistoryRecord,
+    TapeRecord,
+    TapeRef,
+)
 
 
 # ``current_call_id_var`` is set by ``_run_tool_and_post`` before
@@ -286,6 +295,62 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_for_send(
+    entries: Sequence[HistoryEntry],
+) -> tuple[HistoryEntry, ...]:
+    """Return a wire-format-valid version of ``entries``.
+
+    Stronger than :func:`_insert_synth_trs_in_payload`: also drops
+    orphan ``ToolResult`` entries (no preceding ``AssistantMessage``
+    declaring the ``call_id``) and duplicate ``call_id`` entries.
+    Inserts synthetic ``[interrupted]`` ``ToolResult`` records for any
+    ``AssistantMessage.tool_calls`` id that lacks a matching
+    ``ToolResult`` before the next ``AssistantMessage`` or non-``TR``
+    entry.
+
+    Used by the runtime gate's rescue path when structural repair
+    can't pair tool_use / tool_result across overrides (e.g.
+    accumulated microcompact debt from a session predating the
+    cache-warm gate fix).
+
+    Idempotent.
+    """
+    out: list[HistoryEntry] = []
+    pending: list[str] = []
+    seen: set[str] = set()
+
+    def _flush_pending() -> None:
+        for cid in pending:
+            out.append(
+                ToolResult(
+                    call_id=cid,
+                    content="[interrupted]",
+                    is_error=True,
+                ),
+            )
+            seen.add(cid)
+        pending.clear()
+
+    for entry in entries:
+        if isinstance(entry, AssistantMessage):
+            _flush_pending()
+            out.append(entry)
+            pending.extend(tc.id for tc in entry.tool_calls)
+        elif isinstance(entry, ToolResult):
+            if entry.call_id in seen:
+                continue
+            if entry.call_id not in pending:
+                continue  # orphan: drop
+            out.append(entry)
+            pending.remove(entry.call_id)
+            seen.add(entry.call_id)
+        else:
+            _flush_pending()
+            out.append(entry)
+    _flush_pending()
+    return tuple(out)
+
+
 def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
     """Return class names for compact debug logging."""
     return tuple(t.__name__ for t in types)
@@ -294,15 +359,6 @@ def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
 def _item_names(items: Sequence[object]) -> tuple[str, ...]:
     """Return event class names for compact debug logging."""
     return tuple(type(item).__name__ for item in items)
-
-
-def normalize_compaction_result(
-    result: CompactionResult | list[HistoryEntry],
-) -> CompactionResult:
-    """Normalize legacy compactor outputs to first-class result metadata."""
-    if isinstance(result, CompactionResult):
-        return result
-    return CompactionResult(summary=result)
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -524,23 +580,57 @@ class Model(Protocol):
 
 
 class Compactor(Protocol):
-    """Minimal compactor interface."""
+    """Minimal compactor interface (tape-native).
+
+    Compactors emit a :class:`ContextOverride` that the runtime appends
+    to its tape. ``maintain()`` returns a tuple of microcompaction
+    overrides; an empty tuple means no maintenance was required. The
+    runtime supplies a ``mint_ref`` factory so the compactor can mint
+    fresh ``TapeRef`` values without seeing the rest of the runtime.
+    """
 
     async def compact(
         self,
-        history: list[HistoryEntry],
+        tape: Sequence[TapeRecord],
+        context: Sequence[HistoryEntry],
         model: Model,
+        mint_ref: Callable[[], TapeRef],
         args: str = "",
-    ) -> CompactionResult | list[HistoryEntry]:
-        """Summarize history into a shorter sequence.
+    ) -> ContextOverride:
+        """Produce a barrier override from the current tape/context.
 
         Args:
-          history: Full conversation history.
-          model: Model to use for summarization.
+          tape: Append-only session tape.
+          context: Resolved provider-facing context (resolver's
+              ``messages`` view of ``tape``).
+          model: Model used for summarization.
+          mint_ref: Factory returning fresh ``TapeRef`` values.
           args: Custom compaction instructions.
 
         Returns:
-          result: Compacted history plus optional fallback metadata.
+          override: Barrier ``ContextOverride`` with the summary payload.
+
+        """
+        ...
+
+    def maintain(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[HistoryEntry],
+        tools: dict[str, Tool],
+        mint_ref: Callable[[], TapeRef],
+    ) -> tuple[ContextOverride, ...]:
+        """Produce microcompaction overrides; empty tuple to skip.
+
+        Args:
+          tape: Append-only session tape.
+          context: Resolved provider-facing context.
+          tools: Tool registry; consulted for tool-specific trimming rules.
+          mint_ref: Factory returning fresh ``TapeRef`` values.
+
+        Returns:
+          overrides: Microcompaction overrides; empty when no maintenance
+              is required (cache-warm gate or no clearable entries).
 
         """
         ...
@@ -564,6 +654,7 @@ class AgentRuntime:
         system: str = "",
         tools: list[Tool] | None = None,
         compactor: Compactor | None = None,
+        session_id: str = "",
     ) -> None:
         self.model = model
         self.system = system
@@ -573,7 +664,17 @@ class AgentRuntime:
                 raise ValueError(f"Duplicate tool name: {t.name!r}")
             self.tools_map[t.name] = t
         self.compactor = compactor
-        self.history: list[HistoryEntry] = []
+        self.session_id = session_id
+        self.tape: list[TapeRecord] = []
+        self._next_ordinal: int = 0
+        self._cached_resolved: ResolvedContext | None = None
+        # ``_tape_by_ref`` enables O(1) ref -> record lookups used by
+        # detached-splice and coalesce site conversions. ``_placeholder_refs``
+        # / ``_parent_assistant_refs`` cache the call_id -> ref mappings the
+        # same sites need.
+        self._tape_by_ref: dict[TapeRef, TapeRecord] = {}
+        self._placeholder_refs: dict[str, TapeRef] = {}
+        self._parent_assistant_refs: dict[str, TapeRef] = {}
         self.inbox: GatedDeque[RuntimeEvent] = GatedDeque()
         # Task[None]: tools post results to inbox, not via return value.
         self.detached: dict[str, asyncio.Task[None]] = {}
@@ -670,6 +771,224 @@ class AgentRuntime:
                 obs(event)
             except Exception:
                 logger.exception("observer raised on %s", type(event).__name__)
+
+    def context(self) -> ResolvedContext:
+        """Return the provider-facing context resolved from the tape.
+
+        Memoized against ``len(self.tape)`` so repeated calls within one
+        gate iteration walk the tape once.
+
+        Returns:
+          resolved: Resolved messages, origins, slot anchors, version,
+              and a discontinuity flag (always ``False`` here; send-path
+              callers pass their own ``prior`` to :func:`resolve_context`
+              when they need it).
+
+        """
+        if self._cached_resolved is None or self._cached_resolved.version != len(
+            self.tape
+        ):
+            self._cached_resolved = resolve_context(self.tape)
+        return self._cached_resolved
+
+    def append_history(self, entry: HistoryEntry) -> TapeRef:
+        """Append a ``HistoryRecord`` for ``entry`` to the tape.
+
+        Args:
+          entry: Provider-facing message to record.
+
+        Returns:
+          ref: ``TapeRef`` minted for the new record.
+
+        """
+        ref = self.mint_ref()
+        record = HistoryRecord(ref=ref, entry=entry)
+        self.tape.append(record)
+        self._cached_resolved = None
+        self._index_record(record)
+        return ref
+
+    def append_override(
+        self,
+        *,
+        suppresses: tuple[TapeRef, ...] = (),
+        inject_after: TapeRef | None = None,
+        payload: tuple[HistoryEntry, ...] = (),
+        strategy: str = "",
+        barrier: bool = False,
+        token_before: int = 0,
+        token_after: int = 0,
+        fallback_reason: str = "",
+        preserved_tail_count: int = 0,
+        paired_externally: frozenset[str] = frozenset(),
+    ) -> TapeRef:
+        """Append a ``ContextOverride`` to the tape.
+
+        Args:
+          suppresses: Earlier refs hidden when this override is visible.
+          inject_after: Anchor ref whose visible record the payload renders
+              after; ``None`` injects at the head of the visible slice.
+          payload: Provider-facing messages this override injects.
+          strategy: Name of the producing strategy.
+          barrier: When true, stops the resolver walk.
+          token_before: Token count of the suppressed slice (best-effort).
+          token_after: Token count of the injected payload (best-effort).
+          fallback_reason: Reason the producer fell back to non-summary
+              payload, if any.
+          preserved_tail_count: Number of tail entries preserved verbatim
+              in fallback mode.
+          paired_externally: Call ids whose pair lives outside this
+              payload (typically a ``HistoryRecord`` or a sibling
+              override).
+
+        Returns:
+          ref: ``TapeRef`` minted for the new override.
+
+        """
+        ref = self.mint_ref()
+        record = ContextOverride(
+            ref=ref,
+            suppresses=suppresses,
+            inject_after=inject_after,
+            payload=payload,
+            strategy=strategy,
+            barrier=barrier,
+            token_before=token_before,
+            token_after=token_after,
+            fallback_reason=fallback_reason,
+            preserved_tail_count=preserved_tail_count,
+            paired_externally=paired_externally,
+        )
+        self.tape.append(record)
+        self._cached_resolved = None
+        self._tape_by_ref[ref] = record
+        return ref
+
+    def append_clear(self) -> TapeRef:
+        """Append a ``ContextClear`` (barrier) to the tape.
+
+        Returns:
+          ref: ``TapeRef`` minted for the clear record.
+
+        """
+        ref = self.mint_ref()
+        record = ContextClear(ref=ref)
+        self.tape.append(record)
+        self._cached_resolved = None
+        self._tape_by_ref[ref] = record
+        self._placeholder_refs.clear()
+        self._parent_assistant_refs.clear()
+        return ref
+
+    def replay_tape(self, records: Sequence[TapeRecord]) -> None:
+        """Bulk-append pre-built tape records and advance the ordinal cursor.
+
+        Used by session resume to load persisted tape records while
+        preserving their original ``TapeRef`` identities. New appends
+        continue from ``max(record.ref.ordinal) + 1``.
+
+        Args:
+          records: Records to append in their existing order.
+
+        """
+        if not records:
+            return
+        self.tape.extend(records)
+        self._next_ordinal = max(r.ref.ordinal for r in records) + 1
+        self._cached_resolved = None
+        for record in records:
+            self._index_record(record)
+
+    def mint_ref(self) -> TapeRef:
+        """Mint the next ``TapeRef`` and advance the ordinal counter.
+
+        Used by compactors that build ``ContextOverride`` instances
+        directly. The runtime is the sole appender; minting separately
+        lets the compactor stamp records without seeing the runtime.
+
+        Returns:
+          ref: Freshly minted ``TapeRef`` tagged with this runtime's
+              ``session_id``.
+
+        """
+        ref = TapeRef(session_id=self.session_id, ordinal=self._next_ordinal)
+        self._next_ordinal += 1
+        return ref
+
+    def adopt_record(self, record: TapeRecord) -> None:
+        """Append a pre-built tape record (with a runtime-minted ref).
+
+        Used by compactors that build ``ContextOverride`` instances
+        directly via ``mint_ref()``. The runtime updates its side
+        tables (cache invalidation, ref index, call_id anchors) and
+        appends the record to the tape.
+
+        Args:
+          record: Pre-built tape record whose ``ref`` was minted via
+              :meth:`mint_ref` on this runtime.
+
+        """
+        self.tape.append(record)
+        self._cached_resolved = None
+        self._index_record(record)
+
+    def _index_record(self, record: TapeRecord) -> None:
+        """Cache ref->record and call_id->anchor mappings after append."""
+        self._tape_by_ref[record.ref] = record
+        if isinstance(record, HistoryRecord):
+            entry = record.entry
+            if isinstance(entry, AssistantMessage):
+                for tc in entry.tool_calls:
+                    self._parent_assistant_refs[tc.id] = record.ref
+            elif isinstance(entry, ToolResult):
+                self._placeholder_refs[entry.call_id] = record.ref
+
+    def _splice_detached_result(
+        self,
+        call_id: str,
+        content: str,
+        is_error: bool,
+    ) -> ToolResult | None:
+        """Replace a placeholder ``ToolResult`` with the real detached result.
+
+        Appends an override that suppresses the placeholder and injects
+        the real ``ToolResult`` at the parent assistant's anchor, keeping
+        provider-valid tool_use/tool_result pairing.
+
+        Args:
+          call_id: Tool-call id whose placeholder should be replaced.
+          content: Real result text.
+          is_error: True when the underlying tool signalled failure.
+
+        Returns:
+          spliced: The injected ``ToolResult`` instance, or ``None`` when
+              no placeholder survives in the resolved context (e.g. a
+              compaction barrier hid it before the result arrived).
+
+        """
+        placeholder_ref = self._placeholder_refs.get(call_id)
+        parent_ref = self._parent_assistant_refs.get(call_id)
+        if placeholder_ref is None or parent_ref is None:
+            return None
+        placeholder_record = self._tape_by_ref.get(placeholder_ref)
+        if not isinstance(placeholder_record, HistoryRecord):
+            return None
+        prior = placeholder_record.entry
+        if not isinstance(prior, ToolResult):
+            return None
+        real = dataclasses.replace(prior, content=content, is_error=is_error)
+        self.append_override(
+            suppresses=(placeholder_ref,),
+            inject_after=parent_ref,
+            payload=(real,),
+            strategy="detached_splice",
+            paired_externally=frozenset({call_id}),
+        )
+        # Keep the call_id -> placeholder mapping pointing at the original
+        # record; a second splice for the same call_id should still find
+        # and suppress the same placeholder. The override's ref is not
+        # an anchor candidate, so we don't reindex it.
+        return real
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
@@ -770,7 +1089,7 @@ class AgentRuntime:
                             self._pending_detached_user.clear()
                             queued.clear()
                             self._mid_stream_queue.clear()
-                            self.history.clear()
+                            self.append_clear()
                             self.inbox.push_front(
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
@@ -900,18 +1219,11 @@ class AgentRuntime:
                             )
                             self.publish(CompactStarted())
 
-                        case (
-                            CompactComplete(
-                                summary=summary,
-                                snapshot_len=n,
-                            )
-                            | CompactFallback(summary=summary, snapshot_len=n)
-                        ):
+                        case CompactComplete():
+                            # The compaction task already appended its
+                            # override(s) to the tape; this handler just
+                            # clears bookkeeping and republishes.
                             self.compact_task = None
-                            new_items = self.history[n:]
-                            self.history.clear()
-                            self.history.extend(summary)
-                            self.history.extend(new_items)
                             self.publish(item)
 
                         case CompactFailed(exception=exc):
@@ -970,7 +1282,7 @@ class AgentRuntime:
 
                         case ModelResponseComplete(message=msg):
                             self.model_call = None
-                            self.history.append(msg)
+                            self.append_history(msg)
                             self.publish(item)
                             if self._mid_stream_queue:
                                 # User typed mid-stream. Cut their content in
@@ -983,7 +1295,7 @@ class AgentRuntime:
                                 # this round did not idle (a follow-up is
                                 # about to fire) and no cohort gates the model.
                                 for tc in msg.tool_calls:
-                                    self.history.append(
+                                    self.append_history(
                                         ToolResult(
                                             call_id=tc.id,
                                             parent_id=msg.id,
@@ -1041,7 +1353,7 @@ class AgentRuntime:
                         case ToolResult(call_id=cid) if cid in self.cohort:
                             self.cohort.discard(cid)
                             self.running_tools.pop(cid, None)
-                            self.history.append(item)
+                            self.append_history(item)
                             self.publish(item)
 
                         case ToolResult(call_id=cid) if cid in self.detached:
@@ -1059,47 +1371,27 @@ class AgentRuntime:
                             # the real content into the placeholder exactly
                             # like ``DetachedResult`` does.
                             del self.detached[cid]
-                            for i, prior in enumerate(self.history):
-                                if (
-                                    isinstance(prior, ToolResult)
-                                    and prior.call_id == cid
-                                ):
-                                    self.history[i] = dataclasses.replace(
-                                        prior,
-                                        content=item.content,
-                                        is_error=item.is_error,
-                                    )
-                                    self.publish(
-                                        HistoryEntryUpdated(entry=self.history[i]),
-                                    )
-                                    break
+                            self._splice_detached_result(
+                                cid,
+                                item.content,
+                                item.is_error,
+                            )
                             self.publish(item)
 
                         case DetachedResult():
                             self.cohort.discard(item.call_id)
-                            # Splice into the existing placeholder so the
-                            # model sees the real result in the slot it
-                            # already expects, without duplicating the
-                            # full content into a phantom user message.
-                            # Both ``[detached]`` (preempt) and ``[Running
-                            # in background: ...]`` (explicit-bg)
-                            # placeholders match by ``call_id``.
-                            spliced = False
-                            for i, prior in enumerate(self.history):
-                                if (
-                                    isinstance(prior, ToolResult)
-                                    and prior.call_id == item.call_id
-                                ):
-                                    self.history[i] = dataclasses.replace(
-                                        prior,
-                                        content=item.content,
-                                        is_error=item.is_error,
-                                    )
-                                    self.publish(
-                                        HistoryEntryUpdated(entry=self.history[i]),
-                                    )
-                                    spliced = True
-                                    break
+                            # Splice the real result into the placeholder's
+                            # slot via a tape override so the model sees
+                            # the real result where it already expects one.
+                            # ``[detached]`` (preempt) and ``[Running in
+                            # background: ...]`` (explicit-bg) placeholders
+                            # both match by ``call_id``.
+                            spliced_entry = self._splice_detached_result(
+                                item.call_id,
+                                item.content,
+                                item.is_error,
+                            )
+                            spliced = spliced_entry is not None
                             if not spliced:
                                 # No placeholder to splice into (rare:
                                 # ``Clear`` / ``Compact`` wiped it before
@@ -1122,7 +1414,9 @@ class AgentRuntime:
                                 else:
                                     self._append_or_coalesce_user(fallback)
                             elif (
-                                isinstance(self.history[-1], AssistantMessage)
+                                isinstance(
+                                    self.context().messages[-1], AssistantMessage
+                                )
                                 and not self.cohort
                             ):
                                 # Splice landed after the preempted round
@@ -1143,7 +1437,7 @@ class AgentRuntime:
                                 # ``CohortComplete`` will wake the model
                                 # with the spliced content already
                                 # visible in its proper slot.
-                                self.history.append(
+                                self.append_history(
                                     UserMessage(
                                         text=(
                                             f"[Detached tool {item.call_id} completed]"
@@ -1254,7 +1548,7 @@ class AgentRuntime:
                 ):
                     logger.debug(
                         "runtime model call start: history=%d detached=%d queued=%d",
-                        len(self.history),
+                        len(self.context().messages),
                         len(self.detached),
                         len(queued),
                     )
@@ -1295,7 +1589,7 @@ class AgentRuntime:
         self.inbox.push_back(msg)
 
         done = asyncio.Event()
-        turns_before = len(self.history)
+        tape_cursor = len(self.tape)
 
         def _watch(event: RuntimeEvent) -> None:
             if isinstance(event, ModelIdle):
@@ -1312,7 +1606,9 @@ class AgentRuntime:
         with contextlib.suppress(asyncio.CancelledError):
             await task
         self.observers.remove(_watch)
-        return self.history[turns_before:]
+        return [
+            r.entry for r in self.tape[tape_cursor:] if isinstance(r, HistoryRecord)
+        ]
 
     def pending_mid_stream(self) -> Sequence[UserMessage]:
         """Snapshot of mid-stream ``UserMessage`` items awaiting drain.
@@ -1332,41 +1628,166 @@ class AgentRuntime:
 
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""
-        if not self.history:
+        messages = self.context().messages
+        if not messages:
             return False
-        return isinstance(self.history[-1], (UserMessage, ToolResult))
+        return isinstance(messages[-1], (UserMessage, ToolResult))
 
     def _assert_alternation_invariant(self) -> None:
-        """Raise if any ``UserMessage`` falls between an assistant ``tool_use``
-        and its matching ``ToolResult``.
+        """Repair HR-level orphans, validate; rescue if still broken.
 
-        The Anthropic API (and OpenAI's tool-call protocol) requires
-        every ``tool_use`` block to be paired with a ``tool_result``
-        block in the immediately-following message. A ``UserMessage``
-        between them causes HTTP 400 (``tool_use ids were found
-        without tool_result blocks immediately after``).
+        The model-call gate's last guard before firing the provider:
 
-        The invariant is normally maintained by the append helpers
-        (``_append_or_coalesce_user``, ``_stop_tool`` placeholder
-        pairing, ``_pending_detached_user`` deferral). This is a
-        defense-in-depth check at the model-call gate: any future code
-        path that mutates ``self.history`` and violates the invariant
-        crashes here with a stack trace pointing at the violating
-        index, rather than silently producing wire-format that the API
-        rejects mid-session.
+        1. Repair HistoryRecord-level orphans
+           (:meth:`_repair_history_record_orphans`): pair unmatched
+           ``tool_use`` ids with synthetic ``[interrupted]``
+           ``ToolResult`` records; suppress orphan ``ToolResult`` from
+           a ``HistoryRecord`` origin.
+        2. If validation still fails -- typically a legacy session
+           reconstructed via :meth:`ContextOverride.replay` with
+           invalid payloads predating the construct-time invariant --
+           rescue: append a single barrier override that suppresses
+           every visible tape ref and re-injects a fully sanitized
+           payload. Structural attribution is lost for the rescued
+           section but the session stays live.
+
+        Forward producers can no longer emit overrides with invalid
+        payloads (the validator in
+        :meth:`ContextOverride.__post_init__` rejects them at
+        construct), so phase 1 of the prior implementation has been
+        deleted.
+
+        Raises:
+          InvalidContextError: When even the rescue path can't produce
+              a wire-format-valid context (should not happen in
+              practice; rescue's sanitizer is total).
+
         """
-        pending: set[str] = set()
-        for idx, entry in enumerate(self.history):
+        self._repair_history_record_orphans()
+        try:
+            validate_context(self.context().messages)
+            return
+        except InvalidContextError as exc:
+            logger.warning(
+                "context invariant still violated after HR-level repair; "
+                "applying rescue barrier: %s",
+                exc,
+            )
+        self._rescue_context()
+        validate_context(self.context().messages)
+
+    def _rescue_context(self) -> None:
+        """Append a barrier override carrying a fully sanitized payload.
+
+        Last-resort repair, primarily for legacy sessions whose
+        :meth:`ContextOverride.replay` reconstructions carry payloads
+        the construct-time invariant would reject. Suppresses every
+        currently-visible tape ref and re-injects the result of
+        :func:`_sanitize_for_send` over the current resolved messages.
+        Structural attribution is lost for the rescued section but the
+        resolved view is guaranteed wire-format-valid by construction.
+
+        The synthesized override declares every preserved ``call_id``
+        as ``paired_externally`` so the payload validator accepts it
+        even when the sanitized sequence contains tool_use/tool_result
+        across positions the local in-payload check would flag.
+        """
+        resolved = self.context()
+        sanitized = _sanitize_for_send(resolved.messages)
+        suppresses = tuple(set(resolved.origins))
+        paired_externally = frozenset(
+            m.call_id for m in sanitized if isinstance(m, ToolResult)
+        )
+        self.append_override(
+            suppresses=suppresses,
+            inject_after=None,
+            payload=sanitized,
+            strategy="context_rescue",
+            barrier=True,
+            paired_externally=paired_externally,
+        )
+
+    def _repair_history_record_orphans(self) -> None:
+        """Pair / drop HistoryRecord-origin orphans in the resolved context.
+
+        For each ``AssistantMessage`` with unpaired ``tool_calls`` from
+        a ``HistoryRecord`` origin, append an override injecting synth
+        ``[interrupted]`` ``ToolResult`` records in its slot suffix.
+        For each orphan ``ToolResult`` from a ``HistoryRecord`` origin,
+        append a suppression override.
+
+        Overrides from forward producers carry ``paired_externally``
+        declarations covering their own payload pairing, so anything
+        the resolver flags as orphan after this method runs originates
+        either in a legacy ``replay()`` payload (handled by rescue) or
+        in a producer bug (which the construct-time validator should
+        have caught). Idempotent: a second call on a repaired context
+        is a no-op.
+        """
+        resolved = self.context()
+        messages = resolved.messages
+        origins = resolved.origins
+        unmatched_per_am: list[tuple[TapeRef | None, list[str]]] = []
+        pending: dict[str, int] = {}
+        am_repair_anchor: TapeRef | None = None
+        seen_results: set[str] = set()
+        hr_orphan_refs: list[TapeRef] = []
+
+        def _flush_pending() -> None:
+            if pending:
+                unmatched_per_am.append((am_repair_anchor, list(pending)))
+            pending.clear()
+
+        for idx, entry in enumerate(messages):
+            origin = origins[idx]
+            origin_record = self._tape_by_ref.get(origin)
+            origin_is_hr = isinstance(origin_record, HistoryRecord)
             if isinstance(entry, AssistantMessage):
-                pending = {tc.id for tc in entry.tool_calls}
+                _flush_pending()
+                am_repair_anchor = origin if origin_is_hr else None
+                pending.update({tc.id: idx for tc in entry.tool_calls})
             elif isinstance(entry, ToolResult):
-                pending.discard(entry.call_id)
-            elif pending:
-                raise RuntimeError(
-                    f"alternation invariant violated at history[{idx}]: "
-                    f"{type(entry).__name__} interleaved between assistant "
-                    f"tool_use {pending!r} and its ToolResult"
+                if entry.call_id in seen_results or entry.call_id not in pending:
+                    if origin_is_hr:
+                        hr_orphan_refs.append(origin)
+                    # Non-HR orphans get cleared by the rescue path.
+                    continue
+                del pending[entry.call_id]
+                seen_results.add(entry.call_id)
+            else:
+                _flush_pending()
+                am_repair_anchor = None
+        _flush_pending()
+
+        for anchor, missing_ids in unmatched_per_am:
+            if anchor is None:
+                # Origin is an override; producer was supposed to
+                # declare ``paired_externally``. Rescue handles it.
+                continue
+            payload = tuple(
+                ToolResult(
+                    call_id=cid,
+                    content="[interrupted]",
+                    is_error=True,
                 )
+                for cid in missing_ids
+            )
+            # The synth TRs have no matching AM in their payload; the
+            # matching AMs live in the ``HistoryRecord`` at ``anchor``.
+            self.append_override(
+                suppresses=(),
+                inject_after=anchor,
+                payload=payload,
+                strategy="orphan_tool_use_repair",
+                paired_externally=frozenset(missing_ids),
+            )
+        if hr_orphan_refs:
+            self.append_override(
+                suppresses=tuple(hr_orphan_refs),
+                inject_after=None,
+                payload=(),
+                strategy="orphan_tool_result_repair",
+            )
 
     def _append_or_coalesce_user(self, item: UserMessage) -> None:
         r"""Append ``item`` to history; coalesce with tail if also ``UserMessage``.
@@ -1398,15 +1819,33 @@ class AgentRuntime:
         concatenate in arrival order. The tail entry's ``id`` is
         preserved so downstream consumers keyed on ids remain stable.
         """
-        if self.history and isinstance(self.history[-1], UserMessage):
-            tail = self.history[-1]
-            self.history[-1] = dataclasses.replace(
-                tail,
-                text=f"{tail.text}\n\n{item.text}",
-                attachments=tail.attachments + item.attachments,
-            )
+        resolved = self.context()
+        messages = resolved.messages
+        if not messages or not isinstance(messages[-1], UserMessage):
+            self.append_history(item)
+            return
+        tail = messages[-1]
+        combined = dataclasses.replace(
+            tail,
+            text=f"{tail.text}\n\n{item.text}",
+            attachments=tail.attachments + item.attachments,
+        )
+        tail_origin = resolved.origins[-1]
+        anchor = resolved.slot_anchors[-1]
+        prior_record = self._tape_by_ref.get(tail_origin)
+        if isinstance(prior_record, ContextOverride):
+            # Stacking a coalesce on a prior coalesce: subsume the prior
+            # override's suppression set so previously-hidden records do
+            # not re-emerge once the prior override is itself hidden.
+            suppresses: tuple[TapeRef, ...] = (tail_origin, *prior_record.suppresses)
         else:
-            self.history.append(item)
+            suppresses = (tail_origin,)
+        self.append_override(
+            suppresses=suppresses,
+            inject_after=anchor,
+            payload=(combined,),
+            strategy="user_coalesce",
+        )
 
     def _stop_tool(
         self,
@@ -1432,7 +1871,7 @@ class AgentRuntime:
         placeholder, is_error = (
             ("[cancelled]", True) if mode == "kill" else ("[detached]", False)
         )
-        self.history.append(
+        self.append_history(
             ToolResult(call_id=cid, content=placeholder, is_error=is_error),
         )
         self.detached[cid] = task
@@ -1464,7 +1903,7 @@ class AgentRuntime:
         Returns:
           appended: The coalesced ``UserMessage`` (so callers can publish
               it) when the buffer was non-empty; ``None`` otherwise.
-              ``self.history`` is mutated in place.
+              The tape is mutated via ``_append_or_coalesce_user``.
 
         """
         if not self._mid_stream_queue:
@@ -1505,7 +1944,7 @@ class AgentRuntime:
 
         try:
             response = await self.model.stream(
-                self.history,
+                self.context().messages,
                 self.system,
                 list(self.tools_map.values()),
                 on_text,
@@ -1636,38 +2075,37 @@ class AgentRuntime:
             self.inbox.push_back(result)
 
     async def _compact_and_post(self, args: str) -> None:
-        """Run compaction and post the result."""
+        """Run compaction; the compactor's overrides land in the tape.
+
+        The compactor returns one :class:`ContextOverride` whose ref
+        was minted via the ``mint_ref`` factory the runtime provided.
+        The runtime is the sole appender: it stores the returned
+        override on the tape and publishes ``CompactComplete``.
+        """
         if self.compactor is None:
             return
-        snapshot_len = len(self.history)
+        tape_len = len(self.tape)
         try:
-            result = normalize_compaction_result(
-                await self.compactor.compact(
-                    list(self.history),
-                    self.model,
-                    args,
-                )
+            override = await self.compactor.compact(
+                self.tape,
+                self.context().messages,
+                self.model,
+                self.mint_ref,
+                args,
             )
-            if result.fallback_reason:
-                self.inbox.push_back(
-                    CompactFallback(
-                        summary=result.summary,
-                        snapshot_len=snapshot_len,
-                        fallback_reason=result.fallback_reason,
-                        preserved_tail_count=result.preserved_tail_count,
-                    ),
-                )
-            else:
-                self.inbox.push_back(
-                    CompactComplete(
-                        summary=result.summary,
-                        snapshot_len=snapshot_len,
-                    ),
-                )
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             log_exception_or_warning(logger, "compaction failed", exc)
             self.inbox.push_back(
-                CompactFailed(exception=exc, snapshot_len=snapshot_len),
+                CompactFailed(exception=exc, tape_len=tape_len),
             )
+            return
+        self.adopt_record(override)
+        self.inbox.push_back(
+            CompactComplete(
+                records=(override,),
+                fallback_reason=override.fallback_reason,
+                preserved_tail_count=override.preserved_tail_count,
+            ),
+        )

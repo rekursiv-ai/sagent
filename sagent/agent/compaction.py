@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 
 import dataclasses
 import logging
@@ -23,6 +22,15 @@ from sagent.types.tools import Tool
 
 logger = logging.getLogger(__name__)
 
+MAX_CONSECUTIVE_COMPACT_FAILURES = 3
+"""Auto-compaction circuit breaker.
+
+After this many consecutive auto-compact failures, ``compact_if_needed``
+short-circuits (returns ``False``) without invoking the compactor. The
+caller surfaces the underlying error rather than retrying a broken
+compactor indefinitely. Reset on any successful compaction.
+"""
+
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class CompactionState:
@@ -32,47 +40,10 @@ class CompactionState:
     """Number of successful compactions applied."""
 
     compact_failures: int = 0
-    """Count of compactor errors since last success."""
-
-    summary_pointers: list[tuple[str, str]] = dataclasses.field(default_factory=list)
-    """``(path, topic)`` pairs to ``summary_<N>.md`` files."""
+    """Count of consecutive compactor errors. Reset to 0 on success."""
 
     compacting: bool = False
     """True while a compaction is in flight; gates re-entry."""
-
-
-_CONTINUATION_MARKER = "continued from a previous"
-
-
-def is_summary(continuation: str) -> bool:
-    """Decide whether a continuation string is a real compactor summary.
-
-    Args:
-      continuation: Candidate continuation text from the compactor.
-
-    Returns:
-      is_real: True when the marker phrase is present (not an error msg).
-
-    """
-    return bool(continuation) and _CONTINUATION_MARKER in continuation
-
-
-def extract_topic(continuation: str) -> str:
-    """Pick the first substantive line of a continuation as a summary topic.
-
-    Args:
-      continuation: Compactor-produced summary text.
-
-    Returns:
-      topic: First non-bullet, non-heading line (≤120 chars), or a
-          fallback when nothing qualifies.
-
-    """
-    for line in continuation.splitlines():
-        s = line.strip()
-        if s and not s.startswith("- ") and not s.endswith(":"):
-            return s[:120]
-    return "(compacted context)"
 
 
 def append_to_first_user(history: list[HistoryEntry], text: str) -> None:
@@ -125,10 +96,7 @@ def inject_background_status(
 
 async def post_compact_enrich(
     *,
-    result: list[HistoryEntry],
     history: list[HistoryEntry],
-    state: CompactionState,
-    session_dir: Path | None,
     tool_state: ToolState,
     budget: ContextBudget,
     tools: Mapping[str, Tool],
@@ -138,19 +106,12 @@ async def post_compact_enrich(
 ) -> None:
     """Run best-effort post-compaction enrichment pipeline.
 
-    Runs 4 steps; each is individually isolated so a failure in one
-    doesn't block the others: save summary to disk, re-attach recent
-    files, invoke tool ``post_compact_restore`` hooks, re-surface
-    background-job status.
+    Runs 3 steps; each is individually isolated so a failure in one
+    doesn't block the others: re-attach recent files, invoke tool
+    ``post_compact_restore`` hooks, re-surface background-job status.
 
     Args:
-      result: The compactor's output history (first user message holds
-          the continuation summary).
-      history: History to enrich in place; usually the same list as
-          ``result`` post-splice.
-      state: Compaction bookkeeping; ``summary_pointers`` is appended to.
-      session_dir: Where ``summary_<N>.md`` is written; ``None`` skips
-          the disk save step.
+      history: Payload-under-construction; mutated in place.
       tool_state: Active tool state; ``recent_files`` drives re-attach.
       budget: Context budget for re-attach sizing and hook budgets.
       tools: Tool registry; entries implementing ``CompactRestorable``
@@ -161,20 +122,7 @@ async def post_compact_enrich(
           hook budget.
 
     """
-    # 1. Save summary to file and accumulate pointer.
-    try:
-        continuation = (
-            result[0].text if result and isinstance(result[0], UserMessage) else ""
-        )
-        if session_dir is not None and is_summary(continuation):
-            sp = session_dir / f"summary_{state.compact_count}.md"
-            sp.write_text(continuation, encoding="utf-8")
-            topic = extract_topic(continuation)
-            state.summary_pointers.append((str(sp), topic))
-    except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
-        logger.warning("Summary save failed", exc_info=True)
-
-    # 2. Re-attach recently-read files.
+    # 1. Re-attach recently-read files.
     try:
         await reattach_files(
             history,
@@ -186,7 +134,7 @@ async def post_compact_enrich(
     except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
         logger.warning("reattach_files failed", exc_info=True)
 
-    # 3. Run post-compact hooks on tools.
+    # 2. Run post-compact hooks on tools.
     available = max(0, estimate_tokens - headroom)
     hook_budget = available * budget.chars_per_token
     for tool in tools.values():
@@ -204,7 +152,7 @@ async def post_compact_enrich(
                     exc_info=True,
                 )
 
-    # 4. Re-surface background job status.
+    # 3. Re-surface background job status.
     try:
         inject_background_status(history, background_tasks)
     except Exception:  # noqa: BLE001 -- provider errors are heterogeneous

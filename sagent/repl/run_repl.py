@@ -167,9 +167,8 @@ def _publish_startup_idle_if_settled(runtime: agent_runtime.AgentRuntime) -> Non
 
 def _history_triggers_model_call(runtime: agent_runtime.AgentRuntime) -> bool:
     """Return True when persisted history already needs a model turn."""
-    return bool(runtime.history) and isinstance(
-        runtime.history[-1], (ToolResult, UserMessage)
-    )
+    messages = runtime.context().messages
+    return bool(messages) and isinstance(messages[-1], (ToolResult, UserMessage))
 
 
 def make_queued_input_committer(

@@ -755,44 +755,26 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
 
 
 def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
-    """Attach a ``SaveSession`` observer that appends history deltas to disk.
+    """Attach a ``SaveSession`` observer that appends tape deltas to disk.
 
-    Re-writes ``meta`` whenever ``agent.status`` changes (via the
-    ``StatusChanged`` event), even when there's no history delta, so a
-    status update survives a crash before the next history append.
-
-    Tracks in-place splice updates from ``HistoryEntryUpdated`` events
-    (emitted when ``DetachedResult`` splices real tool output into a
-    ``[detached]`` placeholder). Splice updates are re-emitted as
-    ``kind=history`` records sharing the same ``id``; the loader dedupes
-    by ``id``, last write wins, so the spliced content survives session
-    resume.
+    Tracks ``len(runtime.tape)`` (not resolved-context length) so
+    compaction barriers and overrides land in the JSONL faithfully.
+    ``meta`` is rewritten on every ``StatusChanged`` so a status edit
+    survives a crash even when no tape record has been appended.
     """
-    persisted_len = len(agent.history)
+    persisted_tape_len = len(agent.runtime.tape)
     meta_written = False
     last_status = agent.status
-    pending_updates: dict[int, types.history.ToolResult] = {}
 
     def _on_event(event: types.runtime.RuntimeEvent) -> None:
-        nonlocal persisted_len, meta_written, last_status
-        if isinstance(event, types.runtime.HistoryEntryUpdated):
-            if isinstance(event.entry, types.history.ToolResult):
-                pending_updates[event.entry.id] = event.entry
-            return
+        nonlocal persisted_tape_len, meta_written, last_status
         if not isinstance(
             event, (types.runtime.SaveSession, types.runtime.StatusChanged)
         ):
             return
-        delta = agent.history[persisted_len:]
-        # Drop pending updates whose id is in the delta -- the delta
-        # already carries the latest content. Keep the rest as separate
-        # ``kind=update`` records (patches against entries that were
-        # already persisted).
-        delta_ids = {e.id for e in delta}
-        updates = [upd for uid, upd in pending_updates.items() if uid not in delta_ids]
-        pending_updates.clear()
+        tape_delta = list(agent.runtime.tape[persisted_tape_len:])
         status_changed = agent.status != last_status
-        write_meta = delta or updates or status_changed or not meta_written
+        write_meta = tape_delta or status_changed or not meta_written
         spec = agent.model_spec
         meta = SessionMeta(
             session_id=agent.session_id,
@@ -812,11 +794,10 @@ def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
         append_session(
             session_dir / "session.jsonl",
             meta=meta.serialize() if write_meta else None,
-            history_delta=delta or None,
-            history_updates=updates or None,
+            tape_delta=tape_delta or None,
             tool_state_snapshot=serialize_tool_state(agent.tool_state),
         )
-        persisted_len = len(agent.history)
+        persisted_tape_len = len(agent.runtime.tape)
         meta_written = True
         last_status = agent.status
 

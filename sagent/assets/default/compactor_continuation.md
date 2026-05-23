@@ -1,3 +1,3 @@
-{{pointers}}This session resumes a prior conversation whose context window was exhausted. The recap below captures what happened during that earlier exchange.
+Another language model was working on this task and produced the handoff summary below before its context window filled. Use it to build on the work already done and avoid duplication. Trust the summary's factual claims about prior work but verify any state on disk before acting.
 
-{{summary}}{{transcript}}{{recent}}{{resume}}
+{{summary}}{{recent}}{{resume}}

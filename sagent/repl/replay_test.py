@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from sagent.lib.compaction import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
 from sagent.types.history import (
@@ -127,6 +128,33 @@ def test_replay_tool_call_unknown_tool_falls_back_to_name() -> None:
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
     assert p.tool_labels == ["MysteryTool"]
+
+
+def test_replay_microcompacted_tool_call_renders_stored_summary() -> None:
+    """A microcompacted ``ToolCall`` replays with its preserved label.
+
+    Microcompaction replaces ``ToolCall.args`` with
+    ``{MICROCOMPACTED_ARGS_KEY: tool.summary(original_args)}`` so the
+    information needed to render the original label survives in the
+    stub. Replay must read the stored summary; otherwise every
+    microcompacted ``Read`` shows as ``Read ?`` (the
+    ``args.get("file_path", "")`` fallback in ``Read.summary``),
+    losing every previously-displayed filename.
+    """
+    history: list[HistoryEntry] = [
+        AssistantMessage(
+            tool_calls=(
+                ToolCall(
+                    id="c1",
+                    name="Read",
+                    args={MICROCOMPACTED_ARGS_KEY: "Read foo.py:1-30"},
+                ),
+            ),
+        ),
+    ]
+    p = RecordingPrinter()
+    replay_messages(_agent(history=history), p)
+    assert p.tool_labels == ["Read foo.py:1-30"]
 
 
 def test_replay_tool_result_summary() -> None:

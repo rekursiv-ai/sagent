@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from sagent.types.history import (
     AssistantMessage,
     BytesMessage,
-    HistoryEntry,
     ToolResult,
     UserMessage,
 )
+from sagent.types.tape import ContextOverride
 
 
 __all__ = [
@@ -34,13 +34,10 @@ __all__ = [
     "Compact",
     "CompactComplete",
     "CompactFailed",
-    "CompactFallback",
     "CompactStarted",
-    "CompactionResult",
     "Detach",
     "DetachedResult",
     "Halt",
-    "HistoryEntryUpdated",
     "Kill",
     "ModelCallStarted",
     "ModelIdle",
@@ -280,26 +277,6 @@ class DetachedResult:
     """True when the tool raised or signalled failure."""
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class HistoryEntryUpdated:
-    """An existing history entry was mutated in-place (splice).
-
-    Publish-only. Emitted when ``DetachedResult`` (or its in-batch
-    sibling) splices real tool output into a ``[detached]`` placeholder
-    via ``dataclasses.replace``. Same ``id``, new ``content``.
-
-    Without this event the persistence observer never learns of the
-    update -- its delta-based append (``history[persisted_len:]``)
-    can't see in-place mutations, so resumed sessions would load the
-    stale placeholder. The persistence observer listens for this event
-    and re-emits the entry; the loader dedupes by ``id`` so last-write-
-    wins.
-    """
-
-    entry: HistoryEntry
-    """The updated history entry (carries id + new content)."""
-
-
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class CohortComplete:
     """All tool results for the current cohort have arrived."""
@@ -327,11 +304,17 @@ class CompactStarted:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CompactionResult:
-    """Compactor replacement history plus non-summary fallback metadata."""
+class CompactComplete:
+    """Compaction task finished; compactor's overrides are in the tape.
 
-    summary: list[HistoryEntry]
-    """Replacement history produced by the compactor."""
+    The compaction task appends one or more ``ContextOverride`` records
+    directly to the runtime tape. This event tells observers (renderers,
+    persistence) that compaction is done and exposes the appended
+    records plus fallback metadata.
+    """
+
+    records: tuple[ContextOverride, ...]
+    """Overrides appended by the compactor (typically one barrier)."""
 
     fallback_reason: str = ""
     """Why the compactor used fallback history instead of a summary."""
@@ -341,52 +324,19 @@ class CompactionResult:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class CompactComplete:
-    """Compaction finished; splice summary into history."""
-
-    summary: list[HistoryEntry]
-    """Compactor output to install at the head of history."""
-
-    snapshot_len: int
-    """History length captured before compaction; entries appended after
-    that index are preserved post-splice."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CompactFallback:
-    """Compaction could not summarize but produced safe replacement history."""
-
-    summary: list[HistoryEntry]
-    """Fallback replacement history to splice into history."""
-
-    snapshot_len: int
-    """History length captured before compaction; entries appended after
-    that index are preserved post-splice."""
-
-    fallback_reason: str
-    """Why fallback history was used instead of a model-written summary."""
-
-    preserved_tail_count: int
-    """Number of tail entries preserved verbatim in the fallback."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class CompactFailed:
-    """Compaction task raised; runtime keeps prior history.
+    """Compaction task raised; runtime keeps the tape as-is.
 
-    Mirror of ``CompactComplete`` for the failure path. The dispatch
-    loop's handler clears ``compact_task`` (so subsequent ``ModelSwitch``
-    / model-call gates unblock) and splices a visible
-    ``[Compaction error: ...]`` ``UserMessage`` into history so the
-    model can react.
+    The dispatch loop's handler clears ``compact_task`` (so subsequent
+    ``ModelSwitch`` / model-call gates unblock) and appends a visible
+    ``[Compaction error: ...]`` ``UserMessage`` so the model can react.
     """
 
     exception: BaseException
     """The compactor's raised exception."""
 
-    snapshot_len: int
-    """History length captured before compaction (for symmetry with
-    ``CompactComplete``)."""
+    tape_len: int
+    """Tape length captured before compaction (for forensics)."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -483,13 +433,11 @@ type RuntimeEvent = (
     | ToolResultPartial
     | ToolResult
     | DetachedResult
-    | HistoryEntryUpdated
     | CohortComplete
     | Compact
     | Recompact
     | CompactStarted
     | CompactComplete
-    | CompactFallback
     | CompactFailed
     | SaveSession
     | StatusChanged

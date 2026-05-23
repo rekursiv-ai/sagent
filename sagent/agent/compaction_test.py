@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import asyncio
 
@@ -14,9 +13,7 @@ from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import (
     CompactionState,
     append_to_first_user,
-    extract_topic,
     inject_background_status,
-    is_summary,
     post_compact_enrich,
 )
 from sagent.lib.json import JSON
@@ -87,45 +84,7 @@ def test_compaction_state_defaults() -> None:
     s = CompactionState()
     assert s.compact_count == 0
     assert s.compact_failures == 0
-    assert s.summary_pointers == []
     assert s.compacting is False
-
-
-def test_is_summary_true_when_continuation_marker_present() -> None:
-    text = "This conversation is being continued from a previous turn."
-    assert is_summary(text) is True
-
-
-def test_is_summary_false_when_marker_absent() -> None:
-    assert is_summary("compaction failed") is False
-
-
-def test_is_summary_false_when_empty() -> None:
-    assert is_summary("") is False
-
-
-def test_extract_topic_returns_first_substantive_line() -> None:
-    text = "summary heading:\n- bullet line\nReal topic line.\n"
-    assert extract_topic(text) == "Real topic line."
-
-
-def test_extract_topic_skips_bullets_and_colon_lines() -> None:
-    assert extract_topic("- a\n- b\nfoo:\nFinal value") == "Final value"
-
-
-def test_extract_topic_caps_at_120_chars() -> None:
-    long = "x" * 200
-    topic = extract_topic(long)
-    assert len(topic) == 120
-    assert topic == "x" * 120
-
-
-def test_extract_topic_falls_back_to_default_string() -> None:
-    assert extract_topic("- only\n- bullets\nlast:") == "(compacted context)"
-
-
-def test_extract_topic_falls_back_on_empty() -> None:
-    assert extract_topic("") == "(compacted context)"
 
 
 def test_append_to_first_user_concatenates_when_text_nonempty() -> None:
@@ -177,82 +136,7 @@ async def test_inject_background_status_appends_to_first_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_compact_enrich_writes_summary_file_when_real_summary(
-    tmp_path: Path,
-) -> None:
-    state = CompactionState()
-    # Topic extraction skips lines ending with ``:``; the first
-    # non-bullet, non-colon-terminated line becomes the pointer topic.
-    summary_text = "continued from a previous summary:\nTopic line here."
-    result: list[HistoryEntry] = [UserMessage(text=summary_text)]
-    history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, Tool] = {}
-    await post_compact_enrich(
-        result=result,
-        history=history,
-        state=state,
-        session_dir=tmp_path,
-        tool_state=ToolState(),
-        budget=_budget(),
-        tools=tools_map,
-        background_tasks={},
-        estimate_tokens=0,
-        headroom=0,
-    )
-    # Step 1 saved a summary file + appended a pointer.
-    summary_file = tmp_path / "summary_0.md"
-    assert summary_file.exists()
-    assert state.summary_pointers == [(str(summary_file), "Topic line here.")]
-
-
-@pytest.mark.asyncio
-async def test_post_compact_enrich_skips_summary_save_when_not_a_real_summary(
-    tmp_path: Path,
-) -> None:
-    state = CompactionState()
-    result: list[HistoryEntry] = [UserMessage(text="compaction failed")]
-    history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, Tool] = {}
-    await post_compact_enrich(
-        result=result,
-        history=history,
-        state=state,
-        session_dir=tmp_path,
-        tool_state=ToolState(),
-        budget=_budget(),
-        tools=tools_map,
-        background_tasks={},
-        estimate_tokens=0,
-        headroom=0,
-    )
-    assert not (tmp_path / "summary_0.md").exists()
-    assert state.summary_pointers == []
-
-
-@pytest.mark.asyncio
-async def test_post_compact_enrich_no_session_dir_skips_summary_save() -> None:
-    state = CompactionState()
-    text = "continued from a previous turn"
-    result: list[HistoryEntry] = [UserMessage(text=text)]
-    history: list[HistoryEntry] = list(result)
-    tools_map: Mapping[str, Tool] = {}
-    await post_compact_enrich(
-        result=result,
-        history=history,
-        state=state,
-        session_dir=None,
-        tool_state=ToolState(),
-        budget=_budget(),
-        tools=tools_map,
-        background_tasks={},
-        estimate_tokens=0,
-        headroom=0,
-    )
-    assert state.summary_pointers == []
-
-
-@pytest.mark.asyncio
-async def test_post_compact_enrich_runs_restorable_tool_hook(tmp_path: Path) -> None:
+async def test_post_compact_enrich_runs_restorable_tool_hook() -> None:
     """A tool implementing ``CompactRestorable`` is called."""
     calls: list[int] = []
 
@@ -270,14 +154,10 @@ async def test_post_compact_enrich_runs_restorable_tool_hook(tmp_path: Path) -> 
             del history, tool_state
             calls.append(budget_chars)
 
-    state = CompactionState()
-    result: list[HistoryEntry] = [UserMessage(text="x")]
+    history: list[HistoryEntry] = [UserMessage(text="x")]
     tools_map: Mapping[str, Tool] = {"R": Restorable()}
     await post_compact_enrich(
-        result=result,
-        history=result,
-        state=state,
-        session_dir=tmp_path,
+        history=history,
         tool_state=ToolState(),
         budget=_budget(),
         tools=tools_map,
@@ -290,9 +170,7 @@ async def test_post_compact_enrich_runs_restorable_tool_hook(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_post_compact_enrich_swallows_restorable_failures(
-    tmp_path: Path,
-) -> None:
+async def test_post_compact_enrich_swallows_restorable_failures() -> None:
     """A raising tool hook is logged and skipped without aborting the pipeline."""
 
     @dataclass(slots=True, kw_only=True)
@@ -309,14 +187,10 @@ async def test_post_compact_enrich_swallows_restorable_failures(
             del history, tool_state, budget_chars
             raise RuntimeError("nope")
 
-    state = CompactionState()
-    result: list[HistoryEntry] = [UserMessage(text="x")]
+    history: list[HistoryEntry] = [UserMessage(text="x")]
     tools_map: Mapping[str, Tool] = {"B": BadRestorable()}
     await post_compact_enrich(
-        result=result,
-        history=result,
-        state=state,
-        session_dir=tmp_path,
+        history=history,
         tool_state=ToolState(),
         budget=_budget(),
         tools=tools_map,
@@ -324,50 +198,16 @@ async def test_post_compact_enrich_swallows_restorable_failures(
         estimate_tokens=0,
         headroom=0,
     )
-    # Pipeline completed despite the failure.
-    assert state.summary_pointers == []
+    # Pipeline completed despite the failure (no assertions on side effects).
 
 
 @pytest.mark.asyncio
-async def test_post_compact_enrich_swallows_summary_save_failure(
-    tmp_path: Path,
-) -> None:
-    """Step 1 (summary save) failure is logged and the pipeline continues."""
-    state = CompactionState()
-    # Triggering a write failure: replace ``summary_0.md`` with a
-    # directory so ``write_text`` raises.
-    blocker = tmp_path / "summary_0.md"
-    blocker.mkdir()
-    result: list[HistoryEntry] = [UserMessage(text="continued from a previous turn")]
-    tools_map: Mapping[str, Tool] = {}
-    await post_compact_enrich(
-        result=result,
-        history=result,
-        state=state,
-        session_dir=tmp_path,
-        tool_state=ToolState(),
-        budget=_budget(),
-        tools=tools_map,
-        background_tasks={},
-        estimate_tokens=0,
-        headroom=0,
-    )
-    # Pipeline completed; pointer NOT appended because save failed.
-    assert state.summary_pointers == []
-
-
-@pytest.mark.asyncio
-async def test_post_compact_enrich_injects_background_status(tmp_path: Path) -> None:
-    state = CompactionState()
+async def test_post_compact_enrich_injects_background_status() -> None:
     history: list[HistoryEntry] = [UserMessage(text="orig")]
-    result: list[HistoryEntry] = history
     tools_map: Mapping[str, Tool] = {}
     bg = {"q9": await _make_bg("Bash", "q9")}
     await post_compact_enrich(
-        result=result,
         history=history,
-        state=state,
-        session_dir=tmp_path,
         tool_state=ToolState(),
         budget=_budget(),
         tools=tools_map,
