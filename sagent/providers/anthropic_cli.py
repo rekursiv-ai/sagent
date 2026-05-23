@@ -26,6 +26,7 @@ import os
 import shutil
 import tempfile
 
+from sagent.lib import token_count
 from sagent.lib.json import MutableJSON, int_val
 from sagent.providers.anthropic import Anthropic, _strip_context_tag
 from sagent.providers.lib.cost import ModelProfile, Pricing
@@ -276,30 +277,30 @@ class _AnthropicCLIModel:
         """Anthropic's documented vision byte cap (5 MiB)."""
         return 5 * 1024 * 1024
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input tokens from ``len(text) / chars_per_token``.
-
-        Args:
-          text: Text to score.
-
-        Returns:
-          tokens: Integer token estimate.
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``chars_per_token``."""
         return int(len(text) / self._profile.chars_per_token)
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate tokens for an image using Anthropic's ``w*h/750`` formula.
-
-        Args:
-          data: Raw image bytes.
-
-        Returns:
-          tokens: Integer token estimate.
-
-        """
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate from image dimensions (``width*height/750``)."""
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify whether an error means the prompt exceeded the window.

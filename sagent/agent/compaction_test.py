@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
 
 import asyncio
 
@@ -15,27 +14,20 @@ from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import (
     CompactionState,
     append_to_first_user,
-    estimate_total_tokens,
     extract_topic,
     inject_background_status,
     is_summary,
     post_compact_enrich,
 )
 from sagent.lib.json import JSON
-from sagent.testing import MockModelCaps
 from sagent.tools.core import ToolState
 from sagent.types.history import (
     AssistantMessage,
-    BytesMessage,
     HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import (
-    ContextBudget,
-    ModelRequest,
-    ModelResponse,
-)
+from sagent.types.model import ContextBudget
 from sagent.types.tools import Tool
 
 
@@ -63,36 +55,6 @@ class _StubTool:
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         return ToolResult(call_id="", content="")
-
-
-@dataclass(slots=True, kw_only=True)
-class _TokenModel(MockModelCaps):
-    """Trivial token estimator: text length // 4, fixed image cost."""
-
-    model_id: str = "tok"
-    max_request_tokens: int = 100_000
-
-    @override
-    def estimate_text_token_count(self, text: str) -> int:
-        return len(text) // 4
-
-    @override
-    def estimate_image_token_count(self, data: bytes) -> int:
-        del data
-        return 7
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        del request
-        return ModelResponse(message=AssistantMessage(text=""))
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
-    ) -> ModelResponse:
-        del request, on_text, on_thinking
-        return ModelResponse(message=AssistantMessage(text=""))
 
 
 def _budget() -> ContextBudget:
@@ -212,61 +174,6 @@ async def test_inject_background_status_appends_to_first_user() -> None:
     assert isinstance(first, UserMessage)
     assert "Active background tasks" in first.text
     assert "[q1] Bash" in first.text
-
-
-def test_estimate_total_tokens_user_message() -> None:
-    model = _TokenModel()
-    n = estimate_total_tokens("sys", [UserMessage(text="abcdefgh")], model)
-    # ``"sys"`` → 0 (3 chars // 4); ``"abcdefgh"`` → 2.
-    assert n == 0 + 2
-
-
-def test_estimate_total_tokens_user_with_image() -> None:
-    model = _TokenModel()
-    history: list[HistoryEntry] = [
-        UserMessage(
-            text="",
-            attachments=(BytesMessage(data=b"\x89PNG", descriptor="image/png"),),
-        )
-    ]
-    n = estimate_total_tokens("", history, model)
-    assert n == 7
-
-
-def test_estimate_total_tokens_user_with_non_image_attachment() -> None:
-    """Non-image attachments don't count toward image-token estimate."""
-    model = _TokenModel()
-    history: list[HistoryEntry] = [
-        UserMessage(
-            text="",
-            attachments=(BytesMessage(data=b"%PDF", descriptor="application/pdf"),),
-        )
-    ]
-    assert estimate_total_tokens("", history, model) == 0
-
-
-def test_estimate_total_tokens_assistant_message() -> None:
-    model = _TokenModel()
-    n = estimate_total_tokens("", [AssistantMessage(text="abcdefgh")], model)
-    assert n == 2
-
-
-def test_estimate_total_tokens_tool_result_with_image() -> None:
-    model = _TokenModel()
-    history: list[HistoryEntry] = [
-        ToolResult(
-            call_id="c1",
-            content="result",
-            attachments=(BytesMessage(data=b"\x89PNG", descriptor="image/jpeg"),),
-        )
-    ]
-    assert estimate_total_tokens("", history, model) == 1 + 7
-
-
-def test_estimate_total_tokens_tool_result_no_image() -> None:
-    model = _TokenModel()
-    history: list[HistoryEntry] = [ToolResult(call_id="c1", content="xxxxxxxx")]
-    assert estimate_total_tokens("", history, model) == 2
 
 
 @pytest.mark.asyncio

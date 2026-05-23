@@ -1,0 +1,186 @@
+"""Tests for ``lib.token_count``: wire-aware approx walker."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import override
+
+from sagent.lib.json import JSON
+from sagent.lib.token_count import approx_request_tokens
+from sagent.testing import MockModelCaps
+from sagent.types.history import (
+    AssistantMessage,
+    BytesMessage,
+    HistoryEntry,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.model import ModelRequest
+
+
+@dataclass(slots=True, kw_only=True)
+class _TokenModel(MockModelCaps):
+    """Trivial estimator: text length // 4, fixed image cost."""
+
+    model_id: str = "tok"
+    max_request_tokens: int = 100_000
+
+    @override
+    def approx_image_tokens(self, data: bytes) -> int:
+        del data
+        return 7
+
+
+@dataclass(slots=True, kw_only=True)
+class _StubTool:
+    """Tool stub satisfying the rich ``Tool`` protocol surface."""
+
+    name: str = "Stub"
+    tool_id: str = "application/x-tool-stub"
+    description: str = ""
+    supports_microcompaction: bool = False
+    directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        del args
+        return ""
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        del result
+        return None
+
+    def prompt(self) -> str:
+        return ""
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        return ToolResult(call_id="", content="")
+
+
+def _req(messages: list[HistoryEntry], **kwargs: object) -> ModelRequest:
+    return ModelRequest(messages=messages, **kwargs)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- test helper
+
+
+def test_user_message_text() -> None:
+    n = approx_request_tokens(
+        _req([UserMessage(text="abcdefgh")], system="sys"),
+        _TokenModel(),
+    )
+    # ``"sys"`` → 0 (3 chars // 4); ``"abcdefgh"`` → 2.
+    assert n == 0 + 2
+
+
+def test_user_with_image_attachment() -> None:
+    n = approx_request_tokens(
+        _req(
+            [
+                UserMessage(
+                    text="",
+                    attachments=(
+                        BytesMessage(data=b"\x89PNG", descriptor="image/png"),
+                    ),
+                ),
+            ],
+        ),
+        _TokenModel(),
+    )
+    assert n == 7
+
+
+def test_user_with_non_image_attachment_zero() -> None:
+    """Non-image attachments contribute nothing."""
+    n = approx_request_tokens(
+        _req(
+            [
+                UserMessage(
+                    text="",
+                    attachments=(
+                        BytesMessage(data=b"%PDF", descriptor="application/pdf"),
+                    ),
+                ),
+            ],
+        ),
+        _TokenModel(),
+    )
+    assert n == 0
+
+
+def test_assistant_text() -> None:
+    n = approx_request_tokens(
+        _req([AssistantMessage(text="abcdefgh")]),
+        _TokenModel(),
+    )
+    assert n == 2
+
+
+def test_tool_result_text_with_image() -> None:
+    n = approx_request_tokens(
+        _req(
+            [
+                ToolResult(
+                    call_id="c1",
+                    content="result",
+                    attachments=(
+                        BytesMessage(data=b"\x89PNG", descriptor="image/jpeg"),
+                    ),
+                ),
+            ],
+        ),
+        _TokenModel(),
+    )
+    # ``"result"`` → 1 (6 chars // 4); image → 7.
+    assert n == 1 + 7
+
+
+def test_assistant_tool_call_args_counted() -> None:
+    """``ToolCall.args`` are summed (this was the silent undercount bug)."""
+    tc = ToolCall(id="t1", name="Bash", args={"cmd": "x" * 100})
+    n = approx_request_tokens(
+        _req([AssistantMessage(text="", tool_calls=(tc,))]),
+        _TokenModel(),
+    )
+    # JSON-encoded ``{id, name, args}`` is longer than the cmd alone.
+    assert n > 100 // 4
+
+
+def test_assistant_thinking_signature_counted() -> None:
+    """Thinking-block signatures and bodies are summed."""
+    n = approx_request_tokens(
+        _req(
+            [
+                AssistantMessage(
+                    text="",
+                    thinking_blocks=(
+                        {
+                            "type": "thinking",
+                            "signature": "s" * 80,
+                            "thinking": "t" * 40,
+                        },
+                    ),
+                ),
+            ],
+        ),
+        _TokenModel(),
+    )
+    # 80 // 4 + 40 // 4 = 20 + 10.
+    assert n == 30
+
+
+def test_tools_schema_counted() -> None:
+    """``request.tools`` schemas are summed via JSON-serialized form."""
+    tool = _StubTool(directive_schema={"type": "object", "x": "y" * 100})
+    n = approx_request_tokens(_req([], tools=[tool]), _TokenModel())
+    # ``json.dumps(...)`` of the schema has ≥ 100 chars; expect ≥ 25 tokens.
+    assert n >= 25
+
+
+def test_empty_request_zero() -> None:
+    assert approx_request_tokens(_req([]), _TokenModel()) == 0
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing import test_main
+
+    test_main(__file__)

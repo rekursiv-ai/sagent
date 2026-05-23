@@ -154,11 +154,7 @@ async def test_run_delay_schedules_call_later(monkeypatch: pytest.MonkeyPatch) -
 def test_deliver_into_live_inbox() -> None:
     target = FakeAgent()
     send_module._deliver(target, "Me", "ping", 7)
-    drained = (
-        asyncio.get_event_loop_policy()
-        .new_event_loop()
-        .run_until_complete(target.runtime.inbox.drain())
-    )
+    drained = asyncio.new_event_loop().run_until_complete(target.runtime.inbox.drain())
     assert any(
         isinstance(i, UserMessage)
         and "ping" in i.text

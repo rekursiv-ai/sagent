@@ -31,6 +31,7 @@ import os
 import shutil
 import tempfile
 
+from sagent.lib import token_count
 from sagent.lib.json import MutableJSON
 from sagent.providers.google import Google
 from sagent.providers.lib.cost import (
@@ -289,33 +290,33 @@ class _GoogleCLIModel:
         """Gemini's documented vision byte cap (20 MiB)."""
         return 20 * 1024 * 1024
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input tokens from ``len(text) / 4`` (Gemini's heuristic).
-
-        Args:
-          text: Text to score.
-
-        Returns:
-          tokens: Integer token estimate.
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
         return len(text) // 4
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate tokens for an image using Gemini's tile heuristic.
-
-        Args:
-          data: Raw image bytes.
-
-        Returns:
-          tokens: Integer token estimate.
-
-        """
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate via Gemini's tile heuristic."""
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
         # 258 tokens per 512x512 tile (matches `Google._GeminiModel`).
         return ((dims[0] + 511) // 512) * ((dims[1] + 511) // 512) * 258
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Subprocess transport has no tokenizer access; falls back to approx."""
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify whether an error means the prompt exceeded the window.
@@ -496,8 +497,8 @@ class _GoogleCLIModel:
     ) -> ModelResponse:
         """Assemble a ``ModelResponse`` with estimated token usage and cost."""
         full_text = "".join(text_parts)
-        input_tokens = _estimate_input_tokens(request.messages, self)
-        output_tokens = self.estimate_text_token_count(full_text)
+        input_tokens = self.approx_request_tokens(request)
+        output_tokens = self.approx_text_tokens(full_text)
         in_cost, out_cost, total_cost = compute_cost(
             self._profile.pricing, input_tokens, output_tokens
         )
@@ -840,20 +841,3 @@ def _dispatch_session_update(
             thinking_parts.append(text)
             if on_thinking is not None:
                 on_thinking(text)
-
-
-def _estimate_input_tokens(
-    history: list[HistoryEntry],
-    model: _GoogleCLIModel,
-) -> int:
-    """Approximate input tokens from history text via the model's heuristic."""
-    total = 0
-    for entry in history:
-        if isinstance(entry, UserMessage):
-            total += model.estimate_text_token_count(entry.text)
-            for att in entry.attachments:
-                if att.descriptor.startswith("image/"):
-                    total += model.estimate_image_token_count(att.data)
-        elif isinstance(entry, AssistantMessage):
-            total += model.estimate_text_token_count(entry.text)
-    return total

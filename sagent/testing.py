@@ -25,13 +25,14 @@ from dataclasses import dataclass, field
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
+from sagent.lib import token_count
 from sagent.tools.core import (
     ToolState,
     current_agent_var,
     tool_state_var,
 )
 from sagent.types.history import AssistantMessage, HistoryEntry
-from sagent.types.model import Pricing
+from sagent.types.model import ModelRequest, Pricing
 from sagent.types.runtime import Halt, RuntimeEvent
 
 
@@ -60,12 +61,24 @@ class MockModelCaps:
     def pricing(self) -> Pricing:
         return Pricing()
 
-    def estimate_text_token_count(self, text: str) -> int:
+    def approx_text_tokens(self, text: str) -> int:
         return len(text) // 4
 
-    def estimate_image_token_count(self, data: bytes) -> int:
+    def approx_image_tokens(self, data: bytes) -> int:
         del data
         return 256
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         del error

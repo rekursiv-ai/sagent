@@ -8,6 +8,7 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
+from sagent.lib import token_count
 from sagent.tools import tool
 from sagent.types.history import (
     AssistantMessage,
@@ -55,30 +56,30 @@ class ScriptedModel:
     max_image_bytes = 0
     pricing = Pricing()
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate text tokens with a deliberately simple offline heuristic.
-
-        Args:
-          text: Text to estimate.
-
-        Returns:
-          tokens: Approximate token count (at least 1).
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Offline ``len(text) // 4`` heuristic; minimum 1."""
         return max(1, len(text) // 4)
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Return zero because this scripted model has no image support.
-
-        Args:
-          data: Image bytes (ignored).
-
-        Returns:
-          tokens: Always ``0``.
-
-        """
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Scripted model has no image support; returns zero."""
         del data
         return 0
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Offline model; delegates to ``approx``."""
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Offline model; delegates to ``approx``."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Offline model; delegates to ``approx``."""
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Return false because the scripted model never raises API errors.

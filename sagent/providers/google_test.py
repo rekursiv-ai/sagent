@@ -309,7 +309,7 @@ def test_google_model_is_retryable_provider_error_false() -> None:
 def test_google_model_text_token_estimate_floor_division() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-pro")
-    assert m.estimate_text_token_count("a" * 16) == 4
+    assert m.approx_text_tokens("a" * 16) == 4
 
 
 @pytest.mark.asyncio
@@ -377,6 +377,26 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
     m._client = httpx.AsyncClient(transport=transport)
     with pytest.raises(httpx.HTTPStatusError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_actual_request_tokens_hits_count_tokens_endpoint() -> None:
+    """``actual_request_tokens`` POSTs to ``:countTokens`` and reads ``totalTokens``."""
+    seen_paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"totalTokens": 314})
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    n = await m.actual_request_tokens(
+        ModelRequest(messages=[UserMessage(text="ping")]),
+    )
+    assert n == 314
+    assert any(path.endswith(":countTokens") for path in seen_paths)
 
 
 @pytest.mark.asyncio

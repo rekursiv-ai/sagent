@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -24,12 +25,13 @@ import re
 import time
 
 from sagent.agent.retry import send_with_retry
-from sagent.lib.compaction import CLEARED
+from sagent.lib.compaction import CLEARED, MICROCOMPACTED_ARGS_KEY
 from sagent.tools.core import read_asset, recipe_dict
 from sagent.types.exceptions import PromptTooLongError
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
+    ToolCall,
     ToolResult,
     UserMessage,
 )
@@ -342,18 +344,25 @@ def microcompact(
     *,
     keep_recent: int = MICROCOMPACT_KEEP_RECENT,
 ) -> None:
-    """Clear old clearable tool results in place.
+    """Clear old clearable tool exchanges in place.
 
-    Walks the ``AssistantMessage`` entries to learn which tool produced
-    each ``ToolResult`` (via ``ToolCall.name``), then replaces the
-    ``content`` of clearable older ``ToolResult`` entries with
-    ``CLEARED``. The most recent ``keep_recent`` clearable results are
-    preserved.
+    A tool exchange is the pair ``AssistantMessage.tool_calls[i]`` +
+    matching ``ToolResult``. For clearable exchanges (tools where
+    ``supports_microcompaction=True``), this:
+
+    1. Replaces ``ToolResult.content`` with :data:`CLEARED` (and drops
+       attachments / diff / hint / summary).
+    2. Replaces the matching ``ToolCall.args`` with
+       ``{MICROCOMPACTED_ARGS_KEY: tool.summary(args)}`` so the call
+       remains API-valid but the payload (``Edit``'s ``old_string`` /
+       ``new_string``, ``Write``'s file body, etc.) is gone.
+
+    The most recent ``keep_recent`` clearable exchanges are preserved.
 
     Args:
       history: History list to mutate in place.
-      tools: Tool registry; only ``supports_microcompaction`` results clear.
-      keep_recent: Number of most-recent clearable results to preserve.
+      tools: Tool registry; only ``supports_microcompaction`` exchanges clear.
+      keep_recent: Number of most-recent clearable exchanges to preserve.
 
     """
     tool_for_call: dict[str, str] = {}
@@ -371,12 +380,44 @@ def microcompact(
             clearable.append(i)
 
     to_clear = clearable[:-keep_recent] if keep_recent > 0 else clearable
+    cleared_call_ids: set[str] = set()
     for i in to_clear:
         entry = history[i]
-        if isinstance(entry, ToolResult):
-            history[i] = dataclasses.replace(
-                entry, content=CLEARED, attachments=(), diff="", hint="", summary=""
+        assert isinstance(entry, ToolResult)
+        cleared_call_ids.add(entry.call_id)
+        history[i] = dataclasses.replace(
+            entry, content=CLEARED, attachments=(), diff="", hint="", summary=""
+        )
+
+    if not cleared_call_ids:
+        return
+    for i, entry in enumerate(history):
+        if not isinstance(entry, AssistantMessage):
+            continue
+        if not any(tc.id in cleared_call_ids for tc in entry.tool_calls):
+            continue
+        new_calls = tuple(
+            dataclasses.replace(
+                tc,
+                args={MICROCOMPACTED_ARGS_KEY: _stub_args_summary(tc, tools)},
             )
+            if tc.id in cleared_call_ids
+            else tc
+            for tc in entry.tool_calls
+        )
+        history[i] = dataclasses.replace(entry, tool_calls=new_calls)
+
+
+def _stub_args_summary(tc: ToolCall, tools: Mapping[str, Tool]) -> str:
+    """Return the tool's ``summary(args)`` output, or fall back to the name."""
+    tool = tools.get(tc.name)
+    if tool is None:
+        return tc.name
+    try:
+        summary = tool.summary(tc.args)
+    except Exception:  # noqa: BLE001 -- tool.summary is user-defined; survive failures
+        return tc.name
+    return summary or tc.name
 
 
 def _format_summary(raw: str) -> str:

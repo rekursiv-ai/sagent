@@ -464,7 +464,7 @@ def test_model_properties_defaults() -> None:
     assert m.supports_context_management is False
     assert m.supports_persistent_retry is False
     assert m.supports_account_auth is False
-    assert m.estimate_text_token_count("x" * 12) == 3
+    assert m.approx_text_tokens("x" * 12) == 3
     assert m.max_image_dim == 2048
     assert m.max_image_bytes == 20 * 1024 * 1024
 
@@ -482,6 +482,23 @@ def test_model_max_request_tokens_override() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model("stub-1", max_request_tokens=500)
     assert m.max_request_tokens == 500
+
+
+@pytest.mark.asyncio
+async def test_actual_text_tokens_falls_back_to_approx_for_unknown_model() -> None:
+    """Non-OpenAI model ids that tiktoken doesn't recognize use ``approx_text_tokens``."""
+    p = _DummyProvider.from_key("k")
+    m = p.model("stub-1")  # tiktoken has no encoding for ``stub-1``.
+    assert await m.actual_text_tokens("x" * 12) == m.approx_text_tokens("x" * 12)
+
+
+@pytest.mark.asyncio
+async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() -> None:
+    """Without a tiktoken encoding, ``actual_request_tokens`` returns ``approx``."""
+    p = _DummyProvider.from_key("k")
+    m = p.model("stub-1")
+    req = ModelRequest(messages=[UserMessage(text="hello world")])
+    assert await m.actual_request_tokens(req) == m.approx_request_tokens(req)
 
 
 def _make_provider_with_mock(

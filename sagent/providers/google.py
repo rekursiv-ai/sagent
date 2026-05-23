@@ -34,6 +34,7 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
+from sagent.lib import token_count
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
@@ -273,16 +274,8 @@ class _GeminiModel:
         """Whether the provider uses account-based authentication."""
         return False
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input token count for a text string.
-
-        Args:
-          text: Text to score.
-
-        Returns:
-          tokens: Approximate input token count (``len(text) // 4``).
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
         return len(text) // 4
 
     @property
@@ -290,23 +283,47 @@ class _GeminiModel:
         """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate token count for an image using Gemini's tile formula.
-
-        Args:
-          data: Raw image bytes.
-
-        Returns:
-          tokens: Approximate input token count (``tiles * 258``).
-
-        """
-        # Gemini uses 258 tokens per tile (tile-based, similar to OpenAI).
-        # Exact tile size undocumented; using OpenAI's 512x512 as proxy.
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate via Gemini's tile formula (``tiles * 258``)."""
+        # Tile size undocumented; using OpenAI's 512x512 as proxy.
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
         return tiles * 258
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Delegate to the local heuristic; a single-string roundtrip would cost more than the gain."""
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Delegate to the local heuristic (Google's published tile formula)."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Call ``:countTokens`` for the exact server-side count."""
+        url = f"{_API_BASE}/models/{self._model_id}:countTokens"
+        body = _build_request(request, self.max_image_dim, self.max_image_bytes)
+        client = await self._get_client()
+        r = await client.post(
+            url,
+            json=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self._provider.api_key,
+            },
+            timeout=60.0,
+        )
+        if 400 <= r.status_code < 500:
+            msg = r.text.lower()
+            if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
+                raise PromptTooLongError(r.text)
+        r.raise_for_status()
+        return int_val(cast(MutableJSON, r.json()).get("totalTokens"), 0)
 
     @property
     def max_image_dim(self) -> int:

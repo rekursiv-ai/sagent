@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 import math
@@ -36,6 +37,7 @@ import os
 
 if TYPE_CHECKING:
     import httpx
+    import tiktoken
 
     import sagent.lib.image as image_lib
 else:
@@ -43,7 +45,9 @@ else:
 
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
+    tiktoken = lazy_import("tiktoken")  # 30ms cold
 
+from sagent.lib import token_count
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
@@ -260,16 +264,8 @@ class OpenAICompatModel:
         """Whether the provider uses account-based authentication."""
         return False
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input token count for a text string.
-
-        Args:
-          text: Text to score.
-
-        Returns:
-          tokens: Approximate input token count (``len(text) // 4``).
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``len(text) // 4``."""
         return len(text) // 4
 
     @property
@@ -277,23 +273,53 @@ class OpenAICompatModel:
         """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate token count for an image using OpenAI's tile formula.
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate via OpenAI's tile formula (``85 + tiles * 170``).
 
-        Args:
-          data: Raw image bytes.
-
-        Returns:
-          tokens: Approximate input token count (``85 + tiles * 170``).
+        References:
+          https://platform.openai.com/docs/guides/vision/calculating-costs
 
         """
-        # OpenAI: 85 base + 170 per 512x512 tile (high detail).
-        # https://platform.openai.com/docs/guides/vision/calculating-costs
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
         return 85 + tiles * 170
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Local tiktoken count when an encoding for ``model_id`` exists.
+
+        Falls back to :meth:`approx_text_tokens` for non-OpenAI models
+        whose ids tiktoken doesn't recognize (Kimi, Qwen, MiniMax, etc.).
+        """
+        enc = self._tiktoken_encoding()
+        if enc is None:
+            return self.approx_text_tokens(text)
+        return len(enc.encode(text))
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Delegate to the local heuristic (OpenAI's published tile formula)."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Local tiktoken-driven walk; falls back to approx without an encoding."""
+        enc = self._tiktoken_encoding()
+        if enc is None:
+            return self.approx_request_tokens(request)
+        return token_count.approx_request_tokens(
+            request, _TiktokenEstimator(encoding=enc, image_fallback=self)
+        )
+
+    def _tiktoken_encoding(self) -> tiktoken.Encoding | None:
+        """Return tiktoken's encoding for this model, or ``None`` if unknown."""
+        try:
+            return tiktoken.encoding_for_model(self._model_id)
+        except KeyError:
+            return None
 
     @property
     def max_image_dim(self) -> int:
@@ -465,6 +491,27 @@ class OpenAICompatModel:
                 pricing=self._profile.pricing,
                 reasoning_field=self._reasoning_field,
             )
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _TiktokenEstimator:
+    """``TokenEstimator`` adapter using ``tiktoken`` for text and a fallback for images.
+
+    Attributes:
+      encoding: tiktoken encoding for the active model.
+      image_fallback: ``OpenAICompatModel`` whose ``approx_image_tokens``
+          provides image-token estimates (tiktoken doesn't handle images).
+
+    """
+
+    encoding: tiktoken.Encoding
+    image_fallback: OpenAICompatModel
+
+    def approx_text_tokens(self, text: str) -> int:
+        return len(self.encoding.encode(text))
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        return self.image_fallback.approx_image_tokens(data)
 
 
 def build_messages(

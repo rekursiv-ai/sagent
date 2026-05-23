@@ -600,6 +600,13 @@ class AgentRuntime:
         # ("type to redirect" UX during streaming, matching the
         # mid-cohort behavior of stub-and-detach).
         self._mid_stream_queue: list[UserMessage] = []
+        # Detached-tool results whose splice failed (no placeholder
+        # survived, typically post-``Clear``) AND a fresh cohort is in
+        # flight. Held here until ``CohortComplete`` so the user-facing
+        # notification doesn't interleave between the cohort's
+        # ``tool_use`` and its forthcoming ``tool_result``. Drained at
+        # the same site that publishes ``CohortComplete``.
+        self._pending_detached_user: list[UserMessage] = []
         # ``AgentIdle`` is edge-triggered: published once when the
         # runtime is about to block on an empty inbox with no work
         # in flight, then suppressed until the next ``drain()`` returns
@@ -746,6 +753,21 @@ class AgentRuntime:
                                 self.model_call.cancel()
                                 self.model_call = None
                             self._stop_all_tools(mode="detach")
+                            # Cancel and forget every detached task. Clear
+                            # is a hard reset; without this, surviving
+                            # background tasks eventually fire
+                            # ``DetachedResult`` into the wiped session
+                            # (splice fails, fallback appends an orphan
+                            # ``UserMessage``). After ``self.detached``
+                            # is empty the cancelled tasks' completions
+                            # match neither cohort nor detached
+                            # membership at ``_run_tool_and_post`` and
+                            # are silently dropped at the default
+                            # inbox case.
+                            for task in self.detached.values():
+                                task.cancel()
+                            self.detached.clear()
+                            self._pending_detached_user.clear()
                             queued.clear()
                             self._mid_stream_queue.clear()
                             self.history.clear()
@@ -1079,27 +1101,48 @@ class AgentRuntime:
                                     spliced = True
                                     break
                             if not spliced:
-                                # No placeholder to splice into (rare: result
-                                # arrived before the stub was inserted). Fall
-                                # back to a user message so the content isn't
-                                # silently dropped.
-                                self.history.append(
-                                    UserMessage(
-                                        text=(
-                                            f"[Tool {item.call_id} completed]\n"
-                                            f"{item.content}"
-                                        ),
+                                # No placeholder to splice into (rare:
+                                # ``Clear`` / ``Compact`` wiped it before
+                                # the detached task finished). Surface
+                                # the content as a ``UserMessage`` so
+                                # it isn't silently dropped. If a fresh
+                                # cohort is in flight, defer to
+                                # ``CohortComplete`` -- appending now
+                                # would interleave between the cohort's
+                                # ``tool_use`` and its forthcoming
+                                # ``tool_result``.
+                                fallback = UserMessage(
+                                    text=(
+                                        f"[Tool {item.call_id} completed]\n"
+                                        f"{item.content}"
                                     ),
                                 )
-                            elif isinstance(self.history[-1], AssistantMessage):
+                                if self.cohort:
+                                    self._pending_detached_user.append(fallback)
+                                else:
+                                    self._append_or_coalesce_user(fallback)
+                            elif (
+                                isinstance(self.history[-1], AssistantMessage)
+                                and not self.cohort
+                            ):
                                 # Splice landed after the preempted round
-                                # already responded. History tail is an
-                                # ``AssistantMessage``, so the end-of-loop
-                                # model-call gate won't fire on its own.
-                                # Append a terse notification (the real
-                                # content is already in its proper slot
-                                # above) so the model wakes and can react
-                                # to the now-real tool result.
+                                # already idled with text. History tail
+                                # is an ``AssistantMessage`` with no
+                                # pending cohort, so the end-of-loop
+                                # gate won't fire on its own. Append a
+                                # terse notification (real content lives
+                                # in its proper slot above) to wake the
+                                # model. The ``not self.cohort`` guard
+                                # is essential: with an in-flight cohort
+                                # the tail assistant carries an
+                                # unanswered ``tool_use`` and appending
+                                # here interleaves a ``UserMessage``
+                                # between ``tool_use`` and its
+                                # forthcoming ``tool_result``
+                                # (Anthropic rejects with HTTP 400).
+                                # ``CohortComplete`` will wake the model
+                                # with the spliced content already
+                                # visible in its proper slot.
                                 self.history.append(
                                     UserMessage(
                                         text=(
@@ -1160,6 +1203,15 @@ class AgentRuntime:
                     )
                     self.publish(CohortComplete())
                     self._cohort_seen = False
+                    # Flush any ``DetachedResult`` fallbacks that landed
+                    # mid-cohort. Tail is now a ``ToolResult`` (the
+                    # cohort just settled), so appending here is safe.
+                    # ``_append_or_coalesce_user`` collapses consecutive
+                    # entries when the model gate fires next.
+                    for pending_user in self._pending_detached_user:
+                        self._append_or_coalesce_user(pending_user)
+                        self.publish(pending_user)
+                    self._pending_detached_user.clear()
 
                 # ``UserQueuedMessage`` drains at ``ModelIdle``, not
                 # ``CohortComplete``. The ``not self._should_call_model()``
@@ -1212,6 +1264,7 @@ class AgentRuntime:
                     # ``UserMessage`` still at history.tail, treating the
                     # cancellation as a retry rather than waiting for the
                     # user's next input.
+                    self._assert_alternation_invariant()
                     self.model_call = asyncio.create_task(
                         self._stream_and_post(),
                     )
@@ -1282,6 +1335,38 @@ class AgentRuntime:
         if not self.history:
             return False
         return isinstance(self.history[-1], (UserMessage, ToolResult))
+
+    def _assert_alternation_invariant(self) -> None:
+        """Raise if any ``UserMessage`` falls between an assistant ``tool_use``
+        and its matching ``ToolResult``.
+
+        The Anthropic API (and OpenAI's tool-call protocol) requires
+        every ``tool_use`` block to be paired with a ``tool_result``
+        block in the immediately-following message. A ``UserMessage``
+        between them causes HTTP 400 (``tool_use ids were found
+        without tool_result blocks immediately after``).
+
+        The invariant is normally maintained by the append helpers
+        (``_append_or_coalesce_user``, ``_stop_tool`` placeholder
+        pairing, ``_pending_detached_user`` deferral). This is a
+        defense-in-depth check at the model-call gate: any future code
+        path that mutates ``self.history`` and violates the invariant
+        crashes here with a stack trace pointing at the violating
+        index, rather than silently producing wire-format that the API
+        rejects mid-session.
+        """
+        pending: set[str] = set()
+        for idx, entry in enumerate(self.history):
+            if isinstance(entry, AssistantMessage):
+                pending = {tc.id for tc in entry.tool_calls}
+            elif isinstance(entry, ToolResult):
+                pending.discard(entry.call_id)
+            elif pending:
+                raise RuntimeError(
+                    f"alternation invariant violated at history[{idx}]: "
+                    f"{type(entry).__name__} interleaved between assistant "
+                    f"tool_use {pending!r} and its ToolResult"
+                )
 
     def _append_or_coalesce_user(self, item: UserMessage) -> None:
         r"""Append ``item`` to history; coalesce with tail if also ``UserMessage``.

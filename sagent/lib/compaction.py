@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 CLEARED = "[Prior tool output omitted]"
 
+MICROCOMPACTED_ARGS_KEY = "_microcompacted"
+"""Single args key used to stub a microcompacted ``ToolCall``.
+
+The value is the tool's ``summary(args)`` output (e.g. ``"Edit foo.py"``)
+when available, else the tool name. Keeps the API-required ``tool_use``
+block valid while discarding the large args payload (``Edit``'s
+``old_string``/``new_string``, ``Write``'s file body, etc.)."""
+
 
 def write_pre_compact_transcript(
     path: Path,

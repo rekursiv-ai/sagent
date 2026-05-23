@@ -14,11 +14,10 @@ from sagent.agent.state import ToolState
 from sagent.lib.compaction import reattach_files
 from sagent.types.compactor import CompactRestorable
 from sagent.types.history import (
-    AssistantMessage,
     HistoryEntry,
     UserMessage,
 )
-from sagent.types.model import ContextBudget, Model
+from sagent.types.model import ContextBudget
 from sagent.types.tools import Tool
 
 
@@ -210,43 +209,3 @@ async def post_compact_enrich(
         inject_background_status(history, background_tasks)
     except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
         logger.warning("inject_background_status failed", exc_info=True)
-
-
-def estimate_total_tokens(
-    system: str,
-    history: list[HistoryEntry],
-    model: Model,
-) -> int:
-    """Estimate total input tokens for a system prompt plus history.
-
-    Args:
-      system: System prompt text.
-      history: Conversation history.
-      model: Model whose tokenizer estimates are used.
-
-    Returns:
-      tokens: Estimated total input token count.
-
-    """
-    total = model.estimate_text_token_count(system)
-    for entry in history:
-        total += _estimate_entry_tokens(entry, model)
-    return total
-
-
-def _estimate_entry_tokens(entry: HistoryEntry, model: Model) -> int:
-    """Estimate tokens for one history entry (text plus image attachments)."""
-    if isinstance(entry, UserMessage):
-        total = model.estimate_text_token_count(entry.text)
-        for att in entry.attachments:
-            if att.descriptor.startswith("image/"):
-                total += model.estimate_image_token_count(att.data)
-        return total
-    if isinstance(entry, AssistantMessage):
-        return model.estimate_text_token_count(entry.text)
-    # ToolResult
-    total = model.estimate_text_token_count(entry.content)
-    for att in entry.attachments:
-        if att.descriptor.startswith("image/"):
-            total += model.estimate_image_token_count(att.data)
-    return total
