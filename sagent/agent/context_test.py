@@ -507,6 +507,150 @@ def test_detached_splice_override_keeps_tool_pairing_valid() -> None:
     validate_context(messages)
 
 
+def test_splice_redirects_when_anchor_is_microcompacted() -> None:
+    """Splice OV anchored at a later-microcompacted AM must follow the chain.
+
+    Reproduces a 400 from production session ``33d143ad``:
+
+    1. ``HR(AM, calls=[c1, c2])`` lands at slot N (e.g. AgentSpawn ``c2``
+       plus a synchronous tool ``c1``).
+    2. ``HR(TR(c1))`` lands at slot N+1 -- the synchronous tool result.
+    3. Tool ``c2`` runs detached; splice OV ``inject_after=slot N``
+       delivers the real TR for ``c2``.
+    4. Many turns later, microcompact_call OV suppresses ``HR(AM)`` and
+       injects a stubbed AM at slot N-1's suffix; microcompact_result
+       OV suppresses ``HR(TR(c1))`` and injects a CLEARED TR. The
+       splice OV is untouched because microcompact's TR ledger only
+       tracks HR refs and ``c2``'s TR lives in an OV payload.
+    5. Splice OV's anchor (slot N) is now suppressed, so without anchor
+       redirection the resolver falls back to HEAD -- emitting the
+       splice's TR as an orphan at the very front of the context.
+
+    Fix: resolver follows the suppression chain. When an OV's anchor
+    was suppressed by some microcompact OV M, redirect to M's anchor
+    and append after M's payload.
+    """
+    am = _assistant(tool_calls=(_tool_call("c1"), _tool_call("c2", name="AgentSpawn")))
+    tr_c1 = _tool_result("c1", "sync result")
+    real_c2 = _tool_result("c2", "spawned agent ready")
+    stubbed_am = _assistant(
+        tool_calls=(
+            ToolCall(id="c1", name="echo", args={"_microcompacted": "summary"}),
+            _tool_call("c2", name="AgentSpawn"),
+        )
+    )
+    cleared_c1 = _tool_result("c1", "[Prior tool output omitted]")
+    tape: list[TapeRecord] = [
+        _hr(0, _user("hi")),
+        _hr(1, am),
+        _hr(2, tr_c1),
+        _override(
+            3,  # splice for c2 (AgentSpawn detached)
+            suppresses=(),
+            inject_after=_ref(1),
+            payload=(real_c2,),
+            strategy="detached_splice",
+            paired_externally=frozenset({"c2"}),
+        ),
+        _hr(4, _user("more")),
+        _override(
+            5,  # microcompact_call: suppresses AM, stubs c1 args, keeps c2 calls
+            suppresses=(_ref(1),),
+            inject_after=_ref(0),
+            payload=(stubbed_am,),
+            strategy="microcompact_call",
+            paired_externally=frozenset({"c1", "c2"}),
+        ),
+        _override(
+            6,  # microcompact_result: clears HR TR for c1
+            suppresses=(_ref(2),),
+            inject_after=_ref(0),
+            payload=(cleared_c1,),
+            strategy="microcompact_result",
+            paired_externally=frozenset({"c1"}),
+        ),
+    ]
+    messages = resolve_context(tape).messages
+    assert not isinstance(messages[0], ToolResult), (
+        f"expected first message to be a non-orphan; got {type(messages[0]).__name__}; "
+        f"all types={[type(m).__name__ for m in messages]}"
+    )
+    validate_context(messages)
+    # Both TRs must be present, in pairing order, after the stubbed AM.
+    am_idx = next(i for i, m in enumerate(messages) if isinstance(m, AssistantMessage))
+    tail = messages[am_idx + 1 : am_idx + 3]
+    assert {m.call_id for m in tail if isinstance(m, ToolResult)} == {"c1", "c2"}
+
+
+def test_chain_runs_out_falls_back_to_head_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An anchor with no suppressor and no live slot warns + HEAD-fallbacks.
+
+    This is a producer bug surface: someone created an override anchored
+    at a ref that was never a live slot and was never suppressed. The
+    resolver still produces output (so the runtime doesn't crash) but
+    logs a warning so the bug is detectable.
+    """
+    ghost_ref = TapeRef(session_id="ghost", ordinal=999)
+    tape: list[TapeRecord] = [
+        _hr(0, _user("hi")),
+        _override(
+            1,
+            suppresses=(),
+            inject_after=ghost_ref,
+            payload=(_assistant(text="stranded"),),
+            strategy="producer_bug",
+        ),
+    ]
+    with caplog.at_level("WARNING", logger="sagent.agent.context"):
+        messages = resolve_context(tape).messages
+    # Stranded entry falls into HEAD.
+    assert isinstance(messages[0], AssistantMessage)
+    assert messages[0].text == "stranded"
+    # Warning emitted so the bug is detectable.
+    assert any("no live slot" in r.getMessage() for r in caplog.records), (
+        f"expected resolver warning; got {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_chain_stops_at_barrier_falls_back_to_head() -> None:
+    """A barrier override cuts the suppression chain; pre-barrier refs HEAD.
+
+    A barrier override stops the reverse walk. Records before the
+    barrier are invisible. An override emitted before the barrier that
+    pointed at a pre-barrier slot has no live anchor post-barrier;
+    HEAD is the right answer.
+    """
+    am = _assistant(tool_calls=(_tool_call("c1"),))
+    tape: list[TapeRecord] = [
+        _hr(0, _user("hi")),
+        _hr(1, am),
+        _override(
+            2,
+            suppresses=(),
+            inject_after=_ref(1),
+            payload=(_tool_result("c1", "real"),),
+            strategy="detached_splice",
+            paired_externally=frozenset({"c1"}),
+        ),
+        # Barrier: hides everything before it (no suppresses needed).
+        _override(
+            3,
+            suppresses=(),
+            inject_after=None,
+            payload=(_user("fresh start"),),
+            strategy="barrier",
+            barrier=True,
+        ),
+    ]
+    messages = resolve_context(tape).messages
+    # Only the barrier's payload is visible: ["fresh start"].
+    assert len(messages) == 1
+    assert isinstance(messages[0], UserMessage)
+    assert messages[0].text == "fresh start"
+
+
 def test_resolved_context_is_a_resolved_context_instance() -> None:
     """``resolve_context`` returns a ``ResolvedContext`` value object."""
     resolved = resolve_context([])

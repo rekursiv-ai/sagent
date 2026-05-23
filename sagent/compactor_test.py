@@ -11,7 +11,7 @@ import dataclasses
 import httpx
 import pytest
 
-from sagent.agent.context import resolve_context
+from sagent.agent.context import resolve_context, validate_context
 from sagent.compactor import (
     MICROCOMPACT_KEEP_RECENT,
     SummaryCompactor,
@@ -383,6 +383,64 @@ def test_microcompact_args_stub_uses_tool_summary() -> None:
     assert dict(asst.tool_calls[0].args) == {
         MICROCOMPACTED_ARGS_KEY: "Edit foo.py",
     }
+
+
+def test_microcompact_suppresses_splice_ov_for_same_call_id() -> None:
+    """Microcompact must suppress the splice OV's TR, not just the HR.
+
+    Reproduces production duplicate-TR scenario:
+    1. AM with tool_call ``c1`` (HR)
+    2. Placeholder TR for ``c1`` (HR) -- detached
+    3. Splice OV: suppresses placeholder, injects real TR for ``c1``
+    4. Many turns later, microcompact wants to clear ``c1``'s TR.
+
+    Without the fix, microcompact only suppresses the original
+    placeholder HR (already hidden by the splice). The splice OV's
+    real TR remains visible alongside microcompact's CLEARED TR --
+    duplicate, validate fails.
+
+    With the fix, microcompact also suppresses any visible OV whose
+    payload provides a TR for the same call_id.
+    """
+    placeholder = ToolResult(call_id="c1", content="[detached]")
+    real_tr = ToolResult(call_id="c1", content="real result")
+    tape: list[TapeRecord] = [
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=0), entry=UserMessage(text="hi")
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=1),
+            entry=AssistantMessage(
+                tool_calls=(ToolCall(id="c1", name="Bash", args={"cmd": "ls"}),)
+            ),
+        ),
+        HistoryRecord(ref=TapeRef(session_id="", ordinal=2), entry=placeholder),
+        ContextOverride(
+            ref=TapeRef(session_id="", ordinal=3),
+            suppresses=(TapeRef(session_id="", ordinal=2),),
+            inject_after=TapeRef(session_id="", ordinal=1),
+            payload=(real_tr,),
+            strategy="detached_splice",
+            paired_externally=frozenset({"c1"}),
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=4), entry=UserMessage(text="more")
+        ),
+    ]
+    mint = _ref_factory(start=len(tape))
+    tools: dict[str, Tool] = {"Bash": _Tool()}
+    context = resolve_context(tape).messages
+    overrides = microcompact(tape, context, tools, mint, keep_recent=0)
+    tape.extend(overrides)
+    messages = resolve_context(tape).messages
+    tr_count = sum(
+        1 for m in messages if isinstance(m, ToolResult) and m.call_id == "c1"
+    )
+    assert tr_count == 1, (
+        f"expected exactly one TR for c1; got {tr_count}: "
+        f"{[m.content for m in messages if isinstance(m, ToolResult) and m.call_id == 'c1']}"
+    )
+    validate_context(messages)
 
 
 def test_microcompact_keeps_recent_args_intact() -> None:
