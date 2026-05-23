@@ -1,7 +1,7 @@
-"""Post-compaction utilities: file re-attachment, transcript persistence.
+"""Post-compaction utilities: file re-attachment.
 
-These are agent lifecycle concerns -- they run after compaction but
-are not part of the Compactor protocol.
+Re-attach is an agent lifecycle concern -- it runs after compaction
+but is not part of the Compactor protocol.
 """
 
 from __future__ import annotations
@@ -9,12 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import asyncio
-import base64
 import dataclasses
-import json
 import logging
 
-from sagent.lib.atomic_file import atomic_write
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
@@ -34,76 +31,6 @@ The value is the tool's ``summary(args)`` output (e.g. ``"Edit foo.py"``)
 when available, else the tool name. Keeps the API-required ``tool_use``
 block valid while discarding the large args payload (``Edit``'s
 ``old_string``/``new_string``, ``Write``'s file body, etc.)."""
-
-
-def write_pre_compact_transcript(
-    path: Path,
-    history: list[HistoryEntry],
-) -> None:
-    """Dump history to ``path`` as JSONL for Recompact recovery.
-
-    Each entry is serialized via ``dataclasses.asdict`` plus a discriminator
-    column (``_kind``) so the reload path can reconstruct the right
-    dataclass. ``BytesMessage`` attachments serialize as base64.
-
-    Args:
-      path: Destination ``.jsonl`` file (atomically written).
-      history: History entries to persist, one record per line.
-
-    """
-    with atomic_write(path) as f:
-        for entry in history:
-            _ = f.write(json.dumps(_serialize_entry(entry)) + "\n")
-
-
-def _serialize_entry(entry: HistoryEntry) -> dict[str, object]:
-    """Convert one entry to a JSONL-safe dict."""
-    if isinstance(entry, UserMessage):
-        return {
-            "_kind": "user",
-            "text": entry.text,
-            "attachments": [_serialize_bytes(a) for a in entry.attachments],
-            "id": entry.id,
-            "parent_id": entry.parent_id,
-            "timestamp": entry.timestamp,
-        }
-    if isinstance(entry, AssistantMessage):
-        return {
-            "_kind": "assistant",
-            "text": entry.text,
-            "thinking_blocks": [dict(b) for b in entry.thinking_blocks],
-            "tool_calls": [
-                {"id": tc.id, "name": tc.name, "args": dict(tc.args)}
-                for tc in entry.tool_calls
-            ],
-            "id": entry.id,
-            "parent_id": entry.parent_id,
-            "timestamp": entry.timestamp,
-        }
-    return {
-        "_kind": "tool_result",
-        "call_id": entry.call_id,
-        "content": entry.content,
-        "is_error": entry.is_error,
-        "diff": entry.diff,
-        "diff_file_path": entry.diff_file_path,
-        "hint": entry.hint,
-        "summary": entry.summary,
-        "attachments": [_serialize_bytes(a) for a in entry.attachments],
-        "id": entry.id,
-        "parent_id": entry.parent_id,
-        "timestamp": entry.timestamp,
-    }
-
-
-def _serialize_bytes(att: object) -> dict[str, str]:
-    """Serialize a ``BytesMessage`` attachment to ``{mime, data_b64}``."""
-    data = getattr(att, "data", b"")
-    descriptor = getattr(att, "descriptor", "application/octet-stream")
-    return {
-        "mime": str(descriptor),
-        "data_b64": base64.b64encode(data if isinstance(data, bytes) else b"").decode(),
-    }
 
 
 async def reattach_files(

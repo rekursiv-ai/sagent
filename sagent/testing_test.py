@@ -82,7 +82,7 @@ async def test_fake_agent_null_model_stream_returns_empty() -> None:
         return None
 
     msg = await a.runtime.model.stream(
-        a.runtime.history,
+        a.runtime.context().messages,
         a.runtime.system,
         list(a.runtime.tools_map.values()),
         _on_text,

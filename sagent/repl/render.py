@@ -36,7 +36,6 @@ from sagent.types.runtime import (
     ChildEvent,
     CompactComplete,
     CompactFailed,
-    CompactFallback,
     CompactStarted,
     ModelResponseCancelled,
     ModelResponseComplete,
@@ -327,24 +326,30 @@ class RenderObserver:
             case CompactStarted():
                 self._flush_stream()
                 self._printer.write_dim_line("[compacting history…]")
-            case CompactComplete(summary=summary, snapshot_len=n):
-                self._flush_stream()
-                self._printer.write_dim_line(
-                    f"[compaction complete: {n} → {len(summary)} entries]",
-                )
-            case CompactFailed(exception=exc):
-                self._flush_stream()
-                self._printer.write_dim_line(
-                    f"[compaction failed: {type(exc).__name__}: {exc}]",
-                )
-            case CompactFallback(
+            case CompactComplete(
+                records=records,
                 fallback_reason=reason,
                 preserved_tail_count=count,
             ):
                 self._flush_stream()
-                entry = "entry" if count == 1 else "entries"
+                payload_entries = sum(len(r.payload) for r in records)
+                tokens_before = sum(r.token_before for r in records)
+                tokens_after = sum(r.token_after for r in records)
+                if reason:
+                    entry = "entry" if count == 1 else "entries"
+                    self._printer.write_dim_line(
+                        f"[compaction fallback: {reason}; preserved {count}"
+                        f" tail {entry}]",
+                    )
+                else:
+                    self._printer.write_dim_line(
+                        f"[compaction complete: ~{tokens_before} →"
+                        f" ~{tokens_after} tokens, {payload_entries} entries]",
+                    )
+            case CompactFailed(exception=exc):
+                self._flush_stream()
                 self._printer.write_dim_line(
-                    f"[compaction fallback: {reason}; preserved {count} tail {entry}]",
+                    f"[compaction failed: {type(exc).__name__}: {exc}]",
                 )
             case _:
                 pass

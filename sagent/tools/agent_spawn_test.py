@@ -162,11 +162,11 @@ def test_prompt_leaf_at_cap() -> None:
 
 
 @contextmanager
-def _parent_context(parent: Agent) -> Generator[None]:
+def _parent_context(parent: Agent, *, label: str = "Agent") -> Generator[None]:
     """Install minimal parent contextvars for the block."""
     agent_t = current_agent_var.set(parent)
     path_t = agent_path_var.set("")
-    label_t = agent_label_var.set("Agent")
+    label_t = agent_label_var.set(label)
     counter_t = agent_counter_var.set(itertools.count())
     state_t = tool_state_var.set(parent.tool_state)
     try:
@@ -587,13 +587,18 @@ async def test_spawn_persistent_rejects_duplicate_label() -> None:
 
 
 def _make_forwarder(
-    parent: Agent, label: str, *, notify_on_asleep: bool
+    parent: Agent,
+    label: str,
+    *,
+    notify_on_asleep: bool,
+    child: Agent | None = None,
 ) -> _ChildForwarder:
     """Construct a _ChildForwarder bound to ``parent``, no verbosity gating."""
     import time as _time  # noqa: PLC0415 -- isolated to test helper
 
     return _ChildForwarder(
         parent_agent=parent,
+        child=child or _make_parent(),
         forward_set=frozenset(),
         stats=ChildStats(label=label, start=_time.monotonic()),
         label=label,
@@ -614,7 +619,11 @@ def test_forwarder_notify_on_asleep_false_skips_inbox_push() -> None:
 
 
 def test_forwarder_notify_on_asleep_true_pushes_one_user_message() -> None:
-    """notify_on_asleep=True: one AgentIdle -> one UserMessage on parent."""
+    """notify_on_asleep=True: one AgentIdle -> one UserMessage on parent.
+
+    With no assistant message in the child's history yet, the payload
+    falls back to the bare ``[<label> is idle]`` form.
+    """
     parent = _make_parent()
     fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
 
@@ -625,6 +634,28 @@ def test_forwarder_notify_on_asleep_true_pushes_one_user_message() -> None:
     msg = queue.get_nowait()
     assert isinstance(msg, UserMessage)
     assert msg.text == "[child is idle]"
+
+
+def test_forwarder_notify_on_asleep_includes_last_assistant_text() -> None:
+    """When the child has assistant history, the idle payload carries it.
+
+    This is the safety net for a persistent child that replies with
+    plain assistant text instead of calling ``AgentSend`` back -- the
+    forwarder ferries the last text into the parent's inbox so the
+    parent's model still sees the content.
+    """
+    parent = _make_parent()
+    child = _make_parent()
+    child.runtime.append_history(AssistantMessage(text="hello parent"))
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
+
+    fwd(AgentIdle())
+
+    queue = parent.runtime.inbox._queue
+    assert queue.qsize() == 1
+    msg = queue.get_nowait()
+    assert isinstance(msg, UserMessage)
+    assert msg.text == "[child is idle] hello parent"
 
 
 def test_forwarder_notify_on_asleep_one_push_per_event() -> None:
@@ -661,7 +692,8 @@ def test_forwarder_notify_on_asleep_ignores_other_events() -> None:
 @pytest.mark.real_sleep
 async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
     """End-to-end: a persistent child seeded with a prompt completes one
-    round, becomes idle, and the parent inbox receives the notification.
+    round, becomes idle, and the parent inbox receives the notification
+    with the child's last assistant text embedded.
     """
     parent = _make_parent()
     child = Agent(
@@ -685,11 +717,12 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
                 pytest.fail("parent inbox never received the AgentIdle notification")
             await asyncio.sleep(0.01)
 
-        # First message is the idle ping; subsequent pings are possible
-        # if the agent cycles, but at least one must be present.
+        # First message is the idle ping carrying the child's last
+        # assistant text; subsequent pings are possible if the agent
+        # cycles, but at least one must be present.
         first = parent.runtime.inbox._queue.get_nowait()
         assert isinstance(first, UserMessage)
-        assert first.text == "[watcher-child is idle]", (
+        assert first.text == "[watcher-child is idle] done", (
             f"unexpected payload: {first.text!r}"
         )
 
@@ -704,9 +737,11 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_persistent_spawn_without_notify_on_asleep_silent() -> None:
-    """Without the flag, the parent inbox stays empty even after the
-    child becomes idle.
+async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
+    """Explicit ``notify_on_asleep=False`` suppresses idle pings.
+
+    The default is now True (so a parent that forgets the flag still
+    hears from its child); this test pins the opt-out path.
     """
     parent = _make_parent()
     child = Agent(
@@ -716,7 +751,9 @@ async def test_persistent_spawn_without_notify_on_asleep_silent() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent):
-        result = t._spawn_persistent(child, "quiet-child", "do work")
+        result = t._spawn_persistent(
+            child, "quiet-child", "do work", notify_on_asleep=False
+        )
         assert not result.is_error
         task = _persistent_tasks.get("quiet-child")
         assert task is not None
@@ -735,7 +772,7 @@ async def test_persistent_spawn_without_notify_on_asleep_silent() -> None:
                 break
 
         assert parent.runtime.inbox.empty(), (
-            "parent inbox received an unexpected push without notify_on_asleep"
+            "parent inbox received an unexpected push with notify_on_asleep=False"
         )
 
         child.shutdown(force=True)
@@ -743,6 +780,68 @@ async def test_persistent_spawn_without_notify_on_asleep_silent() -> None:
             await asyncio.wait_for(task, timeout=2.0)
         except (TimeoutError, Exception):  # noqa: BLE001
             _ = task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_persistent_spawn_augments_child_system_prompt() -> None:
+    """Persistent children get an IPC rule appended to their system prompt
+    so the child's LLM knows raw assistant text is invisible to the parent
+    and that ``AgentSend(to=<parent>)`` is the only reliable reply path.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+        system="base system prompt",
+    )
+    t = AgentSpawn()
+
+    with _parent_context(parent, label="parent-label"):
+        result = t._spawn_persistent(child, "augmented-child", "do work")
+        assert not result.is_error
+        task = _persistent_tasks.get("augmented-child")
+        assert task is not None
+
+        prompt = child.system
+        assert "base system prompt" in prompt
+        assert "persistent agent" in prompt
+        assert "AgentSend(to='parent-label'" in prompt
+        assert "invisible" in prompt
+
+        child.shutdown(force=True)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001 -- tear-down is best-effort
+            _ = task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_persistent_spawn_return_value_names_reply_channel() -> None:
+    """The tool result must tell the parent's LLM how replies arrive,
+    so it doesn't assume the next assistant message will surface
+    automatically.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+    )
+    t = AgentSpawn()
+
+    with _parent_context(parent):
+        result = t._spawn_persistent(child, "channel-child", "do work")
+        assert not result.is_error
+        assert "AgentSend" in result.content
+        assert "channel-child" in result.content
+        assert "is idle" in result.content
+
+        child.shutdown(force=True)
+        task = _persistent_tasks.get("channel-child")
+        if task is not None:
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (TimeoutError, Exception):  # noqa: BLE001 -- tear-down is best-effort
+                _ = task.cancel()
 
 
 def test_directive_schema_documents_notify_on_asleep() -> None:

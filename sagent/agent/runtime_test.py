@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 import asyncio
@@ -12,6 +12,7 @@ import logging
 import pytest
 
 from sagent.agent import runtime as agent_runtime
+from sagent.agent.runtime import Tool
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.history import (
     AssistantMessage,
@@ -30,8 +31,6 @@ from sagent.types.runtime import (
     Compact,
     CompactComplete,
     CompactFailed,
-    CompactFallback,
-    CompactionResult,
     Detach,
     DetachedResult,
     Halt,
@@ -49,6 +48,28 @@ from sagent.types.runtime import (
     Undetach,
     UserQueuedMessage,
 )
+from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+
+
+def _summary_override(
+    summary: list[HistoryEntry],
+    mint_ref: Callable[[], TapeRef],
+    *,
+    strategy: str = "summary",
+    fallback_reason: str = "",
+    preserved_tail_count: int = 0,
+) -> ContextOverride:
+    """Build a barrier override carrying ``summary`` as its payload."""
+    return ContextOverride(
+        ref=mint_ref(),
+        suppresses=(),
+        inject_after=None,
+        payload=tuple(summary),
+        strategy=strategy,
+        barrier=True,
+        fallback_reason=fallback_reason,
+        preserved_tail_count=preserved_tail_count,
+    )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -199,7 +220,7 @@ def _assistant_texts(agent: agent_runtime.AgentRuntime) -> list[str]:
     """Return assistant text entries from runtime history."""
     return [
         entry.text
-        for entry in agent.history
+        for entry in agent.context().messages
         if isinstance(entry, AssistantMessage) and entry.text
     ]
 
@@ -216,10 +237,11 @@ async def test_simple_text_response() -> None:
 
     await run_with_quit(agent)
 
-    assert len(agent.history) == 2
-    assert isinstance(agent.history[0], UserMessage)
-    assert isinstance(agent.history[1], AssistantMessage)
-    assert agent.history[1].text == "hello back"
+    messages = agent.context().messages
+    assert len(messages) == 2
+    assert isinstance(messages[0], UserMessage)
+    assert isinstance(messages[1], AssistantMessage)
+    assert messages[1].text == "hello back"
     assert collector.texts() == list("hello back")
     assert collector.has(ModelIdle)
 
@@ -240,13 +262,14 @@ async def test_tool_call_round() -> None:
     await run_with_quit(agent)
 
     assert echo.call_count == 1
-    assert len(agent.history) == 4
-    assert isinstance(agent.history[0], UserMessage)
-    assert isinstance(agent.history[1], AssistantMessage)
-    assert isinstance(agent.history[2], ToolResult)
-    assert agent.history[2].content == "tool output"
-    assert isinstance(agent.history[3], AssistantMessage)
-    assert agent.history[3].text == "done"
+    messages = agent.context().messages
+    assert len(messages) == 4
+    assert isinstance(messages[0], UserMessage)
+    assert isinstance(messages[1], AssistantMessage)
+    assert isinstance(messages[2], ToolResult)
+    assert messages[2].content == "tool output"
+    assert isinstance(messages[3], AssistantMessage)
+    assert messages[3].text == "done"
 
 
 @pytest.mark.asyncio
@@ -270,7 +293,7 @@ async def test_multiple_tools_parallel() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 2
     assert {r.call_id for r in results} == {"c1", "c2"}
     assert t1.call_count == 1
@@ -291,7 +314,7 @@ async def test_tool_error() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 1
     assert results[0].is_error
     assert "boom" in results[0].content
@@ -339,12 +362,12 @@ async def test_user_message_detaches_running_tools() -> None:
 
     detached = [
         t
-        for t in agent.history
+        for t in agent.context().messages
         if isinstance(t, ToolResult) and t.content == "[detached]"
     ]
     assert len(detached) == 1
     assert detached[0].call_id == "t1"
-    user_msgs = [t for t in agent.history if isinstance(t, UserMessage)]
+    user_msgs = [t for t in agent.context().messages if isinstance(t, UserMessage)]
     assert any(m.text == "stop" for m in user_msgs)
 
 
@@ -408,7 +431,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
     # "resume" may coalesce into the prior "go" entry (alternation
     # invariant: no back-to-back UserMessages in history). Either form
     # is correct -- only the content presence matters.
-    user_msgs = [t for t in agent.history if isinstance(t, UserMessage)]
+    user_msgs = [t for t in agent.context().messages if isinstance(t, UserMessage)]
     assert any("resume" in m.text for m in user_msgs), (
         f"'resume' must reach history; got {[m.text for m in user_msgs]!r}"
     )
@@ -511,11 +534,12 @@ async def test_clear_wipes_history() -> None:
     )
 
     assert not any(
-        isinstance(t, UserMessage) and t.text == "first" for t in agent.history
+        isinstance(t, UserMessage) and t.text == "first"
+        for t in agent.context().messages
     )
     assert any(
         isinstance(t, UserMessage) and t.text == "new conversation"
-        for t in agent.history
+        for t in agent.context().messages
     )
 
 
@@ -548,7 +572,7 @@ async def test_kill_one_tool() -> None:
         kill_slow(),
     )
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     fast_results = [r for r in results if r.call_id == "f1"]
     assert len(fast_results) == 1
     assert fast_results[0].content == "fast done"
@@ -559,7 +583,7 @@ async def test_kill_one_tool() -> None:
     assert len(slow_results) == 1
     assert slow_results[0].content == "[cancelled]"
     assert slow_results[0].is_error
-    for msg in agent.history:
+    for msg in agent.context().messages:
         if isinstance(msg, AssistantMessage) and msg.tool_calls:
             for tc in msg.tool_calls:
                 assert any(r.call_id == tc.id for r in results), (
@@ -610,12 +634,14 @@ async def test_detach_and_result_arrives_later() -> None:
 
     stubs = [
         t
-        for t in agent.history
+        for t in agent.context().messages
         if isinstance(t, ToolResult) and t.content == "[detached]"
     ]
     assert stubs == []
     spliced = [
-        t for t in agent.history if isinstance(t, ToolResult) and t.call_id == "t1"
+        t
+        for t in agent.context().messages
+        if isinstance(t, ToolResult) and t.call_id == "t1"
     ]
     assert len(spliced) == 1
     assert spliced[0].content == "late result"
@@ -688,14 +714,16 @@ async def test_splice_wakes_model_after_round_ended() -> None:
     # tool output is in the call_id="t1" slot.
     stubs = [
         t
-        for t in agent.history
+        for t in agent.context().messages
         if isinstance(t, ToolResult) and t.content == "[detached]"
     ]
     assert stubs == [], (
         "splice should have replaced the placeholder with the real result"
     )
     spliced = [
-        t for t in agent.history if isinstance(t, ToolResult) and t.call_id == "t1"
+        t
+        for t in agent.context().messages
+        if isinstance(t, ToolResult) and t.call_id == "t1"
     ]
     assert len(spliced) == 1
     assert spliced[0].content == "real output"
@@ -704,7 +732,9 @@ async def test_splice_wakes_model_after_round_ended() -> None:
     # scripted response. Without the wake, only round 2 would have
     # fired.
     assistant_texts = [
-        m.text for m in agent.history if isinstance(m, AssistantMessage) and m.text
+        m.text
+        for m in agent.context().messages
+        if isinstance(m, AssistantMessage) and m.text
     ]
     assert assistant_texts == ["preempted response", "post-splice response"], (
         f"splice should wake the model; got assistant texts {assistant_texts!r}"
@@ -715,7 +745,7 @@ async def test_splice_wakes_model_after_round_ended() -> None:
     # duplicated into the notification.
     notifications = [
         m
-        for m in agent.history
+        for m in agent.context().messages
         if isinstance(m, UserMessage) and m.text.startswith("[Detached tool ")
     ]
     assert len(notifications) == 1
@@ -824,7 +854,7 @@ async def test_detached_completion_during_next_cohort_no_interleave() -> None:
     # Walk history in append order and assert no ``UserMessage`` falls
     # between an assistant ``tool_use`` and its matching ``ToolResult``.
     pending_calls: set[str] = set()
-    for idx, entry in enumerate(agent.history):
+    for idx, entry in enumerate(agent.context().messages):
         if isinstance(entry, AssistantMessage):
             assert not pending_calls, (
                 f"history[{idx}] assistant turn while tool_use "
@@ -896,7 +926,7 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
     async def driver() -> None:
         await t1_started.wait()
         agent.inbox.push_back(Clear())
-        await wait_until(lambda: len(agent.history) == 0)
+        await wait_until(lambda: len(agent.context().messages) == 0)
         agent.inbox.push_back(UserMessage(text="fresh"))
         await wait_until(lambda: "fresh response" in _assistant_texts(agent))
         # Release whatever's still running in the background. With the
@@ -914,7 +944,7 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
 
     leaked = [
         entry
-        for entry in agent.history
+        for entry in agent.context().messages
         if isinstance(entry, UserMessage)
         and (
             entry.text.startswith("[Tool ") or entry.text.startswith("[Detached tool ")
@@ -969,7 +999,7 @@ async def test_undetach_gates_model() -> None:
     # rather than being appended as a fresh user message.
     spliced = [
         t
-        for t in agent.history
+        for t in agent.context().messages
         if isinstance(t, ToolResult) and t.content == "waited for"
     ]
     assert len(spliced) == 1
@@ -985,12 +1015,24 @@ async def test_compact_rewrites_history() -> None:
     class StubCompactor:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
-            return list(summary)
+        ) -> ContextOverride:
+            del tape, context, model, args
+            return _summary_override(list(summary), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent(
         [
@@ -1025,7 +1067,7 @@ async def test_compact_rewrites_history() -> None:
 
     assert any(
         isinstance(t, UserMessage) and t.text == "[summary of prior conversation]"
-        for t in agent.history
+        for t in agent.context().messages
     )
 
 
@@ -1209,14 +1251,14 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
     # be followed by ToolResults for ALL of those calls before any other
     # entry type (UserMessage / AssistantMessage / etc.).
     pending: set[str] = set()
-    for entry in agent.history:
+    for entry in agent.context().messages:
         if isinstance(entry, AssistantMessage):
             if pending:
                 pytest.fail(
                     f"orphan tool_use(s) {pending}: an AssistantMessage "
                     f"with tool_calls was not followed by all its tool_results "
                     f"before the next entry. History: "
-                    f"{[type(m).__name__ for m in agent.history]}"
+                    f"{[type(m).__name__ for m in agent.context().messages]}"
                 )
             pending = {tc.id for tc in entry.tool_calls}
         elif isinstance(entry, ToolResult):
@@ -1226,11 +1268,11 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
                 f"orphan tool_use(s) {pending}: a {type(entry).__name__} "
                 f"appeared before all tool_results for the prior "
                 f"AssistantMessage. History: "
-                f"{[type(m).__name__ for m in agent.history]}"
+                f"{[type(m).__name__ for m in agent.context().messages]}"
             )
     assert not pending, (
         f"trailing orphan tool_use(s) {pending} at end of history: "
-        f"{[type(m).__name__ for m in agent.history]}"
+        f"{[type(m).__name__ for m in agent.context().messages]}"
     )
 
 
@@ -1256,7 +1298,9 @@ async def test_irrecoverable_error_gates_on_user() -> None:
     assert collector.has(ModelResponseError)
     # The error sentinel and the user's retry coalesce into one entry
     # (alternation invariant: no back-to-back UserMessages in history).
-    user_texts = [t.text for t in agent.history if isinstance(t, UserMessage)]
+    user_texts = [
+        t.text for t in agent.context().messages if isinstance(t, UserMessage)
+    ]
     assert any("[Error:" in t for t in user_texts), (
         f"expected an error sentinel in user history; got {user_texts!r}"
     )
@@ -1302,9 +1346,11 @@ async def test_model_waits_for_all_tools() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 2
-    assistant_msgs = [t for t in agent.history if isinstance(t, AssistantMessage)]
+    assistant_msgs = [
+        t for t in agent.context().messages if isinstance(t, AssistantMessage)
+    ]
     assert assistant_msgs[-1].text == "both in"
 
 
@@ -1326,7 +1372,8 @@ async def test_await_user_blocks_non_user_items() -> None:
     )
 
     assert any(
-        isinstance(t, UserMessage) and t.text == "unblock" for t in agent.history
+        isinstance(t, UserMessage) and t.text == "unblock"
+        for t in agent.context().messages
     )
 
 
@@ -1359,7 +1406,9 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
     # only after the second (fresh) one arrives. Content can coalesce
     # into a single entry (alternation invariant) or stand alone -- the
     # test only requires the fresh redirect's text is present.
-    user_texts = [t.text for t in agent.history if isinstance(t, UserMessage)]
+    user_texts = [
+        t.text for t in agent.context().messages if isinstance(t, UserMessage)
+    ]
     assert any("fresh redirect" in t for t in user_texts), (
         f"'fresh redirect' must reach history (possibly coalesced); got {user_texts!r}"
     )
@@ -1403,18 +1452,18 @@ async def test_queued_message_waits_for_cohort() -> None:
         queue_after_start(),
     )
 
-    user_msgs = [t for t in agent.history if isinstance(t, UserMessage)]
+    user_msgs = [t for t in agent.context().messages if isinstance(t, UserMessage)]
     assert any("btw check tests" in m.text for m in user_msgs)
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert results[0].content == "tool done"
     user_idx = next(
         i
-        for i, t in enumerate(agent.history)
+        for i, t in enumerate(agent.context().messages)
         if isinstance(t, UserMessage) and "btw" in t.text
     )
     result_idx = next(
         i
-        for i, t in enumerate(agent.history)
+        for i, t in enumerate(agent.context().messages)
         if isinstance(t, ToolResult) and t.content == "tool done"
     )
     assert user_idx > result_idx
@@ -1434,7 +1483,7 @@ async def test_queued_messages_coalesce() -> None:
 
     await run_with_quit(agent)
 
-    user_msgs = [t for t in agent.history if isinstance(t, UserMessage)]
+    user_msgs = [t for t in agent.context().messages if isinstance(t, UserMessage)]
     coalesced = [m for m in user_msgs if "first" in m.text and "second" in m.text]
     assert len(coalesced) == 1
 
@@ -1473,7 +1522,8 @@ async def test_clear_discards_queued_messages() -> None:
     )
 
     assert not any(
-        isinstance(t, UserMessage) and "should be lost" in t.text for t in agent.history
+        isinstance(t, UserMessage) and "should be lost" in t.text
+        for t in agent.context().messages
     )
 
 
@@ -1521,7 +1571,8 @@ async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
         )
 
     assert not any(
-        isinstance(t, ToolResult) and t.content == "done" for t in agent.history
+        isinstance(t, ToolResult) and t.content == "done"
+        for t in agent.context().messages
     )
     messages = [record.getMessage() for record in caplog.records]
     assert any("runtime cohort start" in message for message in messages)
@@ -1574,7 +1625,7 @@ async def test_detach_all_tools() -> None:
 
     detached = [
         t
-        for t in agent.history
+        for t in agent.context().messages
         if isinstance(t, ToolResult) and t.content == "[detached]"
     ]
     assert len(detached) == 2
@@ -1594,7 +1645,8 @@ async def test_tool_result_not_in_cohort_ignored() -> None:
     await run_with_quit(agent)
 
     assert not any(
-        isinstance(t, ToolResult) and t.call_id == "bogus" for t in agent.history
+        isinstance(t, ToolResult) and t.call_id == "bogus"
+        for t in agent.context().messages
     )
 
 
@@ -1862,12 +1914,24 @@ async def test_compact_clears_queued_messages() -> None:
     class StubCompactor2:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
-            return list(summary)
+        ) -> ContextOverride:
+            del tape, context, model, args
+            return _summary_override(list(summary), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _collector = make_agent(
         [
@@ -1902,7 +1966,8 @@ async def test_compact_clears_queued_messages() -> None:
     )
 
     assert not any(
-        isinstance(t, UserMessage) and "should be lost" in t.text for t in agent.history
+        isinstance(t, UserMessage) and "should be lost" in t.text
+        for t in agent.context().messages
     )
 
 
@@ -1954,7 +2019,7 @@ async def test_tool_result_call_id_stamped_when_empty() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 1
     r = results[0]
     assert r.call_id == "c1"
@@ -1995,7 +2060,7 @@ async def test_tool_result_call_id_matching_call_preserved() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 1
     assert results[0].call_id == "c1"
     assert results[0].content == "ok"
@@ -2034,7 +2099,7 @@ async def test_unknown_tool_returns_error_result() -> None:
 
     await run_with_quit(agent)
 
-    results = [t for t in agent.history if isinstance(t, ToolResult)]
+    results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 1
     assert results[0].is_error
     assert "Unknown tool: missing" in results[0].content
@@ -2069,12 +2134,24 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
     class _Boom:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref, args
             raise RuntimeError("compactor broke")
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent([AssistantMessage(text="ok")])
     agent.compactor = _Boom()
@@ -2089,22 +2166,41 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_fallback_posts_compact_fallback_event() -> None:
-    """A safe fallback is its own runtime transition, not success text."""
+async def test_compact_fallback_propagates_via_compact_complete() -> None:
+    """Fallback metadata rides on ``CompactComplete.fallback_reason``.
+
+    ``CompactFallback`` has been folded into ``CompactComplete``;
+    fallback overrides set ``fallback_reason`` / ``preserved_tail_count``
+    on both the override and the event.
+    """
 
     class _Fallback:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> CompactionResult:
-            del history, model, args
-            return CompactionResult(
-                summary=[UserMessage(text="[fallback]"), UserMessage(text="continue")],
+        ) -> ContextOverride:
+            del tape, context, model, args
+            return _summary_override(
+                [UserMessage(text="[fallback]"), UserMessage(text="continue")],
+                mint_ref,
+                strategy="summary_fallback",
                 fallback_reason="summary failed after 3 attempts",
                 preserved_tail_count=1,
             )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent([AssistantMessage(text="ok")])
     agent.compactor = _Fallback()
@@ -2112,12 +2208,10 @@ async def test_compact_fallback_posts_compact_fallback_event() -> None:
     await agent._compact_and_post("")
 
     items = await agent.inbox.drain()
-    fallbacks = [i for i in items if isinstance(i, CompactFallback)]
     completes = [i for i in items if isinstance(i, CompactComplete)]
-    assert len(fallbacks) == 1
-    assert fallbacks[0].fallback_reason == "summary failed after 3 attempts"
-    assert fallbacks[0].preserved_tail_count == 1
-    assert not completes
+    assert len(completes) == 1
+    assert completes[0].fallback_reason == "summary failed after 3 attempts"
+    assert completes[0].preserved_tail_count == 1
 
 
 @pytest.mark.asyncio
@@ -2135,12 +2229,24 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
     class _Boom:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
+        ) -> ContextOverride:
+            del tape, context, model, mint_ref, args
             raise RuntimeError("compactor broke")
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent([AssistantMessage(text="post")])
     agent.compactor = _Boom()
@@ -2174,15 +2280,27 @@ async def test_compact_while_compacting_is_dropped() -> None:
     class _SlowCompactor:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
+        ) -> ContextOverride:
+            del tape, context, model, args
             call_count["n"] += 1
             compact_started.set()
             await release.wait()
-            return list(summary)
+            return _summary_override(list(summary), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent(
         [
@@ -2260,12 +2378,24 @@ async def test_compact_cancels_running_model_call() -> None:
     class _StubCompactor:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
-            return list(summary)
+        ) -> ContextOverride:
+            del tape, context, model, args
+            return _summary_override(list(summary), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent = agent_runtime.AgentRuntime(
         model=_BlockingModel(responses=[AssistantMessage(text="x")]),
@@ -2291,7 +2421,8 @@ async def test_compact_cancels_running_model_call() -> None:
     )
 
     assert any(
-        isinstance(t, UserMessage) and t.text == "[summary]" for t in agent.history
+        isinstance(t, UserMessage) and t.text == "[summary]"
+        for t in agent.context().messages
     )
 
 
@@ -2343,14 +2474,26 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
     class _SlowCompactor2:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del model, args
+        ) -> ContextOverride:
+            del tape, model, args
             compact_blocked.set()
             await asyncio.sleep(10.0)
-            return list(history)
+            return _summary_override(list(context), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, _ = make_agent(
         [
@@ -2486,7 +2629,8 @@ async def test_quit_cancels_running_tool_tasks() -> None:
 
     # Tool task was cancelled before posting its result.
     assert not any(
-        isinstance(t, ToolResult) and t.content == "done" for t in agent.history
+        isinstance(t, ToolResult) and t.content == "done"
+        for t in agent.context().messages
     )
 
 
@@ -2611,7 +2755,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
 
     assert len(model.call_histories) == 2, (
         f"expected 2 model calls (user1 + 'hey'); got {len(model.call_histories)}."
-        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+        f" history tail: {[type(m).__name__ for m in agent.context().messages[-4:]]}"
     )
     second_call = model.call_histories[1]
     assert any(isinstance(m, UserMessage) and m.text == "hey" for m in second_call), (
@@ -2681,7 +2825,7 @@ def _assert_exactly_one_surface(
     """
     in_pending = any(m.text == text for m in agent.pending_mid_stream())
     in_history = any(
-        isinstance(m, UserMessage) and text in m.text for m in agent.history
+        isinstance(m, UserMessage) and text in m.text for m in agent.context().messages
     )
     publish_count = published.count(text)
     # Bar in console_pane is driven by a publish event; "committed" =
@@ -2768,7 +2912,8 @@ async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
         # Wait until "hey" lands in history (drain happened).
         for _ in range(100):
             if any(
-                isinstance(m, UserMessage) and "hey" in m.text for m in agent.history
+                isinstance(m, UserMessage) and "hey" in m.text
+                for m in agent.context().messages
             ):
                 break
             await asyncio.sleep(0.01)
@@ -2810,7 +2955,7 @@ async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
         for _ in range(100):
             if any(
                 isinstance(m, UserMessage) and "a\n\nb\n\nc" in m.text
-                for m in agent.history
+                for m in agent.context().messages
             ):
                 break
             await asyncio.sleep(0.01)
@@ -2858,13 +3003,14 @@ async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
         # Not committed yet: model is still streaming.
         assert "deferred" not in published
         assert not any(
-            isinstance(m, UserMessage) and "deferred" in m.text for m in agent.history
+            isinstance(m, UserMessage) and "deferred" in m.text
+            for m in agent.context().messages
         )
         release_stream.set()
         for _ in range(100):
             if any(
                 isinstance(m, UserMessage) and "deferred" in m.text
-                for m in agent.history
+                for m in agent.context().messages
             ):
                 break
             await asyncio.sleep(0.01)
@@ -2898,42 +3044,42 @@ class TestUserMessageAlternation:
     def test_empty_history_appends(self) -> None:
         agent = _runtime_for_alternation_tests()
         agent._append_or_coalesce_user(UserMessage(text="hi"))
-        assert len(agent.history) == 1
-        tail = agent.history[-1]
+        assert len(agent.context().messages) == 1
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "hi"
 
     def test_after_assistant_appends_new_entry(self) -> None:
         """User -> Assistant -> User: tail is Assistant, no coalesce."""
         agent = _runtime_for_alternation_tests()
-        agent.history.append(UserMessage(text="prior"))
-        agent.history.append(AssistantMessage(text="response"))
+        agent.append_history(UserMessage(text="prior"))
+        agent.append_history(AssistantMessage(text="response"))
         agent._append_or_coalesce_user(UserMessage(text="next"))
-        assert len(agent.history) == 3
-        tail = agent.history[-1]
+        assert len(agent.context().messages) == 3
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "next"
 
     def test_after_tool_result_appends_new_entry(self) -> None:
         """User -> Tool result -> User: tail is ToolResult, no coalesce."""
         agent = _runtime_for_alternation_tests()
-        agent.history.append(UserMessage(text="prior"))
-        agent.history.append(ToolResult(call_id="c1", content="ok"))
+        agent.append_history(UserMessage(text="prior"))
+        agent.append_history(ToolResult(call_id="c1", content="ok"))
         agent._append_or_coalesce_user(UserMessage(text="next"))
-        assert len(agent.history) == 3
-        tail = agent.history[-1]
+        assert len(agent.context().messages) == 3
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "next"
 
     def test_after_user_coalesces_text(self) -> None:
         r"""Tail is UserMessage: merge text with ``\n\n`` join."""
         agent = _runtime_for_alternation_tests()
-        agent.history.append(UserMessage(text="first"))
+        agent.append_history(UserMessage(text="first"))
         agent._append_or_coalesce_user(UserMessage(text="second"))
-        assert len(agent.history) == 1, (
-            f"expected one coalesced entry; got {len(agent.history)}: {agent.history!r}"
+        assert len(agent.context().messages) == 1, (
+            f"expected one coalesced entry; got {len(agent.context().messages)}: {agent.context().messages!r}"
         )
-        tail = agent.history[-1]
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "first\n\nsecond"
 
@@ -2941,9 +3087,9 @@ class TestUserMessageAlternation:
         """Coalesce keeps the tail entry's ``id`` so downstream refs survive."""
         agent = _runtime_for_alternation_tests()
         tail_before = UserMessage(text="first")
-        agent.history.append(tail_before)
+        agent.append_history(tail_before)
         agent._append_or_coalesce_user(UserMessage(text="second"))
-        tail_after = agent.history[-1]
+        tail_after = agent.context().messages[-1]
         assert isinstance(tail_after, UserMessage)
         assert tail_after.id == tail_before.id, (
             f"coalesce must reuse tail id {tail_before.id}; got {tail_after.id}"
@@ -2954,11 +3100,11 @@ class TestUserMessageAlternation:
         a1 = BytesMessage(data=b"a", descriptor="image/png")
         a2 = BytesMessage(data=b"b", descriptor="image/png")
         agent = _runtime_for_alternation_tests()
-        agent.history.append(UserMessage(text="first", attachments=(a1,)))
+        agent.append_history(UserMessage(text="first", attachments=(a1,)))
         agent._append_or_coalesce_user(
             UserMessage(text="second", attachments=(a2,)),
         )
-        tail = agent.history[-1]
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.attachments == (a1, a2), (
             f"expected attachments (a1, a2); got {tail.attachments!r}"
@@ -2969,8 +3115,8 @@ class TestUserMessageAlternation:
         agent = _runtime_for_alternation_tests()
         for text in ("a", "b", "c"):
             agent._append_or_coalesce_user(UserMessage(text=text))
-        assert len(agent.history) == 1
-        tail = agent.history[-1]
+        assert len(agent.context().messages) == 1
+        tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "a\n\nb\n\nc"
 
@@ -3024,7 +3170,9 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
     # Anthropic-style invariant: no two ``UserMessage`` entries adjacent
     # in history. (One coalesced entry, or queued semantics that buffer
     # the second into a follow-up round, are both fine.)
-    pairs = list(zip(agent.history, agent.history[1:], strict=False))
+    pairs = list(
+        zip(agent.context().messages, agent.context().messages[1:], strict=False)
+    )
     consecutive_users = [
         (a, b)
         for a, b in pairs
@@ -3034,7 +3182,7 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
         f"history has back-to-back UserMessages "
         f"(breaks Anthropic alternation): "
         f"{[(a.text, b.text) for a, b in consecutive_users]}; "
-        f"full history: {[type(m).__name__ for m in agent.history]}"
+        f"full history: {[type(m).__name__ for m in agent.context().messages]}"
     )
     # Both messages' content must reach the model exactly once.
     all_texts = "".join(
@@ -3319,7 +3467,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
     assert len(model.call_histories) == 2, (
         f"expected 2 model calls (user1 + queued 'hey');"
         f" got {len(model.call_histories)}."
-        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+        f" history tail: {[type(m).__name__ for m in agent.context().messages[-4:]]}"
     )
     second_call = model.call_histories[1]
     assert any(isinstance(m, UserMessage) and "hey" in m.text for m in second_call), (
@@ -3511,7 +3659,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     assert len(model.call_histories) >= 2, (
         f"expected ≥ 2 model calls (Round 1 + Round 2 for 'second');"
         f" got {len(model.call_histories)}."
-        f" history tail: {[type(m).__name__ for m in agent.history[-4:]]}"
+        f" history tail: {[type(m).__name__ for m in agent.context().messages[-4:]]}"
     )
     # Round 2 must see "second" in some UserMessage. The alternation
     # invariant may coalesce "first" and "second" into one entry (no
@@ -3601,9 +3749,13 @@ async def test_run_forever_survives_synchronous_raise_in_pending_apply() -> None
 
     await run_with_quit(agent)
 
-    assert any(isinstance(t, UserMessage) and t.text == "hi" for t in agent.history)
+    assert any(
+        isinstance(t, UserMessage) and t.text == "hi" for t in agent.context().messages
+    )
     assert collector.has(ModelSwitchRejected)
-    assistant_msgs = [t for t in agent.history if isinstance(t, AssistantMessage)]
+    assistant_msgs = [
+        t for t in agent.context().messages if isinstance(t, AssistantMessage)
+    ]
     assert assistant_msgs[-1].text == "after error"
 
 
@@ -3915,13 +4067,25 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
     class _SlowCompactor:
         async def compact(
             self,
-            history: list[HistoryEntry],
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
             model: object,
+            mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> list[HistoryEntry]:
-            del history, model, args
+        ) -> ContextOverride:
+            del tape, context, model, args
             await release.wait()
-            return list(summary)
+            return _summary_override(list(summary), mint_ref)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextOverride, ...]:
+            del tape, context, tools, mint_ref
+            return ()
 
     agent, collector = make_agent(
         [
@@ -4154,6 +4318,159 @@ async def test_agent_idle_observer_pushback_does_not_loop() -> None:
         f"expected exactly 2 AgentIdles (one per real cycle), got {len(idles)}; "
         "an extra AgentIdle would mean the flag re-arms without consuming work"
     )
+
+
+class TestGateRepairsInvalidContext:
+    """Verify the model-call gate self-heals when ``validate_context`` finds an orphan.
+
+    Forward producers can no longer construct overrides with invalid
+    payloads -- :meth:`ContextOverride.__post_init__` rejects them at
+    construct (see ``types/tape_test.py``). What still reaches the
+    gate is invalid context resolved across multiple records: orphan
+    ``tool_use`` from a ``HistoryRecord`` whose ``ToolResult`` never
+    landed (tool task crashed silently, partial provider response
+    persisted), orphan ``ToolResult`` from a ``HistoryRecord`` whose
+    ``AssistantMessage`` was suppressed. Phase 2 repair handles these.
+    Cross-payload pathologies that previously required phase 1 repair
+    are now impossible by construction -- those scenarios live in
+    ``types/tape_test.py`` as validator-rejection tests.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orphan_tool_use_is_repaired_at_gate(self) -> None:
+        """Pre-populated orphan ``tool_use`` resolves to a paired context."""
+        model = ScriptedModel(
+            responses=[AssistantMessage(text="acknowledged")],
+        )
+        agent = agent_runtime.AgentRuntime(model=model)
+        # Seed history with a dangling tool_use: assistant declared
+        # ``toolu_1`` but no result follows.
+        agent.append_history(UserMessage(text="kick off"))
+        agent.append_history(
+            AssistantMessage(
+                text="",
+                tool_calls=(ToolCall(id="toolu_1", name="Bash", args={}),),
+            ),
+        )
+
+        # Ask the runtime to do another round. Without the repair, the
+        # gate's ``validate_context`` raises on every iteration and the
+        # runtime never fires the model.
+        agent.inbox.push_back(UserMessage(text="please retry"))
+        await run_with_quit(agent, timeout_sec=2.0)
+
+        # The runtime made progress: a follow-up assistant message
+        # exists, proving the model was actually called.
+        assistant_texts = [
+            m.text for m in agent.context().messages if isinstance(m, AssistantMessage)
+        ]
+        assert "acknowledged" in assistant_texts, (
+            f"runtime should self-heal orphan tool_use and call the model; "
+            f"actual assistant turns: {assistant_texts}"
+        )
+        # The synthetic repair leaves a paired ToolResult in the
+        # resolved view so the next provider serialization is valid.
+        results = [
+            m
+            for m in agent.context().messages
+            if isinstance(m, ToolResult) and m.call_id == "toolu_1"
+        ]
+        assert len(results) == 1, (
+            f"expected exactly one synthetic ToolResult for toolu_1; got {len(results)}"
+        )
+        assert results[0].is_error
+        assert "interrupt" in results[0].content.lower()
+
+    @pytest.mark.asyncio
+    async def test_orphan_tool_result_is_repaired_at_gate(self) -> None:
+        """Pre-populated orphan ``ToolResult`` is suppressed before send."""
+        model = ScriptedModel(
+            responses=[AssistantMessage(text="acknowledged")],
+        )
+        agent = agent_runtime.AgentRuntime(model=model)
+        agent.append_history(UserMessage(text="kick off"))
+        # Orphan: ``ToolResult`` whose ``call_id`` has no preceding
+        # assistant ``ToolCall``. ``repair_dangling_tool_calls`` would
+        # drop this at load; the gate must drop it in-flight too.
+        agent.append_history(ToolResult(call_id="ghost_1", content="oops"))
+
+        agent.inbox.push_back(UserMessage(text="please retry"))
+        await run_with_quit(agent, timeout_sec=2.0)
+
+        # Model was called; orphan was hidden by the repair.
+        resolved = agent.context().messages
+        assert not any(
+            isinstance(m, ToolResult) and m.call_id == "ghost_1" for m in resolved
+        ), (
+            f"orphan ToolResult should be suppressed at gate; "
+            f"resolved: {[type(m).__name__ for m in resolved]}"
+        )
+        assistant_texts = [m.text for m in resolved if isinstance(m, AssistantMessage)]
+        assert "acknowledged" in assistant_texts
+
+    @pytest.mark.asyncio
+    async def test_legacy_invalid_override_payload_rescued_at_gate(self) -> None:
+        """Legacy ``ContextOverride.replay`` (invalid payload) survives gate.
+
+        Sessions written before ``ContextOverride.__post_init__`` enforced
+        the pairing invariant may persist invalid payloads on disk. The
+        session loader uses :meth:`ContextOverride.replay` to bypass
+        validation at reconstruction. The rescue path then produces a
+        wire-format-valid context for the next provider call.
+        """
+        model = ScriptedModel(
+            responses=[AssistantMessage(text="acknowledged")],
+        )
+        agent = agent_runtime.AgentRuntime(model=model)
+        agent.append_history(UserMessage(text="dropped"))
+        # The orphan ToolResult (`ghost`) and unpaired AM (`toolu_X`)
+        # would each be rejected at construct. ``replay`` mimics a
+        # legacy session reconstructing such a payload from disk.
+        orphan_am = AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="toolu_X", name="Bash", args={}),),
+        )
+        legacy_override = ContextOverride.replay(
+            ref=TapeRef(session_id="", ordinal=agent._next_ordinal),
+            suppresses=(),
+            inject_after=None,
+            payload=(
+                UserMessage(text="[summary]"),
+                orphan_am,
+                ToolResult(call_id="ghost", content="dangling"),
+            ),
+            strategy="legacy_summary",
+            barrier=True,
+        )
+        agent.adopt_record(legacy_override)
+
+        agent.inbox.push_back(UserMessage(text="please retry"))
+        await run_with_quit(agent, timeout_sec=2.0)
+
+        resolved = agent.context().messages
+        # Model was called -- gate didn't hang.
+        assistant_texts = [
+            m.text for m in resolved if isinstance(m, AssistantMessage) and m.text
+        ]
+        assert "acknowledged" in assistant_texts, (
+            "rescue path must produce valid context for legacy payloads"
+        )
+        # Orphan TR is gone; the surviving tool_use is paired.
+        assert not any(
+            isinstance(m, ToolResult) and m.call_id == "ghost" for m in resolved
+        )
+        # Every AM in the final resolved sequence is followed by TRs
+        # matching its tool_calls.
+        pending: set[str] = set()
+        for entry in resolved:
+            if isinstance(entry, AssistantMessage):
+                assert not pending, (
+                    f"AM appeared while pending {pending!r}; rescue should pair"
+                )
+                pending = {tc.id for tc in entry.tool_calls}
+            elif isinstance(entry, ToolResult):
+                pending.discard(entry.call_id)
+        assert not pending, f"unpaired tool_use(s) at end: {pending}"
 
 
 if __name__ == "__main__":

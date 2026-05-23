@@ -224,7 +224,7 @@ class BackgroundTask:
 
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
     """Return the most recent ``ToolResult`` matching ``call_id``, or ``None``."""
-    for entry in reversed(agent.runtime.history):
+    for entry in reversed(agent.runtime.context().messages):
         if isinstance(entry, ToolResult) and entry.call_id == call_id:
             return entry
     return None

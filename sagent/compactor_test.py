@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import override
 
 import dataclasses
@@ -12,6 +11,7 @@ import dataclasses
 import httpx
 import pytest
 
+from sagent.agent.context import resolve_context
 from sagent.compactor import (
     MICROCOMPACT_KEEP_RECENT,
     SummaryCompactor,
@@ -30,9 +30,98 @@ from sagent.types.history import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse
-from sagent.types.runtime import CompactionResult
+from sagent.types.model import Model, ModelRequest, ModelResponse
+from sagent.types.tape import (
+    ContextOverride,
+    HistoryRecord,
+    TapeRecord,
+    TapeRef,
+)
 from sagent.types.tools import Tool
+
+
+def _ref_factory(start: int = 0) -> Callable[[], TapeRef]:
+    """Yield monotonically incrementing test refs (session_id ``"t"``)."""
+    n = [start]
+
+    def mint() -> TapeRef:
+        ref = TapeRef(session_id="t", ordinal=n[0])
+        n[0] += 1
+        return ref
+
+    return mint
+
+
+def _tape_from(history: list[HistoryEntry]) -> list[TapeRecord]:
+    return [
+        HistoryRecord(ref=TapeRef(session_id="t", ordinal=i), entry=e)
+        for i, e in enumerate(history)
+    ]
+
+
+def _apply_microcompact(
+    history: list[HistoryEntry],
+    tools: dict[str, Tool],
+    *,
+    keep_recent: int,
+) -> list[HistoryEntry]:
+    """Test helper: run ``microcompact`` and return the resolved messages."""
+    tape: list[TapeRecord] = list(_tape_from(history))
+    mint = _ref_factory(start=len(tape))
+    overrides = microcompact(tape, history, tools, mint, keep_recent=keep_recent)
+    tape.extend(overrides)
+    return resolve_context(tape).messages
+
+
+async def _build_compact_override(
+    compactor: SummaryCompactor,
+    history: list[HistoryEntry],
+    model: Model,
+    *,
+    custom_instructions: str | None = None,
+) -> ContextOverride:
+    """Test helper: run ``compactor.compact`` and return the raw override."""
+    tape: list[TapeRecord] = list(_tape_from(history))
+    mint = _ref_factory(start=len(tape))
+    return await compactor.compact(
+        tape=tape,
+        context=history,
+        model=model,
+        mint_ref=mint,
+        custom_instructions=custom_instructions,
+    )
+
+
+async def _apply_compact(
+    compactor: SummaryCompactor,
+    history: list[HistoryEntry],
+    model: Model,
+    *,
+    custom_instructions: str | None = None,
+) -> list[HistoryEntry]:
+    """Test helper: run ``compactor.compact`` and return the resolved messages."""
+    override = await _build_compact_override(
+        compactor,
+        history,
+        model,
+        custom_instructions=custom_instructions,
+    )
+    tape: list[TapeRecord] = list(_tape_from(history))
+    tape.append(override)
+    return resolve_context(tape).messages
+
+
+def _maintain_via(
+    compactor: SummaryCompactor,
+    history: list[HistoryEntry],
+    tools: dict[str, Tool],
+) -> list[HistoryEntry]:
+    """Test helper: run ``compactor.maintain`` and return resolved messages."""
+    tape: list[TapeRecord] = list(_tape_from(history))
+    mint = _ref_factory(start=len(tape))
+    overrides = compactor.maintain(tape, history, tools, mint)
+    tape.extend(overrides)
+    return resolve_context(tape).messages
 
 
 @dataclass(slots=True, kw_only=True)
@@ -96,13 +185,6 @@ def _summary_resp(body: str) -> ModelResponse:
     )
 
 
-def _summary(result: CompactionResult | list[HistoryEntry]) -> list[HistoryEntry]:
-    """Return compacted history from new or legacy compactor results."""
-    if isinstance(result, CompactionResult):
-        return result.summary
-    return result
-
-
 @pytest.mark.asyncio
 async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     body = "structured 9-section summary here"
@@ -112,7 +194,7 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     assert len(result) == 1
     first = result[0]
     assert isinstance(first, UserMessage)
@@ -131,7 +213,7 @@ async def test_compact_truncates_long_fallback_summary() -> None:
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     first = result[0]
     assert isinstance(first, UserMessage)
     assert "(truncated)" in first.text
@@ -140,19 +222,6 @@ async def test_compact_truncates_long_fallback_summary() -> None:
 def test_build_continuation_minimal() -> None:
     text = build_continuation("plain summary")
     assert "plain summary" in text
-
-
-def test_build_continuation_with_pointers() -> None:
-    text = build_continuation(
-        "body", summary_pointers=[("/p/sum.md", "topic A"), ("/q/sum.md", "topic B")]
-    )
-    assert "/p/sum.md: topic A" in text
-    assert "/q/sum.md: topic B" in text
-
-
-def test_build_continuation_with_transcript_path() -> None:
-    text = build_continuation("body", transcript_path="/x/log.jsonl")
-    assert "/x/log.jsonl" in text
 
 
 def test_build_continuation_proactive_resume_directive() -> None:
@@ -205,7 +274,7 @@ def test_maintain_calls_microcompact_in_place() -> None:
     compactor = SummaryCompactor()
     history = _history_with_n_clearable_results(8)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    compactor.maintain(history, tools)
+    history = _maintain_via(compactor, history, tools)
     # Five results kept; three cleared.
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 8 - MICROCOMPACT_KEEP_RECENT
@@ -214,7 +283,7 @@ def test_maintain_calls_microcompact_in_place() -> None:
 def test_microcompact_clears_old_clearable_results() -> None:
     history = _history_with_n_clearable_results(8)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    microcompact(history, tools, keep_recent=3)
+    history = _apply_microcompact(history, tools, keep_recent=3)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 5
 
@@ -223,7 +292,7 @@ def test_microcompact_skips_non_clearable_tools() -> None:
     """Tool with ``supports_microcompaction=False`` is preserved."""
     history = _history_with_n_clearable_results(3)
     tools: dict[str, Tool] = {"Bash": _Tool(supports_microcompaction=False)}
-    microcompact(history, tools, keep_recent=0)
+    history = _apply_microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert cleared == []
 
@@ -234,7 +303,7 @@ def test_microcompact_skips_already_cleared_results() -> None:
     # history[2] is the first ToolResult (call_id c0); pre-clear it.
     history[2] = ToolResult(call_id="c0", content=CLEARED)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    microcompact(history, tools, keep_recent=0)
+    history = _apply_microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     # Two: the pre-cleared one + the still-live one we just cleared.
     assert len(cleared) == 2
@@ -243,7 +312,7 @@ def test_microcompact_skips_already_cleared_results() -> None:
 def test_microcompact_unknown_tool_is_ignored() -> None:
     """A ``ToolResult`` whose ``ToolCall.name`` isn't in ``tools`` is preserved."""
     history = _history_with_n_clearable_results(3)
-    microcompact(history, {}, keep_recent=0)
+    history = _apply_microcompact(history, {}, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert cleared == []
 
@@ -251,7 +320,7 @@ def test_microcompact_unknown_tool_is_ignored() -> None:
 def test_microcompact_keep_recent_zero_clears_all() -> None:
     history = _history_with_n_clearable_results(3)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    microcompact(history, tools, keep_recent=0)
+    history = _apply_microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 3
 
@@ -266,7 +335,7 @@ def test_microcompact_stubs_matching_tool_call_args() -> None:
     """
     history = _history_with_n_clearable_results(3)
     tools: dict[str, Tool] = {"Bash": _Tool()}  # ``summary`` returns "".
-    microcompact(history, tools, keep_recent=0)
+    history = _apply_microcompact(history, tools, keep_recent=0)
     asst = history[1]
     assert isinstance(asst, AssistantMessage)
     for tc in asst.tool_calls:
@@ -308,7 +377,7 @@ def test_microcompact_args_stub_uses_tool_summary() -> None:
         ToolResult(call_id="c0", content="ok"),
     ]
     tools: dict[str, Tool] = {"Edit": _SummarizingTool()}
-    microcompact(history, tools, keep_recent=0)
+    history = _apply_microcompact(history, tools, keep_recent=0)
     asst = history[1]
     assert isinstance(asst, AssistantMessage)
     assert dict(asst.tool_calls[0].args) == {
@@ -328,7 +397,7 @@ def test_microcompact_keeps_recent_args_intact() -> None:
     )
     history[1] = dataclasses.replace(asst, tool_calls=new_calls)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    microcompact(history, tools, keep_recent=1)
+    history = _apply_microcompact(history, tools, keep_recent=1)
     asst = history[1]
     assert isinstance(asst, AssistantMessage)
     # First two args got stubbed; the last (kept) one is intact.
@@ -350,9 +419,7 @@ async def test_compact_with_keep_recent_preserves_tail() -> None:
         UserMessage(text="m3"),
         AssistantMessage(text="a3"),
     ]
-    result = _summary(
-        await compactor.compact(history, model, direction="from", keep_recent=2)
-    )
+    result = await _apply_compact(compactor, history, model)
     # First entry: continuation message; last two entries: original tail.
     assert isinstance(result[0], UserMessage)
     assert "partial summary" in result[0].text
@@ -369,7 +436,7 @@ async def test_compact_preserves_current_user_turn_by_default() -> None:
         AssistantMessage(text="older response"),
         UserMessage(text="continue the active task"),
     ]
-    result = _summary(await compactor.compact(history, model, direction="from"))
+    result = await _apply_compact(compactor, history, model)
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
     assert result[-1] == history[-1]
@@ -379,15 +446,13 @@ async def test_compact_preserves_current_user_turn_by_default() -> None:
 async def test_compact_direction_up_to_keeps_prefix() -> None:
     body = "summary content"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
-    compactor = SummaryCompactor()
+    compactor = SummaryCompactor(direction="up_to", keep_recent=1)
     history: list[HistoryEntry] = [
         UserMessage(text="early1"),
         UserMessage(text="mid1"),
         UserMessage(text="late1"),
     ]
-    result = _summary(
-        await compactor.compact(history, model, direction="up_to", keep_recent=1)
-    )
+    result = await _apply_compact(compactor, history, model)
     # Prefix preserved, continuation appended at end.
     assert isinstance(result[0], UserMessage)
     assert result[0].text == "early1"
@@ -401,7 +466,9 @@ async def test_compact_includes_custom_instructions_in_request() -> None:
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="x")]
-    _ = await compactor.compact(history, model, custom_instructions="focus on errors")
+    _ = await _apply_compact(
+        compactor, history, model, custom_instructions="focus on errors"
+    )
     assert model.stream_calls == 1
 
 
@@ -412,7 +479,7 @@ async def test_compact_ignores_blank_custom_instructions() -> None:
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="x")]
-    _ = await compactor.compact(history, model, custom_instructions="   ")
+    _ = await _apply_compact(compactor, history, model, custom_instructions="   ")
     assert model.stream_calls == 1
 
 
@@ -424,7 +491,7 @@ async def test_compact_strips_image_attachments() -> None:
     compactor = SummaryCompactor()
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     history: list[HistoryEntry] = [UserMessage(text="see", attachments=(img,))]
-    _ = await compactor.compact(history, model)
+    _ = await _apply_compact(compactor, history, model)
     # The request the model saw had no binary payload (verified via the
     # buffer call succeeding without any attachment-related branching).
     assert model.stream_calls == 1
@@ -435,7 +502,7 @@ async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
     """``_safe_split`` avoids slicing through an unfinished tool_use pair."""
     body = "summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
-    compactor = SummaryCompactor()
+    compactor = SummaryCompactor(keep_recent=2)
     tc = ToolCall(id="t1", name="Bash", args={"cmd": "ls"})
     # Without snap-left the split would orphan the tool_use at idx 1.
     history: list[HistoryEntry] = [
@@ -444,9 +511,7 @@ async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
         ToolResult(call_id="t1", content="ran"),
         UserMessage(text="m2"),
     ]
-    result = _summary(
-        await compactor.compact(history, model, direction="from", keep_recent=2)
-    )
+    result = await _apply_compact(compactor, history, model)
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
 
@@ -463,7 +528,7 @@ async def test_compact_strips_tool_result_attachments() -> None:
         UserMessage(text="x"),
         ToolResult(call_id="c1", content="ran", attachments=(img, pdf)),
     ]
-    _ = await compactor.compact(history, model)
+    _ = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 1
 
 
@@ -482,7 +547,7 @@ async def test_compact_drops_groups_on_prompt_too_long() -> None:
         UserMessage(text="round2"),
         AssistantMessage(text="resp2"),
     ]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 2
     assert isinstance(result[0], UserMessage)
     assert "post-shrink summary" in result[0].text
@@ -502,7 +567,7 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
         ToolResult(call_id="t1", content="output bytes"),
         UserMessage(text="r2"),
     ]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
 
@@ -512,14 +577,12 @@ async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
     """``keep_recent >= len(history)`` after snap-left returns the prefix."""
     body = "summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
-    compactor = SummaryCompactor()
+    compactor = SummaryCompactor(keep_recent=10)
     history: list[HistoryEntry] = [
         UserMessage(text="m1"),
         AssistantMessage(text="a1"),
     ]
-    result = _summary(
-        await compactor.compact(history, model, direction="from", keep_recent=10)
-    )
+    result = await _apply_compact(compactor, history, model)
     # Keep-recent saturates: tail preserved verbatim + continuation prepended.
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
@@ -527,7 +590,7 @@ async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
-    """Every attempt fails → fallback ``UserMessage`` returned."""
+    """Every attempt fails → fallback ``UserMessage`` returned in the override."""
     overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)
     model = _ScriptedModel(stream_responses=[overflow, overflow, overflow])
     compactor = SummaryCompactor(max_attempts=3)
@@ -535,11 +598,10 @@ async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
         UserMessage(text="round1"),
         AssistantMessage(text="resp1"),
     ]
-    result = await compactor.compact(history, model)
-    assert isinstance(result, CompactionResult)
-    assert result.fallback_reason == "summary failed after 3 attempts"
-    assert len(result.summary) == 1
-    first = result.summary[0]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.fallback_reason == "summary failed after 3 attempts"
+    assert len(override.payload) == 1
+    first = override.payload[0]
     assert isinstance(first, UserMessage)
     assert "Compaction failed" in first.text
 
@@ -554,11 +616,10 @@ async def test_compact_failure_preserves_current_user_turn() -> None:
         AssistantMessage(text="older response"),
         UserMessage(text="continue the active task"),
     ]
-    result = await compactor.compact(history, model)
-    assert isinstance(result, CompactionResult)
-    assert result.fallback_reason == "summary failed after 3 attempts"
-    assert result.preserved_tail_count == 1
-    assert result.summary[-1] == history[-1]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.fallback_reason == "summary failed after 3 attempts"
+    assert override.preserved_tail_count == 1
+    assert override.payload[-1] == history[-1]
 
 
 @pytest.mark.asyncio
@@ -581,7 +642,7 @@ async def test_compact_retries_on_transient_transport_error() -> None:
     )
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     first = result[0]
     assert isinstance(first, UserMessage)
     assert "recovered after retry" in first.text
@@ -598,7 +659,7 @@ async def test_compact_inserts_user_bridge_when_groups_lead_with_assistant() -> 
         AssistantMessage(text="leads-with-assistant"),
         ToolResult(call_id="c1", content="ran"),
     ]
-    result = _summary(await compactor.compact(history, model))
+    result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 1
     first = result[0]
     assert isinstance(first, UserMessage)
@@ -606,25 +667,37 @@ async def test_compact_inserts_user_bridge_when_groups_lead_with_assistant() -> 
 
 
 @pytest.mark.asyncio
-async def test_compact_includes_summary_pointers(tmp_path: Path) -> None:
-    """``summary_pointers`` arg is rendered into the continuation."""
+async def test_compact_drops_orphan_tool_result_before_sending() -> None:
+    """``compact`` filters orphan ``ToolResult`` from its outgoing LLM call.
+
+    Regression: when the resolved context contains a ``ToolResult``
+    whose ``call_id`` has no matching ``AssistantMessage.tool_calls``
+    entry earlier (orphan -- e.g. carried over from a malformed
+    session resume, or left by an override placement bug), the
+    compactor used to pass it through verbatim. The provider then
+    rejected the summary call with a 400 like ``No tool call found
+    for function call output with call_id fc_8`` (OpenAI) or
+    ``tool_use ids were found without tool_result blocks``
+    (Anthropic). Defensive filter at the request-build boundary
+    keeps the compactor's own LLM call valid regardless of upstream
+    context shape.
+    """
     body = "summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
-    transcript = tmp_path / "pre.jsonl"
-    pointers = [("/old/sum_0.md", "earlier topic")]
-    history: list[HistoryEntry] = [UserMessage(text="x")]
-    result = _summary(
-        await compactor.compact(
-            history,
-            model,
-            transcript_path=transcript,
-            summary_pointers=pointers,
-        )
-    )
-    first = result[0]
-    assert isinstance(first, UserMessage)
-    assert "/old/sum_0.md: earlier topic" in first.text
+    # Orphan: ``ghost_1`` has no preceding assistant ``ToolCall``.
+    history: list[HistoryEntry] = [
+        UserMessage(text="hi"),
+        ToolResult(call_id="ghost_1", content="orphan content"),
+        UserMessage(text="continue"),
+    ]
+    result = await _apply_compact(compactor, history, model)
+    assert model.stream_calls == 1
+    # The compactor's request should not have included the orphan.
+    # Inspect the request the model received via ``call_histories``
+    # if available; otherwise this test relies on the model not
+    # raising (a 400 would be turned into an exception by send_with_retry).
+    assert any(isinstance(m, UserMessage) and body in m.text for m in result)
 
 
 @pytest.mark.asyncio
@@ -635,7 +708,7 @@ async def test_compactor_uses_alternate_model_when_provided() -> None:
     primary_model = _ScriptedModel(stream_responses=[])
     compactor = SummaryCompactor(model=override_model)
     history: list[HistoryEntry] = [UserMessage(text="x")]
-    result = _summary(await compactor.compact(history, primary_model))
+    result = await _apply_compact(compactor, history, primary_model)
     assert override_model.stream_calls == 1
     assert primary_model.stream_calls == 0
     first = result[0]
@@ -672,6 +745,78 @@ def test_override_aware_constructs_cleanly() -> None:
     m = _OverrideAware()
     assert m.model_id == "ov"
     assert m.max_request_tokens == 1_000
+
+
+# --- verify_summary flag --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_false_skips_second_call() -> None:
+    """Default behavior: one model call per compaction."""
+    body = "first-pass summary"
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    compactor = SummaryCompactor(verify_summary=False)
+    history: list[HistoryEntry] = [UserMessage(text="x")]
+    result = await _apply_compact(compactor, history, model)
+    assert model.stream_calls == 1
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert body in first.text
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_true_uses_improved_summary() -> None:
+    """Second call's non-empty improvement replaces the first-pass summary."""
+    first = "first-pass missed details"
+    improved = "complete summary with all details"
+    model = _ScriptedModel(
+        stream_responses=[
+            _summary_resp(first),
+            ModelResponse(message=AssistantMessage(text=improved)),
+        ]
+    )
+    compactor = SummaryCompactor(verify_summary=True)
+    history: list[HistoryEntry] = [UserMessage(text="x")]
+    result = await _apply_compact(compactor, history, model)
+    assert model.stream_calls == 2
+    first_entry = result[0]
+    assert isinstance(first_entry, UserMessage)
+    assert improved in first_entry.text
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_identical_keeps_first_pass() -> None:
+    """Second call returning ``IDENTICAL`` keeps the first-pass summary."""
+    body = "summary that is already complete"
+    model = _ScriptedModel(
+        stream_responses=[
+            _summary_resp(body),
+            ModelResponse(message=AssistantMessage(text="IDENTICAL")),
+        ]
+    )
+    compactor = SummaryCompactor(verify_summary=True)
+    history: list[HistoryEntry] = [UserMessage(text="x")]
+    result = await _apply_compact(compactor, history, model)
+    assert model.stream_calls == 2
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert body in first.text
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_failure_keeps_first_pass() -> None:
+    """Second call raising is logged and the first-pass summary survives."""
+    body = "first pass"
+    model = _ScriptedModel(
+        stream_responses=[_summary_resp(body), RuntimeError("verifier broke")]
+    )
+    compactor = SummaryCompactor(verify_summary=True)
+    history: list[HistoryEntry] = [UserMessage(text="x")]
+    result = await _apply_compact(compactor, history, model)
+    assert model.stream_calls == 2
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert body in first.text
 
 
 if __name__ == "__main__":

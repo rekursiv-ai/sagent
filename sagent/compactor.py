@@ -15,8 +15,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from pathlib import Path
+from collections.abc import Callable, Mapping, Sequence
 from typing import Literal
 
 import dataclasses
@@ -36,7 +35,12 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.model import Model, ModelRequest
-from sagent.types.runtime import CompactionResult
+from sagent.types.tape import (
+    ContextOverride,
+    HistoryRecord,
+    TapeRecord,
+    TapeRef,
+)
 from sagent.types.tools import Tool
 
 
@@ -104,6 +108,7 @@ class SummaryCompactor:
     - Tool-use prevention (preamble + trailer)
     - Prompt-too-long retry (drop oldest rounds, up to N attempts)
     - Post-compaction continuation suppression
+    - Optional two-call self-verification (``verify_summary``)
 
     Args:
       prompt: Full compaction prompt template.
@@ -113,6 +118,10 @@ class SummaryCompactor:
       max_attempts: Retries on ``PromptTooLongError`` before giving up.
       keep_recent: Default ``keep_recent`` when ``compact`` doesn't override.
       proactive: When True, the continuation resumes work autonomously.
+      verify_summary: When True, run a second LLM call after summarization
+          asking the same model to critique the summary and fill gaps;
+          use the improved output. Doubles compaction token cost and
+          wall-clock; opt in when summary fidelity matters more.
       model: Optional model override; otherwise uses the caller's model.
 
     Raises:
@@ -129,8 +138,13 @@ class SummaryCompactor:
         chars_per_token: int = 4,
         max_attempts: int = 3,
         keep_recent: int = 0,
+        direction: Literal["from", "up_to"] = "from",
         proactive: bool = False,
+        verify_summary: bool = False,
         model: Model | None = None,
+        microcompact_keep_recent: int = MICROCOMPACT_KEEP_RECENT,
+        microcompact_gap_sec: float = 3600.0,
+        last_response_time: Callable[[], float] | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
@@ -140,8 +154,13 @@ class SummaryCompactor:
         self._chars_per_token = chars_per_token
         self._max_attempts = max_attempts
         self._keep_recent = keep_recent
+        self._direction: Literal["from", "up_to"] = direction
         self._proactive = proactive
+        self._verify_summary = verify_summary
         self._model = model
+        self._microcompact_keep_recent = microcompact_keep_recent
+        self._microcompact_gap_sec = microcompact_gap_sec
+        self._last_response_time = last_response_time
 
     @property
     def proactive(self) -> bool:
@@ -150,32 +169,39 @@ class SummaryCompactor:
 
     def maintain(
         self,
-        history: list[HistoryEntry],
+        tape: Sequence[TapeRecord],
+        context: Sequence[HistoryEntry],
         tools: dict[str, Tool],
-        *,
-        last_response_time: float = 0.0,
-        gap_sec: float = 3600.0,
-        keep_recent: int = MICROCOMPACT_KEEP_RECENT,
-    ) -> None:
-        """Replace old clearable ``ToolResult`` entries with a placeholder.
+        mint_ref: Callable[[], TapeRef],
+    ) -> tuple[ContextOverride, ...]:
+        """Produce microcompaction overrides for clearable tool exchanges.
 
-        Skips when the prompt cache is likely still warm (``time.time() -
-        last_response_time <= gap_sec``); microcompacting a warm-cache
-        request would force re-tokenization for no real saving.
+        Skips when the prompt cache is likely still warm
+        (``time.time() - last_response_time() <= microcompact_gap_sec``);
+        microcompacting a warm-cache request would force re-tokenization
+        for no real saving.
 
         Args:
-          history: History list to mutate in place.
+          tape: Append-only session tape.
+          context: Resolved provider-facing context.
           tools: Tool registry; only ``supports_microcompaction`` results clear.
-          last_response_time: Wall-clock seconds of the last response.
-              ``0.0`` falls through the gate so first-call sessions
-              still get cleared.
-          gap_sec: Cache-warm threshold; default 1 hour.
-          keep_recent: Number of recent clearable results preserved.
+          mint_ref: Factory minting fresh ``TapeRef`` values.
+
+        Returns:
+          overrides: Microcompaction overrides; empty when cache-warm or
+              no clearable exchanges remain.
 
         """
-        if last_response_time and (time.time() - last_response_time) <= gap_sec:
-            return
-        microcompact(history, tools, keep_recent=keep_recent)
+        last = self._last_response_time() if self._last_response_time else 0.0
+        if last and (time.time() - last) <= self._microcompact_gap_sec:
+            return ()
+        return microcompact(
+            tape,
+            context,
+            tools,
+            mint_ref,
+            keep_recent=self._microcompact_keep_recent,
+        )
 
     async def should_compact(
         self,
@@ -199,34 +225,37 @@ class SummaryCompactor:
 
     async def compact(
         self,
-        history: list[HistoryEntry],
+        tape: Sequence[TapeRecord],
+        context: Sequence[HistoryEntry],
         model: Model,
-        transcript_path: Path | None = None,
-        direction: Literal["from", "up_to"] = "from",
-        keep_recent: int | None = None,
+        mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
-        summary_pointers: list[tuple[str, str]] | None = None,
-    ) -> CompactionResult | list[HistoryEntry]:
-        """Summarize ``history`` with a structured format.
+    ) -> ContextOverride:
+        """Summarize ``context`` into a barrier override.
+
+        Direction (``"from"`` keeps tail, ``"up_to"`` keeps head) and
+        ``keep_recent`` are constructor parameters. The barrier override
+        replaces the visible context with ``payload = continuation``
+        plus the preserved tail (or prefix); the runtime appends it.
 
         Args:
-          history: Conversation history to summarize.
+          tape: Append-only session tape (unused; reserved for future
+              fine-grained suppression strategies).
+          context: Resolved provider-facing context to summarize.
           model: Fallback model when the compactor has none of its own.
-          transcript_path: Optional path of the pre-compact transcript on disk.
-          direction: ``"from"`` keeps the tail, ``"up_to"`` keeps the head.
-          keep_recent: Override for the default ``keep_recent`` count;
-              ``None`` falls back to the value supplied at construction.
+          mint_ref: Factory minting fresh ``TapeRef`` values.
           custom_instructions: Extra guidance appended to the prompt.
-          summary_pointers: ``(path, topic)`` pairs surfaced in the continuation.
 
         Returns:
-          summary: Compacted history with the continuation user message
-              placed per ``direction``.
+          override: Barrier override with the compacted payload, ready
+              for the runtime to append.
 
         """
+        del tape  # reserved
         compact_model = self._model or model
-        history = _strip_attachments(history)
-        effective_keep = self._keep_recent if keep_recent is None else keep_recent
+        history = _strip_attachments(list(context))
+        direction = self._direction
+        effective_keep = self._keep_recent
         if direction == "from":
             effective_keep = max(effective_keep, _trailing_user_tail_len(history))
 
@@ -242,6 +271,8 @@ class SummaryCompactor:
         else:
             to_summarize = history
             to_keep = []
+
+        token_before = sum(_entry_chars(e) for e in history) // self._chars_per_token
 
         if to_keep:
             body = self._partial_prompt
@@ -264,8 +295,17 @@ class SummaryCompactor:
 
         groups = _group_history_by_round(to_summarize)
         summary_text: str | None = None
+        entries: list[HistoryEntry] = []
         for attempt in range(self._max_attempts):
-            entries: list[HistoryEntry] = [e for g in groups for e in g]
+            entries = [e for g in groups for e in g]
+            # Drop orphan ``ToolResult`` entries before sending. Resolved
+            # contexts can carry them when an override suppresses an
+            # ``AssistantMessage`` whose ``ToolResult`` survives, or when
+            # legacy load passed through malformed history. Providers
+            # reject ``function_call_output`` blocks whose ``call_id``
+            # has no matching ``function_call`` earlier in the request
+            # (OpenAI 400 ``No tool call found for function call output``).
+            entries = _drop_orphan_tool_results(entries)
             # Anthropic requires the first message role to be ``user``;
             # dropping groups can leave ``entries[0]`` as an
             # ``AssistantMessage``. Prepend a synthetic user bridge.
@@ -307,16 +347,33 @@ class SummaryCompactor:
                 text="Compaction failed. Previous context summarized on disk only.",
             )
             if direction == "from":
-                summary = [fallback, *to_keep]
+                payload = (fallback, *to_keep)
             else:
-                summary = [*to_keep, fallback]
-            return CompactionResult(
-                summary=summary,
+                payload = (*to_keep, fallback)
+            token_after = sum(_entry_chars(e) for e in payload) // self._chars_per_token
+            return ContextOverride(
+                ref=mint_ref(),
+                suppresses=(),
+                inject_after=None,
+                payload=payload,
+                strategy="summary_fallback",
+                barrier=True,
+                token_before=token_before,
+                token_after=token_after,
                 fallback_reason=f"summary failed after {self._max_attempts} attempts",
                 preserved_tail_count=len(to_keep),
             )
 
         raw = summary_text or "(compaction produced no output)"
+        if self._verify_summary:
+            try:
+                raw = await self._verify(
+                    compact_model,
+                    entries,
+                    raw,
+                )
+            except Exception as exc:  # noqa: BLE001 -- verification is best-effort
+                logger.warning("summary verification failed; using original: %s", exc)
         summary = _format_summary(raw)
         logger.info(
             "Compacted %d entries → summary (%d chars), kept %d recent.",
@@ -327,75 +384,190 @@ class SummaryCompactor:
         continuation = UserMessage(
             text=build_continuation(
                 summary,
-                transcript_path=transcript_path,
                 recent_preserved=bool(to_keep),
                 proactive=self._proactive,
-                summary_pointers=summary_pointers,
             ),
         )
         if direction == "from":
-            return CompactionResult(summary=[continuation, *to_keep])
-        return CompactionResult(summary=[*to_keep, continuation])
+            payload = (continuation, *to_keep)
+        else:
+            payload = (*to_keep, continuation)
+        token_after = sum(_entry_chars(e) for e in payload) // self._chars_per_token
+        return ContextOverride(
+            ref=mint_ref(),
+            suppresses=(),
+            inject_after=None,
+            payload=payload,
+            strategy="summary",
+            barrier=True,
+            token_before=token_before,
+            token_after=token_after,
+        )
+
+    async def _verify(
+        self,
+        compact_model: Model,
+        original_entries: list[HistoryEntry],
+        raw_summary: str,
+    ) -> str:
+        """Self-verification probe: ask the model to critique its own summary.
+
+        Re-runs the model with the original entries plus the produced
+        summary, asking it to identify any missing technical details,
+        file paths, tool results, or user constraints and emit an
+        improved summary. Returns the improved text when non-empty,
+        otherwise the original.
+
+        Args:
+          compact_model: Model used for the verification call (same one
+              that produced the summary).
+          original_entries: Entries that fed the original summarization
+              call, used to ground the critique.
+          raw_summary: Raw summary text (pre-format) the verification
+              should improve.
+
+        Returns:
+          improved: Verified summary text, or ``raw_summary`` unchanged
+              when the verification call returned nothing substantive.
+
+        """
+        probe = (
+            "You produced this summary of the prior conversation:\n\n"
+            f"<previous_summary>\n{raw_summary}\n</previous_summary>\n\n"
+            "Review your summary against the conversation above. Did you"
+            " omit any specific technical details, file paths, tool"
+            " results, user constraints, pending tasks, or recent"
+            " decisions? If yes, emit a corrected complete summary in"
+            " the same format. If the summary is already complete and"
+            " accurate, emit exactly the token IDENTICAL on a single"
+            " line and nothing else."
+        )
+        request = ModelRequest(
+            messages=[*original_entries, UserMessage(text=probe)],
+            system=_SYSTEM,
+            tools=None,
+        )
+        response = await send_with_retry(
+            compact_model,
+            request,
+            max_attempts=self._max_attempts,
+            persistent_retry=False,
+            publish_recoverable=lambda text: logger.info(
+                "verifier recoverable: %s", text
+            ),
+        )
+        improved = response.message.text.strip()
+        if not improved or improved.upper() == "IDENTICAL":
+            return raw_summary
+        return improved
 
 
 def microcompact(
-    history: list[HistoryEntry],
+    tape: Sequence[TapeRecord],
+    context: Sequence[HistoryEntry],
     tools: dict[str, Tool],
+    mint_ref: Callable[[], TapeRef],
     *,
     keep_recent: int = MICROCOMPACT_KEEP_RECENT,
-) -> None:
-    """Clear old clearable tool exchanges in place.
+) -> tuple[ContextOverride, ...]:
+    """Build microcompaction overrides for clearable tool exchanges.
 
     A tool exchange is the pair ``AssistantMessage.tool_calls[i]`` +
     matching ``ToolResult``. For clearable exchanges (tools where
-    ``supports_microcompaction=True``), this:
+    ``supports_microcompaction=True``), this emits two override kinds:
 
-    1. Replaces ``ToolResult.content`` with :data:`CLEARED` (and drops
-       attachments / diff / hint / summary).
-    2. Replaces the matching ``ToolCall.args`` with
-       ``{MICROCOMPACTED_ARGS_KEY: tool.summary(args)}`` so the call
-       remains API-valid but the payload (``Edit``'s ``old_string`` /
-       ``new_string``, ``Write``'s file body, etc.) is gone.
+    1. One override per cleared ``ToolResult``: suppresses the
+       original, injects a replacement with :data:`CLEARED` content
+       (and stripped attachments / diff / hint / summary).
+    2. One override per ``AssistantMessage`` carrying any cleared
+       ``call_id``: suppresses the original, injects a replacement
+       whose cleared calls have stubbed ``args``
+       (``{MICROCOMPACTED_ARGS_KEY: tool.summary(args)}``).
 
-    The most recent ``keep_recent`` clearable exchanges are preserved.
+    The most recent ``keep_recent`` clearable exchanges in the visible
+    context are preserved. Already-cleared results (visible content
+    equals :data:`CLEARED`) are skipped, so repeated calls are idempotent.
 
     Args:
-      history: History list to mutate in place.
-      tools: Tool registry; only ``supports_microcompaction`` exchanges clear.
+      tape: Append-only session tape (used to locate suppression refs
+          and slot anchors).
+      context: Resolved provider-facing context to inspect.
+      tools: Tool registry; only ``supports_microcompaction`` exchanges
+          clear.
+      mint_ref: Factory minting fresh ``TapeRef`` values.
       keep_recent: Number of most-recent clearable exchanges to preserve.
 
+    Returns:
+      overrides: One ``ContextOverride`` per replaced record; empty
+          when no clearable exchange survives the ``keep_recent`` gate.
+
     """
+    # Walk tape, tracking the slot anchor before each AssistantMessage,
+    # the AssistantMessage record itself, and (per call_id) the
+    # ``ToolResult`` record it produced. ``call_to_block`` maps call_id
+    # -> index into the assistant block list.
+    assistant_blocks: list[tuple[TapeRef, TapeRef, AssistantMessage]] = []
+    call_to_block: dict[str, int] = {}
     tool_for_call: dict[str, str] = {}
-    for entry in history:
+    tr_records: dict[str, tuple[TapeRef, ToolResult]] = {}
+    prior_history_ref: TapeRef | None = None
+    for record in tape:
+        if not isinstance(record, HistoryRecord):
+            continue
+        entry = record.entry
         if isinstance(entry, AssistantMessage):
+            # ``prior_history_ref`` is the slot before this AM; that's
+            # the anchor where the AM and its TR replacements render.
+            block_anchor = prior_history_ref or _SENTINEL_HEAD_ANCHOR
+            block_idx = len(assistant_blocks)
+            assistant_blocks.append((block_anchor, record.ref, entry))
             for tc in entry.tool_calls:
                 tool_for_call.setdefault(tc.id, tc.name)
+                call_to_block[tc.id] = block_idx
+        elif isinstance(entry, ToolResult):
+            tr_records.setdefault(entry.call_id, (record.ref, entry))
+        prior_history_ref = record.ref
 
-    clearable: list[int] = []
-    for i, entry in enumerate(history):
-        if not isinstance(entry, ToolResult) or entry.content == CLEARED:
-            continue
-        tool = tools.get(tool_for_call.get(entry.call_id, ""))
-        if tool is not None and getattr(tool, "supports_microcompaction", False):
-            clearable.append(i)
+    # Filter to clearable call_ids: tool supports microcompaction, the
+    # currently-visible result is not yet ``CLEARED``, and a ToolResult
+    # for the call_id actually exists.
+    visible_tr_by_call: dict[str, ToolResult] = {}
+    for entry in context:
+        if isinstance(entry, ToolResult) and entry.content != CLEARED:
+            visible_tr_by_call.setdefault(entry.call_id, entry)
 
-    to_clear = clearable[:-keep_recent] if keep_recent > 0 else clearable
-    cleared_call_ids: set[str] = set()
-    for i in to_clear:
-        entry = history[i]
-        assert isinstance(entry, ToolResult)
-        cleared_call_ids.add(entry.call_id)
-        history[i] = dataclasses.replace(
-            entry, content=CLEARED, attachments=(), diff="", hint="", summary=""
-        )
+    clearable: list[str] = []
+    for call_id in tr_records:
+        if call_id not in visible_tr_by_call:
+            continue
+        if call_id not in call_to_block:
+            continue
+        tool = tools.get(tool_for_call.get(call_id, ""))
+        if tool is None or not getattr(tool, "supports_microcompaction", False):
+            continue
+        clearable.append(call_id)
 
-    if not cleared_call_ids:
-        return
-    for i, entry in enumerate(history):
-        if not isinstance(entry, AssistantMessage):
+    # Preserve tape order so "most recent N kept" matches the original
+    # in-place semantic.
+    clearable.sort(key=lambda c: tr_records[c][0].ordinal)
+    to_clear_ids = clearable[:-keep_recent] if keep_recent > 0 else clearable
+    if not to_clear_ids:
+        return ()
+    cleared_call_ids: set[str] = set(to_clear_ids)
+
+    overrides: list[ContextOverride] = []
+    affected_blocks: set[int] = set()
+
+    # Build one override per ``AssistantMessage`` whose tool_calls
+    # include a cleared id, anchored at the slot before the AM. The
+    # stubbed AM carries its tool_calls but its matching TRs live in
+    # sibling overrides (built next); ``paired_externally`` declares
+    # every tool_call id as externally paired so payload validation
+    # passes.
+    for block_idx, (anchor, am_ref, am_entry) in enumerate(assistant_blocks):
+        if not any(tc.id in cleared_call_ids for tc in am_entry.tool_calls):
             continue
-        if not any(tc.id in cleared_call_ids for tc in entry.tool_calls):
-            continue
+        affected_blocks.add(block_idx)
         new_calls = tuple(
             dataclasses.replace(
                 tc,
@@ -403,9 +575,88 @@ def microcompact(
             )
             if tc.id in cleared_call_ids
             else tc
-            for tc in entry.tool_calls
+            for tc in am_entry.tool_calls
         )
-        history[i] = dataclasses.replace(entry, tool_calls=new_calls)
+        stubbed = dataclasses.replace(am_entry, tool_calls=new_calls)
+        overrides.append(
+            ContextOverride(
+                ref=mint_ref(),
+                suppresses=(am_ref,),
+                inject_after=anchor if anchor is not _SENTINEL_HEAD_ANCHOR else None,
+                payload=(stubbed,),
+                strategy="microcompact_call",
+                paired_externally=frozenset(tc.id for tc in stubbed.tool_calls),
+            ),
+        )
+
+    # Build one override per cleared ``ToolResult``, anchored at the
+    # same point as its parent AM. Order matches the tape order of
+    # the original ToolResults so the resolver's "same-anchor renders
+    # in append order" rule lays them out correctly. ``paired_externally``
+    # declares the matching AM lives in a sibling ``microcompact_call``
+    # override (or the original ``HistoryRecord`` when only the TR is
+    # being cleared).
+    for call_id in to_clear_ids:
+        block_idx = call_to_block[call_id]
+        anchor, _am_ref, _am_entry = assistant_blocks[block_idx]
+        tr_ref, tr_entry = tr_records[call_id]
+        cleared = dataclasses.replace(
+            tr_entry,
+            content=CLEARED,
+            attachments=(),
+            diff="",
+            hint="",
+            summary="",
+        )
+        overrides.append(
+            ContextOverride(
+                ref=mint_ref(),
+                suppresses=(tr_ref,),
+                inject_after=anchor if anchor is not _SENTINEL_HEAD_ANCHOR else None,
+                payload=(cleared,),
+                strategy="microcompact_result",
+                paired_externally=frozenset({call_id}),
+            ),
+        )
+
+    return tuple(overrides)
+
+
+# Sentinel: a non-None marker distinct from any real TapeRef, used to
+# represent "no prior slot exists" without confusing ``inject_after=None``
+# (which is itself the head-anchor signal at override-construction time).
+_SENTINEL_HEAD_ANCHOR = TapeRef(session_id="\0", ordinal=-1)
+
+
+def _drop_orphan_tool_results(
+    entries: list[HistoryEntry],
+) -> list[HistoryEntry]:
+    """Filter out ``ToolResult`` entries with no preceding matching ``ToolCall``.
+
+    Walks ``entries`` in order, tracking ``call_id``s seen on
+    ``AssistantMessage.tool_calls``. Any ``ToolResult`` whose
+    ``call_id`` was not previously declared is dropped.
+
+    Args:
+      entries: Provider-facing entries about to be sent in a request.
+
+    Returns:
+      filtered: ``entries`` with orphan ``ToolResult`` records removed.
+
+    """
+    declared: set[str] = set()
+    out: list[HistoryEntry] = []
+    for entry in entries:
+        if isinstance(entry, AssistantMessage):
+            for tc in entry.tool_calls:
+                declared.add(tc.id)
+            out.append(entry)
+        elif isinstance(entry, ToolResult):
+            if entry.call_id in declared:
+                out.append(entry)
+        else:
+            out.append(entry)
+    return out
 
 
 def _stub_args_summary(tc: ToolCall, tools: Mapping[str, Tool]) -> str:
@@ -434,40 +685,20 @@ def _format_summary(raw: str) -> str:
 
 def build_continuation(
     summary: str,
-    transcript_path: str | Path | None = None,
     recent_preserved: bool = False,
     proactive: bool = False,
-    summary_pointers: list[tuple[str, str]] | None = None,
 ) -> str:
     """Build the post-compaction continuation message from asset templates.
 
     Args:
       summary: Compacted summary text to embed.
-      transcript_path: Optional disk path of the full pre-compact transcript.
       recent_preserved: True when a recent tail was kept verbatim.
       proactive: When True, the resume directive runs autonomously.
-      summary_pointers: ``(path, topic)`` pairs surfaced ahead of the summary.
 
     Returns:
       message: Continuation user-message text ready to splice into history.
 
     """
-    pointers = ""
-    if summary_pointers:
-        lines = [
-            "Prior context summaries (read files for full detail)."
-            " Any pending tasks from these summaries that have not"
-            " been completed are still active.",
-            *(f"- {path}: {topic}" for path, topic in summary_pointers),
-        ]
-        pointers = "\n".join(lines) + "\n\n"
-    transcript = ""
-    if transcript_path is not None:
-        transcript = (
-            "\n\nThe full conversation transcript is at:"
-            f" {transcript_path}. Consult it for exact code,"
-            " error output, or other pre-compaction details."
-        )
     recent = (
         "\n\nThe most recent messages appear below in their original form."
         if recent_preserved
@@ -488,9 +719,7 @@ def build_continuation(
             " etc.). Proceed as though no interruption occurred."
         )
     return (
-        _CONTINUATION_TEMPLATE.replace("{{pointers}}", pointers)
-        .replace("{{summary}}", summary)
-        .replace("{{transcript}}", transcript)
+        _CONTINUATION_TEMPLATE.replace("{{summary}}", summary)
         .replace("{{recent}}", recent)
         .replace("{{resume}}", resume)
         .strip()

@@ -27,7 +27,6 @@ from sagent.types.runtime import (
     ChildEvent,
     CompactComplete,
     CompactFailed,
-    CompactFallback,
     CompactStarted,
     ModelResponseComplete,
     ModelResponseError,
@@ -38,6 +37,7 @@ from sagent.types.runtime import (
     ToolLabel,
     ToolResultPartial,
 )
+from sagent.types.tape import ContextOverride, TapeRef
 
 
 def test_render_tool_result_error_only_emits_error() -> None:
@@ -127,17 +127,29 @@ def test_compact_complete_emits_progress_dim_line() -> None:
     obs = make_render_observer(p)
     obs(
         CompactComplete(
-            summary=[UserMessage(text="u"), AssistantMessage(text="a")],
-            snapshot_len=42,
+            records=(
+                ContextOverride(
+                    ref=TapeRef(session_id="t", ordinal=0),
+                    suppresses=(),
+                    inject_after=None,
+                    payload=(UserMessage(text="u"), AssistantMessage(text="a")),
+                    strategy="summary",
+                    barrier=True,
+                    token_before=42,
+                    token_after=8,
+                ),
+            ),
         )
     )
-    assert p.dim_lines == ["[compaction complete: 42 → 2 entries]"]
+    assert p.dim_lines == [
+        "[compaction complete: ~42 → ~8 tokens, 2 entries]",
+    ]
 
 
 def test_compact_failed_emits_error_dim_line() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)
-    obs(CompactFailed(exception=RuntimeError("ctx full"), snapshot_len=10))
+    obs(CompactFailed(exception=RuntimeError("ctx full"), tape_len=10))
     assert p.dim_lines == ["[compaction failed: RuntimeError: ctx full]"]
 
 
@@ -145,15 +157,25 @@ def test_compact_fallback_emits_progress_dim_line() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)
     obs(
-        CompactFallback(
-            summary=[UserMessage(text="tail")],
-            snapshot_len=10,
+        CompactComplete(
+            records=(
+                ContextOverride(
+                    ref=TapeRef(session_id="t", ordinal=0),
+                    suppresses=(),
+                    inject_after=None,
+                    payload=(UserMessage(text="tail"),),
+                    strategy="summary_fallback",
+                    barrier=True,
+                    fallback_reason="summary failed after 3 attempts",
+                    preserved_tail_count=1,
+                ),
+            ),
             fallback_reason="summary failed after 3 attempts",
             preserved_tail_count=1,
         )
     )
     assert p.dim_lines == [
-        "[compaction fallback: summary failed after 3 attempts; preserved 1 tail entry]"
+        "[compaction fallback: summary failed after 3 attempts; preserved 1 tail entry]",
     ]
 
 

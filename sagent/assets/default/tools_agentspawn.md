@@ -40,12 +40,20 @@ Arguments:
 - `persistent` (optional) — run the child as a long-running background
   agent via `serve_forever()`. Returns immediately with the child's
   label. Send subsequent work via `AgentSend(to=<label>, ...)`; manage
-  the lifecycle (cancel / list) via `BackgroundTask`.
-- `notify_on_asleep` (optional, persistent only) — when true, the
-  parent's inbox receives a `UserMessage` every time the child becomes
-  idle (drained inbox with no work in flight). Lets the parent detect
-  "child has finished processing my message" without polling. Edge-
-  triggered: one notification per idle transition.
+  the lifecycle (cancel / list) via `BackgroundTask`. Reply path:
+  unlike a non-persistent spawn, a persistent child's plain assistant
+  text is **invisible** to you — it's logged only to the child's own
+  history. The child must call `AgentSend(to=<your label>, ...)` for
+  its words to reach your inbox. The idle-notification payload (see
+  `notify_on_asleep`) is the only automatic fallback.
+- `notify_on_asleep` (optional, persistent only, default true) — when
+  true, the parent's inbox receives a `UserMessage` every time the
+  child becomes idle (drained inbox with no work in flight). The
+  notification carries the child's last assistant text:
+  `[<label> is idle] <last text>`. This is the safety net for children
+  that emit plain assistant text instead of calling `AgentSend` back.
+  Pass `false` to suppress idle pings entirely. Edge-triggered: one
+  notification per idle transition.
 - `label` (optional) — explicit label for the child agent. Auto-
   generated if omitted. Required to be unique across live persistent
   agents.

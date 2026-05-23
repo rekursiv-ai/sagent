@@ -9,11 +9,11 @@ from unittest.mock import patch
 import json
 
 from sagent.agent import session_io
+from sagent.agent.context import resolve_context
 from sagent.agent.session_io import (
     SessionMeta,
     append_session,
     load_session,
-    parse_summary_pointers,
     rebuild_content_cache,
     repair_dangling_tool_calls,
     restore_model,
@@ -29,10 +29,30 @@ from sagent.types.history import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.tape import (
+    ContextClear,
+    ContextOverride,
+    HistoryRecord,
+    TapeRecord,
+    TapeRef,
+)
 
 
 if TYPE_CHECKING:
     import pytest
+
+
+def _records_from(entries: list[HistoryEntry]) -> list[TapeRecord]:
+    """Wrap each entry as a ``HistoryRecord`` with a synthetic ref."""
+    return [
+        HistoryRecord(ref=TapeRef(session_id="abc", ordinal=i), entry=e)
+        for i, e in enumerate(entries)
+    ]
+
+
+def _history_from_tape(tape: list[TapeRecord]) -> list[HistoryEntry]:
+    """Resolve a loaded tape to its provider-facing entries."""
+    return resolve_context(tape).messages
 
 
 def test_serialize_tool_state_empty_has_bash_cwd() -> None:
@@ -73,12 +93,12 @@ def _round_trip_history(
     append_session(
         session_file,
         meta=meta.serialize(),
-        history_delta=entries,
+        tape_delta=_records_from(entries),
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
-    return history
+    _, tape, _ = loaded
+    return _history_from_tape(tape)
 
 
 def test_user_message_round_trip(tmp_path: Path) -> None:
@@ -114,36 +134,39 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
     append_session(
         session_file,
         meta=meta.serialize(),
-        history_delta=[assistant, original],
+        tape_delta=_records_from([assistant, original]),
     )
 
-    # Step 2: write an update patch using the SAME id with the real
-    # bash output (simulating the splice).
+    # Step 2: write an override that suppresses the placeholder and
+    # injects the real bash output (simulating the splice).
     spliced = ToolResult(
-        id=original.id,  # same id is the key
+        id=original.id,
         call_id="toolu_bash_1",
         content="hello world\n",
     )
-    append_session(
-        session_file,
-        history_updates=[spliced],
+    placeholder_records = _records_from([assistant, original])
+    placeholder_ref = placeholder_records[1].ref
+    parent_ref = placeholder_records[0].ref
+    splice_override = ContextOverride(
+        ref=TapeRef(session_id="abc", ordinal=2),
+        suppresses=(placeholder_ref,),
+        inject_after=parent_ref,
+        payload=(spliced,),
+        strategy="detached_splice",
+        paired_externally=frozenset({"toolu_bash_1"}),
     )
+    append_session(session_file, tape_delta=[splice_override])
 
-    # Step 3: reload + assert the spliced content wins.
+    # Step 3: reload + resolve and assert the spliced content wins.
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    messages = resolve_context(tape).messages
     matching = [
-        e for e in history if isinstance(e, ToolResult) and e.call_id == "toolu_bash_1"
+        e for e in messages if isinstance(e, ToolResult) and e.call_id == "toolu_bash_1"
     ]
-    assert len(matching) == 1, (
-        f"expected exactly one ToolResult for the spliced call_id; "
-        f"got {len(matching)}: {[e.content for e in matching]}"
-    )
-    assert matching[0].content == "hello world\n", (
-        f"expected spliced content; got {matching[0].content!r}. "
-        f"Loader is appending duplicates instead of deduping by id."
-    )
+    assert len(matching) == 1
+    assert matching[0].content == "hello world\n"
 
 
 def test_user_message_with_attachment(tmp_path: Path) -> None:
@@ -206,16 +229,20 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
     append_session(
         session_file,
         meta=meta.serialize(),
-        history_delta=[UserMessage(text="old")],
+        tape_delta=_records_from([UserMessage(text="old")]),
     )
-    append_session(session_file, clear=True)
     append_session(
         session_file,
-        history_delta=[UserMessage(text="new")],
+        tape_delta=[ContextClear(ref=TapeRef(session_id="abc", ordinal=999))],
+    )
+    append_session(
+        session_file,
+        tape_delta=_records_from([UserMessage(text="new")]),
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     texts = [e.text for e in history if isinstance(e, UserMessage)]
     assert texts == ["new"]
 
@@ -243,7 +270,10 @@ def test_tool_state_post_clear_wins(tmp_path: Path) -> None:
     s2 = ToolState()
     s2.bash_cwd = "/new"
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s1))
-    append_session(session_file, clear=True)
+    append_session(
+        session_file,
+        tape_delta=[ContextClear(ref=TapeRef(session_id="abc", ordinal=999))],
+    )
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s2))
     loaded = load_session(tmp_path, {})
     assert loaded is not None
@@ -257,31 +287,58 @@ def test_append_session_no_ops_on_empty_batch(tmp_path: Path) -> None:
     assert not session_file.exists()
 
 
-def test_append_session_emits_clear_first(tmp_path: Path) -> None:
+def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
+    """Disk-loaded ``ToolResult`` with no matching ``tool_use`` is hidden on resume.
+
+    Regression: a session that crashed mid-tool or that imported a
+    foreign history could persist a ``ToolResult`` whose ``call_id``
+    has no preceding ``AssistantMessage.tool_calls`` match.
+    ``repair_dangling_tool_calls`` drops the orphan from its returned
+    list, but the loaded tape still contained the orphan as a
+    ``HistoryRecord``; the resolved context surfaced it and the next
+    provider call rejected the request with 400. The load-time tape
+    repair must append a suppression override so the resolved view
+    is wire-format-valid out of the box.
+    """
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="orphan", model_id="m", provider="P", auth="env")
+    # Persist: user -> orphan ToolResult -> user.
+    user1 = UserMessage(text="kick off")
+    orphan = ToolResult(call_id="ghost_1", content="dangling")
+    user2 = UserMessage(text="continue")
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=0), entry=user1),
+            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=1), entry=orphan),
+            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=2), entry=user2),
+        ],
+    )
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    resolved = resolve_context(tape).messages
+    # The orphan must not surface in the resolved view; user messages survive.
+    assert not any(
+        isinstance(m, ToolResult) and m.call_id == "ghost_1" for m in resolved
+    ), f"orphan ToolResult should be suppressed on load; resolved: {resolved}"
+    assert [m for m in resolved if isinstance(m, UserMessage)] == [user1, user2]
+
+
+def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:
+    """Within one batch: ``meta`` precedes any tape records."""
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(session_id="abc")
     append_session(
         session_file,
-        clear=True,
         meta=meta.serialize(),
-        history_delta=[UserMessage(text="x")],
+        tape_delta=_records_from([UserMessage(text="x")]),
     )
     lines = session_file.read_text(encoding="utf-8").splitlines()
     parsed = [json.loads(line) for line in lines]
     kinds = [r["kind"] for r in parsed]
-    assert kinds[0] == "clear"
-    assert kinds[1] == "meta"
-
-
-def test_parse_summary_pointers_valid() -> None:
-    raw = [["/p1", "t1"], ["/p2", "t2"]]
-    assert parse_summary_pointers(raw) == [("/p1", "t1"), ("/p2", "t2")]
-
-
-def test_parse_summary_pointers_invalid_returns_empty() -> None:
-    assert parse_summary_pointers(None) == []
-    assert parse_summary_pointers("not-a-list") == []
-    assert parse_summary_pointers([["only-one-element"]]) == []
+    assert kinds == ["meta", "history"]
 
 
 def test_session_meta_round_trip() -> None:
@@ -315,7 +372,8 @@ def test_load_session_skips_unknown_history_type(tmp_path: Path) -> None:
 
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     # Unknown ``type`` was silently dropped.
     assert history == []
 
@@ -340,7 +398,8 @@ def test_load_session_drops_attachment_with_bad_mime_or_data(tmp_path: Path) -> 
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     assert len(history) == 1
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -371,7 +430,8 @@ def test_load_session_drops_non_list_attachments_and_thinking(
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     user = history[0]
     asst = history[1]
     assert isinstance(user, UserMessage)
@@ -394,7 +454,8 @@ def test_load_session_drops_non_dict_tool_calls(tmp_path: Path) -> None:
     _write_jsonl(session_file, record)
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     asst = history[0]
     assert isinstance(asst, AssistantMessage)
     assert len(asst.tool_calls) == 1
@@ -415,7 +476,8 @@ def test_load_session_skips_blank_lines_and_non_dict_records(tmp_path: Path) -> 
 
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     assert len(history) == 1
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -434,7 +496,8 @@ def test_load_session_preserves_and_skips_corrupt_lines(tmp_path: Path) -> None:
 
     loaded = load_session(tmp_path, {})
     assert loaded is not None
-    _, history, _ = loaded
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
     assert len(history) == 1
     entry = history[0]
     assert isinstance(entry, UserMessage)

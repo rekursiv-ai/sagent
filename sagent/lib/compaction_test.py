@@ -1,24 +1,17 @@
-"""Tests for ``lib.compaction``: re-attach + transcript persistence."""
+"""Tests for ``lib.compaction``: re-attach helpers."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import base64
-import json
-
 import pytest
 
 from sagent.lib.compaction import (
     CLEARED,
-    _serialize_bytes,
-    _serialize_entry,
     reattach_files,
-    write_pre_compact_transcript,
 )
 from sagent.types.history import (
     AssistantMessage,
-    BytesMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -29,87 +22,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sagent.types.history import HistoryEntry
-
-
-def test_serialize_user_entry() -> None:
-    img = BytesMessage(data=b"img", descriptor="image/png")
-    entry = UserMessage(text="hi", attachments=(img,))
-    out = _serialize_entry(entry)
-    assert out["_kind"] == "user"
-    assert out["text"] == "hi"
-    atts = out["attachments"]
-    assert isinstance(atts, list)
-    assert atts == [
-        {"mime": "image/png", "data_b64": base64.b64encode(b"img").decode()}
-    ]
-
-
-def test_serialize_assistant_entry() -> None:
-    tc = ToolCall(id="c1", name="Bash", args={"cmd": "ls"})
-    entry = AssistantMessage(
-        text="thinking",
-        thinking_blocks=({"thinking": "x", "type": "block"},),
-        tool_calls=(tc,),
-    )
-    out = _serialize_entry(entry)
-    assert out["_kind"] == "assistant"
-    assert out["text"] == "thinking"
-    thinking = out["thinking_blocks"]
-    assert thinking == [{"thinking": "x", "type": "block"}]
-    calls = out["tool_calls"]
-    assert calls == [{"id": "c1", "name": "Bash", "args": {"cmd": "ls"}}]
-
-
-def test_serialize_tool_result_entry() -> None:
-    entry = ToolResult(
-        call_id="c1",
-        content="ok",
-        diff="--- a\n+++ b\n",
-        diff_file_path="/x.py",
-        hint="be careful",
-        summary="1 line",
-    )
-    out = _serialize_entry(entry)
-    assert out["_kind"] == "tool_result"
-    assert out["call_id"] == "c1"
-    assert out["diff"] == "--- a\n+++ b\n"
-    assert out["hint"] == "be careful"
-    assert out["summary"] == "1 line"
-    assert out["is_error"] is False
-
-
-def test_serialize_bytes_unknown_type() -> None:
-    # Object lacking ``data`` / ``descriptor`` -> falls back gracefully.
-    out = _serialize_bytes(object())
-    assert out == {
-        "mime": "application/octet-stream",
-        "data_b64": base64.b64encode(b"").decode(),
-    }
-
-
-def test_serialize_bytes_real_attachment() -> None:
-    att = BytesMessage(data=b"hello", descriptor="image/jpeg")
-    out = _serialize_bytes(att)
-    assert out["mime"] == "image/jpeg"
-    assert base64.b64decode(out["data_b64"]) == b"hello"
-
-
-def test_write_pre_compact_transcript_round_trip(tmp_path: Path) -> None:
-    history = [
-        UserMessage(text="hello"),
-        AssistantMessage(text="hi back"),
-        ToolResult(call_id="c1", content="ok"),
-    ]
-    out = tmp_path / "transcript.jsonl"
-    write_pre_compact_transcript(out, history)
-    lines = out.read_text().splitlines()
-    assert len(lines) == 3
-    rec0 = json.loads(lines[0])
-    rec1 = json.loads(lines[1])
-    rec2 = json.loads(lines[2])
-    assert rec0["_kind"] == "user"
-    assert rec1["_kind"] == "assistant"
-    assert rec2["_kind"] == "tool_result"
 
 
 @pytest.mark.asyncio

@@ -18,9 +18,8 @@ Owns three wrappers and a small set of observers:
 
 - :class:`_AgentCompactor` bridges the rich ``SummaryCompactor``
   interface to the runtime's lean ``compact(history, model, args)``
-  protocol. Writes ``pre_compact_<N>.jsonl`` transcripts when a
-  session dir is set; runs the post-compact enrich pipeline
-  (file reattach, status injection, tool restore).
+  protocol. Runs the post-compact enrich pipeline (file reattach,
+  status injection, tool restore).
 
 Observers track cost, activity (call timing, streamed chars), tool
 registry (cohort id → tool name), persistence (``SaveSession`` →
@@ -35,7 +34,7 @@ Public surface includes:
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 
 import asyncio
@@ -55,6 +54,7 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.agent.compaction import (
+    MAX_CONSECUTIVE_COMPACT_FAILURES,
     CompactionState,
     post_compact_enrich,
 )
@@ -77,8 +77,8 @@ from sagent.agent.state import (
     unique_registry_label,
 )
 from sagent.lib import last_models
-from sagent.lib.compaction import write_pre_compact_transcript
 from sagent.lib.json import JSON
+from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,11 @@ re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
 ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
 MAX_OVERFLOW_RECOVERY = 3
+_MICROCOMPACT_GAP_SEC = 3600.0
+"""Cache-warm threshold: skip microcompact when the previous response is newer
+than this. Matches the legacy default; microcompacting an in-flight cached
+prefix forces re-tokenization for no real saving and produces stubbed-args
+tool calls that the model then mimics."""
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -398,8 +403,13 @@ class Agent:
 
     @property
     def history(self) -> list[types.history.HistoryEntry]:
-        """Conversation history (read/write view of runtime.history)."""
-        return self.runtime.history
+        """Resolved provider-facing context (read-only snapshot).
+
+        Returns a fresh list each call. Mutations are silently lost --
+        use ``runtime.append_history`` / ``append_override`` /
+        ``append_clear`` to evolve state.
+        """
+        return self.runtime.context().messages
 
     @property
     def inbox(self):
@@ -651,7 +661,7 @@ class Agent:
     def resume(
         self,
         meta: SessionMeta,
-        history: list[types.history.HistoryEntry],
+        tape: list[TapeRecord],
         tool_state: ToolState,
     ) -> None:
         """Apply a persisted session snapshot to this agent.
@@ -665,22 +675,22 @@ class Agent:
 
         Args:
           meta: Persisted ``SessionMeta``.
-          history: Persisted conversation history.
+          tape: Persisted tape records loaded by ``load_session``.
           tool_state: Persisted ``ToolState`` snapshot.
 
         """
-        self.runtime.history.extend(history)
-        self.tool_state = tool_state
-        rebuild_content_cache(history, self.tool_state)
         if meta.session_id:
             self._session_id = meta.session_id
+            self.runtime.session_id = meta.session_id
+        self.runtime.replay_tape(tape)
+        self.tool_state = tool_state
+        rebuild_content_cache(self.runtime.context().messages, self.tool_state)
         if meta.status:
             self._status = meta.status
         self.cost_tracker.restore(total_cost_usd=meta.total_cost_usd, total=meta.tokens)
         self.activity.num_tool_call_rounds = meta.num_tool_call_rounds
         self.activity.elapsed_seconds = meta.total_active_elapsed_seconds
         self.compaction_state.compact_count = meta.compact_count
-        self.compaction_state.summary_pointers = list(meta.summary_pointers)
         if meta.provider and meta.model_id and meta.model_id != self.model.model_id:
             restored = restore_model(meta)
             if restored is not None:
@@ -732,7 +742,7 @@ class Agent:
         """
         await self._await_event(
             types.runtime.Compact(args=args),
-            (types.runtime.CompactComplete, types.runtime.CompactFallback),
+            (types.runtime.CompactComplete,),
         )
 
     async def recompact(self, args: str = "") -> None:
@@ -744,7 +754,7 @@ class Agent:
         """
         await self._await_event(
             types.runtime.Recompact(args=args),
-            (types.runtime.CompactComplete, types.runtime.CompactFallback),
+            (types.runtime.CompactComplete,),
         )
 
     async def clear(self) -> None:
@@ -976,7 +986,6 @@ class Agent:
             event,
             (
                 types.runtime.CompactComplete,
-                types.runtime.CompactFallback,
                 types.runtime.CompactFailed,
             ),
         ):
@@ -1009,18 +1018,24 @@ class Agent:
                 )
             )
 
-    def microcompact_history(self, history: list[types.history.HistoryEntry]) -> None:
-        """Apply the compactor's in-place microcompaction to ``history``.
+    def microcompact_history(self) -> None:
+        """Append microcompaction overrides for stale clearable tool exchanges.
 
-        No-op when no rich compactor is wired. Used by the model
-        wrapper to trim stale tool results before each model call.
-
-        Args:
-          history: History list to mutate in place.
-
+        No-op when no rich compactor is wired. Called by the model
+        wrapper before each model call so the provider sees compacted
+        tool exchanges; subsequent ``runtime.context()`` reads reflect
+        the overrides.
         """
-        if self._agent_compactor is not None:
-            self._agent_compactor.maintain(history)
+        if self._agent_compactor is None:
+            return
+        overrides = self._agent_compactor.maintain(
+            self.runtime.tape,
+            self.runtime.context().messages,
+            self.runtime.tools_map,
+            self.runtime.mint_ref,
+        )
+        for override in overrides:
+            self.runtime.adopt_record(override)
 
     def cancel_background(self, job_id: str) -> None:
         """Remove ``job_id`` from the background-task registry, if present.
@@ -1060,8 +1075,9 @@ class Agent:
               proactive vs reactive path.
 
         Args:
-          history: Pre-compaction history snapshot (mutated in place if
-              ``compact_now`` runs; same list as ``runtime.history``).
+          history: Pre-compaction history snapshot. ``compact_now``
+              appends a barrier override to the tape; callers should
+              re-resolve via ``runtime.context().messages`` after.
           model: Rich model whose tokenizer estimates seed the headroom
               check and whose ``max_request_tokens`` caps the budget.
 
@@ -1080,14 +1096,24 @@ class Agent:
             max_response_tokens=self.max_response_tokens,
         ):
             return True
+        # Circuit breaker: after N consecutive auto-compact failures, stop
+        # retrying and let the caller surface the prior error. Manual
+        # ``/compact`` goes through ``_compact_and_post`` and is unaffected.
+        if self.compaction_state.compact_failures >= MAX_CONSECUTIVE_COMPACT_FAILURES:
+            logger.warning(
+                "auto-compaction circuit breaker open: %d consecutive failures",
+                self.compaction_state.compact_failures,
+            )
+            return False
         return await self.compact_now()
 
     async def compact_now(self) -> bool:
         """Synchronous compact path used by ``_AgentModel`` for overflow recovery.
 
         Bypasses the inbox (the runtime would cancel our task if we
-        pushed ``types.runtime.Compact``). Calls the inner compactor directly,
-        replaces ``runtime.history`` in place. On failure, stashes the
+        pushed ``types.runtime.Compact``). Calls the inner compactor
+        directly and appends the resulting barrier override to the
+        runtime's tape. On failure, stashes the
         underlying exception on :attr:`last_compact_error` so the
         proactive / reactive raise sites in :class:`_AgentModel` can
         distinguish true context overflow (polished remediation
@@ -1105,15 +1131,15 @@ class Agent:
         if self._agent_compactor is None:
             self.last_compact_error = None
             return True
-        snapshot_len = len(self.runtime.history)
+        tape_len = len(self.runtime.tape)
         self.publish(types.runtime.CompactStarted())
         try:
-            result = agent_runtime.normalize_compaction_result(
-                await self._agent_compactor.compact(
-                    list(self.runtime.history),
-                    self._agent_model,
-                    "",
-                )
+            override = await self._agent_compactor.compact(
+                self.runtime.tape,
+                self.runtime.context().messages,
+                self._agent_model,
+                self.runtime.mint_ref,
+                "",
             )
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             types.exceptions.log_exception_or_warning(
@@ -1121,35 +1147,27 @@ class Agent:
                 "synchronous compaction failed during overflow recovery",
                 exc,
             )
-            self.runtime.history.append(
+            self.compaction_state.compact_failures += 1
+            self.runtime.append_history(
                 types.history.UserMessage(
-                    text=f"[Compaction error: {type(exc).__name__}: {exc}]"
+                    text=f"[Compaction error: {type(exc).__name__}: {exc}]",
                 ),
             )
             self.publish(
-                types.runtime.CompactFailed(exception=exc, snapshot_len=snapshot_len)
+                types.runtime.CompactFailed(exception=exc, tape_len=tape_len),
             )
             self.last_compact_error = exc
             return False
-        self.runtime.history.clear()
-        self.runtime.history.extend(result.summary)
-        if result.fallback_reason:
-            self.publish(
-                types.runtime.CompactFallback(
-                    summary=result.summary,
-                    snapshot_len=snapshot_len,
-                    fallback_reason=result.fallback_reason,
-                    preserved_tail_count=result.preserved_tail_count,
-                ),
-            )
-        else:
-            self.publish(
-                types.runtime.CompactComplete(
-                    summary=result.summary,
-                    snapshot_len=snapshot_len,
-                ),
-            )
+        self.runtime.adopt_record(override)
+        self.publish(
+            types.runtime.CompactComplete(
+                records=(override,),
+                fallback_reason=override.fallback_reason,
+                preserved_tail_count=override.preserved_tail_count,
+            ),
+        )
         self.last_compact_error = None
+        self.compaction_state.compact_failures = 0
         return True
 
 
@@ -1338,8 +1356,10 @@ class _AgentModel:
           RuntimeError: Overflow recovery failed after the retry cap.
 
         """
-        # Microcompact in place (no event; just mutate history).
-        self._agent.microcompact_history(history)
+        # Microcompact: append overrides to the runtime tape, then
+        # refetch the resolved view so the provider sees the result.
+        self._agent.microcompact_history()
+        history = self._agent.runtime.context().messages
 
         # Proactive compaction: ask the compactor whether headroom is
         # exhausted BEFORE handing the prompt to the provider. Without
@@ -1349,11 +1369,14 @@ class _AgentModel:
         # at all. Some providers accept oversized prompts up to a hard
         # ceiling, so the reactive path leaves a wide window where the
         # buffer's headroom (``ContextBudget.buffer_tokens``) is paid
-        # for but never spent. ``compact_now`` mutates ``runtime.history``
-        # in place; the local ``history`` reference is the same list.
+        # for but never spent. ``compact_now`` appends a barrier override
+        # to the runtime tape; we refetch the resolved view below.
         if not await self._agent.compact_if_needed(history, self._inner):
             last_err = self._agent.last_compact_error
             raise _compact_failure_error(last_err, self._inner) from last_err
+        # Compaction may have appended a barrier override; refetch the
+        # resolved view so subsequent attempts in this call see it.
+        history = self._agent.runtime.context().messages
 
         # Re-evaluate the system spec per request so callable sections
         # (e.g. cwd-aware ``environment``) stay live after ``cd``. The
@@ -1427,6 +1450,9 @@ class _AgentModel:
                     raise _compact_failure_error(last_err, self._inner) from (
                         last_err or exc
                     )
+                # Refetch resolved view: ``compact_now`` appended a
+                # barrier override.
+                history = self._agent.runtime.context().messages
                 continue
             # Record cost out-of-band; the runtime's
             # types.runtime.ModelResponseComplete event has tokens=0 by
@@ -1580,14 +1606,13 @@ class _AgentTool:
 class _AgentCompactor:
     """Bridges rich ``Compactor`` to the runtime's lean ``compact`` protocol.
 
-    Threads ``transcript_path`` / ``direction`` / ``keep_recent`` /
-    ``custom_instructions`` / ``summary_pointers`` from agent state.
+    Threads ``custom_instructions`` from the runtime's compact args.
     Runs the post-compact enrich pipeline after the inner compactor
     returns.
 
     Args:
       inner: Rich compactor whose ``compact`` is delegated to.
-      agent: Owning ``Agent``; supplies transcript path, budget, tools.
+      agent: Owning ``Agent``; supplies budget, tools, tool state.
 
     """
 
@@ -1618,50 +1643,42 @@ class _AgentCompactor:
 
     async def compact(
         self,
-        history: list[types.history.HistoryEntry],
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.history.HistoryEntry],
         model: agent_runtime.Model,
+        mint_ref: Callable[[], TapeRef],
         args: str = "",
-    ) -> types.runtime.CompactionResult | list[types.history.HistoryEntry]:
+    ) -> ContextOverride:
         """Run the rich compactor and apply post-compact enrichment.
 
         Args:
-          history: Full history snapshot to compact.
+          tape: Append-only session tape.
+          context: Resolved provider-facing context to compact.
           model: Runtime-side model (ignored; rich model used directly).
+          mint_ref: Factory for fresh ``TapeRef`` values.
           args: Free-form compaction instructions forwarded to the compactor.
 
         Returns:
-          summary: Compacted history; always ends with a ``types.history.UserMessage``
-              or ``types.history.ToolResult`` so the runtime gate fires next round.
+          override: Barrier override carrying the compacted payload,
+              ready for the runtime to append to ``runtime.tape``.
 
         """
         del model  # _AgentCompactor uses the agent's rich model directly
-        n = self._agent.compaction_state.compact_count
-        transcript_path = (
-            self._agent.session_dir / f"pre_compact_{n}.jsonl"
-            if self._agent.session_dir is not None
-            else None
+        override = await self._inner.compact(
+            tape=tape,
+            context=context,
+            model=self._agent.model,
+            mint_ref=mint_ref,
+            custom_instructions=args or None,
         )
-        if transcript_path is not None:
-            write_pre_compact_transcript(transcript_path, history)
-        compaction_result = agent_runtime.normalize_compaction_result(
-            await self._inner.compact(
-                history=history,
-                model=self._agent.model,
-                transcript_path=transcript_path,
-                direction="from",
-                keep_recent=self._agent.budget.keep_recent_on_compact,
-                custom_instructions=args or None,
-                summary_pointers=self._agent.compaction_state.summary_pointers or None,
-            )
-        )
-        result = compaction_result.summary
+        payload: list[types.history.HistoryEntry] = list(override.payload)
 
-        # Post-compact enrich. ``compact_count`` is incremented AFTER so
-        # ``pre_compact_{n}.jsonl`` and ``summary_{n}.md`` agree on ``n``.
+        # Post-compact enrich operates on the override's mutable payload
+        # before the runtime freezes and appends.
         try:
             used = self._agent.model.approx_request_tokens(
                 types.model.ModelRequest(
-                    messages=result,
+                    messages=payload,
                     system=self._agent.system_prompt() or None,
                     tools=self._agent.tools or None,
                 ),
@@ -1670,10 +1687,7 @@ class _AgentCompactor:
                 self._agent.max_response_tokens + self._agent.budget.buffer_tokens
             )
             await post_compact_enrich(
-                result=result,
-                history=result,
-                state=self._agent.compaction_state,
-                session_dir=self._agent.session_dir,
+                history=payload,
                 tool_state=self._agent.tool_state,
                 budget=self._agent.budget,
                 tools=self._agent.tools_map,
@@ -1686,33 +1700,99 @@ class _AgentCompactor:
                 logger, "post_compact_enrich failed; continuing", exc
             )
         self._agent.compaction_state.compact_count += 1
+        self._agent.compaction_state.compact_failures = 0
 
-        # The runtime's gate needs the last entry to be types.history.UserMessage or
-        # types.history.ToolResult so the next iteration calls the model. If the
-        # compactor returned an empty list or ended elsewhere, append
-        # a continuation user message.
-        if not result or not isinstance(
-            result[-1], (types.history.UserMessage, types.history.ToolResult)
+        # The runtime's gate needs the last entry to be UserMessage or
+        # ToolResult so the next iteration calls the model. If the
+        # compactor produced an empty payload or ended elsewhere,
+        # append a continuation user message.
+        if not payload or not isinstance(
+            payload[-1],
+            (types.history.UserMessage, types.history.ToolResult),
         ):
-            result = [*result, types.history.UserMessage(text="[continuation]")]
-        if result is compaction_result.summary:
-            return compaction_result
-        return dataclasses.replace(compaction_result, summary=result)
+            payload.append(types.history.UserMessage(text="[continuation]"))
 
-    def maintain(self, history: list[types.history.HistoryEntry]) -> None:
+        # ``willRetriggerNextTurn`` prediction: estimate whether the new
+        # payload already exceeds the auto-compact threshold. If it does,
+        # the next turn would re-trigger compaction immediately --
+        # likely an infinite loop. Mark ``fallback_reason`` so observers
+        # can surface the condition without blocking the current call.
+        fallback_reason = override.fallback_reason
+        try:
+            payload_tokens = self._agent.model.approx_request_tokens(
+                types.model.ModelRequest(
+                    messages=payload,
+                    system=self._agent.system_prompt() or None,
+                    tools=self._agent.tools or None,
+                ),
+            )
+            threshold = (
+                self._agent.model.max_request_tokens
+                - self._agent.budget.buffer_tokens
+                - self._agent.max_response_tokens
+            )
+            if payload_tokens >= threshold:
+                msg = (
+                    f"compacted payload ({payload_tokens} tok) already exceeds"
+                    f" auto-compact threshold ({threshold} tok); next turn would"
+                    f" re-trigger compaction"
+                )
+                logger.warning(msg)
+                fallback_reason = (
+                    f"{fallback_reason}; {msg}" if fallback_reason else msg
+                )
+        except (TypeError, ValueError) as exc:
+            logger.debug("willRetriggerNextTurn estimate skipped: %s", exc)
+
+        if (
+            tuple(payload) == override.payload
+            and fallback_reason == override.fallback_reason
+        ):
+            return override
+        return dataclasses.replace(
+            override,
+            payload=tuple(payload),
+            fallback_reason=fallback_reason,
+        )
+
+    def maintain(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.history.HistoryEntry],
+        tools: dict[str, agent_runtime.Tool],
+        mint_ref: Callable[[], TapeRef],
+    ) -> tuple[ContextOverride, ...]:
         """Forward microcompaction to the inner compactor.
 
-        Threads ``cost_tracker.last_response_time`` so the inner
-        compactor can gate microcompaction on cache-cold likelihood.
+        Skips when the previous response was recent (cache-warm gate)
+        so a model call within the same conversation flow doesn't get
+        its tool-call args replaced with stubbed
+        ``{_microcompacted: "..."}`` markers and force the next round
+        to re-tokenize the cached prefix. Threads the agent's rich
+        tools_map (not the runtime Tool view) so the inner compactor
+        can consult ``supports_microcompaction`` and ``summary(args)``.
 
         Args:
-          history: History list to mutate in place.
+          tape: Append-only session tape.
+          context: Resolved provider-facing context.
+          tools: Runtime-side tools (ignored; rich tools used directly).
+          mint_ref: Factory for fresh ``TapeRef`` values.
+
+        Returns:
+          overrides: Microcompaction overrides produced by the inner
+              compactor; empty when nothing to clear or the cache is
+              still warm.
 
         """
-        self._inner.maintain(
-            history,
+        del tools
+        last = self._agent.cost_tracker.last_response_time
+        if last and (time.time() - last) <= _MICROCOMPACT_GAP_SEC:
+            return ()
+        return self._inner.maintain(
+            tape,
+            context,
             self._agent.tools_map,
-            last_response_time=self._agent.cost_tracker.last_response_time,
+            mint_ref,
         )
 
 
