@@ -15,7 +15,6 @@ from sagent.providers.google import Google
 from sagent.providers.google_cli import (
     GoogleCLI,
     _dispatch_session_update,
-    _estimate_input_tokens,
     _GoogleCLIModel,
     _hash_system,
     _read_expiry,
@@ -25,7 +24,6 @@ from sagent.providers.google_cli import (
 from sagent.providers.lib.subproc import Subproc
 from sagent.types.history import (
     AssistantMessage,
-    HistoryEntry,
     ToolResult,
     UserMessage,
 )
@@ -250,16 +248,18 @@ def test_dispatch_session_update_ignores_unknown_kinds() -> None:
     assert thinking_parts == []
 
 
-def test_estimate_input_tokens_sums_user_and_assistant() -> None:
-    """Token estimation walks both user and assistant entries."""
+def test_approx_request_tokens_sums_user_and_assistant() -> None:
+    """The walker counts both user and assistant text entries."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    history: list[HistoryEntry] = [
-        UserMessage(text="aaaa" * 4),
-        AssistantMessage(text="bbbb"),
-        UserMessage(text="cccc"),
-    ]
-    estimate = _estimate_input_tokens(history, model)
+    request = ModelRequest(
+        messages=[
+            UserMessage(text="aaaa" * 4),
+            AssistantMessage(text="bbbb"),
+            UserMessage(text="cccc"),
+        ],
+    )
+    estimate = model.approx_request_tokens(request)
     # ``len("a"*16) // 4 = 4`` + ``4 // 4 = 1`` + ``4 // 4 = 1`` = 6.
     assert estimate == 6
 

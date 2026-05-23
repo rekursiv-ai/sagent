@@ -56,7 +56,6 @@ from sagent.agent.background import (
 )
 from sagent.agent.compaction import (
     CompactionState,
-    estimate_total_tokens,
     post_compact_enrich,
 )
 from sagent.agent.cost_tracker import CostTracker
@@ -1069,7 +1068,12 @@ class Agent:
         """
         if self._agent_compactor is None:
             return True
-        used = estimate_total_tokens(self.system_prompt(), history, model)
+        request = types.model.ModelRequest(
+            messages=history,
+            system=self.system_prompt() or None,
+            tools=self.tools or None,
+        )
+        used = model.approx_request_tokens(request)
         if not await self._agent_compactor.should_compact(
             input_tokens=used,
             max_request_tokens=model.max_request_tokens,
@@ -1655,8 +1659,12 @@ class _AgentCompactor:
         # Post-compact enrich. ``compact_count`` is incremented AFTER so
         # ``pre_compact_{n}.jsonl`` and ``summary_{n}.md`` agree on ``n``.
         try:
-            used = estimate_total_tokens(
-                self._agent.system_prompt(), result, self._agent.model
+            used = self._agent.model.approx_request_tokens(
+                types.model.ModelRequest(
+                    messages=result,
+                    system=self._agent.system_prompt() or None,
+                    tools=self._agent.tools or None,
+                ),
             )
             headroom = (
                 self._agent.max_response_tokens + self._agent.budget.buffer_tokens

@@ -245,8 +245,10 @@ class Model(Protocol):
         """Maximum image size (bytes) accepted by the API."""
         ...
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input token count for a text string.
+    def approx_text_tokens(self, text: str) -> int:
+        """Cheap local estimate of input tokens for a text string.
+
+        Synchronous; no I/O. Uses ``chars_per_token`` or a local heuristic.
 
         Args:
           text: Text to score.
@@ -257,14 +259,79 @@ class Model(Protocol):
         """
         ...
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate input token count for an image.
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Cheap local estimate of input tokens for an image.
+
+        Synchronous; no I/O. Uses a fixed per-image constant or a
+        dimension-based formula.
 
         Args:
           data: Raw image bytes.
 
         Returns:
           tokens: Approximate input token count.
+
+        """
+        ...
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Cheap local estimate of input tokens for a full request.
+
+        Synchronous; no I/O. Sums all wire-bearing surfaces of
+        ``request``: system prompt, every text-bearing field on every
+        history entry (including ``ToolCall.args`` and
+        ``thinking_blocks``), image attachments, and the tools schema.
+        Use this for hot-path proactive compaction decisions.
+
+        Args:
+          request: Fully-built model request.
+
+        Returns:
+          tokens: Approximate input token count.
+
+        """
+        ...
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Provider's best-truth input-token count for a text string.
+
+        Asynchronous because some providers must roundtrip
+        (Anthropic ``messages.count_tokens``, Google ``models.countTokens``).
+        Providers with a local tokenizer (OpenAI ``tiktoken``, self-hosted
+        HF) answer without I/O.
+
+        Args:
+          text: Text to score.
+
+        Returns:
+          tokens: Best-truth input token count.
+
+        """
+        ...
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Provider's best-truth input-token count for an image.
+
+        Args:
+          data: Raw image bytes.
+
+        Returns:
+          tokens: Best-truth input token count.
+
+        """
+        ...
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Provider's best-truth input-token count for a full request.
+
+        Falls back to ``approx_request_tokens`` on providers without a
+        truth source (CLI variants without tokenizer access).
+
+        Args:
+          request: Fully-built model request.
+
+        Returns:
+          tokens: Best-truth input token count.
 
         """
         ...

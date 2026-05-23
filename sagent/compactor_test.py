@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
 
+import dataclasses
+
 import httpx
 import pytest
 
@@ -16,7 +18,7 @@ from sagent.compactor import (
     build_continuation,
     microcompact,
 )
-from sagent.lib.compaction import CLEARED
+from sagent.lib.compaction import CLEARED, MICROCOMPACTED_ARGS_KEY
 from sagent.lib.json import JSON
 from sagent.testing import MockModelCaps
 from sagent.types.exceptions import PromptTooLongError
@@ -252,6 +254,87 @@ def test_microcompact_keep_recent_zero_clears_all() -> None:
     microcompact(history, tools, keep_recent=0)
     cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
     assert len(cleared) == 3
+
+
+def test_microcompact_stubs_matching_tool_call_args() -> None:
+    """The matching ``AssistantMessage.tool_calls[i].args`` is stubbed.
+
+    Microcompact's design is symmetric: clearing a tool result also
+    discards the args payload that drove the call (``Edit``'s
+    ``old_string``/``new_string``, ``Write``'s file body, etc.). Args
+    are replaced with ``{MICROCOMPACTED_ARGS_KEY: tool.summary(args)}``.
+    """
+    history = _history_with_n_clearable_results(3)
+    tools: dict[str, Tool] = {"Bash": _Tool()}  # ``summary`` returns "".
+    microcompact(history, tools, keep_recent=0)
+    asst = history[1]
+    assert isinstance(asst, AssistantMessage)
+    for tc in asst.tool_calls:
+        # ``_Tool.summary`` returns ``""`` so the fallback is the tool name.
+        assert dict(tc.args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
+
+
+def test_microcompact_args_stub_uses_tool_summary() -> None:
+    """When ``tool.summary(args)`` returns text, it lands in the stub."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _SummarizingTool:
+        name: str = "Edit"
+        tool_id: str = "application/x-tool-edit"
+        description: str = ""
+        supports_microcompaction: bool = True
+        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+
+        def summary(self, args: Mapping[str, object]) -> str:
+            return f"Edit {args.get('file_path', '?')}"
+
+        def summary_result(self, result: ToolResult) -> str | None:
+            del result
+            return None
+
+        def prompt(self) -> str:
+            return ""
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            return ToolResult(call_id="", content="")
+
+    history: list[HistoryEntry] = [
+        UserMessage(text="go"),
+        AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="c0", name="Edit", args={"file_path": "foo.py"}),),
+        ),
+        ToolResult(call_id="c0", content="ok"),
+    ]
+    tools: dict[str, Tool] = {"Edit": _SummarizingTool()}
+    microcompact(history, tools, keep_recent=0)
+    asst = history[1]
+    assert isinstance(asst, AssistantMessage)
+    assert dict(asst.tool_calls[0].args) == {
+        MICROCOMPACTED_ARGS_KEY: "Edit foo.py",
+    }
+
+
+def test_microcompact_keeps_recent_args_intact() -> None:
+    """Recent (kept) exchanges retain their original args."""
+    history = _history_with_n_clearable_results(3)
+    # Add a real arg to the last call so we can verify it survives.
+    asst = history[1]
+    assert isinstance(asst, AssistantMessage)
+    new_calls = (
+        *asst.tool_calls[:-1],
+        ToolCall(id="c2", name="Bash", args={"cmd": "ls"}),
+    )
+    history[1] = dataclasses.replace(asst, tool_calls=new_calls)
+    tools: dict[str, Tool] = {"Bash": _Tool()}
+    microcompact(history, tools, keep_recent=1)
+    asst = history[1]
+    assert isinstance(asst, AssistantMessage)
+    # First two args got stubbed; the last (kept) one is intact.
+    assert dict(asst.tool_calls[0].args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
+    assert dict(asst.tool_calls[1].args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
+    assert dict(asst.tool_calls[2].args) == {"cmd": "ls"}
 
 
 @pytest.mark.asyncio

@@ -31,23 +31,31 @@ import logging
 
 
 if TYPE_CHECKING:
+    from mcp.server import (
+        lowlevel as _mcp_server_lowlevel,
+        streamable_http_manager as _mcp_streamable_http_manager,
+    )
     from mcp.server.lowlevel import Server
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette import (
+        applications as _starlette_applications,
+        routing as _starlette_routing,
+    )
     from starlette.applications import Starlette
-    from starlette.routing import Mount
 
     import mcp.types as mcp_types
     import uvicorn
 else:
     from sagent.lib.lazy_import import lazy_import
 
+    # ``lazy_import("foo").attr`` triggers ``__getattr__`` at module load,
+    # which materializes the proxy and imports ``foo`` eagerly. Keep the
+    # proxy as a module reference and defer ``.attr`` to the call site.
     mcp_types = lazy_import("mcp.types")
-    Server = lazy_import("mcp.server.lowlevel").Server
-    StreamableHTTPSessionManager = lazy_import(
-        "mcp.server.streamable_http_manager",
-    ).StreamableHTTPSessionManager
-    Starlette = lazy_import("starlette.applications").Starlette
-    Mount = lazy_import("starlette.routing").Mount
+    _mcp_server_lowlevel = lazy_import("mcp.server.lowlevel")
+    _mcp_streamable_http_manager = lazy_import("mcp.server.streamable_http_manager")
+    _starlette_applications = lazy_import("starlette.applications")
+    _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
 from sagent.lib.json import json_unfreeze
@@ -88,8 +96,10 @@ class ToolsBridge:
               ``_STARTUP_TIMEOUT_SEC``.
 
         """
-        self._server = Server("sagent-cli-bridge")
-        manager = StreamableHTTPSessionManager(app=self._server, stateless=True)
+        self._server = _mcp_server_lowlevel.Server("sagent-cli-bridge")
+        manager = _mcp_streamable_http_manager.StreamableHTTPSessionManager(
+            app=self._server, stateless=True
+        )
         self._register_handlers(self._server)
         app = self._build_app(manager)
         config = uvicorn.Config(
@@ -201,8 +211,8 @@ class ToolsBridge:
             async with manager.run():
                 yield
 
-        return Starlette(
-            routes=[Mount(_MCP_PATH, app=handle_mcp)],
+        return _starlette_applications.Starlette(
+            routes=[_starlette_routing.Mount(_MCP_PATH, app=handle_mcp)],
             lifespan=lifespan,
         )
 

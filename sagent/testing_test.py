@@ -46,14 +46,14 @@ def test_mock_model_caps_pricing_zero() -> None:
 
 def test_mock_model_caps_estimate_text() -> None:
     m = MockModelCaps()
-    assert m.estimate_text_token_count("") == 0
-    assert m.estimate_text_token_count("12345678") == 2
+    assert m.approx_text_tokens("") == 0
+    assert m.approx_text_tokens("12345678") == 2
 
 
 def test_mock_model_caps_estimate_image_is_constant() -> None:
     m = MockModelCaps()
-    assert m.estimate_image_token_count(b"") == 256
-    assert m.estimate_image_token_count(b"\x89PNG") == 256
+    assert m.approx_image_tokens(b"") == 256
+    assert m.approx_image_tokens(b"\x89PNG") == 256
 
 
 def test_mock_model_caps_is_context_overflow_default_false() -> None:

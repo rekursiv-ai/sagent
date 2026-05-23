@@ -36,7 +36,7 @@ else:
     anthropic = lazy_import("anthropic")  # 569ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.lib import debug_log
+from sagent.lib import debug_log, token_count
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
@@ -544,8 +544,8 @@ class _AnthropicModel:
         """Whether the provider uses account-based authentication."""
         return self._provider.subscription
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate input token count for a text string.
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``chars_per_token``.
 
         Args:
           text: Text to score.
@@ -561,8 +561,8 @@ class _AnthropicModel:
         """Per-million-token pricing schedule for this model."""
         return self._profile.pricing
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate token count for an image using Anthropic's formula.
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate from image dimensions (Anthropic's formula).
 
         Args:
           data: Raw image bytes.
@@ -570,11 +570,47 @@ class _AnthropicModel:
         Returns:
           tokens: Approximate input token count (``width*height/750``).
 
+        References:
+          https://docs.anthropic.com/en/docs/build-with-claude/vision#calculate-image-costs
+
         """
-        # Anthropic: ~width*height/750 tokens.
-        # https://docs.anthropic.com/en/docs/build-with-claude/vision#calculate-image-costs
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Delegate to the local heuristic.
+
+        Anthropic's ``messages.count_tokens`` endpoint operates on
+        full message lists, not bare strings, so a single-string
+        roundtrip would cost a request and a tail-padded tokenization
+        guess. Local heuristic is the practical truth source here.
+        """
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Delegate to the local heuristic (Anthropic's published formula)."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Call the server's ``messages.count_tokens`` for an exact count."""
+        messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
+        sdk = await self._provider.get_sdk()
+        kwargs = self._build_kwargs(request, messages)
+        # ``count_tokens`` accepts a subset of ``messages.create``'s kwargs.
+        for k in ("max_tokens", "temperature", "stop_sequences", "service_tier"):
+            kwargs.pop(k, None)
+        try:
+            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
+        except anthropic.AuthenticationError:
+            await self._provider.handle_auth_error()
+            sdk = await self._provider.get_sdk()
+            kwargs["system"] = self._provider.build_system(request.system, messages)
+            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
+        return result.input_tokens
 
     @property
     def max_image_dim(self) -> int:

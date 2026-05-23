@@ -369,7 +369,7 @@ def test_self_hosted_model_properties() -> None:
     assert m.supports_account_auth is False
     assert m.max_image_dim == 2000
     assert m.max_image_bytes == 5 * 1024 * 1024
-    assert m.estimate_text_token_count("a" * 16) == 4
+    assert m.approx_text_tokens("a" * 16) == 4
     assert m.is_context_overflow(RuntimeError("x")) is False
     assert m.is_retryable_provider_error(RuntimeError("x")) is False
     assert m.pricing.request == 0.0

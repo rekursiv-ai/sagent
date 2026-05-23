@@ -724,6 +724,210 @@ async def test_splice_wakes_model_after_round_ended() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_detached_completion_during_next_cohort_no_interleave() -> None:
+    """Detached completion mid-cohort must not interleave a notification.
+
+    Reproduces session 3770ef77's HTTP 400 from Anthropic:
+
+      ``messages.132: tool_use ids were found without tool_result blocks
+      immediately after: toolu_75``
+
+    Scenario:
+      1. User sends "go"; model returns tool_use ``t1``.
+      2. Tool ``t1`` starts (blocks on release).
+      3. User preempts mid-cohort with "preempt". Runtime appends
+         ``[detached]`` placeholder for ``t1`` and fires round 2.
+      4. Round 2 returns tool_use ``t2`` (NOT terminal text).
+      5. Tool ``t2`` starts (blocks on release).
+      6. ``t1`` releases first. ``DetachedResult`` splices the real
+         content into the placeholder. **Bug:** history tail is the
+         round-2 ``AssistantMessage`` whose ``t2`` tool_use has not yet
+         been answered, but the splice handler unconditionally appends
+         a ``[Detached tool t1 completed]`` ``UserMessage`` to "wake
+         the model" -- inserting it between ``tool_use=t2`` and the
+         forthcoming ``tool_result=t2``.
+      7. ``t2`` releases; its ``ToolResult`` is appended.
+
+    Result without the fix:
+
+      ``... asst(tool_use=t2) -> user("[Detached tool t1 completed]")
+        -> tool_result(t2) ...``
+
+    Anthropic requires ``tool_result`` immediately after ``tool_use`` --
+    the inserted ``UserMessage`` violates that.
+    """
+    t1_started = asyncio.Event()
+    t2_started = asyncio.Event()
+    release_t1 = asyncio.Event()
+    release_t2 = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool1:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            t1_started.set()
+            await release_t1.wait()
+            return ToolResult(call_id="", content="real-t1")
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool2:
+        @property
+        def name(self) -> str:
+            return "t2"
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            t2_started.set()
+            await release_t2.wait()
+            return ToolResult(call_id="", content="real-t2")
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(tool_calls=(ToolCall(id="t2", name="t2", args={}),)),
+            AssistantMessage(text="post-splice"),
+        ],
+        tools=[SlowTool1(), SlowTool2()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    detached_seen = asyncio.Event()
+
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, DetachedResult):
+            detached_seen.set()
+
+    agent.observers.append(_watch)
+
+    async def driver() -> None:
+        await t1_started.wait()
+        agent.inbox.push_back(UserMessage(text="preempt"))
+        await t2_started.wait()
+        release_t1.set()
+        await detached_seen.wait()
+        # Yield so the splice handler runs to completion (the buggy
+        # notification append, if present, lands here).
+        await asyncio.sleep(0.01)
+        release_t2.set()
+        await wait_until(lambda: "post-splice" in _assistant_texts(agent))
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        driver(),
+    )
+
+    # Walk history in append order and assert no ``UserMessage`` falls
+    # between an assistant ``tool_use`` and its matching ``ToolResult``.
+    pending_calls: set[str] = set()
+    for idx, entry in enumerate(agent.history):
+        if isinstance(entry, AssistantMessage):
+            assert not pending_calls, (
+                f"history[{idx}] assistant turn while tool_use "
+                f"{pending_calls!r} still missing ToolResult"
+            )
+            pending_calls = {tc.id for tc in entry.tool_calls}
+        elif isinstance(entry, ToolResult):
+            pending_calls.discard(entry.call_id)
+        else:
+            assert not pending_calls, (
+                f"history[{idx}] UserMessage {entry.text!r} interleaved "
+                f"between assistant tool_use {pending_calls!r} and its "
+                f"ToolResult -- Anthropic rejects this with HTTP 400 "
+                f"('tool_use without tool_result block immediately after')"
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
+    r"""Detached tasks must not leak their results into post-``Clear`` history.
+
+    ``Clear`` is a user-initiated reset: ``self.history`` is wiped,
+    ``model_call`` is cancelled, the cohort is detached. Pre-fix, the
+    surviving ``self.detached`` tasks kept running; their eventual
+    ``DetachedResult`` posted into fresh post-``Clear`` history (splice
+    fails, fallback appends a ``UserMessage`` with the orphan content).
+    The user, having cleared the session, then saw a phantom
+    ``[Tool t1 completed]\\n…`` message attributed to nothing.
+
+    Scenario:
+      1. User: "go"; model returns tool_use ``t1``.
+      2. Tool ``t1`` starts (blocks on release).
+      3. User issues ``Clear``.
+      4. User: "fresh"; model returns text "fresh response".
+      5. ``t1`` releases.
+      6. **Bug:** ``DetachedResult`` fallback appends an orphan
+         ``UserMessage`` into the post-``Clear`` history.
+
+    Fix: ``Clear`` cancels everything in ``self.detached`` and clears
+    the dict + ``_pending_detached_user``; the cancelled task's
+    eventual completion is silently dropped (matches neither cohort
+    nor detached membership).
+    """
+    t1_started = asyncio.Event()
+    release_t1 = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            t1_started.set()
+            await release_t1.wait()
+            return ToolResult(call_id="", content="real-t1")
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="fresh response"),
+        ],
+        tools=[SlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await t1_started.wait()
+        agent.inbox.push_back(Clear())
+        await wait_until(lambda: len(agent.history) == 0)
+        agent.inbox.push_back(UserMessage(text="fresh"))
+        await wait_until(lambda: "fresh response" in _assistant_texts(agent))
+        # Release whatever's still running in the background. With the
+        # fix it's already cancelled; without the fix, this triggers
+        # the leaking DetachedResult fallback.
+        release_t1.set()
+        # Give the runtime time to process any leaked DetachedResult.
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        driver(),
+    )
+
+    leaked = [
+        entry
+        for entry in agent.history
+        if isinstance(entry, UserMessage)
+        and (
+            entry.text.startswith("[Tool ") or entry.text.startswith("[Detached tool ")
+        )
+    ]
+    assert leaked == [], (
+        f"detached task leaked orphan content into post-Clear history: "
+        f"{[e.text for e in leaked]!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_undetach_gates_model() -> None:
     """Undetach re-gates the model on a detached tool."""
     tool_started = asyncio.Event()

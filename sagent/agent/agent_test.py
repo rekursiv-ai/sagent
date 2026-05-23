@@ -29,7 +29,7 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.agent.state import agent_registry
-from sagent.lib import last_models
+from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
 
@@ -58,12 +58,24 @@ class StubModel:
     def pricing(self) -> types.model.Pricing:
         return types.model.Pricing()
 
-    def estimate_text_token_count(self, text: str) -> int:
+    def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 
-    def estimate_image_token_count(self, data: bytes) -> int:
+    def approx_image_tokens(self, data: bytes) -> int:
         del data
         return 256
+
+    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         del error
@@ -1510,12 +1522,24 @@ class _OverflowModel:
     def pricing(self) -> types.model.Pricing:
         return types.model.Pricing()
 
-    def estimate_text_token_count(self, text: str) -> int:
+    def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 
-    def estimate_image_token_count(self, data: bytes) -> int:
+    def approx_image_tokens(self, data: bytes) -> int:
         del data
         return 256
+
+    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         return isinstance(error, types.exceptions.PromptTooLongError)
@@ -1575,12 +1599,24 @@ class _RawOverflowModel:
     def pricing(self) -> types.model.Pricing:
         return types.model.Pricing()
 
-    def estimate_text_token_count(self, text: str) -> int:
+    def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 
-    def estimate_image_token_count(self, data: bytes) -> int:
+    def approx_image_tokens(self, data: bytes) -> int:
         del data
         return 256
+
+    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         return isinstance(error, RuntimeError) and "context window" in str(error)
@@ -1739,12 +1775,24 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         def pricing(self) -> types.model.Pricing:
             return types.model.Pricing()
 
-        def estimate_text_token_count(self, text: str) -> int:
+        def approx_text_tokens(self, text: str) -> int:
             return max(1, len(text) // 4)
 
-        def estimate_image_token_count(self, data: bytes) -> int:
+        def approx_image_tokens(self, data: bytes) -> int:
             del data
             return 256
+
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            return token_count.approx_request_tokens(request, self)
+
+        async def actual_text_tokens(self, text: str) -> int:
+            return self.approx_text_tokens(text)
+
+        async def actual_image_tokens(self, data: bytes) -> int:
+            return self.approx_image_tokens(data)
+
+        async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+            return self.approx_request_tokens(request)
 
         def is_context_overflow(self, error: Exception) -> bool:
             del error

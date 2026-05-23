@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic as anthropic_sdk
 import httpx
@@ -408,13 +408,37 @@ def test_anthropic_model_token_estimate_uses_profile_chars_per_token() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     # chars_per_token = 2.83; 28 chars / 2.83 ≈ 9.89 → int → 9.
-    assert m.estimate_text_token_count("a" * 28) == 9
+    assert m.approx_text_tokens("a" * 28) == 9
 
 
 def test_anthropic_model_pricing_exposed() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
     assert m.pricing.request > 0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
+    """``actual_request_tokens`` routes through the SDK's ``count_tokens``."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    fake_sdk = MagicMock()
+    fake_result = MagicMock()
+    fake_result.input_tokens = 42
+    fake_sdk.messages.count_tokens = AsyncMock(return_value=fake_result)
+    with patch.object(p, "get_sdk", AsyncMock(return_value=fake_sdk)):
+        n = await m.actual_request_tokens(
+            ModelRequest(messages=[UserMessage(text="ping")]),
+        )
+    assert n == 42
+    # ``count_tokens`` rejects kwargs that ``create`` accepts -- verify
+    # we stripped them before the call.
+    await_args = fake_sdk.messages.count_tokens.await_args
+    assert await_args is not None
+    kwargs = await_args.kwargs
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+    assert kwargs["model"] == "claude-opus-4-7"
 
 
 def test_anthropic_token_count_default_typing() -> None:

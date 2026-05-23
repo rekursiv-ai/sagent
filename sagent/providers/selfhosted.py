@@ -38,6 +38,7 @@ import re
 import time
 import uuid
 
+from sagent.lib import token_count
 from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -84,6 +85,8 @@ class _Tokenizer(Protocol):
     def apply_chat_template(self, messages: object, **kwargs: object) -> object: ...
 
     def decode(self, token_ids: object, *, skip_special_tokens: bool) -> str: ...
+
+    def encode(self, text: str, **kwargs: object) -> list[int]: ...
 
 
 class _GenerateModel(Protocol):
@@ -444,6 +447,27 @@ class _ProviderLike(Protocol):
     def tokenizer(self) -> _Tokenizer: ...
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _HfEstimator:
+    """``TokenEstimator`` adapter using a HuggingFace tokenizer for text.
+
+    Attributes:
+      tokenizer: HF tokenizer with an ``encode`` method.
+      image_fallback: ``SelfHostedModel`` whose ``approx_image_tokens``
+          provides image-token estimates.
+
+    """
+
+    tokenizer: _Tokenizer
+    image_fallback: SelfHostedModel
+
+    def approx_text_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        return self.image_fallback.approx_image_tokens(data)
+
+
 class SelfHostedModel:
     """``Model`` backend for a self-hosted HuggingFace model."""
 
@@ -508,16 +532,8 @@ class SelfHostedModel:
         """Return whether account auth is supported."""
         return False
 
-    def estimate_text_token_count(self, text: str) -> int:
-        """Estimate the token count for a text string.
-
-        Args:
-          text: Input text.
-
-        Returns:
-          count: Estimated number of tokens.
-
-        """
+    def approx_text_tokens(self, text: str) -> int:
+        """Local estimate via ``len(text) // 4``."""
         return len(text) // 4
 
     @property
@@ -525,21 +541,35 @@ class SelfHostedModel:
         """Per-million-token pricing (zero for self-hosted models)."""
         return Pricing()
 
-    def estimate_image_token_count(self, data: bytes) -> int:
-        """Estimate the token count for an image.
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Local estimate via vision-encoder patch geometry.
 
-        Args:
-          data: Raw image bytes.
-
-        Returns:
-          count: Estimated number of tokens.
-
+        Default matches Qwen3.6-27B (``patch_size=16, spatial_merge_size=2`` →
+        32x32 pixels per token); other self-hosted models override.
         """
-        # Based on Qwen3.6-27B vision encoder (docs/qwen3_27b.md):
-        # patch_size=16, spatial_merge_size=2 → 32x32 pixels per token.
-        # Other self-hosted models will differ; override as needed.
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // (32 * 32) if dims is not None else 0
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Walk-and-sum every wire-bearing surface of ``request``."""
+        return token_count.approx_request_tokens(request, self)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Local HF tokenizer count -- the true tokenization for this model."""
+        return len(
+            self._provider.tokenizer.encode(text, add_special_tokens=False),
+        )
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Delegate to the local heuristic (vision-encoder patch math)."""
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Walker driven by the HF tokenizer for text + provider's image formula."""
+        return token_count.approx_request_tokens(
+            request,
+            _HfEstimator(tokenizer=self._provider.tokenizer, image_fallback=self),
+        )
 
     @property
     def max_image_dim(self) -> int:

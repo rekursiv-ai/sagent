@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
-from urllib.parse import urlparse
+from typing import Any, Protocol, cast
+from urllib.parse import quote, urlparse
+from xml.etree.ElementTree import Element, ParseError
 
 import asyncio
+import html
 import ipaddress
 import json
 import re
 import socket
 
 import cachetools
+import defusedxml.common
+import defusedxml.ElementTree
 
 from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.lazy_import import lazy_import
@@ -27,6 +31,34 @@ from sagent.types.history import ToolResult
 
 
 trafilatura = lazy_import("trafilatura")
+
+# Response kinds returned by ``_fetch_body``; controls extraction.
+_KIND_HTML = "html"  # raw HTML, needs trafilatura
+_KIND_REDDIT = "reddit_thread"  # Reddit JSON, needs comment formatter
+_KIND_MARKDOWN = "markdown"  # already-extracted markdown (reader proxy)
+_KIND_RSS = "rss"  # RSS 2.0 XML, needs feed formatter
+
+# HTTP statuses that trigger the bot-wall fallback ladder. Other
+# 4xx/5xx (404, 410, 451, 500, ...) are not signs of bot detection and
+# surface to the caller immediately.
+_FALLBACK_STATUSES: frozenset[int] = frozenset({403, 429, 503})
+
+# Reader-proxy fallback endpoint. Jina AI's free Reader API takes a
+# target URL as a path segment and returns clean markdown rendered by
+# its own browser stack -- which gets past bot walls without us
+# touching TLS-layer details. URL templated so the proxy host can be
+# swapped (self-hosted, alternate provider) by overriding this module
+# attribute.
+_READER_PROXY_TEMPLATE = "https://r.jina.ai/{url}"
+
+# Sentinel embedded in the markdown body when Jina's own backend got
+# bot-walled. Returned with HTTP 200, so we have to detect at the
+# content level. Matches both ``Target URL returned error 4xx`` and
+# ``Target URL returned error 5xx``.
+_READER_PROXY_SOFT_FAIL_RE = re.compile(
+    rb"Warning:\s*Target URL returned error \d{3}",
+    re.IGNORECASE,
+)
 
 
 class WebFetch:
@@ -166,7 +198,7 @@ class WebFetch:
                 return ToolResult(call_id="", content=cached)
 
         try:
-            body, reddit_thread = await _fetch_body(
+            body, kind = await _fetch_body(
                 raw_url,
                 method=method,
                 json_body=json_body,
@@ -177,7 +209,7 @@ class WebFetch:
 
         text = await _extract_text(
             body,
-            reddit_thread=reddit_thread,
+            kind=kind,
             method=method,
         )
         truncated = truncate(text, TOOL_RESULT_MAX_CHARS)
@@ -206,15 +238,29 @@ def _request_bodies(
     }
 
 
-async def _extract_text(body: bytes, *, reddit_thread: bool, method: str) -> str:
-    """Extract tool result text from a response body."""
+async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
+    """Extract tool result text from a response body.
+
+    ``kind`` selects the post-processing path:
+      - ``_KIND_REDDIT``: parse as Reddit listing JSON.
+      - ``_KIND_RSS``: parse as RSS 2.0 XML and format as markdown.
+      - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already
+        rendered to markdown; running trafilatura on it would strip
+        structure).
+      - ``_KIND_HTML``: trafilatura main-content extraction, with a
+        raw-content fallback when extraction returns nothing.
+    """
     content = body.decode("utf-8", errors="replace")
-    if reddit_thread:
+    if kind == _KIND_REDDIT:
         try:
             data = json.loads(content)
         except (ValueError, TypeError):
             return content[:TOOL_RESULT_MAX_CHARS]
         return _format_reddit_json(data)
+    if kind == _KIND_RSS:
+        return _format_rss(body)
+    if kind == _KIND_MARKDOWN:
+        return content[:TOOL_RESULT_MAX_CHARS]
     if method == "POST" or content.lstrip().startswith(("{", "[")):
         return content[:TOOL_RESULT_MAX_CHARS]
     extracted = await asyncio.to_thread(
@@ -232,8 +278,15 @@ async def _fetch_body(
     method: str,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
-) -> tuple[bytes, bool]:
-    """Fetch a URL and identify Reddit thread JSON responses.
+) -> tuple[bytes, str]:
+    """Fetch a URL and classify the response for downstream extraction.
+
+    GET requests are first offered to each ``HostAdapter`` in
+    ``_ADAPTERS``; the first ``matches`` returning True takes over the
+    fetch and owns its own retry/fallback policy. URLs with no matching
+    adapter (and all non-GET requests) fall through to
+    ``_fetch_with_fallback``, a multi-rung ladder that handles bot-wall
+    403/429/503 responses transparently.
 
     Args:
       raw_url: Target URL to fetch.
@@ -243,46 +296,100 @@ async def _fetch_body(
 
     Returns:
       body: Raw response bytes.
-      is_reddit_thread_json: Whether ``body`` came from Reddit's thread JSON
-        endpoint and should be formatted as Reddit comments instead of extracted
-        as generic text or HTML.
+      kind: One of the ``_KIND_*`` constants; selects the
+        post-processing branch in ``_extract_text``.
 
     """
-    is_reddit_get = method == "GET" and _is_reddit_url(raw_url)
+    if method == "GET":
+        for adapter in _ADAPTERS:
+            if adapter.matches(raw_url):
+                return await adapter.fetch(raw_url)
+    return await asyncio.to_thread(
+        _fetch_with_fallback,
+        raw_url,
+        method=method,
+        json_body=json_body,
+        form_body=form_body,
+    )
 
-    if not is_reddit_get:
-        body = await asyncio.to_thread(
-            _safe_fetch,
-            raw_url,
+
+def _fetch_with_fallback(
+    url: str,
+    *,
+    method: str,
+    json_body: JSONValue,
+    form_body: dict[str, str] | None,
+) -> tuple[bytes, str]:
+    """Fetch ``url`` through a bot-wall-aware fallback ladder.
+
+    The stdlib HTTP path (via ``_safe_fetch``) is always tried first.
+    On a 403/429/503 response to a GET -- the signature of edge-side
+    bot detection (Fastly, Akamai, Cloudflare) -- the ladder falls
+    through to additional fetch strategies and finally to a reader-
+    proxy hop that renders the URL with a third-party browser stack.
+    Non-GET methods, non-fallback statuses (404, 500, ...), and SSRF /
+    DNS errors surface immediately; the ladder only engages on the
+    specific bot-wall signature.
+
+    Args:
+      url: Target URL (SSRF-checked by ``_safe_fetch`` on each rung).
+      method: HTTP method; the fallback path is GET-only.
+      json_body: POST JSON body (initial-rung only).
+      form_body: POST form body (initial-rung only).
+
+    Returns:
+      body_kind: ``(bytes, kind)`` where kind is ``_KIND_HTML`` from
+        the HTTP rungs and ``_KIND_MARKDOWN`` from the reader proxy.
+
+    Raises:
+      FetchError: The original error, if every rung fails.
+
+    """
+    try:
+        body = _safe_fetch(
+            url,
             method=method,
             json_body=json_body,
             form_body=form_body,
         )
-        return body, False
-
-    # Reddit thread pages are easier and more stable through Reddit's JSON view.
-    if re.search(r"^https?://(?:\w+\.)?reddit\.com/r/\w+/comments/\w+", raw_url):
-        url = re.sub(
-            r"^(https?://)(?:\w+\.)?reddit\.com/",
-            r"\1www.reddit.com/",
-            raw_url.rstrip("/"),
-        )
-        if not url.endswith(".json"):
-            url += ".json"
-        body = await asyncio.to_thread(_safe_fetch, url)
-        return body, True
-
-    try:
-        body = await asyncio.to_thread(_safe_fetch, raw_url)
+        return body, _KIND_HTML
     except FetchError as e:
-        if not _is_reddit_verification_page(e.body):
+        if e.status not in _FALLBACK_STATUSES or method != "GET":
             raise
-        return await _fetch_old_reddit(raw_url), False
+        rung1_err = e
 
-    # Old Reddit is only a fallback when canonical Reddit serves JS verification.
-    if _is_reddit_verification_page(body):
-        return await _fetch_old_reddit(raw_url), False
-    return body, False
+    # Reader-proxy fallback (final rung).
+    try:
+        return _reader_proxy_fetch(url), _KIND_MARKDOWN
+    except (FetchError, ValueError, OSError) as e:
+        raise rung1_err from e
+
+
+def _reader_proxy_fetch(url: str) -> bytes:
+    """Fetch ``url`` through the r.jina.ai reader proxy.
+
+    The proxy receives the target URL as a path segment, fetches it
+    with a full browser stack, and returns clean markdown. The proxy
+    URL itself goes through ``_safe_fetch`` so SSRF guards still apply
+    to the proxy host. The user URL travels as encoded path data; the
+    proxy -- not us -- is the one that contacts the target server.
+
+    Jina returns HTTP 200 even when its own backend was bot-walled,
+    embedding the diagnostic as a ``Warning:`` line in the markdown.
+    We detect that sentinel and raise ``FetchError`` so the ladder
+    treats it as a soft failure instead of handing the agent text
+    that looks like an article but is actually a proxy diagnostic.
+    """
+    proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/?#&=%"))
+    body = _safe_fetch(proxy_url)
+    if _READER_PROXY_SOFT_FAIL_RE.search(body):
+        raise FetchError(
+            url=url,
+            status=502,
+            headers={},
+            body=body[:200],
+        )
+    return body
 
 
 def _safe_fetch(
@@ -357,31 +464,167 @@ def _url_is_safe(url: str) -> str | None:
     return None
 
 
-async def _fetch_old_reddit(raw_url: str) -> bytes:
-    """Fetch a Reddit HTML page through the legacy host."""
-    url = re.sub(
-        r"^(https?://)(?:www\.)?reddit\.com/",
-        r"\1old.reddit.com/",
-        raw_url,
-    )
-    try:
-        return await asyncio.to_thread(_safe_fetch, url)
-    except (FetchError, ValueError, OSError) as e:
-        raise ValueError(
-            "Reddit returned a JavaScript verification page for "
-            f"{raw_url}; old Reddit fallback failed: {e}"
-        ) from e
+class HostAdapter(Protocol):
+    """Per-host fetch override for sites that need bespoke retrieval.
 
-
-def _is_reddit_url(raw_url: str) -> bool:
-    """True for ``reddit.com`` and any subdomain (``old``, ``np``, ``new``).
-
-    Matches subdomains so legacy thread URLs still take the JSON /
-    verification-fallback path. ``urlparse(...).hostname`` is already
-    lowercased.
+    The dispatcher in ``_fetch_body`` walks ``_ADAPTERS`` in order and
+    delegates to the first adapter whose ``matches`` returns True. The
+    adapter then owns the full fetch, including any host-specific
+    fallbacks (Reddit's JS-verification → old.reddit hop, X's renderer
+    delegation). The dispatcher does not second-guess: an adapter that
+    raises propagates its exception up through ``WebFetch.run``.
     """
-    hostname = urlparse(raw_url).hostname or ""
-    return hostname == "reddit.com" or hostname.endswith(".reddit.com")
+
+    def matches(self, url: str) -> bool:
+        """Return True iff this adapter handles ``url``."""
+        ...
+
+    async def fetch(self, url: str) -> tuple[bytes, str]:
+        """Fetch ``url`` through host-specific logic.
+
+        Args:
+          url: Target URL (already SSRF-checked by the inner call to
+            ``_safe_fetch``).
+
+        Returns:
+          body: Raw response bytes.
+          kind: One of the ``_KIND_*`` constants identifying which
+            ``_extract_text`` branch to use.
+
+        """
+        ...
+
+
+class _RedditAdapter:
+    """Reddit threads via the JSON API; non-thread pages with old.reddit fallback."""
+
+    _THREAD_RE = re.compile(
+        r"^https?://(?:\w+\.)?reddit\.com/r/\w+/comments/\w+",
+    )
+
+    def matches(self, url: str) -> bool:
+        """Match ``reddit.com`` and any subdomain (``old``, ``np``, ``new``)."""
+        hostname = urlparse(url).hostname or ""
+        return hostname == "reddit.com" or hostname.endswith(".reddit.com")
+
+    async def fetch(self, url: str) -> tuple[bytes, str]:
+        """Fetch a Reddit URL via JSON view or HTML with verification fallback."""
+        if self._THREAD_RE.search(url):
+            json_url = re.sub(
+                r"^(https?://)(?:\w+\.)?reddit\.com/",
+                r"\1www.reddit.com/",
+                url.rstrip("/"),
+            )
+            if not json_url.endswith(".json"):
+                json_url += ".json"
+            body = await asyncio.to_thread(_safe_fetch, json_url)
+            return body, _KIND_REDDIT
+
+        try:
+            body = await asyncio.to_thread(_safe_fetch, url)
+        except FetchError as e:
+            if not _is_reddit_verification_page(e.body):
+                raise
+            return await self._fetch_old_reddit(url), _KIND_HTML
+        if _is_reddit_verification_page(body):
+            return await self._fetch_old_reddit(url), _KIND_HTML
+        return body, _KIND_HTML
+
+    @staticmethod
+    async def _fetch_old_reddit(raw_url: str) -> bytes:
+        """Fetch a Reddit HTML page through the legacy host."""
+        url = re.sub(
+            r"^(https?://)(?:www\.)?reddit\.com/",
+            r"\1old.reddit.com/",
+            raw_url,
+        )
+        try:
+            return await asyncio.to_thread(_safe_fetch, url)
+        except (FetchError, ValueError, OSError) as e:
+            raise ValueError(
+                "Reddit returned a JavaScript verification page for "
+                f"{raw_url}; old Reddit fallback failed: {e}"
+            ) from e
+
+
+# Google News front-page paths that route to the top-stories RSS feed.
+# Article-detail URLs (``/articles/...``) and topic URLs (``/topics/...``)
+# fall through unrewritten -- topic IDs don't map cleanly between the
+# SPA and RSS URL spaces, and article pages have no RSS equivalent.
+_GOOGLE_NEWS_TOP_PATHS: frozenset[str] = frozenset(
+    {"", "/home", "/topstories", "/foryou"},
+)
+
+
+class _GoogleNewsAdapter:
+    """Rewrite ``news.google.com`` SPA URLs to their RSS endpoints.
+
+    The SPA's server-side render only contains a sparse "Your briefing"
+    block; the bulk of the page is hydrated by JS we don't execute. The
+    public RSS feed at the same hostname serves the full set of story
+    clusters as structured XML, which ``_format_rss`` renders cleanly.
+    """
+
+    def matches(self, url: str) -> bool:
+        """Match the exact ``news.google.com`` hostname (no subdomains)."""
+        return urlparse(url).hostname == "news.google.com"
+
+    async def fetch(self, url: str) -> tuple[bytes, str]:
+        """Fetch via RSS if the path has a known rewrite, else HTML."""
+        rewritten = self._rewrite(url)
+        target = rewritten if rewritten is not None else url
+        body = await asyncio.to_thread(_safe_fetch, target)
+        kind = _KIND_RSS if urlparse(target).path.startswith("/rss") else _KIND_HTML
+        return body, kind
+
+    @staticmethod
+    def _rewrite(url: str) -> str | None:
+        """Return the RSS-equivalent URL, or None for paths we leave alone."""
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        if path.startswith("/rss"):
+            return None
+        if path in _GOOGLE_NEWS_TOP_PATHS:
+            return parsed._replace(path="/rss").geturl()
+        if path == "/search":
+            return parsed._replace(path="/rss/search").geturl()
+        return None
+
+
+class _XAdapter:
+    """X (Twitter) -- full SPA with no useful SSR; route via reader proxy.
+
+    X serves an empty shell to non-JS clients; tweet text only appears
+    after a JS hydration step. We delegate the render to the existing
+    reader-proxy rung (Jina) and return its markdown. This is the same
+    third-party hop used by the bot-wall fallback; the adapter makes
+    that hop the unconditional default for x.com / twitter.com URLs
+    rather than a last-resort retry.
+
+    External dependency: every fetch flows through ``r.jina.ai``.
+    """
+
+    def matches(self, url: str) -> bool:
+        """Match ``x.com``, ``twitter.com``, and their subdomains."""
+        hostname = urlparse(url).hostname or ""
+        if hostname in ("x.com", "twitter.com"):
+            return True
+        return hostname.endswith((".x.com", ".twitter.com"))
+
+    async def fetch(self, url: str) -> tuple[bytes, str]:
+        """Fetch via reader proxy and tag as already-extracted markdown."""
+        body = await asyncio.to_thread(_reader_proxy_fetch, url)
+        return body, _KIND_MARKDOWN
+
+
+# Registry of host adapters. Order matters: the first matching adapter
+# wins. New entries should be added in expected-match-frequency order
+# so a popular host doesn't pay for failed matches against niche ones.
+_ADAPTERS: tuple[HostAdapter, ...] = (
+    _RedditAdapter(),
+    _GoogleNewsAdapter(),
+    _XAdapter(),
+)
 
 
 def _is_reddit_verification_page(content: bytes) -> bool:
@@ -433,6 +676,94 @@ def _format_reddit_comments(children: list[Any], lines: list[str], depth: int) -
             replies_dict = cast(dict[str, Any], replies)
             reply_children = replies_dict.get("data", {}).get("children", [])
             _format_reddit_comments(reply_children, lines, depth + 1)
+
+
+# Matches one ``<li>`` entry in a Google News RSS cluster description.
+# The description body is a small fragment of HTML with the same shape
+# every time: ``<ol><li><a href="..">title</a> &nbsp;&nbsp;<font ..>source
+# </font></li>...</ol>``. We parse with a regex rather than an HTML
+# parser because the fragment is well-formed-by-construction and the
+# regex stays under ten lines.
+_RSS_CLUSTER_LINK_RE = re.compile(
+    r'<li>\s*<a\s+[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
+    r"(?:[^<]*<font[^>]*>([^<]+)</font>)?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _format_rss(body: bytes) -> str:
+    """Format an RSS 2.0 feed as readable markdown.
+
+    Each ``<item>`` becomes a section: the lead headline as an ``##``
+    heading with source and pub date, followed by bullet-listed sibling
+    stories parsed from the (Google-News-style) ``<ol>`` embedded in
+    the item's ``<description>``. Feeds without cluster descriptions
+    degrade to one heading per item.
+
+    Args:
+      body: Raw feed XML.
+
+    Returns:
+      formatted: Markdown text suitable for direct tool output.
+
+    """
+    try:
+        root = defusedxml.ElementTree.fromstring(body)
+    except (ParseError, defusedxml.common.DefusedXmlException):
+        return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
+    channel = root.find("channel") if root.tag == "rss" else root
+    if channel is None:
+        return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
+    lines: list[str] = []
+    feed_title = (channel.findtext("title") or "").strip()
+    if feed_title:
+        lines.append(f"# {feed_title}\n")
+    for item in channel.findall("item"):
+        _append_rss_item(item, lines)
+    return "\n".join(lines).rstrip()
+
+
+def _append_rss_item(item: Element, lines: list[str]) -> None:
+    """Append one feed item (heading + meta + cluster bullets) to ``lines``."""
+    title = (item.findtext("title") or "").strip()
+    link = (item.findtext("link") or "").strip()
+    source_elem = item.find("source")
+    source = (source_elem.text or "").strip() if source_elem is not None else ""
+    pub_date = (item.findtext("pubDate") or "").strip()
+    if title:
+        lines.append(f"## {title}")
+    meta_parts = [p for p in (source, pub_date) if p]
+    if meta_parts:
+        lines.append(" -- ".join(meta_parts))
+    if link:
+        lines.append(link)
+    # The first cluster entry duplicates the item title; siblings follow.
+    cluster = _parse_rss_cluster(item.findtext("description") or "")
+    for sibling_title, sibling_link, sibling_source in cluster[1:]:
+        suffix = f" -- {sibling_source}" if sibling_source else ""
+        lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")
+    lines.append("")
+
+
+def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
+    """Parse the ``<ol>`` of sibling stories embedded in a feed item description.
+
+    Args:
+      description_html: HTML fragment from an ``<item><description>``.
+
+    Returns:
+      entries: ``(title, link, source)`` tuples, in document order. Empty
+        list when the fragment lacks Google-News-style cluster markup.
+
+    """
+    return [
+        (
+            html.unescape(match.group(2)).strip(),
+            match.group(1),
+            html.unescape(match.group(3) or "").strip(),
+        )
+        for match in _RSS_CLUSTER_LINK_RE.finditer(description_html)
+    ]
 
 
 _NUDGE = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
