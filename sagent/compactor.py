@@ -505,11 +505,30 @@ def microcompact(
     # Walk tape, tracking the slot anchor before each AssistantMessage,
     # the AssistantMessage record itself, and (per call_id) the
     # ``ToolResult`` record it produced. ``call_to_block`` maps call_id
-    # -> index into the assistant block list.
+    # -> index into the assistant block list. ``tr_extra_sources_by_call``
+    # records visible OVs whose payload provides a ``ToolResult`` for a
+    # given call_id -- e.g. a detached splice OV that replaced the
+    # original placeholder TR. Microcompact must suppress these too,
+    # otherwise the splice's TR remains visible alongside the cleared
+    # TR (duplicate).
     assistant_blocks: list[tuple[TapeRef, TapeRef, AssistantMessage]] = []
     call_to_block: dict[str, int] = {}
     tool_for_call: dict[str, str] = {}
     tr_records: dict[str, tuple[TapeRef, ToolResult]] = {}
+    tr_extra_sources_by_call: dict[str, list[TapeRef]] = {}
+    hidden: set[TapeRef] = set()
+    for record in reversed(tape):
+        if record.ref in hidden:
+            continue
+        if isinstance(record, ContextOverride):
+            hidden.update(record.suppresses)
+            for payload_entry in record.payload:
+                if isinstance(payload_entry, ToolResult):
+                    tr_extra_sources_by_call.setdefault(
+                        payload_entry.call_id, []
+                    ).append(record.ref)
+            if record.barrier:
+                break
     prior_history_ref: TapeRef | None = None
     for record in tape:
         if not isinstance(record, HistoryRecord):
@@ -608,10 +627,15 @@ def microcompact(
             hint="",
             summary="",
         )
+        # Suppress both the original HR TR and any visible OV whose
+        # payload also provides a TR for this call_id (typically a
+        # detached splice OV). Without the extra suppression, the
+        # splice OV's TR remains visible alongside the cleared TR.
+        suppresses = (tr_ref, *tr_extra_sources_by_call.get(call_id, ()))
         overrides.append(
             ContextOverride(
                 ref=mint_ref(),
-                suppresses=(tr_ref,),
+                suppresses=suppresses,
                 inject_after=anchor if anchor is not _SENTINEL_HEAD_ANCHOR else None,
                 payload=(cleared,),
                 strategy="microcompact_result",

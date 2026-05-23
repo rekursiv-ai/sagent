@@ -8,9 +8,27 @@ They are not provider messages.
 ``ContextOverride`` hides earlier refs and injects a payload at an anchor.
 ``ContextClear`` stops the resolver walk with no payload.
 
-The canonical identity for suppression, injection anchors, persistence
-cursors, and replay is ``TapeRef``. Provider-message id on
-``HistoryEntry.id`` is debugging metadata only.
+Slot identity
+-------------
+
+``TapeRef`` is the canonical and ONLY way to address a position in the
+tape. A ref names a SLOT -- a logical position in the conversation --
+not just a physical record. The ref's identity is preserved across
+suppression: when ``ContextOverride`` ``O`` suppresses ``HistoryRecord``
+``X``, ``O`` inherits ``X``'s slot identity. Any other override that
+referenced ``X`` (e.g. ``inject_after=X.ref``) still refers to the same
+slot; the resolver follows the suppression chain to find the current
+owner.
+
+This makes ``inject_after=R`` a stable contract: "after the slot
+identified by R," independent of what physically lives there now.
+Producers write ``inject_after=record.ref`` and the resolver guarantees
+the payload lands in the right conversational position even if that
+slot has since been replaced by microcompaction or rescue.
+
+The same identity rule governs ``suppresses``: the suppressor inherits
+the slot of each ref it lists. Multi-ref suppression collapses those
+slots into the suppressor's own ``inject_after`` position.
 
 ``ContextOverride.__post_init__`` enforces a local pairing invariant on
 ``payload``: every ``AssistantMessage.tool_calls`` id must be paired by
@@ -51,7 +69,13 @@ class InvalidPayloadError(ValueError):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TapeRef:
-    """Canonical identity for one tape record."""
+    """Canonical identity for one slot in the conversation.
+
+    A ref names a SLOT, not just a physical record. The first record
+    at this ref opens the slot; subsequent records may suppress that
+    record, inheriting the slot. References to the ref always resolve
+    to the slot's current owner via the resolver's chain-walk.
+    """
 
     session_id: str
     """Session this ref belongs to."""
@@ -79,10 +103,23 @@ class ContextOverride:
     """Canonical identity."""
 
     suppresses: tuple[TapeRef, ...]
-    """Earlier refs hidden when this override is visible."""
+    """Slot identities this override inherits.
+
+    The records originally at these refs are hidden; this override
+    becomes the current owner of each named slot. Multi-ref suppression
+    collapses those slots into this override's ``inject_after`` position.
+    """
 
     inject_after: TapeRef | None
-    """Visible record after which ``payload`` renders; ``None`` = head."""
+    """Slot after which ``payload`` renders; ``None`` = head.
+
+    The resolver follows the suppression chain to find the current
+    owner of this slot. ``None`` injects at the head of the visible
+    slice, before any HR-owned slot. A ref that no producer has ever
+    suppressed must be a live ``HistoryRecord`` ref in the visible set
+    or the payload falls into HEAD (with a resolver warning so producer
+    bugs are detectable).
+    """
 
     payload: tuple[HistoryEntry, ...]
     """Provider-facing messages this override injects."""

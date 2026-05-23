@@ -6,12 +6,33 @@ emitted list respects assistant tool-call / tool-result ordering.
 
 The resolver is the only sanctioned reader of tape semantics. Runtime,
 session IO, replay, and observers consume its output.
+
+Slot identity is the single addressing mechanism: every ``TapeRef``
+names a slot in the conversation. When an override suppresses a
+record, the override inherits the suppressed ref's slot identity. Any
+other override that referenced the suppressed ref still resolves to
+the same slot -- the resolver walks the suppression chain to find the
+current owner. There is no separate notion of "physical record" vs
+"slot": refs are slots.
+
+This means ``inject_after=R`` is a stable contract: "after the slot
+identified by R," independent of what currently occupies that slot.
+Producers don't need to rebase anchors when other producers suppress
+their targets; the resolver maintains slot identity automatically.
+
+The chain-walk is two-pass: first pass places overrides whose anchor
+resolves directly to a live slot; second pass redirects deferred
+overrides via the suppression chain. The two passes guarantee
+ordering: a replacement is placed before any deferred override that
+depends on the replacement's slot.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+import logging
 
 from sagent.types.history import (
     AssistantMessage,
@@ -33,6 +54,9 @@ __all__ = [
     "resolve_context",
     "validate_context",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidContextError(ValueError):
@@ -76,9 +100,16 @@ def resolve_context(
 
     Walks the tape in reverse to compute the visible set, then forward
     to render. ``HistoryRecord``s emit their entry; ``ContextOverride``s
-    inject their payload at the visible record matching ``inject_after``
-    (or the head of the visible slice when the anchor is absent or itself
-    suppressed); ``ContextClear`` and barrier overrides stop the walk.
+    inject their payload at the slot identified by ``inject_after``;
+    ``ContextClear`` and barrier overrides stop the walk.
+
+    Slot identity resolution: when an override's ``inject_after`` was
+    suppressed by another override, the resolver chases the suppression
+    chain to find the current owner of the slot and appends the
+    deferred override's payload after the owner's payload. HEAD
+    fallback is reserved for ``inject_after=None`` (legitimate head
+    injection) or for a chain that reaches a barrier / runs out of
+    suppressors (logged as a warning -- producer bug).
 
     Args:
       tape: Append-only session tape.
@@ -105,12 +136,26 @@ def resolve_context(
 
     visible = list(reversed(visible_in_reverse))
 
+    # ``suppressor_by_ref[X] = OV`` means ``X``'s slot identity was
+    # inherited by ``OV``. Lets the resolver redirect anchors that
+    # point at a slot whose owner has changed.
+    suppressor_by_ref: dict[TapeRef, ContextOverride] = {}
+    for record in visible:
+        if isinstance(record, ContextOverride):
+            for sup in record.suppresses:
+                suppressor_by_ref[sup] = record
+
     head: list[HistoryEntry] = []
     head_origins: list[TapeRef] = []
     suffix_by_ref: dict[TapeRef, list[HistoryEntry]] = {}
     suffix_origins_by_ref: dict[TapeRef, list[TapeRef]] = {}
     slot_order: list[TapeRef] = []
     history_entry_by_ref: dict[TapeRef, HistoryEntry] = {}
+    # OVs whose anchor doesn't yet name a live slot get deferred to a
+    # second pass. The replacement may not have been placed yet, or the
+    # anchor may need chain-walking. Deferring guarantees ordering:
+    # a deferred override's payload always lands AFTER its replacement's.
+    deferred: list[ContextOverride] = []
 
     for record in visible:
         if isinstance(record, HistoryRecord):
@@ -120,16 +165,43 @@ def resolve_context(
             slot_order.append(record.ref)
         elif isinstance(record, ContextOverride):
             anchor = record.inject_after
-            # ``suffix_by_ref`` only has visible ``HistoryRecord`` refs as
-            # keys. Anchoring at another override's ref (which owns no
-            # slot) or at a suppressed ref both fall back to the head of
-            # the visible slice.
-            if anchor is None or anchor not in suffix_by_ref:
-                head.extend(record.payload)
-                head_origins.extend(record.ref for _ in record.payload)
-            else:
+            if anchor is not None and anchor in suffix_by_ref:
                 suffix_by_ref[anchor].extend(record.payload)
                 suffix_origins_by_ref[anchor].extend(record.ref for _ in record.payload)
+            else:
+                deferred.append(record)
+
+    # Sort deferred overrides by the slot identity they inherit so an
+    # AM-stubbed override lands immediately before the TR-cleared
+    # override for the same conversational pair. Tape order would mix
+    # them up: microcompact emits all AM overrides first (tape order
+    # MC_3, MC_5, ..., MC_18), then all TR overrides (MR_4, MR_6, ...,
+    # MR_17). Processing in tape order lays them out as
+    # [MC_3, MC_5, ..., MR_4, MR_6, ...] in the same slot suffix,
+    # breaking the AM-then-TR pairing that validate_context requires.
+    deferred.sort(key=_deferred_sort_key)
+    for record in deferred:
+        anchor = _resolve_slot(
+            record.inject_after, suppressor_by_ref, suffix_by_ref, record.ref
+        )
+        if anchor is None:
+            if record.inject_after is not None:
+                # Producer bug: anchor was specified but no live slot
+                # owns it (chain ran out, or chain hit a barrier).
+                # Falling into HEAD silently was the original design
+                # defect; surfacing it as a warning lets producer bugs
+                # be caught at the boundary.
+                logger.warning(
+                    "resolver: override %s anchor %s has no live slot "
+                    "(chain exhausted); payload falls into HEAD",
+                    record.ref,
+                    record.inject_after,
+                )
+            head.extend(record.payload)
+            head_origins.extend(record.ref for _ in record.payload)
+        else:
+            suffix_by_ref[anchor].extend(record.payload)
+            suffix_origins_by_ref[anchor].extend(record.ref for _ in record.payload)
 
     messages: list[HistoryEntry] = list(head)
     origins: list[TapeRef] = list(head_origins)
@@ -202,6 +274,63 @@ def validate_context(messages: Sequence[HistoryEntry]) -> None:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(pending)}",
         )
+
+
+def _deferred_sort_key(record: ContextOverride) -> tuple[int, int]:
+    """Sort key for deferred overrides: by the slot identity they inherit.
+
+    Primary: the smallest ordinal among the suppressed refs (the
+    "earliest slot" this override owns). For pure-injection overrides
+    with no ``suppresses``, fall back to ``inject_after.ord``, then the
+    override's own ordinal.
+
+    Secondary: the override's own ordinal, to keep deterministic
+    ordering between overrides that inherit the same slot (e.g. an AM
+    override and its sibling TR override at the same anchor).
+    """
+    if record.suppresses:
+        primary = min(s.ordinal for s in record.suppresses)
+    elif record.inject_after is not None:
+        primary = record.inject_after.ordinal
+    else:
+        primary = record.ref.ordinal
+    return (primary, record.ref.ordinal)
+
+
+def _resolve_slot(
+    anchor: TapeRef | None,
+    suppressor_by_ref: dict[TapeRef, ContextOverride],
+    suffix_by_ref: dict[TapeRef, list[HistoryEntry]],
+    self_ref: TapeRef,
+) -> TapeRef | None:
+    """Follow the suppression chain to find ``anchor``'s current owner.
+
+    Returns the live slot ref if found, ``None`` if the chain runs out
+    (no suppressor) or cycles (defensive; should not occur for
+    well-formed tapes). ``self_ref`` is the requesting override's own
+    ref; used to detect a degenerate self-loop where an override
+    suppresses something that points back at the override.
+
+    Args:
+      anchor: The original ``inject_after`` ref to resolve.
+      suppressor_by_ref: Map of suppressed ref to inheriting override.
+      suffix_by_ref: Live slot refs (built during the first pass).
+      self_ref: The requesting override's own ref.
+
+    Returns:
+      slot: A live slot ref, or ``None`` to indicate HEAD.
+
+    """
+    seen: set[TapeRef] = set()
+    while anchor is not None and anchor not in suffix_by_ref:
+        if anchor in seen:
+            return None
+        seen.add(anchor)
+        suppressor = suppressor_by_ref.get(anchor)
+        if suppressor is None or suppressor.ref == self_ref:
+            return None
+        anchor = suppressor.inject_after
+    return anchor
 
 
 def _is_discontinuous(
