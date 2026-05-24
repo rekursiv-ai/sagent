@@ -64,6 +64,21 @@ _STREAM_IDLE_TIMEOUT = 600.0
 
 _CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
+_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+
+# Models that support server-side ``clear_tool_uses_20250919``. Per
+# Anthropic docs: Sonnet 4/4.5, Haiku 4.5, Opus 4/4.1/4.5. We treat
+# the +1m variants identically (same base model).
+_CONTEXT_MANAGEMENT_MODELS = frozenset(
+    {
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+    }
+)
 
 
 def _strip_context_tag(model_id: str) -> str:
@@ -73,6 +88,11 @@ def _strip_context_tag(model_id: str) -> str:
         if lower.endswith(tag):
             return model_id[: -len(tag)]
     return model_id
+
+
+def supports_native_context_management(model_id: str) -> bool:
+    """True when the model accepts the ``clear_tool_uses_20250919`` beta."""
+    return _strip_context_tag(model_id) in _CONTEXT_MANAGEMENT_MODELS
 
 
 def context_betas(model_id: str) -> list[str]:
@@ -85,9 +105,12 @@ def context_betas(model_id: str) -> list[str]:
       betas: Beta header strings to include in the request.
 
     """
+    betas: list[str] = []
     if model_id.lower().endswith("+1m"):
-        return [_CONTEXT_1M_BETA]
-    return []
+        betas.append(_CONTEXT_1M_BETA)
+    if supports_native_context_management(model_id):
+        betas.append(_CONTEXT_MANAGEMENT_BETA)
+    return betas
 
 
 # Model limits and pricing.
@@ -708,6 +731,23 @@ class _AnthropicModel:
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,
         )
+        if supports_native_context_management(self._model_id):
+            # ``clear_tool_uses_20250919``: server-side clearing of old
+            # tool results when the prompt exceeds ``trigger``. ``keep``
+            # preserves the most recent N tool uses (matches our
+            # ``microcompact_keep_recent`` default). ``clear_at_least``
+            # prevents cache-busting for trivially small clears.
+            cm_config = {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "trigger": {"type": "input_tokens", "value": 100_000},
+                        "keep": {"type": "tool_uses", "value": 5},
+                        "clear_at_least": {"type": "input_tokens", "value": 1_000},
+                    }
+                ],
+            }
+            body = {**(body or {}), "context_management": cm_config}
         if body is not None:
             kwargs["extra_body"] = body
         headers = self._provider.extra_headers(self._model_id)

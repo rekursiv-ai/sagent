@@ -89,11 +89,6 @@ re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
 ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
 MAX_OVERFLOW_RECOVERY = 3
-_MICROCOMPACT_GAP_SEC = 3600.0
-"""Cache-warm threshold: skip microcompact when the previous response is newer
-than this. Matches the legacy default; microcompacting an in-flight cached
-prefix forces re-tokenization for no real saving and produces stubbed-args
-tool calls that the model then mimics."""
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -1764,13 +1759,10 @@ class _AgentCompactor:
     ) -> tuple[ContextOverride, ...]:
         """Forward microcompaction to the inner compactor.
 
-        Skips when the previous response was recent (cache-warm gate)
-        so a model call within the same conversation flow doesn't get
-        its tool-call args replaced with stubbed
-        ``{_microcompacted: "..."}`` markers and force the next round
-        to re-tokenize the cached prefix. Threads the agent's rich
-        tools_map (not the runtime Tool view) so the inner compactor
-        can consult ``supports_microcompaction`` and ``summary(args)``.
+        Threads the agent's rich ``tools_map`` (not the runtime ``Tool``
+        view) so the inner compactor can consult
+        ``supports_microcompaction`` and ``summary(args)``. The inner
+        compactor owns gating (interval, byte threshold, idempotency).
 
         Args:
           tape: Append-only session tape.
@@ -1780,14 +1772,11 @@ class _AgentCompactor:
 
         Returns:
           overrides: Microcompaction overrides produced by the inner
-              compactor; empty when nothing to clear or the cache is
-              still warm.
+              compactor; empty when nothing to clear or below the
+              compactor's gate thresholds.
 
         """
         del tools
-        last = self._agent.cost_tracker.last_response_time
-        if last and (time.time() - last) <= _MICROCOMPACT_GAP_SEC:
-            return ()
         return self._inner.maintain(
             tape,
             context,

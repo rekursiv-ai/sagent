@@ -20,6 +20,7 @@ from sagent.providers.anthropic import (
     _tool_result_block,
     _tool_use_block,
     context_betas,
+    supports_native_context_management,
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.types.exceptions import (
@@ -61,11 +62,17 @@ def test_strip_context_tag(model_id: str, stripped: str) -> None:
 
 
 def test_context_betas_one_million_emits_beta() -> None:
-    assert context_betas("claude-opus-4-7+1m") == ["context-1m-2025-08-07"]
+    assert "context-1m-2025-08-07" in context_betas("claude-opus-4-7+1m")
 
 
-def test_context_betas_no_tag_returns_empty() -> None:
-    assert context_betas("claude-haiku-4-5") == []
+def test_context_betas_native_context_management_for_supported_models() -> None:
+    assert "context-management-2025-06-27" in context_betas("claude-haiku-4-5")
+    assert "context-management-2025-06-27" in context_betas("claude-opus-4-7+1m")
+
+
+def test_context_betas_skip_native_context_management_for_unknown_models() -> None:
+    # Older / unsupported models don't get the context-management beta.
+    assert context_betas("claude-3-opus-20240229") == []
 
 
 @pytest.mark.parametrize(
@@ -565,14 +572,45 @@ def test_anthropic_provider_extra_headers_for_1m_includes_beta() -> None:
     assert headers.get("anthropic-beta", "").startswith("context-1m")
 
 
-def test_anthropic_provider_extra_headers_no_tag_empty() -> None:
+def test_anthropic_provider_extra_headers_includes_context_management() -> None:
+    """Modern models opt into the context-management beta unconditionally."""
     p = Anthropic.from_key("k")
-    assert p.extra_headers("claude-haiku-4-5") == {}
+    headers = p.extra_headers("claude-haiku-4-5")
+    assert "context-management-2025-06-27" in headers.get("anthropic-beta", "")
+
+
+def test_anthropic_provider_extra_headers_unknown_model_empty() -> None:
+    p = Anthropic.from_key("k")
+    assert p.extra_headers("claude-3-opus-20240229") == {}
 
 
 def test_anthropic_provider_extra_body_default_none() -> None:
     p = Anthropic.from_key("k")
     assert p.extra_body(has_thinking=False, cache_cold=False) is None
+
+
+def test_build_kwargs_includes_context_management_for_supported_model() -> None:
+    """Supported models get the server-side ``clear_tool_uses`` config injected."""
+    p = Anthropic.from_key("k")
+    model = p.model("claude-opus-4-7+1m")
+    req = ModelRequest(
+        messages=[UserMessage(text="hi")],
+        system="s",
+        tools=None,
+        max_response_tokens=128_000,
+    )
+    kwargs = model._build_kwargs(
+        req, [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    )
+    body = cast(dict[str, object], kwargs["extra_body"])
+    cm = cast(dict[str, object], body["context_management"])
+    edits = cast(list[dict[str, object]], cm["edits"])
+    assert any(e["type"] == "clear_tool_uses_20250919" for e in edits)
+
+
+def test_build_kwargs_no_context_management_for_unknown_model() -> None:
+    """Unknown / older models don't get the context-management config."""
+    assert not supports_native_context_management("claude-3-opus-20240229")
 
 
 def test_anthropic_provider_build_system_passthrough() -> None:
