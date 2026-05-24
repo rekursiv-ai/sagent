@@ -115,7 +115,6 @@ class PaperDetails:
     name: str = "PaperDetails"
     tool_id: str = "application/x-tool-paperdetails"
     description: str = load_tool_description("PaperDetails")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

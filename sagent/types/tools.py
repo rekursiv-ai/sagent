@@ -3,7 +3,7 @@
 The Protocol every concrete tool implementation must satisfy. The
 runtime needs only ``name`` + ``run``; the wrapper / REPL layer
 consumes the rest (``tool_id``, ``description``, ``directive_schema``,
-``summary``, ``summary_result``, ``prompt``, ``supports_microcompaction``).
+``summary``, ``summary_result``, ``prompt``).
 """
 
 from __future__ import annotations
@@ -26,8 +26,7 @@ class Tool(Protocol):
 
     The runtime sees only ``name`` + ``run``; the wrapper layer
     consumes the rest (``tool_id``, ``description``,
-    ``directive_schema``, ``summary``, ``summary_result``, ``prompt``,
-    ``supports_microcompaction``).
+    ``directive_schema``, ``summary``, ``summary_result``, ``prompt``).
     """
 
     name: str
@@ -41,10 +40,6 @@ class Tool(Protocol):
 
     directive_schema: JSON
     """Frozen JSON Schema for the tool's directive."""
-
-    supports_microcompaction: bool
-    """Whether old results of this tool are eligible for microcompaction
-    (clearing on cache-cold)."""
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Build a short label for a pending invocation.

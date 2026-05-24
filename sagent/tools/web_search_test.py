@@ -15,7 +15,6 @@ def test_websearch_metadata() -> None:
     t = WebSearch()
     assert t.name == "WebSearch"
     assert t.tool_id == "application/x-tool-websearch"
-    assert t.supports_microcompaction is True
 
 
 def test_description_resolves() -> None:

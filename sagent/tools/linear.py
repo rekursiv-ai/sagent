@@ -193,7 +193,6 @@ class Linear:
     name: str = "Linear"
     tool_id: str = "application/x-tool-linear"
     description: str = load_tool_description("Linear")
-    supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

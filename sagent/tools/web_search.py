@@ -22,7 +22,6 @@ class WebSearch:
 
     name: str = "WebSearch"
     tool_id: str = "application/x-tool-websearch"
-    supports_microcompaction: bool = True
 
     @property
     def description(self) -> str:

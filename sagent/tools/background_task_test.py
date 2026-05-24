@@ -26,7 +26,6 @@ class _DummyInner:
     name: str = "Dummy"
     tool_id: str = "application/x-tool-dummy"
     description: str = "dummy"
-    supports_microcompaction: bool = False
     directive_schema = json_freeze(
         {
             "type": "object",
@@ -67,7 +66,6 @@ def test_aware_preserves_metadata_and_delegates() -> None:
     assert wrapped.name == "Dummy"
     assert wrapped.tool_id == "application/x-tool-dummy"
     assert wrapped.description == "dummy"
-    assert wrapped.supports_microcompaction is False
     assert wrapped.summary({"x": "hi"}) == "Dummy hi"
     assert wrapped.summary_result(ToolResult(call_id="", content="")) == "ok"
     assert wrapped.prompt() == "dummy-prompt"
@@ -78,7 +76,6 @@ def test_aware_schema_without_properties_passes_through() -> None:
         name: str = "NP"
         tool_id: str = "application/x-tool-np"
         description: str = ""
-        supports_microcompaction: bool = False
         directive_schema = json_freeze({"type": "object"})
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -112,7 +109,6 @@ def test_metadata_basics() -> None:
     t = BackgroundTask()
     assert t.name == "BackgroundTask"
     assert t.tool_id == "application/x-tool-backgroundtask"
-    assert t.supports_microcompaction is True
     assert "background:" in t.prompt()
     assert t.summary_result(ToolResult(call_id="", content="")) is None
 

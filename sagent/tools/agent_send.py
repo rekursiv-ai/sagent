@@ -42,7 +42,6 @@ class AgentSend:
     name: str = "AgentSend"
     tool_id: str = "application/x-tool-agentsend"
     description: str = load_tool_description("agentsend")
-    supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

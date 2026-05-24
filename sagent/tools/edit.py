@@ -82,7 +82,6 @@ class Edit:
     name: str = "Edit"
     tool_id: str = "application/x-tool-edit"
     description: str = load_tool_description("Edit")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

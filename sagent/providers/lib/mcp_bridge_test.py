@@ -33,7 +33,6 @@ class _EchoTool:
             "additionalProperties": False,
         },
     )
-    supports_microcompaction: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         del args

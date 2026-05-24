@@ -137,7 +137,6 @@ def test_metadata_basics() -> None:
     t = Skill()
     assert t.name == "Skill"
     assert t.tool_id == "application/x-tool-skill"
-    assert t.supports_microcompaction is False
     assert t.summary({"skill": "alpha"}) == "Skill alpha"
     assert t.summary({}) == "Skill"
     assert t.summary_result(ToolResult(call_id="", content="")) is None
@@ -189,6 +188,38 @@ async def test_run_loads_body_and_marks_invoked(tmp_path: Path) -> None:
     assert "hello &lt;world&gt;" in result.content
     assert "<skill name='alpha'" in result.content
     assert "alpha" in state.invoked_skills
+
+
+@pytest.mark.asyncio
+async def test_run_short_circuits_on_second_invocation(tmp_path: Path) -> None:
+    """Second call returns a stub; the body is not re-emitted."""
+    _write_skill(tmp_path, "alpha", body="full body content\n")
+    t = Skill()
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    with with_fake_agent(tool_state=state):
+        first = await t.run({"skill": "alpha"})
+        second = await t.run({"skill": "alpha"})
+    assert "full body content" in first.content
+    assert "full body content" not in second.content
+    assert "already loaded earlier" in second.content
+    assert state.invoked_skills == {"alpha"}
+
+
+@pytest.mark.asyncio
+async def test_run_reloads_body_after_reset_tool_recall(tmp_path: Path) -> None:
+    """``reset_tool_recall`` re-arms the short-circuit so body re-emits."""
+    _write_skill(tmp_path, "alpha", body="full body content\n")
+    t = Skill()
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    with with_fake_agent(tool_state=state):
+        first = await t.run({"skill": "alpha"})
+        state.reset_tool_recall()
+        second = await t.run({"skill": "alpha"})
+    assert "full body content" in first.content
+    assert "full body content" in second.content
+    assert "already loaded earlier" not in second.content
 
 
 @pytest.mark.asyncio

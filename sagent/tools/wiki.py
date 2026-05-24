@@ -189,7 +189,6 @@ class Wiki:
     name: str = "Wiki"
     tool_id: str = "application/x-tool-wiki"
     description: str = load_tool_description("Wiki")
-    supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

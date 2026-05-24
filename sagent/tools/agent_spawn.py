@@ -126,7 +126,6 @@ class AgentSpawn:
     name: str = "AgentSpawn"
     tool_id: str = "application/x-tool-agentspawn"
     description: str = load_tool_description("agentspawn")
-    supports_microcompaction: bool = False
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {

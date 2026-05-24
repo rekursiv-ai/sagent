@@ -116,9 +116,6 @@ class BackgroundAwareTool:
     description: str
     """Forwarded from the wrapped tool."""
 
-    supports_microcompaction: bool
-    """Forwarded from the wrapped tool."""
-
     directive_schema: JSON
     """Wrapped tool's schema with ``background`` / ``delay`` properties
     merged into ``properties``."""
@@ -128,7 +125,6 @@ class BackgroundAwareTool:
         self.name = tool.name
         self.tool_id = tool.tool_id
         self.description = tool.description
-        self.supports_microcompaction = tool.supports_microcompaction
         schema: MutableJSON = cast(MutableJSON, dict(tool.directive_schema))
         raw_props = schema.get("properties")
         if isinstance(raw_props, Mapping):

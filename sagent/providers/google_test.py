@@ -420,7 +420,6 @@ class _StubTool:
         "type": "object",
         "additionalProperties": False,
     }
-    supports_microcompaction: bool = False
 
 
 def test_build_request_tools_strip_additional_properties() -> None:

@@ -80,7 +80,6 @@ def test_metadata_basics() -> None:
     t = AgentSelf()
     assert t.name == "AgentSelf"
     assert t.tool_id == "application/x-tool-agentself"
-    assert t.supports_microcompaction is True
     assert t.prompt() == ""
 
 

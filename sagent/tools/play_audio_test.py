@@ -40,7 +40,6 @@ def test_metadata_basics() -> None:
     t = PlayAudio()
     assert t.name == "PlayAudio"
     assert t.tool_id == "application/x-tool-playaudio"
-    assert t.supports_microcompaction is True
     assert t.prompt() == ""
     assert t.summary_result(MagicMock()) is None
 

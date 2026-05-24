@@ -50,7 +50,6 @@ class _StubTool:
     tool_id: str = "application/x-tool-bash"
     description: str = "Run shell commands"
     directive_schema: Mapping[str, JSONValue] = MappingProxyType({"type": "object"})
-    supports_microcompaction: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         del args

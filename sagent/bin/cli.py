@@ -296,15 +296,6 @@ def parse_agent_args(
         help="Automatic compaction (default: on; --no-compact to disable).",
     )
     parser.add_argument(
-        "--microcompact",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Per-AM-block microcompaction (default: on; --no-microcompact"
-            " disables for the session)."
-        ),
-    )
-    parser.add_argument(
         "--effort",
         default=None,
         help=(
@@ -392,8 +383,7 @@ def _parse_cli_args(
         help="Session directory for persistence. Overrides --resume/--continue.",
     )
     parser.add_argument(
-        "--no-session-persistence",
-        dest="no_session",
+        "--ephemeral",
         action="store_true",
         help="Disable session persistence. Sessions are not saved to disk.",
     )
@@ -842,7 +832,7 @@ def main() -> None:
     _configure_logging(args.log_level)
     if args.recipe is not None:
         set_recipe(args.recipe)
-    session_dir = None if args.no_session else _resolve_session_dir(args)
+    session_dir = None if args.ephemeral else _resolve_session_dir(args)
     loaded_session = None
     if session_dir is not None:
         loaded_session = load_session(Path(session_dir), {})
@@ -872,11 +862,7 @@ def main() -> None:
             history,
             tool_state,
         )
-    compactor = (
-        SummaryCompactor(microcompact_enabled=args.microcompact)
-        if args.compact
-        else None
-    )
+    compactor = SummaryCompactor() if args.compact else None
 
     headless = not sys.stdin.isatty()
     if not headless:
@@ -898,7 +884,7 @@ def main() -> None:
         return build_system(
             model.model_id,
             custom=custom_system,
-            include_memory=not args.no_session,
+            include_memory=not args.ephemeral,
         )
 
     agent = Agent(

@@ -50,7 +50,6 @@ def test_metadata_basics() -> None:
     t = Advisor(model=StubProviderModel())
     assert t.name == "advisor"
     assert t.tool_id == "application/x-tool-advisor"
-    assert t.supports_microcompaction is False
     assert t.summary({}) == "Advisor consulting…"
     assert t.summary_result(ToolResult(call_id="", content="")) is None
 
