@@ -90,7 +90,6 @@ class Grep:
     name: str = "Grep"
     tool_id: str = "application/x-tool-grep"
     description: str = load_tool_description("Grep")
-    supports_microcompaction: bool = True
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {

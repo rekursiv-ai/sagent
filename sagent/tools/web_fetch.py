@@ -67,7 +67,6 @@ class WebFetch:
     name: str = "WebFetch"
     tool_id: str = "application/x-tool-webfetch"
     description: str = load_tool_description("WebFetch")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

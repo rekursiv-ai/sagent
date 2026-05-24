@@ -125,7 +125,6 @@ class Slack:
     name: str = "Slack"
     tool_id: str = "application/x-tool-slack"
     description: str = load_tool_description("Slack")
-    supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

@@ -753,8 +753,8 @@ class Agent:
         )
 
     async def clear(self) -> None:
-        """Preempt and wipe history + file-tracking caches."""
-        self.tool_state.reset_file_tracking()
+        """Preempt and wipe history + per-tool recall caches."""
+        self.tool_state.reset_tool_recall()
         self.runtime.inbox.push_back(types.runtime.Clear())
 
     async def serve_forever(self) -> None:
@@ -1013,25 +1013,6 @@ class Agent:
                 )
             )
 
-    def microcompact_history(self) -> None:
-        """Append microcompaction overrides for stale clearable tool exchanges.
-
-        No-op when no rich compactor is wired. Called by the model
-        wrapper before each model call so the provider sees compacted
-        tool exchanges; subsequent ``runtime.context()`` reads reflect
-        the overrides.
-        """
-        if self._agent_compactor is None:
-            return
-        overrides = self._agent_compactor.maintain(
-            self.runtime.tape,
-            self.runtime.context().messages,
-            self.runtime.tools_map,
-            self.runtime.mint_ref,
-        )
-        for override in overrides:
-            self.runtime.adopt_record(override)
-
     def cancel_background(self, job_id: str) -> None:
         """Remove ``job_id`` from the background-task registry, if present.
 
@@ -1154,6 +1135,13 @@ class Agent:
             self.last_compact_error = exc
             return False
         self.runtime.adopt_record(override)
+        # Compaction summarized prior context away. Tools whose recall
+        # caches assume "I already showed you this in context" (Read's
+        # check_unchanged, Skill's invoked-skills memo) would now hand
+        # back stubs pointing at content the model can no longer see.
+        # Clear them so the next call re-emits the real content into
+        # the post-compact context.
+        self.tool_state.reset_tool_recall()
         self.publish(
             types.runtime.CompactComplete(
                 records=(override,),
@@ -1338,7 +1326,7 @@ class _AgentModel:
         records cost out-of-band, returns the final assistant message.
 
         Args:
-          history: Conversation history (microcompacted in place first).
+          history: Conversation history (resolved view passed by runtime).
           system: System prompt to send.
           tools: Runtime-side tools forwarded by the engine.
           on_text: Callback for each streamed text chunk.
@@ -1351,11 +1339,6 @@ class _AgentModel:
           RuntimeError: Overflow recovery failed after the retry cap.
 
         """
-        # Microcompact: append overrides to the runtime tape, then
-        # refetch the resolved view so the provider sees the result.
-        self._agent.microcompact_history()
-        history = self._agent.runtime.context().messages
-
         # Proactive compaction: ask the compactor whether headroom is
         # exhausted BEFORE handing the prompt to the provider. Without
         # this gate, ``compact_now`` only runs reactively (after a
@@ -1666,6 +1649,12 @@ class _AgentCompactor:
             mint_ref=mint_ref,
             custom_instructions=args or None,
         )
+        # The barrier summarized prior context away. Per-tool recall
+        # caches (Read.check_unchanged, Skill.invoked_skills) would now
+        # return stubs pointing at content the model can no longer see;
+        # clear them so the next call re-emits the real content into
+        # the post-compact context.
+        self._agent.tool_state.reset_tool_recall()
         payload: list[types.history.HistoryEntry] = list(override.payload)
 
         # Post-compact enrich operates on the override's mutable payload
@@ -1748,40 +1737,6 @@ class _AgentCompactor:
             override,
             payload=tuple(payload),
             fallback_reason=fallback_reason,
-        )
-
-    def maintain(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[types.history.HistoryEntry],
-        tools: dict[str, agent_runtime.Tool],
-        mint_ref: Callable[[], TapeRef],
-    ) -> tuple[ContextOverride, ...]:
-        """Forward microcompaction to the inner compactor.
-
-        Threads the agent's rich ``tools_map`` (not the runtime ``Tool``
-        view) so the inner compactor can consult
-        ``supports_microcompaction`` and ``summary(args)``. The inner
-        compactor owns gating (interval, byte threshold, idempotency).
-
-        Args:
-          tape: Append-only session tape.
-          context: Resolved provider-facing context.
-          tools: Runtime-side tools (ignored; rich tools used directly).
-          mint_ref: Factory for fresh ``TapeRef`` values.
-
-        Returns:
-          overrides: Microcompaction overrides produced by the inner
-              compactor; empty when nothing to clear or below the
-              compactor's gate thresholds.
-
-        """
-        del tools
-        return self._inner.maintain(
-            tape,
-            context,
-            self._agent.tools_map,
-            mint_ref,
         )
 
 

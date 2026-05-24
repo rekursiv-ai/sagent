@@ -166,7 +166,6 @@ class PaperAuthor:
     name: str = "PaperAuthor"
     tool_id: str = "application/x-tool-paperauthor"
     description: str = load_tool_description("PaperAuthor")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

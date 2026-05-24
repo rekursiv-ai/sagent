@@ -138,7 +138,6 @@ class StubTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo tool."
-    supports_microcompaction: bool = False
     directive_schema: JSON = _STUB_SCHEMA
     calls: list[Mapping[str, object]] = field(default_factory=list)
 
@@ -217,16 +216,6 @@ def test_agent_register_and_cancel_background() -> None:
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:
         loop.close()
-
-
-def test_agent_microcompact_history_noop_without_compactor() -> None:
-    a = _build_agent()
-    msg = types.history.UserMessage(text="hi")
-    a.runtime.append_history(msg)
-    a.microcompact_history()
-    # No compactor wired -- resolved context unchanged.
-    assert a.runtime.context().messages == [msg]
-    assert a.runtime.context().messages[0] is msg
 
 
 def test_agent_system_string_to_factory() -> None:
@@ -322,7 +311,6 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
     assert seen.description == "Echo tool."
     assert seen.tool_id == "application/x-tool-echo"
     assert dict(seen.directive_schema) == {"type": "object"}
-    assert seen.supports_microcompaction is False
     assert seen.summary({}) == "echo"
     assert seen.prompt() == ""
 
@@ -1162,51 +1150,6 @@ def test_enforce_caps_pushes_error_when_limit_reached() -> None:
     assert any(isinstance(i, types.runtime.ModelResponseError) for i in items)
 
 
-@dataclass(slots=True, kw_only=True)
-class _MaintainStubCompactor:
-    """Compactor whose ``maintain`` records calls."""
-
-    maintained: list[list[types.history.HistoryEntry]] = field(default_factory=list)
-
-    async def should_compact(
-        self, input_tokens: int, max_request_tokens: int, max_response_tokens: int = 0
-    ) -> bool:
-        del input_tokens, max_request_tokens, max_response_tokens
-        return False
-
-    async def compact(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[types.history.HistoryEntry],
-        model: object,
-        mint_ref: Callable[[], TapeRef],
-        custom_instructions: str | None = None,
-    ) -> ContextOverride:
-        del tape, model
-        del custom_instructions
-        return _summary_override(list(context), mint_ref)
-
-    def maintain(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[types.history.HistoryEntry],
-        tools: object,
-        mint_ref: Callable[[], TapeRef],
-    ) -> tuple[ContextOverride, ...]:
-        del tape, tools, mint_ref
-        self.maintained.append(list(context))
-        return ()
-
-
-def test_microcompact_history_forwards_to_compactor() -> None:
-    """``maintain()`` runs when invoked via ``microcompact_history``."""
-    compactor = _MaintainStubCompactor()
-    a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    a.runtime.append_history(types.history.UserMessage(text="x"))
-    a.microcompact_history()
-    assert compactor.maintained, "maintain() should have been called"
-
-
 @pytest.mark.asyncio
 async def test_compact_now_no_compactor_is_noop() -> None:
     a = _build_agent()
@@ -1260,6 +1203,62 @@ async def test_compact_now_replaces_history_in_place() -> None:
     entry = a.runtime.context().messages[0]
     assert isinstance(entry, types.history.UserMessage)
     assert entry.text == "[summary]"
+
+
+@pytest.mark.asyncio
+async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
+    """After the barrier summarized prior context away, per-tool recall
+    caches that assume the original tool results are still visible must
+    be cleared. Otherwise ``Read.check_unchanged`` returns ``"[unchanged]"``
+    stubs pointing at content the model can no longer see, and
+    ``Skill.run`` short-circuits without re-emitting the body.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _NoopCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextOverride:
+            del tape, context, model, custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref
+            )
+
+    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
+    f = tmp_path / "foo.py"
+    f.write_text("x")
+    a.tool_state.mark_read(str(f), content="x")
+    a.tool_state.invoked_skills.add("alpha")
+    a.tool_state.invoked_skills.add("beta")
+    assert a.tool_state.read_cache, "read_cache should be populated pre-compact"
+    assert a.tool_state.invoked_skills == {"alpha", "beta"}
+
+    a.runtime.append_history(types.history.UserMessage(text="old"))
+    await a.compact_now()
+
+    assert a.tool_state.read_cache == {}, (
+        "compact_now must clear read_cache so Read.check_unchanged stops"
+        " returning [unchanged] stubs for content the model can no longer see"
+    )
+    assert a.tool_state.invoked_skills == set(), (
+        "compact_now must clear invoked_skills so Skill.run re-emits the body"
+        " on next invocation, since the prior <skill> block is no longer in"
+        " context after the barrier"
+    )
 
 
 @pytest.mark.asyncio

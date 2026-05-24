@@ -25,7 +25,6 @@ def test_linear_metadata() -> None:
     t = Linear()
     assert t.name == "Linear"
     assert t.tool_id == "application/x-tool-linear"
-    assert t.supports_microcompaction is False
 
 
 def test_summary_with_id() -> None:

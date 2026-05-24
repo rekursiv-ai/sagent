@@ -52,7 +52,7 @@ sagent --resume-all
 ## Disable persistence
 
 ```bash
-sagent --no-session-persistence
+sagent --ephemeral
 ```
 
 Use this for prompts that should not write conversation state or auto-memory to disk. Library users can omit `session_dir` for in-memory runs and pass `include_memory=False` to `build_system_dict` when persistent memory should be disabled too.

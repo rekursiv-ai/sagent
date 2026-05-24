@@ -59,7 +59,6 @@ def test_webfetch_metadata() -> None:
     t = WebFetch()
     assert t.name == "WebFetch"
     assert t.tool_id == "application/x-tool-webfetch"
-    assert t.supports_microcompaction is True
 
 
 def test_summary_short_url() -> None:

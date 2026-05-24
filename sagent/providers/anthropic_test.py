@@ -203,6 +203,33 @@ def test_assistant_blocks_thinking_text_tool() -> None:
     assert blocks[2]["type"] == "tool_use"
 
 
+def test_assistant_blocks_drops_signature_only_thinking() -> None:
+    """Drop thinking blocks whose signed body was lost.
+
+    A persisted ``thinking`` block with a non-empty ``signature`` but empty
+    ``thinking`` text cannot re-validate against the server's signature, since
+    the signed payload is gone. Replaying it triggers HTTP 400 ``thinking ...
+    blocks in the latest assistant message cannot be modified``. The provider
+    elides such blocks; intact thinking blocks and ``redacted_thinking`` (which
+    has no client-visible body to lose) pass through.
+    """
+    asst = AssistantMessage(
+        text="ok",
+        thinking_blocks=(
+            {"type": "thinking", "thinking": "", "signature": "sig0"},
+            {"type": "thinking", "thinking": "kept", "signature": "sig1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+        ),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert [b["type"] for b in blocks] == [
+        "thinking",
+        "redacted_thinking",
+        "text",
+    ]
+    assert blocks[0].get("thinking") == "kept"
+
+
 def test_tool_use_block_remaps_id_through_remapper() -> None:
     ids = IdRemapper("toolu_")
     out = _tool_use_block(ToolCall(id="ext", name="N", args={"k": "v"}), ids)

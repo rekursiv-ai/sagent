@@ -107,7 +107,7 @@ sagent --continue
 sagent --resume
 sagent --continue-all
 sagent --resume-all
-sagent --no-session-persistence
+sagent --ephemeral
 ```
 
 | Flag | Behavior |
@@ -117,7 +117,7 @@ sagent --no-session-persistence
 | `--resume` | Open an interactive picker for sessions from the current working directory. |
 | `--continue-all` | Resume the newest session across all projects. |
 | `--resume-all` | Open an interactive picker across all projects. |
-| `--no-session-persistence` | Keep conversation state in memory and disable auto-memory. |
+| `--ephemeral` | Keep conversation state in memory and disable auto-memory. |
 
 Default sessions live under a project-scoped directory derived from the current working directory. See [Sessions](sessions.md).
 

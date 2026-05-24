@@ -121,7 +121,6 @@ class Advisor:
             "required": ["prompt"],
         }
     )
-    supports_microcompaction: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return the status-pane label for a pending advisor consult.

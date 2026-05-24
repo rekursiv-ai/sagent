@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from sagent.types.history import HistoryEntry
 from sagent.types.model import Model
 from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
-from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
@@ -82,29 +81,6 @@ class Compactor(Protocol):
 
         Returns:
           override: Barrier ``ContextOverride`` with the summary payload.
-
-        """
-        ...
-
-    def maintain(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[HistoryEntry],
-        tools: dict[str, Tool],
-        mint_ref: Callable[[], TapeRef],
-    ) -> tuple[ContextOverride, ...]:
-        """Apply between-request context maintenance (microcompaction).
-
-        Args:
-          tape: Append-only session tape.
-          context: Resolved provider-facing context.
-          tools: Tool registry; consulted for tool-specific trimming rules.
-          mint_ref: Factory returning fresh ``TapeRef`` values for the
-              compactor's produced records.
-
-        Returns:
-          overrides: Microcompaction overrides to append to the tape;
-              empty tuple when no maintenance is required.
 
         """
         ...

@@ -41,7 +41,6 @@ class BackgroundTask:
     name: str = "BackgroundTask"
     tool_id: str = "application/x-tool-backgroundtask"
     description: str = load_tool_description("BackgroundTask")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

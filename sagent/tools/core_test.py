@@ -281,15 +281,17 @@ def test_tool_state_check_stale_binary_cache_conservative_stale(
     assert s.check_stale(str(f)) is True
 
 
-def test_tool_state_reset_file_tracking(tmp_path: Path) -> None:
+def test_tool_state_reset_tool_recall(tmp_path: Path) -> None:
     f = tmp_path / "a.txt"
     f.write_text("x")
     s = ToolState()
     s.mark_read(str(f), content="x")
-    s.reset_file_tracking()
+    s.invoked_skills.add("skill-a")
+    s.reset_tool_recall()
     assert s.read_cache == {}
     assert not s.has_been_read(str(f))
     assert s.recent_files == []
+    assert s.invoked_skills == set()
 
 
 def test_tool_state_enforce_read_returns_error_when_unread(tmp_path: Path) -> None:

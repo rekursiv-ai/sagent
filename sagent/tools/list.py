@@ -41,7 +41,6 @@ class List:
     name: str = "List"
     tool_id: str = "application/x-tool-list"
     description: str = load_tool_description("List")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

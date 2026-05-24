@@ -35,7 +35,6 @@ class _StubTool:
     name: str = "Stub"
     tool_id: str = "application/x-tool-stub"
     description: str = "Stub tool."
-    supports_microcompaction: bool = False
     directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
 
     def summary(self, args: Mapping[str, object]) -> str:

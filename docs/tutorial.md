@@ -106,7 +106,7 @@ sagent --provider Google --model gemini-3.1-pro-preview --session /tmp/sagent-de
 sagent --provider Google --model gemini-3.1-pro-preview --continue
 ```
 
-Use `--no-session-persistence` for prompts that should not write conversation state or auto-memory to disk.
+Use `--ephemeral` for prompts that should not write conversation state or auto-memory to disk.
 
 ## 6. Add machine-readable output
 
@@ -154,7 +154,7 @@ Then pass `word_count` into `Agent(..., tools=[word_count])`.
 
 - Missing API key: set the provider key or choose another provider with `--provider`.
 - Unknown model: pass a model ID supported by the selected provider.
-- Session surprises: use `--session PATH` for an explicit location or `--no-session-persistence` for stateless runs with auto-memory disabled.
+- Session surprises: use `--session PATH` for an explicit location or `--ephemeral` for stateless runs with auto-memory disabled.
 - Tool access: tools operate in the user's environment. Only pass tools the agent needs.
 - Long context: keep compaction enabled or lower the task scope with narrower tools/prompts.
 

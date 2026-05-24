@@ -23,7 +23,6 @@ class CharacterCount:
     name = "CharacterCount"
     tool_id = "application/x-tool-character-count"
     description = "Count Unicode code points in a string."
-    supports_microcompaction = False
     directive_schema = json_freeze(
         {
             "type": "object",

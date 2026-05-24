@@ -52,7 +52,6 @@ class Glob:
     name: str = "Glob"
     tool_id: str = "application/x-tool-glob"
     description: str = load_tool_description("Glob")
-    supports_microcompaction: bool = True
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {

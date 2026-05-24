@@ -119,7 +119,6 @@ def test_metadata_basics() -> None:
     t = Wiki()
     assert t.name == "Wiki"
     assert t.tool_id == "application/x-tool-wiki"
-    assert t.supports_microcompaction is False
     assert t.prompt() == ""
 
 

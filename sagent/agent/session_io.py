@@ -364,6 +364,7 @@ def serialize_tool_state(state: ToolState) -> dict[str, object]:
         "read_cache": read_cache,
         "recent_files": state.recent_files,
         "additional_dirs": list(state.additional_dirs),
+        "invoked_skills": sorted(state.invoked_skills),
         "depth": state.depth,
     }
 
@@ -416,6 +417,14 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
                 continue
             resolved = str(Path(orig).resolve())
             state._read_order[resolved] = orig  # noqa: SLF001 -- module owns persistence
+    state.invoked_skills.clear()
+    raw_skills = snapshot.get("invoked_skills")
+    if isinstance(raw_skills, list):
+        state.invoked_skills.update(
+            name
+            for name in cast(list[object], raw_skills)
+            if isinstance(name, str) and name
+        )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)

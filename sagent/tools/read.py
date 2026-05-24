@@ -69,7 +69,6 @@ class Read:
     name: str = "Read"
     tool_id: str = "application/x-tool-read"
     description: str = load_tool_description("Read")
-    supports_microcompaction: bool = True
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {

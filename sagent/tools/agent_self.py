@@ -43,7 +43,6 @@ class AgentSelf:
     name: str = "AgentSelf"
     tool_id: str = "application/x-tool-agentself"
     description: str = load_tool_description("agentself")
-    supports_microcompaction: bool = True
     directive_schema: ClassVar[JSON] = json_freeze(
         {
             "type": "object",

@@ -161,7 +161,6 @@ class Skill:
     name: str = "Skill"
     tool_id: str = "application/x-tool-skill"
     description: str = load_tool_description("Skill")
-    supports_microcompaction: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -276,8 +275,8 @@ class Skill:
         """
         skill = str(args.get("skill", ""))
         skill_args = str(args.get("args", ""))
-        cwd = get_tool_state().bash_cwd
-        skills = discover(cwd)
+        state = get_tool_state()
+        skills = discover(state.bash_cwd)
         match = next((s for s in skills if s.name == skill), None)
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
@@ -286,7 +285,19 @@ class Skill:
                 content=f"Unknown skill: {skill!r}. Available: {names}",
                 is_error=True,
             )
-        get_tool_state().invoked_skills.add(match.name)
+        # Idempotent within a recall window: when this skill was already
+        # loaded in this session and its prior body is still in context
+        # (cleared on macro-compact via ``ToolState.reset_tool_recall``),
+        # return a stub instead of re-paying the body in tokens.
+        if match.name in state.invoked_skills:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"[Skill {match.name!r} already loaded earlier in this"
+                    " session; see the prior <skill> block in context.]"
+                ),
+            )
+        state.invoked_skills.add(match.name)
         preface = f"<skill name='{match.name}' source='{match.source}'>\n"
         body = escape_prompt_text(match.body)
         if skill_args:

@@ -106,7 +106,6 @@ def test_metadata_basics() -> None:
     t = AgentSpawn()
     assert t.name == "AgentSpawn"
     assert t.tool_id == "application/x-tool-agentspawn"
-    assert t.supports_microcompaction is False
 
 
 def test_summary_short_and_long() -> None:

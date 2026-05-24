@@ -1001,17 +1001,33 @@ def _assistant_blocks(
     """Build Anthropic content blocks from an AssistantMessage.
 
     Thinking blocks are emitted verbatim (the wire dict from
-    ``block.model_dump()`` stored on the message). Anthropic rejects
-    assistant messages whose final block is thinking, so we append a
-    placeholder text block when no text or tool_use follows.
+    ``block.model_dump()`` stored on the message), with one exception: a
+    ``thinking`` block whose ``signature`` is set but whose ``thinking`` body
+    is empty has lost its signed payload and cannot re-validate server-side
+    (Anthropic answers HTTP 400 ``thinking blocks ... cannot be modified``).
+    Such orphans are elided. ``redacted_thinking`` has no client-visible body
+    to lose and always passes through. Anthropic rejects assistant messages
+    whose final block is thinking, so we append a placeholder text block when
+    no text or tool_use follows.
     """
-    blocks: list[dict[str, object]] = [dict(tb) for tb in entry.thinking_blocks]
+    blocks: list[dict[str, object]] = [
+        dict(tb) for tb in entry.thinking_blocks if not _is_orphan_thinking(tb)
+    ]
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
     blocks.extend(_tool_use_block(tc, ids) for tc in entry.tool_calls)
     if blocks and blocks[-1].get("type") in ("thinking", "redacted_thinking"):
         blocks.append({"type": "text", "text": "."})
     return blocks
+
+
+def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
+    """True for signed ``thinking`` blocks whose signed body is gone."""
+    return (
+        block.get("type") == "thinking"
+        and bool(block.get("signature"))
+        and not block.get("thinking")
+    )
 
 
 def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:

@@ -192,7 +192,7 @@ printf 'Say hi in one sentence.' | \
   --output-format json
 ```
 
-Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--no-session-persistence` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
+Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--ephemeral` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
 
 See [CLI](docs/cli.md) and [Sessions](docs/sessions.md) for the full flag set.
 
@@ -308,7 +308,7 @@ accessible paths, and provider/network tools send data to their configured
 services. Sessions are plaintext local state and may contain prompts, model
 responses, tool results, file snippets, and paths.
 
-Use narrow tool sets, pass `--no-session-persistence` for one-off sensitive
+Use narrow tool sets, pass `--ephemeral` for one-off sensitive
 prompts so sessions and auto-memory are disabled, and run Sagent inside your own
 OS/container sandbox when a task needs hard isolation. See
 [Security](docs/security.md).

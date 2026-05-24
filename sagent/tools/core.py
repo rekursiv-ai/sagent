@@ -405,7 +405,6 @@ class _ToolImpl:
         "directive_schema",
         "emit_tool_summary",
         "name",
-        "supports_microcompaction",
         "tool_id",
     )
 
@@ -417,7 +416,6 @@ class _ToolImpl:
         description: str | None = None,
         schema: JSON | None = None,
         max_result_chars: int = TOOL_RESULT_MAX_CHARS,
-        supports_microcompaction: bool = False,
     ) -> None:
         self._fn = fn
         self._is_async = inspect.iscoroutinefunction(fn)
@@ -428,7 +426,6 @@ class _ToolImpl:
         hints = get_type_hints(fn, include_extras=True)
         hints.pop("return", None)
         self.directive_schema = schema or json_freeze(_build_schema(fn, hints))
-        self.supports_microcompaction = supports_microcompaction
         self.emit_tool_summary = False
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -489,7 +486,6 @@ def tool(
     description: str | None = ...,
     schema: JSON | None = ...,
     max_result_chars: int = ...,
-    supports_microcompaction: bool = ...,
 ) -> _ToolImpl: ...
 
 
@@ -500,7 +496,6 @@ def tool(
     description: str | None = ...,
     schema: JSON | None = ...,
     max_result_chars: int = ...,
-    supports_microcompaction: bool = ...,
 ) -> Callable[[Callable[..., object]], _ToolImpl]: ...
 
 
@@ -511,7 +506,6 @@ def tool(
     description: str | None = None,
     schema: JSON | None = None,
     max_result_chars: int = TOOL_RESULT_MAX_CHARS,
-    supports_microcompaction: bool = False,
 ) -> _ToolImpl | Callable[[Callable[..., object]], _ToolImpl]:
     """Decorator to create a Tool from a function.
 
@@ -521,8 +515,6 @@ def tool(
       description: Override description (defaults to docstring).
       schema: Override JSON schema (defaults to auto-generated).
       max_result_chars: Truncate results beyond this length.
-      supports_microcompaction: Whether old results of this tool are
-        eligible for microcompaction (clearing on cache-cold). Default False.
 
     Returns:
       tool_impl: A Tool implementation wrapping fn.
@@ -535,7 +527,6 @@ def tool(
             description=description,
             schema=schema,
             max_result_chars=max_result_chars,
-            supports_microcompaction=supports_microcompaction,
         )
     return lambda f: _ToolImpl(
         f,
@@ -543,7 +534,6 @@ def tool(
         description=description,
         schema=schema,
         max_result_chars=max_result_chars,
-        supports_microcompaction=supports_microcompaction,
     )
 
 

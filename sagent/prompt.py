@@ -25,7 +25,6 @@ import subprocess
 import sys
 
 from sagent import agents_md, memory
-from sagent.compactor import MICROCOMPACT_KEEP_RECENT
 from sagent.tools import get_tool_state
 from sagent.tools.core import (
     read_asset,
@@ -46,7 +45,7 @@ def _load_static() -> str:
     base = sp.get("base", "")
     if not base:
         return ""
-    return read_asset(base).replace("{keep_recent}", str(MICROCOMPACT_KEEP_RECENT))
+    return read_asset(base)
 
 
 # Per-model marketing name + knowledge cutoff.

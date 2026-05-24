@@ -108,18 +108,21 @@ class ToolState:
         """Recently-read files (original paths, oldest first)."""
         return list(self._read_order.values())
 
-    def reset_file_tracking(self) -> None:
-        """Clear read/content/recency caches.
+    def reset_tool_recall(self) -> None:
+        """Clear per-tool recall caches whose validity assumes prior context.
 
-        Called by the Agent on AgentSelf(clear) so the cleared session
-        starts with no recollection of previously-read or -edited
-        files. Intentionally does NOT reset ``bash_cwd`` (the shell
-        cwd is independent of conversation state) or
+        Called by the Agent on ``clear`` and after macro compaction so
+        tools whose "I already returned this earlier" optimization
+        (``Read.check_unchanged``, ``Skill`` invocation memo) no longer
+        return stubs pointing at content the model can no longer see in
+        its context. Intentionally does NOT reset ``bash_cwd`` (the
+        shell cwd is independent of conversation state) or
         ``additional_dirs`` (CLI-supplied, not session-state).
         """
         self.read_cache.clear()
         self._read_order.clear()
         self._content_cache.clear()
+        self.invoked_skills.clear()
 
     def mark_read(
         self,

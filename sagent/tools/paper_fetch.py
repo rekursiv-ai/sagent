@@ -141,7 +141,6 @@ class PaperFetch:
     name: str = "PaperFetch"
     tool_id: str = "application/x-tool-paperfetch"
     description: str = load_tool_description("PaperFetch")
-    supports_microcompaction: bool = True
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

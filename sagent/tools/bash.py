@@ -96,7 +96,6 @@ class Bash:
     name: str = "Bash"
     tool_id: str = "application/x-tool-bash"
     description: str = _render_bash_description(load_tool_description("Bash"))
-    supports_microcompaction: bool = True
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {

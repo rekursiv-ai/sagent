@@ -583,10 +583,9 @@ class Compactor(Protocol):
     """Minimal compactor interface (tape-native).
 
     Compactors emit a :class:`ContextOverride` that the runtime appends
-    to its tape. ``maintain()`` returns a tuple of microcompaction
-    overrides; an empty tuple means no maintenance was required. The
-    runtime supplies a ``mint_ref`` factory so the compactor can mint
-    fresh ``TapeRef`` values without seeing the rest of the runtime.
+    to its tape. The runtime supplies a ``mint_ref`` factory so the
+    compactor can mint fresh ``TapeRef`` values without seeing the rest
+    of the runtime.
     """
 
     async def compact(
@@ -609,28 +608,6 @@ class Compactor(Protocol):
 
         Returns:
           override: Barrier ``ContextOverride`` with the summary payload.
-
-        """
-        ...
-
-    def maintain(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[HistoryEntry],
-        tools: dict[str, Tool],
-        mint_ref: Callable[[], TapeRef],
-    ) -> tuple[ContextOverride, ...]:
-        """Produce microcompaction overrides; empty tuple to skip.
-
-        Args:
-          tape: Append-only session tape.
-          context: Resolved provider-facing context.
-          tools: Tool registry; consulted for tool-specific trimming rules.
-          mint_ref: Factory returning fresh ``TapeRef`` values.
-
-        Returns:
-          overrides: Microcompaction overrides; empty when no maintenance
-              is required (cache-warm gate or no clearable entries).
 
         """
         ...
