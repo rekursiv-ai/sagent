@@ -1199,41 +1199,12 @@ class _MaintainStubCompactor:
 
 
 def test_microcompact_history_forwards_to_compactor() -> None:
+    """``maintain()`` runs when invoked via ``microcompact_history``."""
     compactor = _MaintainStubCompactor()
     a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    # Force the cache-warm gate open: a fresh ``CostTracker`` sets
-    # ``last_response_time = time.time()``, which would otherwise make
-    # the wrapper skip ``maintain()`` for the first hour.
-    a.cost_tracker.last_response_time = 0.0
     a.runtime.append_history(types.history.UserMessage(text="x"))
     a.microcompact_history()
     assert compactor.maintained, "maintain() should have been called"
-
-
-def test_microcompact_gate_skips_when_cache_warm() -> None:
-    """Microcompact must not run when the previous response was recent.
-
-    Regression: the C3 protocol change dropped the per-call
-    ``last_response_time`` kwarg that the legacy
-    ``_AgentCompactor.maintain`` threaded from ``cost_tracker``.
-    The inner compactor's gate read its own ``self._last_response_time``
-    (None when constructed with no callable) and always fell through,
-    so microcompact ran on every model send. The model then saw
-    ``{"_microcompacted": "..."}`` stubbed args every turn and began
-    mimicking the stub format -- emitting ``Read`` calls with empty
-    ``file_path``. Cache-warm gate prevents that by skipping
-    microcompact for any send within the gap window.
-    """
-    compactor = _MaintainStubCompactor()
-    a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    # Default cost_tracker.last_response_time = time.time(), so any
-    # immediate call falls inside the gap window.
-    a.runtime.append_history(types.history.UserMessage(text="x"))
-    a.microcompact_history()
-    assert not compactor.maintained, (
-        f"maintain() must skip while cache is warm "
-        f"(prev response < gap_sec ago); called {len(compactor.maintained)} times"
-    )
 
 
 @pytest.mark.asyncio

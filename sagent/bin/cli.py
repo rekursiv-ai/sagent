@@ -296,6 +296,15 @@ def parse_agent_args(
         help="Automatic compaction (default: on; --no-compact to disable).",
     )
     parser.add_argument(
+        "--microcompact",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Per-AM-block microcompaction (default: on; --no-microcompact"
+            " disables for the session)."
+        ),
+    )
+    parser.add_argument(
         "--effort",
         default=None,
         help=(
@@ -863,7 +872,11 @@ def main() -> None:
             history,
             tool_state,
         )
-    compactor = SummaryCompactor() if args.compact else None
+    compactor = (
+        SummaryCompactor(microcompact_enabled=args.microcompact)
+        if args.compact
+        else None
+    )
 
     headless = not sys.stdin.isatty()
     if not headless:

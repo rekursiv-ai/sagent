@@ -13,12 +13,14 @@ import pytest
 
 from sagent.agent.context import resolve_context, validate_context
 from sagent.compactor import (
+    DEDUP_MIN_CONTENT_CHARS,
     MICROCOMPACT_KEEP_RECENT,
     SummaryCompactor,
     build_continuation,
+    dedup_tool_results,
     microcompact,
 )
-from sagent.lib.compaction import CLEARED, MICROCOMPACTED_ARGS_KEY
+from sagent.lib.compaction import CLEARED
 from sagent.lib.json import JSON
 from sagent.testing import MockModelCaps
 from sagent.types.exceptions import PromptTooLongError
@@ -270,22 +272,96 @@ async def test_should_compact_subtracts_response_tokens() -> None:
     assert await compactor.should_compact(182_000, 200_000, 8_000) is True
 
 
-def test_maintain_calls_microcompact_in_place() -> None:
+def test_maintain_kill_switch_disables_microcompact() -> None:
+    """``microcompact_enabled=False`` makes maintain() a no-op."""
+    compactor = SummaryCompactor(microcompact_enabled=False)
+    history = _history_with_n_clearable_results(8)
+    history = [
+        dataclasses.replace(e, content="x" * 1000) if isinstance(e, ToolResult) else e
+        for e in history
+    ]
+    tools: dict[str, Tool] = {"Bash": _Tool()}
+    history_after = _maintain_via(compactor, history, tools)
+    assert [type(m).__name__ for m in history_after] == [
+        type(m).__name__ for m in history
+    ]
+
+
+def test_maintain_skips_below_byte_threshold() -> None:
+    """maintain() returns () when clearable bytes < MICROCOMPACT_MIN_CLEARABLE_BYTES."""
+    compactor = SummaryCompactor()
+    # Small clearable result: a few bytes per TR, well below the 5000 byte threshold.
+    history = _history_with_n_clearable_results(3)
+    tools: dict[str, Tool] = {"Bash": _Tool()}
+    history_after = _maintain_via(compactor, history, tools)
+    # No-op: tape unchanged.
+    assert [type(m).__name__ for m in history_after] == [
+        type(m).__name__ for m in history
+    ]
+
+
+def test_maintain_skips_within_interval() -> None:
+    """A second maintain() within the interval is skipped, even with fresh work."""
     compactor = SummaryCompactor()
     history = _history_with_n_clearable_results(8)
+    history = [
+        dataclasses.replace(e, content="x" * 1000) if isinstance(e, ToolResult) else e
+        for e in history
+    ]
+    tools: dict[str, Tool] = {"Bash": _Tool()}
+    # First run fires (above threshold, no prior firing).
+    first = _maintain_via(compactor, history, tools)
+    assert len(first) < len(history)
+    # Second run within MIN_INTERVAL: returns nothing.
+    tape2: list[TapeRecord] = list(_tape_from(history))
+    overrides2 = compactor.maintain(
+        tape2, history, tools, _ref_factory(start=len(tape2))
+    )
+    assert overrides2 == ()
+
+
+def test_maintain_calls_microcompact_in_place() -> None:
+    """maintain() runs microcompact when above byte threshold."""
+    compactor = SummaryCompactor()
+    # 8 AM-blocks, each TR large enough to cross MICROCOMPACT_MIN_CLEARABLE_BYTES.
+    history = _history_with_n_clearable_results(8)
+    history = [
+        (dataclasses.replace(e, content="x" * 1000) if isinstance(e, ToolResult) else e)
+        for e in history
+    ]
     tools: dict[str, Tool] = {"Bash": _Tool()}
     history = _maintain_via(compactor, history, tools)
-    # Five results kept; three cleared.
-    cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
-    assert len(cleared) == 8 - MICROCOMPACT_KEEP_RECENT
+    # Most-recent MICROCOMPACT_KEEP_RECENT blocks preserved verbatim;
+    # older blocks replaced with text-only summary AMs.
+    intact_ams = [
+        e for e in history if isinstance(e, AssistantMessage) and e.tool_calls
+    ]
+    assert len(intact_ams) == MICROCOMPACT_KEEP_RECENT
+    text_only_ams = [
+        e for e in history if isinstance(e, AssistantMessage) and not e.tool_calls
+    ]
+    assert len(text_only_ams) == 8 - MICROCOMPACT_KEEP_RECENT
+    assert all("[microcompacted:" in a.text for a in text_only_ams)
 
 
-def test_microcompact_clears_old_clearable_results() -> None:
+def test_microcompact_clears_old_clearable_blocks() -> None:
+    """8 AM-blocks, keep_recent=3 → 5 oldest blocks replaced with text-only AMs."""
     history = _history_with_n_clearable_results(8)
     tools: dict[str, Tool] = {"Bash": _Tool()}
     history = _apply_microcompact(history, tools, keep_recent=3)
-    cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
-    assert len(cleared) == 5
+    # 5 oldest AM-blocks: replaced with text-only AMs (tool_calls=()).
+    # 3 most-recent: untouched (still have tool_calls + TRs).
+    text_only_ams = [
+        e for e in history if isinstance(e, AssistantMessage) and not e.tool_calls
+    ]
+    assert len(text_only_ams) == 5
+    assert all("[microcompacted:" in a.text for a in text_only_ams)
+    intact_ams = [
+        e for e in history if isinstance(e, AssistantMessage) and e.tool_calls
+    ]
+    assert len(intact_ams) == 3
+    trs = [e for e in history if isinstance(e, ToolResult)]
+    assert len(trs) == 3  # one per intact AM
 
 
 def test_microcompact_skips_non_clearable_tools() -> None:
@@ -297,16 +373,15 @@ def test_microcompact_skips_non_clearable_tools() -> None:
     assert cleared == []
 
 
-def test_microcompact_skips_already_cleared_results() -> None:
-    """A ``ToolResult`` whose ``content`` is already ``CLEARED`` is preserved."""
+def test_microcompact_is_idempotent() -> None:
+    """Running microcompact twice should not re-process AMs already marked."""
     history = _history_with_n_clearable_results(2)
-    # history[2] is the first ToolResult (call_id c0); pre-clear it.
-    history[2] = ToolResult(call_id="c0", content=CLEARED)
     tools: dict[str, Tool] = {"Bash": _Tool()}
-    history = _apply_microcompact(history, tools, keep_recent=0)
-    cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
-    # Two: the pre-cleared one + the still-live one we just cleared.
-    assert len(cleared) == 2
+    once = _apply_microcompact(history, tools, keep_recent=0)
+    twice = _apply_microcompact(list(once), tools, keep_recent=0)
+    # Second pass should produce the same visible context (no new
+    # overrides emitted -- idempotency via the summary marker).
+    assert [type(m).__name__ for m in once] == [type(m).__name__ for m in twice]
 
 
 def test_microcompact_unknown_tool_is_ignored() -> None:
@@ -318,33 +393,38 @@ def test_microcompact_unknown_tool_is_ignored() -> None:
 
 
 def test_microcompact_keep_recent_zero_clears_all() -> None:
+    """keep_recent=0 → all TRs suppressed; AM text-only with summary."""
     history = _history_with_n_clearable_results(3)
     tools: dict[str, Tool] = {"Bash": _Tool()}
     history = _apply_microcompact(history, tools, keep_recent=0)
-    cleared = [e for e in history if isinstance(e, ToolResult) and e.content == CLEARED]
-    assert len(cleared) == 3
+    trs = [e for e in history if isinstance(e, ToolResult)]
+    assert trs == []  # all suppressed
+    asst = next(e for e in history if isinstance(e, AssistantMessage))
+    assert asst.tool_calls == ()  # all calls removed
+    assert "[microcompacted:" in asst.text
 
 
-def test_microcompact_stubs_matching_tool_call_args() -> None:
-    """The matching ``AssistantMessage.tool_calls[i].args`` is stubbed.
+def test_microcompact_replaces_am_with_text_summary() -> None:
+    """Cleared calls vanish from tool_calls; summary appended to text.
 
-    Microcompact's design is symmetric: clearing a tool result also
-    discards the args payload that drove the call (``Edit``'s
-    ``old_string``/``new_string``, ``Write``'s file body, etc.). Args
-    are replaced with ``{MICROCOMPACTED_ARGS_KEY: tool.summary(args)}``.
+    The previous design stubbed args with ``{_microcompacted: <summary>}``
+    -- a format the model copied when emitting new tool calls, producing
+    broken calls with no real args. The new design drops cleared calls
+    from ``tool_calls`` entirely and appends a human-readable summary
+    to the AM's ``text``, eliminating the mimicry vector.
     """
     history = _history_with_n_clearable_results(3)
-    tools: dict[str, Tool] = {"Bash": _Tool()}  # ``summary`` returns "".
+    tools: dict[str, Tool] = {"Bash": _Tool()}
     history = _apply_microcompact(history, tools, keep_recent=0)
-    asst = history[1]
-    assert isinstance(asst, AssistantMessage)
-    for tc in asst.tool_calls:
-        # ``_Tool.summary`` returns ``""`` so the fallback is the tool name.
-        assert dict(tc.args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
+    asst = next(e for e in history if isinstance(e, AssistantMessage))
+    assert asst.tool_calls == ()  # all calls removed
+    assert "[microcompacted:" in asst.text
+    # Summary text uses the tool's summary() output ("Bash" with _Tool).
+    assert "Bash" in asst.text
 
 
-def test_microcompact_args_stub_uses_tool_summary() -> None:
-    """When ``tool.summary(args)`` returns text, it lands in the stub."""
+def test_microcompact_summary_uses_tool_summary_output() -> None:
+    """The marker text comes from ``tool.summary(args)``."""
 
     @dataclass(slots=True, kw_only=True)
     class _SummarizingTool:
@@ -378,11 +458,108 @@ def test_microcompact_args_stub_uses_tool_summary() -> None:
     ]
     tools: dict[str, Tool] = {"Edit": _SummarizingTool()}
     history = _apply_microcompact(history, tools, keep_recent=0)
-    asst = history[1]
-    assert isinstance(asst, AssistantMessage)
-    assert dict(asst.tool_calls[0].args) == {
-        MICROCOMPACTED_ARGS_KEY: "Edit foo.py",
-    }
+    asst = next(e for e in history if isinstance(e, AssistantMessage))
+    assert asst.tool_calls == ()
+    assert "Edit foo.py" in asst.text
+
+
+def _build_read_tape(*file_contents: tuple[str, str]) -> list[TapeRecord]:
+    """Build a tape with N Read tool calls. Each pair = (call_id, content)."""
+    tape: list[TapeRecord] = [
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=0), entry=UserMessage(text="hi")
+        ),
+    ]
+    ord_n = 1
+    for call_id, content in file_contents:
+        tape.append(
+            HistoryRecord(
+                ref=TapeRef(session_id="", ordinal=ord_n),
+                entry=AssistantMessage(
+                    tool_calls=(
+                        ToolCall(id=call_id, name="Read", args={"path": "x.py"}),
+                    )
+                ),
+            )
+        )
+        ord_n += 1
+        tape.append(
+            HistoryRecord(
+                ref=TapeRef(session_id="", ordinal=ord_n),
+                entry=ToolResult(call_id=call_id, content=content),
+            )
+        )
+        ord_n += 1
+    return tape
+
+
+def test_dedup_replaces_repeated_file_read_with_reference() -> None:
+    """Second + third Read of identical content collapse to dedup markers."""
+    content = "x" * 1000  # > DEDUP_MIN_CONTENT_CHARS
+    tape = _build_read_tape(("c1", content), ("c2", content), ("c3", content))
+    mint = _ref_factory(start=len(tape))
+    overrides = dedup_tool_results(tape, resolve_context(tape).messages, mint)
+    assert len(overrides) == 2  # c2 and c3 deduped; c1 stays
+    tape.extend(overrides)
+    messages = resolve_context(tape).messages
+    trs = [m for m in messages if isinstance(m, ToolResult)]
+    assert len(trs) == 3
+    assert trs[0].content == content
+    assert "duplicate of call_id c1" in trs[1].content
+    assert "duplicate of call_id c1" in trs[2].content
+    validate_context(messages)
+
+
+def test_dedup_skips_when_content_differs() -> None:
+    """File reads that return different content keep both."""
+    tape = _build_read_tape(("c1", "a" * 1000), ("c2", "b" * 1000))
+    overrides = dedup_tool_results(
+        tape, resolve_context(tape).messages, _ref_factory(start=len(tape))
+    )
+    assert overrides == ()
+
+
+def test_dedup_skips_below_threshold() -> None:
+    """Small results aren't deduped (marker would be bigger than content)."""
+    short = "x" * (DEDUP_MIN_CONTENT_CHARS - 1)
+    tape = _build_read_tape(("c1", short), ("c2", short))
+    overrides = dedup_tool_results(
+        tape, resolve_context(tape).messages, _ref_factory(start=len(tape))
+    )
+    assert overrides == ()
+
+
+def test_dedup_skips_errors() -> None:
+    """Errored results aren't deduped (each error stands on its own)."""
+    tape: list[TapeRecord] = [
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=0), entry=UserMessage(text="hi")
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=1),
+            entry=AssistantMessage(
+                tool_calls=(ToolCall(id="c1", name="Read", args={}),)
+            ),
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=2),
+            entry=ToolResult(call_id="c1", content="x" * 1000, is_error=True),
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=3),
+            entry=AssistantMessage(
+                tool_calls=(ToolCall(id="c2", name="Read", args={}),)
+            ),
+        ),
+        HistoryRecord(
+            ref=TapeRef(session_id="", ordinal=4),
+            entry=ToolResult(call_id="c2", content="x" * 1000, is_error=True),
+        ),
+    ]
+    overrides = dedup_tool_results(
+        tape, resolve_context(tape).messages, _ref_factory(start=len(tape))
+    )
+    assert overrides == ()
 
 
 def test_microcompact_suppresses_splice_ov_for_same_call_id() -> None:
@@ -436,32 +613,35 @@ def test_microcompact_suppresses_splice_ov_for_same_call_id() -> None:
     tr_count = sum(
         1 for m in messages if isinstance(m, ToolResult) and m.call_id == "c1"
     )
-    assert tr_count == 1, (
-        f"expected exactly one TR for c1; got {tr_count}: "
+    # Under the consolidated-block design, the call is removed entirely:
+    # the AM's tool_calls drops c1 and the splice TR is suppressed.
+    assert tr_count == 0, (
+        f"expected zero TR for c1 (all suppressed); got {tr_count}: "
         f"{[m.content for m in messages if isinstance(m, ToolResult) and m.call_id == 'c1']}"
     )
     validate_context(messages)
 
 
-def test_microcompact_keeps_recent_args_intact() -> None:
-    """Recent (kept) exchanges retain their original args."""
+def test_microcompact_keeps_recent_block_intact() -> None:
+    """Recent kept block retains its original AM and TR untouched."""
     history = _history_with_n_clearable_results(3)
-    # Add a real arg to the last call so we can verify it survives.
-    asst = history[1]
-    assert isinstance(asst, AssistantMessage)
-    new_calls = (
-        *asst.tool_calls[:-1],
-        ToolCall(id="c2", name="Bash", args={"cmd": "ls"}),
+    # Add a real arg to the last block's call so we can verify it survives.
+    last_am_idx = next(
+        i
+        for i in reversed(range(len(history)))
+        if isinstance(history[i], AssistantMessage)
     )
-    history[1] = dataclasses.replace(asst, tool_calls=new_calls)
+    asst = history[last_am_idx]
+    assert isinstance(asst, AssistantMessage)
+    new_calls = (ToolCall(id=asst.tool_calls[0].id, name="Bash", args={"cmd": "ls"}),)
+    history[last_am_idx] = dataclasses.replace(asst, tool_calls=new_calls)
     tools: dict[str, Tool] = {"Bash": _Tool()}
     history = _apply_microcompact(history, tools, keep_recent=1)
-    asst = history[1]
-    assert isinstance(asst, AssistantMessage)
-    # First two args got stubbed; the last (kept) one is intact.
-    assert dict(asst.tool_calls[0].args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
-    assert dict(asst.tool_calls[1].args) == {MICROCOMPACTED_ARGS_KEY: "Bash"}
-    assert dict(asst.tool_calls[2].args) == {"cmd": "ls"}
+    intact_ams = [
+        e for e in history if isinstance(e, AssistantMessage) and e.tool_calls
+    ]
+    assert len(intact_ams) == 1
+    assert dict(intact_ams[0].tool_calls[0].args) == {"cmd": "ls"}
 
 
 @pytest.mark.asyncio
@@ -775,14 +955,21 @@ async def test_compactor_uses_alternate_model_when_provided() -> None:
 
 
 def _history_with_n_clearable_results(n: int) -> list[HistoryEntry]:
-    """Build a history that has ``n`` ``Bash`` tool calls + matching results."""
-    calls = tuple(ToolCall(id=f"c{i}", name="Bash", args={}) for i in range(n))
-    asst = AssistantMessage(text="", tool_calls=calls)
-    entries: list[HistoryEntry] = [
-        UserMessage(text="go"),
-        asst,
-    ]
-    entries.extend(ToolResult(call_id=f"c{i}", content=f"out-{i}") for i in range(n))
+    """Build a history with ``n`` separate Bash AM-blocks, each one call+result.
+
+    Each block is its own ``AssistantMessage`` with a single tool_call and
+    its matching ``ToolResult``. Microcompact's ``keep_recent`` is counted
+    in AM-blocks (not individual call_ids) under the new design.
+    """
+    entries: list[HistoryEntry] = [UserMessage(text="go")]
+    for i in range(n):
+        entries.append(
+            AssistantMessage(
+                text="",
+                tool_calls=(ToolCall(id=f"c{i}", name="Bash", args={}),),
+            ),
+        )
+        entries.append(ToolResult(call_id=f"c{i}", content=f"out-{i}"))
     return entries
 
 
