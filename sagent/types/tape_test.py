@@ -1,8 +1,10 @@
-"""Tests for ``ContextOverride.__post_init__`` payload validation.
+"""Tests for ``ContextSplice.__post_init__`` payload and mask validation.
 
-The validator is the structural enforcement that replaces the prior
-runtime-side phase 1 repair. Producer correctness fails loudly at
-construct rather than silently at resolve.
+The validators enforce structural correctness at construct time so
+producer bugs fail loudly at construction rather than silently at
+resolve. Mask-disjointness is checked per-splice; cross-splice
+mask-overlap (the once-overwrite rule) is enforced separately in
+``AgentRuntime.append_splice``.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.tape import (
-    ContextOverride,
+    ContextSplice,
     InvalidPayloadError,
     TapeRef,
 )
@@ -26,16 +28,22 @@ from sagent.types.tape import (
 _REF = TapeRef(session_id="s", ordinal=0)
 
 
-def _ov(
+def _ref(ordinal: int) -> TapeRef:
+    """Test helper: build a TapeRef with the standard session id."""
+    return TapeRef(session_id="s", ordinal=ordinal)
+
+
+def _splice(
     *,
+    mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
     payload: tuple[HistoryEntry, ...] = (),
     paired_externally: frozenset[str] = frozenset(),
-) -> ContextOverride:
-    """Build an override with sensible defaults for terse tests."""
-    return ContextOverride(
+) -> ContextSplice:
+    """Build a splice with sensible defaults for terse tests."""
+    return ContextSplice(
         ref=_REF,
-        suppresses=(),
-        inject_after=None,
+        mask=mask,
+        insert_after=None,
         payload=payload,
         strategy="test",
         paired_externally=paired_externally,
@@ -43,15 +51,15 @@ def _ov(
 
 
 def test_empty_payload_is_valid() -> None:
-    """Suppress-only overrides (no payload) construct cleanly."""
-    ov = _ov()
-    assert ov.payload == ()
+    """Pure-mask splices (no payload) construct cleanly."""
+    splice = _splice()
+    assert splice.payload == ()
 
 
 def test_text_only_payload_is_valid() -> None:
     """Coalesce / summary payloads with no AM/TR pass trivially."""
-    ov = _ov(payload=(UserMessage(text="a"), UserMessage(text="b")))
-    assert len(ov.payload) == 2
+    splice = _splice(payload=(UserMessage(text="a"), UserMessage(text="b")))
+    assert len(splice.payload) == 2
 
 
 def test_paired_am_tr_block_is_valid() -> None:
@@ -61,8 +69,8 @@ def test_paired_am_tr_block_is_valid() -> None:
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
     tr = ToolResult(call_id="t1", content="ok")
-    ov = _ov(payload=(am, tr))
-    assert len(ov.payload) == 2
+    splice = _splice(payload=(am, tr))
+    assert len(splice.payload) == 2
 
 
 def test_multi_call_am_block_is_valid() -> None:
@@ -74,14 +82,14 @@ def test_multi_call_am_block_is_valid() -> None:
             ToolCall(id="t2", name="Bash", args={}),
         ),
     )
-    ov = _ov(
+    splice = _splice(
         payload=(
             am,
             ToolResult(call_id="t1", content="a"),
             ToolResult(call_id="t2", content="b"),
         ),
     )
-    assert len(ov.payload) == 3
+    assert len(splice.payload) == 3
 
 
 def test_unpaired_am_in_payload_rejected() -> None:
@@ -91,13 +99,13 @@ def test_unpaired_am_in_payload_rejected() -> None:
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
     with pytest.raises(InvalidPayloadError, match="unpaired tool_call id"):
-        _ov(payload=(am,))
+        _splice(payload=(am,))
 
 
 def test_orphan_tr_in_payload_rejected() -> None:
     """A TR with no preceding AM in payload fails validation."""
     with pytest.raises(InvalidPayloadError, match="orphan ToolResult"):
-        _ov(payload=(ToolResult(call_id="t1", content="ok"),))
+        _splice(payload=(ToolResult(call_id="t1", content="ok"),))
 
 
 def test_duplicate_tr_in_payload_rejected() -> None:
@@ -107,7 +115,7 @@ def test_duplicate_tr_in_payload_rejected() -> None:
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
     with pytest.raises(InvalidPayloadError, match="duplicate ToolResult"):
-        _ov(
+        _splice(
             payload=(
                 am,
                 ToolResult(call_id="t1", content="ok"),
@@ -118,21 +126,21 @@ def test_duplicate_tr_in_payload_rejected() -> None:
 
 def test_paired_externally_allows_orphan_tr() -> None:
     """Splice-style payload (single TR) is valid when declared external."""
-    ov = _ov(
+    splice = _splice(
         payload=(ToolResult(call_id="t1", content="late"),),
         paired_externally=frozenset({"t1"}),
     )
-    assert len(ov.payload) == 1
+    assert len(splice.payload) == 1
 
 
 def test_paired_externally_allows_orphan_am() -> None:
-    """Microcompact-style AM payload (no TR) is valid when declared external."""
+    """Payload with AM whose tool_calls live elsewhere passes when declared."""
     am = AssistantMessage(
         text="",
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
-    ov = _ov(payload=(am,), paired_externally=frozenset({"t1"}))
-    assert len(ov.payload) == 1
+    splice = _splice(payload=(am,), paired_externally=frozenset({"t1"}))
+    assert len(splice.payload) == 1
 
 
 def test_paired_externally_partial_still_rejects_unmatched() -> None:
@@ -145,58 +153,81 @@ def test_paired_externally_partial_still_rejects_unmatched() -> None:
         ),
     )
     with pytest.raises(InvalidPayloadError, match=r"unpaired tool_call id.*'t2'"):
-        _ov(payload=(am,), paired_externally=frozenset({"t1"}))
+        _splice(payload=(am,), paired_externally=frozenset({"t1"}))
 
 
 def test_two_back_to_back_unpaired_ams_rejected() -> None:
-    """Two consecutive AMs without TRs (the ceedc0fa pattern) fails."""
+    """Two consecutive AMs without TRs fails (the ceedc0fa pattern)."""
     am1 = AssistantMessage(
         text="",
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
     am2 = AssistantMessage(text="continuing")
     with pytest.raises(InvalidPayloadError, match=r"unpaired tool_call id.*'t1'"):
-        _ov(payload=(am1, am2))
+        _splice(payload=(am1, am2))
+
+
+def test_mask_disjoint_within_splice_passes() -> None:
+    """Two disjoint mask ranges in the same splice pass validation."""
+    splice = _splice(mask=((_ref(1), _ref(2)), (_ref(5), _ref(7))))
+    assert len(splice.mask) == 2
+
+
+def test_mask_adjacent_ranges_within_splice_pass() -> None:
+    """Adjacent (touching) ranges do not share a position; allowed."""
+    splice = _splice(mask=((_ref(1), _ref(3)), (_ref(4), _ref(6))))
+    assert len(splice.mask) == 2
+
+
+def test_mask_overlap_within_splice_rejected() -> None:
+    """Two mask ranges in the same splice that share a position fail."""
+    with pytest.raises(InvalidPayloadError, match="mask ranges overlap"):
+        _splice(mask=((_ref(1), _ref(5)), (_ref(4), _ref(8))))
+
+
+def test_mask_inverted_range_rejected() -> None:
+    """A mask range whose end ordinal is below the start fails."""
+    with pytest.raises(InvalidPayloadError, match="inverted"):
+        _splice(mask=((_ref(5), _ref(3)),))
 
 
 def test_replay_bypasses_validation() -> None:
-    """``replay()`` accepts payloads the validator would reject."""
+    """``replay()`` accepts payloads and masks the validators would reject."""
     am = AssistantMessage(
         text="",
         tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
     )
-    ov = ContextOverride.replay(
+    splice = ContextSplice.replay(
         ref=_REF,
-        suppresses=(),
-        inject_after=None,
+        mask=((_ref(1), _ref(5)), (_ref(4), _ref(8))),
+        insert_after=None,
         payload=(am,),
         strategy="legacy",
     )
-    assert ov.payload == (am,)
-    assert ov.paired_externally == frozenset()
+    assert splice.payload == (am,)
+    assert splice.paired_externally == frozenset()
+    assert len(splice.mask) == 2
 
 
 def test_replay_preserves_all_fields() -> None:
     """``replay()`` populates every dataclass field, including defaults."""
-    ov = ContextOverride.replay(
+    splice = ContextSplice.replay(
         ref=_REF,
-        suppresses=(TapeRef(session_id="s", ordinal=1),),
-        inject_after=TapeRef(session_id="s", ordinal=2),
+        mask=((_ref(1), _ref(2)),),
+        insert_after=_ref(3),
         payload=(UserMessage(text="x"),),
         strategy="summary",
-        barrier=True,
         token_before=10,
         token_after=20,
         fallback_reason="ran out",
         preserved_tail_count=3,
         paired_externally=frozenset({"q"}),
     )
-    assert ov.barrier
-    assert ov.token_before == 10
-    assert ov.token_after == 20
-    assert ov.fallback_reason == "ran out"
-    assert ov.preserved_tail_count == 3
-    assert ov.paired_externally == frozenset({"q"})
+    assert splice.token_before == 10
+    assert splice.token_after == 20
+    assert splice.fallback_reason == "ran out"
+    assert splice.preserved_tail_count == 3
+    assert splice.paired_externally == frozenset({"q"})
 
 
 if __name__ == "__main__":

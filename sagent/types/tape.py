@@ -1,45 +1,54 @@
 """Append-only session tape records.
 
-Tape records are durable session events that render into
-provider-facing ``HistoryEntry`` values via ``agent.context.resolve_context``.
-They are not provider messages.
+Tape records are durable session events that render into provider-facing
+``HistoryEntry`` values via :func:`agent.context.resolve_context`. They
+are not provider messages.
 
-``HistoryRecord`` wraps an ``HistoryEntry`` for replayable storage.
-``ContextOverride`` hides earlier refs and injects a payload at an anchor.
-``ContextClear`` stops the resolver walk with no payload.
+Two record kinds:
 
-Slot identity
--------------
+- ``HistoryRecord`` wraps a ``HistoryEntry`` for replayable storage.
+- ``ContextSplice`` edits the resolved view by masking some prior tape
+  refs and injecting a payload at an anchor.
 
-``TapeRef`` is the canonical and ONLY way to address a position in the
-tape. A ref names a SLOT -- a logical position in the conversation --
-not just a physical record. The ref's identity is preserved across
-suppression: when ``ContextOverride`` ``O`` suppresses ``HistoryRecord``
-``X``, ``O`` inherits ``X``'s slot identity. Any other override that
-referenced ``X`` (e.g. ``inject_after=X.ref``) still refers to the same
-slot; the resolver follows the suppression chain to find the current
-owner.
+Film-reel model
+---------------
 
-This makes ``inject_after=R`` a stable contract: "after the slot
-identified by R," independent of what physically lives there now.
-Producers write ``inject_after=record.ref`` and the resolver guarantees
-the payload lands in the right conversational position even if that
-slot has since been replaced by microcompaction or rescue.
+Think of the tape as an immutable film reel. Each ``ContextSplice``
+performs a cut-and-tape operation on the resolved view: the cut removes
+some segments (the masked tape refs); the tape-in inserts the payload
+at the anchor. Splices accumulate on the reel forever (the tape is
+append-only); the resolved view is what plays back after all splices
+are applied in tape order.
 
-The same identity rule governs ``suppresses``: the suppressor inherits
-the slot of each ref it lists. Multi-ref suppression collapses those
-slots into the suppressor's own ``inject_after`` position.
+Splice semantics
+----------------
 
-``ContextOverride.__post_init__`` enforces a local pairing invariant on
-``payload``: every ``AssistantMessage.tool_calls`` id must be paired by
-a ``ToolResult`` later in the same payload, OR declared in
-``paired_externally`` (the matching record lives elsewhere -- typically
-a ``HistoryRecord`` or a sibling override). Forward producers must
-construct valid payloads; legacy session reconstruction uses
-:meth:`ContextOverride.replay` to bypass validation for historical data
-whose invalid payloads predate this invariant.
+Each ``ContextSplice`` carries a ``mask`` (a tuple of inclusive
+``(from, to)`` tape-ref ranges) and an ``insert_after`` anchor. The
+mask names tape refs whose contributions to the resolved view should
+be removed. The payload renders as a fresh segment immediately after
+``insert_after`` in tape order. ``insert_after=None`` injects at the
+head of the visible view.
 
-See ``docs/private/better_compaction.md`` for the full rationale.
+The runtime enforces a single rule at append time:
+
+> No two splices may mask the same tape ref.
+
+This prevents ambiguity: each tape ref has at most one editor for its
+lifetime. To re-edit a region whose splice you no longer want, mask
+the splice's own ``ref`` (not the original target). Earlier edits are
+chained through; the resolved view always reflects the latest decision
+for each slot.
+
+Payload pairing invariant
+-------------------------
+
+``ContextSplice.__post_init__`` enforces that every
+``AssistantMessage.tool_calls`` id in ``payload`` is matched by a
+``ToolResult`` later in the same payload, or declared in
+``paired_externally``. Producers must construct valid payloads;
+:meth:`ContextSplice.replay` bypasses validation for legacy on-disk
+records.
 """
 
 from __future__ import annotations
@@ -54,27 +63,29 @@ from sagent.types.history import (
 
 
 __all__ = [
-    "ContextClear",
-    "ContextOverride",
+    "ContextSplice",
     "HistoryRecord",
     "InvalidPayloadError",
+    "InvalidSpliceError",
     "TapeRecord",
     "TapeRef",
 ]
 
 
 class InvalidPayloadError(ValueError):
-    """``ContextOverride.payload`` violates tool-call / tool-result pairing."""
+    """``ContextSplice.payload`` violates tool-call / tool-result pairing."""
+
+
+class InvalidSpliceError(ValueError):
+    """A splice violates the append-time mask-overlap invariant."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TapeRef:
-    """Canonical identity for one slot in the conversation.
+    """Canonical identity for one record on the tape.
 
-    A ref names a SLOT, not just a physical record. The first record
-    at this ref opens the slot; subsequent records may suppress that
-    record, inheriting the slot. References to the ref always resolve
-    to the slot's current owner via the resolver's chain-walk.
+    Refs are immutable. A new tape append mints a fresh ref. Splices
+    reference earlier refs by value; the resolver looks them up.
     """
 
     session_id: str
@@ -96,48 +107,45 @@ class HistoryRecord:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ContextOverride:
-    """A context edit: hide some earlier refs, inject a payload."""
+class ContextSplice:
+    """A view-editing splice: mask some refs, insert a payload."""
 
     ref: TapeRef
     """Canonical identity."""
 
-    suppresses: tuple[TapeRef, ...]
-    """Slot identities this override inherits.
+    mask: tuple[tuple[TapeRef, TapeRef], ...]
+    """Inclusive ``(from, to)`` ranges of tape refs whose view
+    contribution this splice removes.
 
-    The records originally at these refs are hidden; this override
-    becomes the current owner of each named slot. Multi-ref suppression
-    collapses those slots into this override's ``inject_after`` position.
-    """
+    The runtime rejects appends whose mask overlaps any existing
+    splice's mask: each tape ref has at most one editor for its
+    lifetime. To re-edit, mask the editing splice's own ref. Within a
+    single splice, the ranges in ``mask`` must themselves be disjoint
+    (the validator rejects within-mask overlap)."""
 
-    inject_after: TapeRef | None
-    """Slot after which ``payload`` renders; ``None`` = head.
+    insert_after: TapeRef | None
+    """Tape ref after which ``payload`` renders in the resolved view.
 
-    The resolver follows the suppression chain to find the current
-    owner of this slot. ``None`` injects at the head of the visible
-    slice, before any HR-owned slot. A ref that no producer has ever
-    suppressed must be a live ``HistoryRecord`` ref in the visible set
-    or the payload falls into HEAD (with a resolver warning so producer
-    bugs are detectable).
-    """
+    ``None`` injects at the head of the visible view, before all other
+    segments. When ``insert_after`` names a masked ref (this splice's
+    own mask or a prior splice's), the anchor still resolves to that
+    position in tape order; the payload renders there even though the
+    masked segment contributes nothing."""
 
     payload: tuple[HistoryEntry, ...]
-    """Provider-facing messages this override injects."""
+    """Provider-facing messages this splice inserts."""
 
     strategy: str
     """Name of the producing strategy (e.g. ``"summary"``)."""
 
-    barrier: bool = False
-    """When true, stops the resolver walk after this record."""
-
     token_before: int = 0
-    """Token count of the suppressed slice (best-effort)."""
+    """Token count of the masked view portion (best-effort)."""
 
     token_after: int = 0
     """Token count of the injected payload (best-effort)."""
 
     fallback_reason: str = ""
-    """Reason the producer fell back to non-summary payload, if any."""
+    """Reason the producer fell back to a non-summary payload, if any."""
 
     preserved_tail_count: int = 0
     """Number of tail entries preserved verbatim in fallback mode."""
@@ -147,28 +155,22 @@ class ContextOverride:
 
     Producers declare here when an ``AssistantMessage.tool_calls`` id
     or a ``ToolResult.call_id`` in ``payload`` is paired with a record
-    elsewhere on the tape (typically a ``HistoryRecord`` or a sibling
-    override). Such ids are exempt from the in-payload pairing check.
+    elsewhere on the tape (typically a ``HistoryRecord``).
 
-    Examples:
-      * Detached splice: payload is ``(real_TR,)``; the matching AM
-        lives in a ``HistoryRecord``. Set ``paired_externally={call_id}``.
-      * Microcompact AM/TR-split: the AM override and the TR override
-        are siblings at the same anchor. Each sets
-        ``paired_externally`` declaring the other side.
-    """
+    Example: ``detached_splice`` injects only the real ``ToolResult``;
+    its matching ``AssistantMessage`` lives in a ``HistoryRecord``.
+    Set ``paired_externally={call_id}``."""
 
     def __post_init__(self) -> None:
-        """Validate ``payload`` against the pairing invariant.
+        """Validate payload pairing and within-mask range disjointedness.
 
         Raises:
-          InvalidPayloadError: When ``payload`` contains an unpaired
-              ``AssistantMessage.tool_calls`` id, an orphan
-              ``ToolResult.call_id``, or a duplicate ``ToolResult``
-              ``call_id`` (and the id is not declared in
-              ``paired_externally``).
+          InvalidPayloadError: When ``payload`` violates the tool-call /
+              tool-result pairing rule, or when ``mask`` contains two
+              ranges that share any tape position.
 
         """
+        _validate_mask_disjoint(self.mask)
         _validate_payload(self.payload, self.paired_externally)
 
     @classmethod
@@ -176,53 +178,50 @@ class ContextOverride:
         cls,
         *,
         ref: TapeRef,
-        suppresses: tuple[TapeRef, ...],
-        inject_after: TapeRef | None,
+        mask: tuple[tuple[TapeRef, TapeRef], ...],
+        insert_after: TapeRef | None,
         payload: tuple[HistoryEntry, ...],
         strategy: str,
-        barrier: bool = False,
         token_before: int = 0,
         token_after: int = 0,
         fallback_reason: str = "",
         preserved_tail_count: int = 0,
         paired_externally: frozenset[str] = frozenset(),
-    ) -> ContextOverride:
-        """Construct without payload validation. Persistence / replay only.
+    ) -> ContextSplice:
+        """Construct without payload or mask validation. Legacy load only.
 
-        Legacy sessions persisted before the pairing invariant existed
-        may carry payloads the validator rejects. The runtime's
-        gate-time rescue path handles whatever the resolved view ends
-        up looking like; deserialization is not the right place to
-        rebuild historical data.
+        Legacy sessions persisted before the new tape model existed may
+        carry payloads or masks the validators reject. The runtime's
+        rescue path handles whatever the resolved view ends up looking
+        like; deserialization is not the right place to rebuild
+        historical data.
 
-        Forward producers must not call this -- use the normal
-        constructor so invariant violations surface at the source.
+        Forward producers must use the normal constructor so invariant
+        violations surface at the source.
 
         Args:
           ref: Canonical identity.
-          suppresses: Earlier refs to hide.
-          inject_after: Anchor ref; ``None`` injects at head of visible slice.
-          payload: Entries this override injects.
+          mask: Inclusive ranges of tape refs to mask.
+          insert_after: Anchor for ``payload``; ``None`` injects at head.
+          payload: Entries this splice injects.
           strategy: Name of the producing strategy.
-          barrier: Stops the resolver walk after this record.
-          token_before: Token count of the suppressed slice.
+          token_before: Token count of the masked view portion.
           token_after: Token count of the injected payload.
-          fallback_reason: Reason the producer fell back to non-summary payload.
+          fallback_reason: Reason the producer fell back to a non-summary payload.
           preserved_tail_count: Tail entries preserved verbatim in fallback mode.
           paired_externally: Call ids whose pair lives outside this payload.
 
         Returns:
-          override: ``ContextOverride`` instance with no validation run.
+          splice: ``ContextSplice`` instance with no validation run.
 
         """
         instance = object.__new__(cls)
         values: dict[str, object] = {
             "ref": ref,
-            "suppresses": suppresses,
-            "inject_after": inject_after,
+            "mask": mask,
+            "insert_after": insert_after,
             "payload": payload,
             "strategy": strategy,
-            "barrier": barrier,
             "token_before": token_before,
             "token_after": token_after,
             "fallback_reason": fallback_reason,
@@ -234,18 +233,39 @@ class ContextOverride:
         return instance
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ContextClear:
-    """A barrier that drops all earlier visible records and emits nothing."""
-
-    ref: TapeRef
-    """Canonical identity."""
-
-    barrier: bool = True
-    """Always true; ``ContextClear`` is by definition a barrier."""
+type TapeRecord = HistoryRecord | ContextSplice
 
 
-type TapeRecord = HistoryRecord | ContextOverride | ContextClear
+def _validate_mask_disjoint(
+    mask: tuple[tuple[TapeRef, TapeRef], ...],
+) -> None:
+    """Reject mask whose own ranges share any tape position.
+
+    A producer is free to construct a mask of multiple disjoint ranges,
+    but two ranges in the same mask must not cover the same ordinal.
+    Overlap within a single mask is a producer bug; canonicalize the
+    ranges before constructing the splice.
+
+    Args:
+      mask: Tuple of inclusive ``(from, to)`` ranges.
+
+    Raises:
+      InvalidPayloadError: On any within-mask overlap.
+
+    """
+    seen: set[int] = set()
+    for r_from, r_to in mask:
+        if r_to.ordinal < r_from.ordinal:
+            raise InvalidPayloadError(
+                f"mask range from={r_from.ordinal} to={r_to.ordinal} is inverted",
+            )
+        rng = set(range(r_from.ordinal, r_to.ordinal + 1))
+        overlap = seen & rng
+        if overlap:
+            raise InvalidPayloadError(
+                f"mask ranges overlap at ordinals {sorted(overlap)}",
+            )
+        seen |= rng
 
 
 def _validate_payload(
@@ -263,7 +283,7 @@ def _validate_payload(
       3. No ``ToolResult.call_id`` appears twice within ``payload``.
 
     Args:
-      payload: ``ContextOverride.payload`` to validate.
+      payload: ``ContextSplice.payload`` to validate.
       paired_externally: Call ids whose pair lives outside this payload.
 
     Raises:
@@ -272,11 +292,9 @@ def _validate_payload(
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
-    declared: set[str] = set()
     for entry in payload:
         if isinstance(entry, AssistantMessage):
             for tc in entry.tool_calls:
-                declared.add(tc.id)
                 pending.add(tc.id)
         elif isinstance(entry, ToolResult):
             if entry.call_id in seen_results:

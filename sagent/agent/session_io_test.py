@@ -30,8 +30,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.tape import (
-    ContextClear,
-    ContextOverride,
+    ContextSplice,
     HistoryRecord,
     TapeRecord,
     TapeRef,
@@ -147,15 +146,15 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
     placeholder_records = _records_from([assistant, original])
     placeholder_ref = placeholder_records[1].ref
     parent_ref = placeholder_records[0].ref
-    splice_override = ContextOverride(
+    splice = ContextSplice(
         ref=TapeRef(session_id="abc", ordinal=2),
-        suppresses=(placeholder_ref,),
-        inject_after=parent_ref,
+        mask=((placeholder_ref, placeholder_ref),),
+        insert_after=parent_ref,
         payload=(spliced,),
         strategy="detached_splice",
         paired_externally=frozenset({"toolu_bash_1"}),
     )
-    append_session(session_file, tape_delta=[splice_override])
+    append_session(session_file, tape_delta=[splice])
 
     # Step 3: reload + resolve and assert the spliced content wins.
     loaded = load_session(tmp_path, {})
@@ -226,18 +225,30 @@ def test_load_session_missing_returns_none(tmp_path: Path) -> None:
 def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
+    # Explicit refs to avoid collision between two ``_records_from`` calls.
+    old_ref = TapeRef(session_id="abc", ordinal=0)
+    splice_ref = TapeRef(session_id="abc", ordinal=1)
+    new_ref = TapeRef(session_id="abc", ordinal=2)
     append_session(
         session_file,
         meta=meta.serialize(),
-        tape_delta=_records_from([UserMessage(text="old")]),
+        tape_delta=[HistoryRecord(ref=old_ref, entry=UserMessage(text="old"))],
     )
     append_session(
         session_file,
-        tape_delta=[ContextClear(ref=TapeRef(session_id="abc", ordinal=999))],
+        tape_delta=[
+            ContextSplice(
+                ref=splice_ref,
+                mask=((old_ref, old_ref),),
+                insert_after=None,
+                payload=(),
+                strategy="clear",
+            )
+        ],
     )
     append_session(
         session_file,
-        tape_delta=_records_from([UserMessage(text="new")]),
+        tape_delta=[HistoryRecord(ref=new_ref, entry=UserMessage(text="new"))],
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
@@ -272,7 +283,15 @@ def test_tool_state_post_clear_wins(tmp_path: Path) -> None:
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s1))
     append_session(
         session_file,
-        tape_delta=[ContextClear(ref=TapeRef(session_id="abc", ordinal=999))],
+        tape_delta=[
+            ContextSplice(
+                ref=TapeRef(session_id="abc", ordinal=999),
+                mask=(),
+                insert_after=None,
+                payload=(),
+                strategy="clear",
+            )
+        ],
     )
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s2))
     loaded = load_session(tmp_path, {})

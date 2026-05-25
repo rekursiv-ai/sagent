@@ -31,7 +31,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.model import Model, ModelRequest
-from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,7 @@ class SummaryCompactor:
         model: Model,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
-    ) -> ContextOverride:
+    ) -> ContextSplice:
         """Summarize ``context`` into a barrier override.
 
         Direction (``"from"`` keeps tail, ``"up_to"`` keeps head) and
@@ -197,8 +197,13 @@ class SummaryCompactor:
               for the runtime to append.
 
         """
-        del tape  # reserved
         compact_model = self._model or model
+        # The barrier mask covers everything currently on the tape so
+        # every alive splice gets absorbed; the new summary becomes the
+        # sole live editor.
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = (
+            ((tape[0].ref, tape[-1].ref),) if tape else ()
+        )
         history = _strip_attachments(list(context))
         direction = self._direction
         effective_keep = self._keep_recent
@@ -297,13 +302,12 @@ class SummaryCompactor:
             else:
                 payload = (*to_keep, fallback)
             token_after = sum(_entry_chars(e) for e in payload) // self._chars_per_token
-            return ContextOverride(
+            return ContextSplice(
                 ref=mint_ref(),
-                suppresses=(),
-                inject_after=None,
+                mask=mask,
+                insert_after=None,
                 payload=payload,
                 strategy="summary_fallback",
-                barrier=True,
                 token_before=token_before,
                 token_after=token_after,
                 fallback_reason=f"summary failed after {self._max_attempts} attempts",
@@ -339,13 +343,12 @@ class SummaryCompactor:
         else:
             payload = (*to_keep, continuation)
         token_after = sum(_entry_chars(e) for e in payload) // self._chars_per_token
-        return ContextOverride(
+        return ContextSplice(
             ref=mint_ref(),
-            suppresses=(),
-            inject_after=None,
+            mask=mask,
+            insert_after=None,
             payload=payload,
             strategy="summary",
-            barrier=True,
             token_before=token_before,
             token_after=token_after,
         )

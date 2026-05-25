@@ -78,7 +78,7 @@ from sagent.agent.state import (
 )
 from sagent.lib import last_models
 from sagent.lib.json import JSON
-from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 logger = logging.getLogger(__name__)
@@ -1626,7 +1626,7 @@ class _AgentCompactor:
         model: agent_runtime.Model,
         mint_ref: Callable[[], TapeRef],
         args: str = "",
-    ) -> ContextOverride:
+    ) -> ContextSplice:
         """Run the rich compactor and apply post-compact enrichment.
 
         Args:

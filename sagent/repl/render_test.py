@@ -37,7 +37,7 @@ from sagent.types.runtime import (
     ToolLabel,
     ToolResultPartial,
 )
-from sagent.types.tape import ContextOverride, TapeRef
+from sagent.types.tape import ContextSplice, TapeRef
 
 
 def test_render_tool_result_error_only_emits_error() -> None:
@@ -128,13 +128,12 @@ def test_compact_complete_emits_progress_dim_line() -> None:
     obs(
         CompactComplete(
             records=(
-                ContextOverride(
+                ContextSplice(
                     ref=TapeRef(session_id="t", ordinal=0),
-                    suppresses=(),
-                    inject_after=None,
+                    mask=(),
+                    insert_after=None,
                     payload=(UserMessage(text="u"), AssistantMessage(text="a")),
                     strategy="summary",
-                    barrier=True,
                     token_before=42,
                     token_after=8,
                 ),
@@ -159,13 +158,12 @@ def test_compact_fallback_emits_progress_dim_line() -> None:
     obs(
         CompactComplete(
             records=(
-                ContextOverride(
+                ContextSplice(
                     ref=TapeRef(session_id="t", ordinal=0),
-                    suppresses=(),
-                    inject_after=None,
+                    mask=(),
+                    insert_after=None,
                     payload=(UserMessage(text="tail"),),
                     strategy="summary_fallback",
-                    barrier=True,
                     fallback_reason="summary failed after 3 attempts",
                     preserved_tail_count=1,
                 ),

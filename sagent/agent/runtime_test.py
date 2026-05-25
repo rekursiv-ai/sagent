@@ -48,25 +48,35 @@ from sagent.types.runtime import (
     Undetach,
     UserQueuedMessage,
 )
-from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 def _summary_override(
     summary: list[HistoryEntry],
     mint_ref: Callable[[], TapeRef],
     *,
+    tape: Sequence[TapeRecord] | None = None,
     strategy: str = "summary",
     fallback_reason: str = "",
     preserved_tail_count: int = 0,
-) -> ContextOverride:
-    """Build a barrier override carrying ``summary`` as its payload."""
-    return ContextOverride(
+) -> ContextSplice:
+    """Build a barrier splice carrying ``summary`` as its payload.
+
+    When ``tape`` is supplied, the mask covers every existing record so
+    every alive splice is absorbed and every HR is hidden. Without
+    ``tape``, the splice has an empty mask (used by tests that only
+    care about the payload).
+    """
+    if tape:
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = ((tape[0].ref, tape[-1].ref),)
+    else:
+        mask = ()
+    return ContextSplice(
         ref=mint_ref(),
-        suppresses=(),
-        inject_after=None,
+        mask=mask,
+        insert_after=None,
         payload=tuple(summary),
         strategy=strategy,
-        barrier=True,
         fallback_reason=fallback_reason,
         preserved_tail_count=preserved_tail_count,
     )
@@ -1020,9 +1030,9 @@ async def test_compact_rewrites_history() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, context, model, args
-            return _summary_override(list(summary), mint_ref)
+        ) -> ContextSplice:
+            del context, model, args
+            return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -1030,7 +1040,7 @@ async def test_compact_rewrites_history() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1919,9 +1929,9 @@ async def test_compact_clears_queued_messages() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, context, model, args
-            return _summary_override(list(summary), mint_ref)
+        ) -> ContextSplice:
+            del context, model, args
+            return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -1929,7 +1939,7 @@ async def test_compact_clears_queued_messages() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2139,7 +2149,7 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref, args
             raise RuntimeError("compactor broke")
 
@@ -2149,7 +2159,7 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2182,7 +2192,7 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, args
             return _summary_override(
                 [UserMessage(text="[fallback]"), UserMessage(text="continue")],
@@ -2198,7 +2208,7 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2234,7 +2244,7 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref, args
             raise RuntimeError("compactor broke")
 
@@ -2244,7 +2254,7 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2285,12 +2295,12 @@ async def test_compact_while_compacting_is_dropped() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, context, model, args
+        ) -> ContextSplice:
+            del context, model, args
             call_count["n"] += 1
             compact_started.set()
             await release.wait()
-            return _summary_override(list(summary), mint_ref)
+            return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -2298,7 +2308,7 @@ async def test_compact_while_compacting_is_dropped() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2383,9 +2393,9 @@ async def test_compact_cancels_running_model_call() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, context, model, args
-            return _summary_override(list(summary), mint_ref)
+        ) -> ContextSplice:
+            del context, model, args
+            return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -2393,7 +2403,7 @@ async def test_compact_cancels_running_model_call() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2479,11 +2489,11 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, model, args
+        ) -> ContextSplice:
+            del model, args
             compact_blocked.set()
             await asyncio.sleep(10.0)
-            return _summary_override(list(context), mint_ref)
+            return _summary_override(list(context), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -2491,7 +2501,7 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -4072,10 +4082,10 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
-        ) -> ContextOverride:
-            del tape, context, model, args
+        ) -> ContextSplice:
+            del context, model, args
             await release.wait()
-            return _summary_override(list(summary), mint_ref)
+            return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
             self,
@@ -4083,7 +4093,7 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
             context: Sequence[HistoryEntry],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -4324,7 +4334,7 @@ class TestGateRepairsInvalidContext:
     """Verify the model-call gate self-heals when ``validate_context`` finds an orphan.
 
     Forward producers can no longer construct overrides with invalid
-    payloads -- :meth:`ContextOverride.__post_init__` rejects them at
+    payloads -- :meth:`ContextSplice.__post_init__` rejects them at
     construct (see ``types/tape_test.py``). What still reaches the
     gate is invalid context resolved across multiple records: orphan
     ``tool_use`` from a ``HistoryRecord`` whose ``ToolResult`` never
@@ -4410,11 +4420,11 @@ class TestGateRepairsInvalidContext:
 
     @pytest.mark.asyncio
     async def test_legacy_invalid_override_payload_rescued_at_gate(self) -> None:
-        """Legacy ``ContextOverride.replay`` (invalid payload) survives gate.
+        """Legacy ``ContextSplice.replay`` (invalid payload) survives gate.
 
-        Sessions written before ``ContextOverride.__post_init__`` enforced
+        Sessions written before ``ContextSplice.__post_init__`` enforced
         the pairing invariant may persist invalid payloads on disk. The
-        session loader uses :meth:`ContextOverride.replay` to bypass
+        session loader uses :meth:`ContextSplice.replay` to bypass
         validation at reconstruction. The rescue path then produces a
         wire-format-valid context for the next provider call.
         """
@@ -4430,17 +4440,16 @@ class TestGateRepairsInvalidContext:
             text="",
             tool_calls=(ToolCall(id="toolu_X", name="Bash", args={}),),
         )
-        legacy_override = ContextOverride.replay(
+        legacy_override = ContextSplice.replay(
             ref=TapeRef(session_id="", ordinal=agent._next_ordinal),
-            suppresses=(),
-            inject_after=None,
+            mask=(),
+            insert_after=None,
             payload=(
                 UserMessage(text="[summary]"),
                 orphan_am,
                 ToolResult(call_id="ghost", content="dangling"),
             ),
             strategy="legacy_summary",
-            barrier=True,
         )
         agent.adopt_record(legacy_override)
 

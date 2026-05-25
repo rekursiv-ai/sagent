@@ -21,5 +21,6 @@ Additional notes:
   - `backend` selects the search engine: `duckduckgo` (default)
 
 DATE AWARENESS — critical for query accuracy:
-  - Today's date is {{NOW}}. Always incorporate the current year into queries about recent documentation, news, or events.
-  - For instance, a request for "latest React docs" should include the current year in the search terms rather than a prior year
+  - The current local date and time is {{NOW}}.
+  - Resolve relative time terms ("today", "yesterday", "this weekend", "last week", "recently") to absolute dates before querying, and verify the chosen data source can filter to that range.
+  - Incorporate the current year (and month/day when relevant) into queries about recent documentation, news, or events. A request for "latest React docs" should include the current year, not a prior year.
