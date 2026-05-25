@@ -32,25 +32,35 @@ from sagent.agent.state import agent_registry
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
-from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 def _summary_override(
     summary: list[types.history.HistoryEntry],
     mint_ref: Callable[[], TapeRef],
     *,
+    tape: Sequence[TapeRecord] | None = None,
     strategy: str = "summary",
     fallback_reason: str = "",
     preserved_tail_count: int = 0,
-) -> ContextOverride:
-    """Build a barrier override carrying ``summary`` as its payload."""
-    return ContextOverride(
+) -> ContextSplice:
+    """Build a barrier splice carrying ``summary`` as its payload.
+
+    When ``tape`` is supplied, the mask covers every existing record so
+    every alive splice is absorbed and every HR is hidden. Without
+    ``tape``, the splice has an empty mask (used by tests that only
+    care about the payload and don't need barrier semantics).
+    """
+    if tape:
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = ((tape[0].ref, tape[-1].ref),)
+    else:
+        mask = ()
+    return ContextSplice(
         ref=mint_ref(),
-        suppresses=(),
-        inject_after=None,
+        mask=mask,
+        insert_after=None,
         payload=tuple(summary),
         strategy=strategy,
-        barrier=True,
         fallback_reason=fallback_reason,
         preserved_tail_count=preserved_tail_count,
     )
@@ -917,11 +927,11 @@ async def test_compact_awaits_compact_complete_event() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -930,7 +940,7 @@ async def test_compact_awaits_compact_complete_event() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -973,11 +983,11 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[recompacted]")], mint_ref
+                [types.history.UserMessage(text="[recompacted]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -986,7 +996,7 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1179,11 +1189,11 @@ async def test_compact_now_replaces_history_in_place() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -1192,7 +1202,7 @@ async def test_compact_now_replaces_history_in_place() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1232,10 +1242,10 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model, custom_instructions
+        ) -> ContextSplice:
+            del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -1290,11 +1300,11 @@ async def test_compact_now_returns_true_on_success() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -1303,7 +1313,7 @@ async def test_compact_now_returns_true_on_success() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1342,7 +1352,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             raise RuntimeError("compaction blew up")
@@ -1353,7 +1363,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1422,7 +1432,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             raise AssertionError("compact must not run when should_compact False")
@@ -1433,7 +1443,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1470,7 +1480,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             raise RuntimeError("compaction blew up")
@@ -1481,7 +1491,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1515,7 +1525,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref, custom_instructions
             self.call_count += 1
             raise RuntimeError("always broken")
@@ -1526,7 +1536,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1571,10 +1581,10 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model, custom_instructions
+        ) -> ContextSplice:
+            del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -1583,7 +1593,7 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1616,7 +1626,7 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             raise RuntimeError("compaction failed")
@@ -1627,7 +1637,7 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1813,12 +1823,12 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref
+                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -1827,7 +1837,7 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1884,12 +1894,12 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             order.append("compact")
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref
+                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -1898,7 +1908,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -1996,11 +2006,11 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref
+                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -2009,7 +2019,7 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2069,7 +2079,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             self.calls += 1
@@ -2081,7 +2091,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2133,7 +2143,7 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             raise types.exceptions.PromptTooLongError("compactor saw overflow")
@@ -2144,7 +2154,7 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2197,12 +2207,12 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             # Returns short summary; model keeps overflowing.
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref
+                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -2211,7 +2221,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2274,7 +2284,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
+        ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
             self.calls += 1
@@ -2286,7 +2296,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2342,12 +2352,12 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref
+                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -2356,7 +2366,7 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2416,11 +2426,11 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.AssistantMessage(text="model said")], mint_ref
+                [types.history.AssistantMessage(text="model said")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -2429,7 +2439,7 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
@@ -2471,11 +2481,11 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
-        ) -> ContextOverride:
-            del tape, context, model
+        ) -> ContextSplice:
+            del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
@@ -2484,7 +2494,7 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
             context: Sequence[types.history.HistoryEntry],
             tools: object,
             mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextOverride, ...]:
+        ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 

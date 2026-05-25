@@ -229,6 +229,7 @@ import logging
 from sagent.agent.context import (
     InvalidContextError,
     ResolvedContext,
+    alive_splices,
     resolve_context,
     validate_context,
 )
@@ -274,9 +275,9 @@ from sagent.types.runtime import (
     UserQueuedMessage,
 )
 from sagent.types.tape import (
-    ContextClear,
-    ContextOverride,
+    ContextSplice,
     HistoryRecord,
+    InvalidSpliceError,
     TapeRecord,
     TapeRef,
 )
@@ -582,7 +583,7 @@ class Model(Protocol):
 class Compactor(Protocol):
     """Minimal compactor interface (tape-native).
 
-    Compactors emit a :class:`ContextOverride` that the runtime appends
+    Compactors emit a :class:`ContextSplice` that the runtime appends
     to its tape. The runtime supplies a ``mint_ref`` factory so the
     compactor can mint fresh ``TapeRef`` values without seeing the rest
     of the runtime.
@@ -595,8 +596,8 @@ class Compactor(Protocol):
         model: Model,
         mint_ref: Callable[[], TapeRef],
         args: str = "",
-    ) -> ContextOverride:
-        """Produce a barrier override from the current tape/context.
+    ) -> ContextSplice:
+        """Produce a barrier splice from the current tape/context.
 
         Args:
           tape: Append-only session tape.
@@ -607,7 +608,7 @@ class Compactor(Protocol):
           args: Custom compaction instructions.
 
         Returns:
-          override: Barrier ``ContextOverride`` with the summary payload.
+          splice: Barrier ``ContextSplice`` with the summary payload.
 
         """
         ...
@@ -652,6 +653,11 @@ class AgentRuntime:
         self._tape_by_ref: dict[TapeRef, TapeRecord] = {}
         self._placeholder_refs: dict[str, TapeRef] = {}
         self._parent_assistant_refs: dict[str, TapeRef] = {}
+        # Tracks the most recent splice ref per detached call_id so
+        # retries can mask the previous splice (per the once-overwrite
+        # rule) rather than the original placeholder which is already
+        # masked.
+        self._last_detached_splice_for_call: dict[str, TapeRef] = {}
         self.inbox: GatedDeque[RuntimeEvent] = GatedDeque()
         # Task[None]: tools post results to inbox, not via return value.
         self.detached: dict[str, asyncio.Task[None]] = {}
@@ -785,51 +791,65 @@ class AgentRuntime:
         self._index_record(record)
         return ref
 
-    def append_override(
+    def append_splice(
         self,
         *,
-        suppresses: tuple[TapeRef, ...] = (),
-        inject_after: TapeRef | None = None,
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
+        insert_after: TapeRef | None = None,
         payload: tuple[HistoryEntry, ...] = (),
         strategy: str = "",
-        barrier: bool = False,
         token_before: int = 0,
         token_after: int = 0,
         fallback_reason: str = "",
         preserved_tail_count: int = 0,
         paired_externally: frozenset[str] = frozenset(),
     ) -> TapeRef:
-        """Append a ``ContextOverride`` to the tape.
+        """Append a ``ContextSplice`` to the tape.
+
+        Validates that ``mask`` does not overlap any existing splice's
+        mask (each tape ref has at most one editor for its lifetime).
+        To re-edit, mask the editing splice's own ref. Producers must
+        also avoid placing ``insert_after`` inside the splice's own
+        ``mask`` (validated below).
 
         Args:
-          suppresses: Earlier refs hidden when this override is visible.
-          inject_after: Anchor ref whose visible record the payload renders
-              after; ``None`` injects at the head of the visible slice.
-          payload: Provider-facing messages this override injects.
+          mask: Inclusive ``(from, to)`` ranges of tape refs to mask.
+          insert_after: Anchor ref after which ``payload`` renders;
+              ``None`` injects at the head of the visible view.
+          payload: Provider-facing messages this splice injects.
           strategy: Name of the producing strategy.
-          barrier: When true, stops the resolver walk.
-          token_before: Token count of the suppressed slice (best-effort).
-          token_after: Token count of the injected payload (best-effort).
+          token_before: Token count of the masked view portion.
+          token_after: Token count of the injected payload.
           fallback_reason: Reason the producer fell back to non-summary
               payload, if any.
           preserved_tail_count: Number of tail entries preserved verbatim
               in fallback mode.
           paired_externally: Call ids whose pair lives outside this
-              payload (typically a ``HistoryRecord`` or a sibling
-              override).
+              payload (typically a ``HistoryRecord``).
 
         Returns:
-          ref: ``TapeRef`` minted for the new override.
+          ref: ``TapeRef`` minted for the new splice.
+
+        Raises:
+          InvalidSpliceError: When ``mask`` overlaps any existing alive
+              splice's mask, or ``insert_after`` falls inside ``mask``.
 
         """
+        self._validate_no_alive_mask_overlap(mask)
+        if insert_after is not None:
+            for r_from, r_to in mask:
+                if r_from.ordinal <= insert_after.ordinal <= r_to.ordinal:
+                    raise InvalidSpliceError(
+                        f"insert_after {insert_after} falls inside this splice's"
+                        f" own mask range ({r_from}, {r_to})",
+                    )
         ref = self.mint_ref()
-        record = ContextOverride(
+        record = ContextSplice(
             ref=ref,
-            suppresses=suppresses,
-            inject_after=inject_after,
+            mask=mask,
+            insert_after=insert_after,
             payload=payload,
             strategy=strategy,
-            barrier=barrier,
             token_before=token_before,
             token_after=token_after,
             fallback_reason=fallback_reason,
@@ -841,18 +861,85 @@ class AgentRuntime:
         self._tape_by_ref[ref] = record
         return ref
 
-    def append_clear(self) -> TapeRef:
-        """Append a ``ContextClear`` (barrier) to the tape.
+    def _validate_no_alive_mask_overlap(
+        self, new_mask: tuple[tuple[TapeRef, TapeRef], ...]
+    ) -> None:
+        """Reject ``new_mask`` if it shares any position with a currently
+        alive splice's mask.
 
-        Returns:
-          ref: ``TapeRef`` minted for the clear record.
+        A splice is alive iff its record ref isn't covered by another
+        alive splice's mask. The rule is: each tape ref has at most one
+        editor at a time. The new splice may absorb (mask) existing
+        alive splices — their masking responsibilities lapse — but it
+        may not double-claim a position from an alive splice it isn't
+        absorbing.
+
+        Args:
+          new_mask: Inclusive ``(from, to)`` ranges this splice claims.
+
+        Raises:
+          InvalidSpliceError: On overlap with an alive splice's mask
+              where the alive splice's ref is NOT in ``new_mask``.
 
         """
-        ref = self.mint_ref()
-        record = ContextClear(ref=ref)
-        self.tape.append(record)
-        self._cached_resolved = None
-        self._tape_by_ref[ref] = record
+        new_positions: set[TapeRef] = set()
+        for r_from, r_to in new_mask:
+            for ref in (r.ref for r in self.tape):
+                if r_from.ordinal <= ref.ordinal <= r_to.ordinal:
+                    new_positions.add(ref)
+        alive = alive_splices(self.tape)
+        for alive_ref in alive:
+            splice = self._tape_by_ref.get(alive_ref)
+            if not isinstance(splice, ContextSplice):
+                continue
+            if alive_ref in new_positions:
+                continue  # being absorbed by this splice
+            for r_from, r_to in splice.mask:
+                for ref in new_positions:
+                    if r_from.ordinal <= ref.ordinal <= r_to.ordinal:
+                        raise InvalidSpliceError(
+                            f"new splice mask overlaps alive splice {alive_ref}"
+                            f" at {ref}; either don't claim already-claimed"
+                            f" positions or extend the mask to include the"
+                            f" splice's own ref to absorb it",
+                        )
+
+    def append_clear(self) -> TapeRef:
+        """Append a barrier splice that masks the full tape prefix.
+
+        Empty payload masking every prior tape ref. Also resets the
+        per-call_id state (placeholder refs, parent-AM refs) so
+        subsequent splices don't try to anchor at refs the barrier has
+        masked.
+
+        Returns:
+          ref: ``TapeRef`` minted for the barrier splice.
+
+        """
+        if not self.tape:
+            # Nothing to mask; mint a no-op marker splice.
+            ref = self.mint_ref()
+            record = ContextSplice(
+                ref=ref,
+                mask=(),
+                insert_after=None,
+                payload=(),
+                strategy="clear",
+            )
+            self.tape.append(record)
+            self._cached_resolved = None
+            self._tape_by_ref[ref] = record
+            self._placeholder_refs.clear()
+            self._parent_assistant_refs.clear()
+            return ref
+        first_ref = self.tape[0].ref
+        last_ref = self.tape[-1].ref
+        ref = self.append_splice(
+            mask=((first_ref, last_ref),),
+            insert_after=None,
+            payload=(),
+            strategy="clear",
+        )
         self._placeholder_refs.clear()
         self._parent_assistant_refs.clear()
         return ref
@@ -879,7 +966,7 @@ class AgentRuntime:
     def mint_ref(self) -> TapeRef:
         """Mint the next ``TapeRef`` and advance the ordinal counter.
 
-        Used by compactors that build ``ContextOverride`` instances
+        Used by compactors that build ``ContextSplice`` instances
         directly. The runtime is the sole appender; minting separately
         lets the compactor stamp records without seeing the runtime.
 
@@ -895,7 +982,7 @@ class AgentRuntime:
     def adopt_record(self, record: TapeRecord) -> None:
         """Append a pre-built tape record (with a runtime-minted ref).
 
-        Used by compactors that build ``ContextOverride`` instances
+        Used by compactors that build ``ContextSplice`` instances
         directly via ``mint_ref()``. The runtime updates its side
         tables (cache invalidation, ref index, call_id anchors) and
         appends the record to the tape.
@@ -954,17 +1041,24 @@ class AgentRuntime:
         if not isinstance(prior, ToolResult):
             return None
         real = dataclasses.replace(prior, content=content, is_error=is_error)
-        self.append_override(
-            suppresses=(placeholder_ref,),
-            inject_after=parent_ref,
+        # First splice for this call_id masks the placeholder; subsequent
+        # retries mask the previous splice (since the placeholder is
+        # already masked and the rule forbids double-masking).
+        prior_splice_ref = self._last_detached_splice_for_call.get(call_id)
+        if prior_splice_ref is None:
+            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
+                (placeholder_ref, placeholder_ref),
+            )
+        else:
+            mask = ((prior_splice_ref, prior_splice_ref),)
+        new_ref = self.append_splice(
+            mask=mask,
+            insert_after=parent_ref,
             payload=(real,),
             strategy="detached_splice",
             paired_externally=frozenset({call_id}),
         )
-        # Keep the call_id -> placeholder mapping pointing at the original
-        # record; a second splice for the same call_id should still find
-        # and suppress the same placeholder. The override's ref is not
-        # an anchor candidate, so we don't reindex it.
+        self._last_detached_splice_for_call[call_id] = new_ref
         return real
 
     async def run_forever(self) -> None:
@@ -1621,7 +1715,7 @@ class AgentRuntime:
            ``ToolResult`` records; suppress orphan ``ToolResult`` from
            a ``HistoryRecord`` origin.
         2. If validation still fails -- typically a legacy session
-           reconstructed via :meth:`ContextOverride.replay` with
+           reconstructed via :meth:`ContextSplice.replay` with
            invalid payloads predating the construct-time invariant --
            rescue: append a single barrier override that suppresses
            every visible tape ref and re-injects a fully sanitized
@@ -1630,7 +1724,7 @@ class AgentRuntime:
 
         Forward producers can no longer emit overrides with invalid
         payloads (the validator in
-        :meth:`ContextOverride.__post_init__` rejects them at
+        :meth:`ContextSplice.__post_init__` rejects them at
         construct), so phase 1 of the prior implementation has been
         deleted.
 
@@ -1657,7 +1751,7 @@ class AgentRuntime:
         """Append a barrier override carrying a fully sanitized payload.
 
         Last-resort repair, primarily for legacy sessions whose
-        :meth:`ContextOverride.replay` reconstructions carry payloads
+        :meth:`ContextSplice.replay` reconstructions carry payloads
         the construct-time invariant would reject. Suppresses every
         currently-visible tape ref and re-injects the result of
         :func:`_sanitize_for_send` over the current resolved messages.
@@ -1671,16 +1765,20 @@ class AgentRuntime:
         """
         resolved = self.context()
         sanitized = _sanitize_for_send(resolved.messages)
-        suppresses = tuple(set(resolved.origins))
         paired_externally = frozenset(
             m.call_id for m in sanitized if isinstance(m, ToolResult)
         )
-        self.append_override(
-            suppresses=suppresses,
-            inject_after=None,
-            payload=sanitized,
+        if not self.tape:
+            return
+        # Mask covers every record on the tape so far. Every existing
+        # alive splice is absorbed, and the validator passes because
+        # no alive splice remains whose mask we'd be double-claiming.
+        mask = ((self.tape[0].ref, self.tape[-1].ref),)
+        self.append_splice(
+            mask=mask,
+            insert_after=None,
+            payload=tuple(sanitized),
             strategy="context_rescue",
-            barrier=True,
             paired_externally=paired_externally,
         )
 
@@ -1751,17 +1849,19 @@ class AgentRuntime:
             )
             # The synth TRs have no matching AM in their payload; the
             # matching AMs live in the ``HistoryRecord`` at ``anchor``.
-            self.append_override(
-                suppresses=(),
-                inject_after=anchor,
+            # Empty mask: pure injection, doesn't claim any positions.
+            self.append_splice(
+                mask=(),
+                insert_after=anchor,
                 payload=payload,
                 strategy="orphan_tool_use_repair",
                 paired_externally=frozenset(missing_ids),
             )
-        if hr_orphan_refs:
-            self.append_override(
-                suppresses=tuple(hr_orphan_refs),
-                inject_after=None,
+        for orphan in hr_orphan_refs:
+            # Pure deletion: mask this single HR ref, empty payload.
+            self.append_splice(
+                mask=((orphan, orphan),),
+                insert_after=None,
                 payload=(),
                 strategy="orphan_tool_result_repair",
             )
@@ -1808,18 +1908,36 @@ class AgentRuntime:
             attachments=tail.attachments + item.attachments,
         )
         tail_origin = resolved.origins[-1]
-        anchor = resolved.slot_anchors[-1]
+        # When the visible tail is itself a coalesce splice's payload,
+        # the new splice must absorb both that splice AND the original
+        # ref(s) the splice was masking — otherwise killing the splice
+        # under undelete semantics would resurrect the originally-
+        # masked content (causing both the merged tail AND the
+        # originals to render side-by-side).
         prior_record = self._tape_by_ref.get(tail_origin)
-        if isinstance(prior_record, ContextOverride):
-            # Stacking a coalesce on a prior coalesce: subsume the prior
-            # override's suppression set so previously-hidden records do
-            # not re-emerge once the prior override is itself hidden.
-            suppresses: tuple[TapeRef, ...] = (tail_origin, *prior_record.suppresses)
+        if isinstance(prior_record, ContextSplice) and prior_record.mask:
+            prior_lo = min(r_from.ordinal for r_from, _ in prior_record.mask)
+            lo_ord = min(prior_lo, tail_origin.ordinal)
         else:
-            suppresses = (tail_origin,)
-        self.append_override(
-            suppresses=suppresses,
-            inject_after=anchor,
+            lo_ord = tail_origin.ordinal
+        hi_ord = tail_origin.ordinal
+        sid = tail_origin.session_id
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = (
+            (
+                TapeRef(session_id=sid, ordinal=lo_ord),
+                TapeRef(session_id=sid, ordinal=hi_ord),
+            ),
+        )
+        # Anchor: the tape ref immediately before the earliest masked
+        # position, or None for head insertion.
+        anchor: TapeRef | None = None
+        for record in self.tape:
+            if record.ref.ordinal >= lo_ord:
+                break
+            anchor = record.ref
+        self.append_splice(
+            mask=mask,
+            insert_after=anchor,
             payload=(combined,),
             strategy="user_coalesce",
         )
@@ -2054,7 +2172,7 @@ class AgentRuntime:
     async def _compact_and_post(self, args: str) -> None:
         """Run compaction; the compactor's overrides land in the tape.
 
-        The compactor returns one :class:`ContextOverride` whose ref
+        The compactor returns one :class:`ContextSplice` whose ref
         was minted via the ``mint_ref`` factory the runtime provided.
         The runtime is the sole appender: it stores the returned
         override on the tape and publishes ``CompactComplete``.

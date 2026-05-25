@@ -1,9 +1,8 @@
 """Tests for ``AgentRuntime``'s tape-native append API.
 
-These tests pin the C2 contract: ``append_history``, ``append_override``,
-``append_clear``, ``replay_tape``, ``context()``, ``tape``, ``session_id``,
-and the ``history`` readonly compatibility view. Mutation-site
-conversions in C2c are checked by the pre-existing ``runtime_test.py``.
+Covers ``append_history``, ``append_splice``, ``append_clear``,
+``replay_tape``, ``context()``, ``tape``, ``session_id``, and the
+append-time mask-overlap validator (once-overwrite rule).
 """
 
 from __future__ import annotations
@@ -27,9 +26,9 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.tape import (
-    ContextClear,
-    ContextOverride,
+    ContextSplice,
     HistoryRecord,
+    InvalidSpliceError,
     TapeRef,
 )
 
@@ -130,82 +129,83 @@ def test_append_history_preserves_entry_object_identity() -> None:
     assert runtime.context().messages[0] is u
 
 
-# --- append_override --------------------------------------------------------
+# --- append_splice ----------------------------------------------------------
 
 
-def test_append_override_returns_taperef() -> None:
-    """``append_override`` mints a ``TapeRef`` and appends the record."""
+def test_append_splice_returns_taperef() -> None:
+    """``append_splice`` mints a ``TapeRef`` and appends the record."""
     runtime = _runtime()
-    u = UserMessage(text="hi")
-    hist_ref = runtime.append_history(u)
-    over_ref = runtime.append_override(
-        suppresses=(hist_ref,),
+    hist_ref = runtime.append_history(UserMessage(text="hi"))
+    splice_ref = runtime.append_splice(
+        mask=((hist_ref, hist_ref),),
+        insert_after=None,
         payload=(UserMessage(text="[summary]"),),
-        barrier=True,
         strategy="summary",
     )
-    assert over_ref.ordinal == 1
-    assert over_ref.session_id == "s"
+    assert splice_ref.ordinal == 1
+    assert splice_ref.session_id == "s"
 
 
-def test_append_override_records_context_override() -> None:
-    """``append_override`` stores a ``ContextOverride`` with the supplied fields."""
+def test_append_splice_records_context_splice() -> None:
+    """``append_splice`` stores a ``ContextSplice`` with the supplied fields."""
     runtime = _runtime()
     hist_ref = runtime.append_history(UserMessage(text="hi"))
     payload = (UserMessage(text="[summary]"),)
-    over_ref = runtime.append_override(
-        suppresses=(hist_ref,),
-        inject_after=None,
+    splice_ref = runtime.append_splice(
+        mask=((hist_ref, hist_ref),),
+        insert_after=None,
         payload=payload,
         strategy="summary",
-        barrier=True,
         token_before=100,
         token_after=20,
     )
     record = runtime.tape[1]
-    assert isinstance(record, ContextOverride)
-    assert record.ref == over_ref
-    assert record.suppresses == (hist_ref,)
-    assert record.inject_after is None
+    assert isinstance(record, ContextSplice)
+    assert record.ref == splice_ref
+    assert record.mask == ((hist_ref, hist_ref),)
+    assert record.insert_after is None
     assert record.payload == payload
     assert record.strategy == "summary"
-    assert record.barrier is True
     assert record.token_before == 100
     assert record.token_after == 20
 
 
-def test_append_override_changes_resolved_context() -> None:
-    """A visible barrier override replaces the prior context."""
+def test_append_splice_changes_resolved_context() -> None:
+    """A barrier-style splice replaces the prior context."""
     runtime = _runtime()
-    runtime.append_history(UserMessage(text="hi"))
-    runtime.append_history(AssistantMessage(text="hello"))
+    r0 = runtime.append_history(UserMessage(text="hi"))
+    r1 = runtime.append_history(AssistantMessage(text="hello"))
     summary = UserMessage(text="[summary]")
-    runtime.append_override(payload=(summary,), barrier=True, strategy="summary")
+    runtime.append_splice(
+        mask=((r0, r1),),
+        insert_after=None,
+        payload=(summary,),
+        strategy="summary",
+    )
     assert runtime.context().messages == [summary]
 
 
-def test_append_override_supports_user_coalesce_pattern() -> None:
-    """User coalesce shape: suppress prior user, inject combined at prior anchor."""
+def test_append_splice_user_coalesce_pattern() -> None:
+    """Coalesce shape: mask prior user tail, insert combined after preceding ref."""
     runtime = _runtime()
     r0 = runtime.append_history(UserMessage(text="first"))
     r1 = runtime.append_history(UserMessage(text="second"))
     combined = UserMessage(text="first\n\nsecond")
-    runtime.append_override(
-        suppresses=(r1,),
-        inject_after=r0,
+    runtime.append_splice(
+        mask=((r1, r1),),
+        insert_after=r0,
         payload=(combined,),
         strategy="user_coalesce",
     )
     messages = runtime.context().messages
-    assert all(isinstance(m, UserMessage) for m in messages)
     assert [m.text for m in messages if isinstance(m, UserMessage)] == [
         "first",
         "first\n\nsecond",
     ]
 
 
-def test_append_override_supports_detached_splice_pattern() -> None:
-    """Detached splice: anchor on parent assistant, suppress placeholder."""
+def test_append_splice_detached_splice_pattern() -> None:
+    """Detached splice: mask placeholder, anchor on parent assistant."""
     runtime = _runtime()
     runtime.append_history(UserMessage(text="hi"))
     parent_ref = runtime.append_history(
@@ -215,9 +215,9 @@ def test_append_override_supports_detached_splice_pattern() -> None:
         ToolResult(call_id="c1", content="[detached]"),
     )
     real_result = ToolResult(call_id="c1", content="real")
-    runtime.append_override(
-        suppresses=(placeholder_ref,),
-        inject_after=parent_ref,
+    runtime.append_splice(
+        mask=((placeholder_ref, placeholder_ref),),
+        insert_after=parent_ref,
         payload=(real_result,),
         strategy="detached_splice",
         paired_externally=frozenset({"c1"}),
@@ -227,11 +227,70 @@ def test_append_override_supports_detached_splice_pattern() -> None:
     validate_context(messages)
 
 
+# --- append_splice: validation ---------------------------------------------
+
+
+def test_append_splice_rejects_double_mask_of_same_position() -> None:
+    """Two splices trying to mask the same alive HR ref are rejected."""
+    runtime = _runtime()
+    hr = runtime.append_history(UserMessage(text="x"))
+    runtime.append_splice(
+        mask=((hr, hr),),
+        insert_after=None,
+        payload=(UserMessage(text="first"),),
+        strategy="test",
+    )
+    with pytest.raises(InvalidSpliceError, match="overlaps alive splice"):
+        runtime.append_splice(
+            mask=((hr, hr),),
+            insert_after=None,
+            payload=(UserMessage(text="second"),),
+            strategy="test",
+        )
+
+
+def test_append_splice_allows_mask_after_absorbing_prior() -> None:
+    """A splice that masks both the prior splice's ref AND its target passes."""
+    runtime = _runtime()
+    hr = runtime.append_history(UserMessage(text="x"))
+    prior = runtime.append_splice(
+        mask=((hr, hr),),
+        insert_after=None,
+        payload=(UserMessage(text="first"),),
+        strategy="test",
+    )
+    # Re-edit by absorbing the prior splice. Mask range covers both hr
+    # and prior, so prior is absorbed and its masking lapses.
+    runtime.append_splice(
+        mask=((hr, prior),),
+        insert_after=None,
+        payload=(UserMessage(text="second"),),
+        strategy="test",
+    )
+    assert [
+        m.text for m in runtime.context().messages if isinstance(m, UserMessage)
+    ] == ["second"]
+
+
+def test_append_splice_rejects_insert_after_inside_own_mask() -> None:
+    """``insert_after`` pointing into this splice's own mask is rejected."""
+    runtime = _runtime()
+    r0 = runtime.append_history(UserMessage(text="a"))
+    r1 = runtime.append_history(UserMessage(text="b"))
+    with pytest.raises(InvalidSpliceError, match="insert_after"):
+        runtime.append_splice(
+            mask=((r0, r1),),
+            insert_after=r0,
+            payload=(),
+            strategy="test",
+        )
+
+
 # --- append_clear -----------------------------------------------------------
 
 
 def test_append_clear_returns_taperef() -> None:
-    """``append_clear`` mints a ``TapeRef`` for the clear record."""
+    """``append_clear`` mints a ``TapeRef`` for the barrier splice."""
     runtime = _runtime()
     runtime.append_history(UserMessage(text="hi"))
     ref = runtime.append_clear()
@@ -239,17 +298,8 @@ def test_append_clear_returns_taperef() -> None:
     assert ref.session_id == "s"
 
 
-def test_append_clear_records_context_clear() -> None:
-    """``append_clear`` appends a ``ContextClear`` with ``barrier=True``."""
-    runtime = _runtime()
-    runtime.append_clear()
-    record = runtime.tape[0]
-    assert isinstance(record, ContextClear)
-    assert record.barrier is True
-
-
 def test_append_clear_empties_resolved_context() -> None:
-    """``append_clear`` removes prior visible history from resolved context."""
+    """``append_clear`` masks all prior records, yielding empty view."""
     runtime = _runtime()
     runtime.append_history(UserMessage(text="hi"))
     runtime.append_history(AssistantMessage(text="hello"))
@@ -322,19 +372,18 @@ def test_replay_tape_resolves_loaded_history_in_order() -> None:
 
 
 def test_replay_tape_accepts_mixed_record_types() -> None:
-    """Replay handles ``HistoryRecord`` / ``ContextOverride`` / ``ContextClear``."""
+    """Replay handles ``HistoryRecord`` + ``ContextSplice`` together."""
     runtime = _runtime()
     u_ref = TapeRef(session_id="x", ordinal=0)
     runtime.replay_tape(
         [
             HistoryRecord(ref=u_ref, entry=UserMessage(text="hi")),
-            ContextOverride(
+            ContextSplice(
                 ref=TapeRef(session_id="x", ordinal=1),
-                suppresses=(u_ref,),
-                inject_after=None,
+                mask=((u_ref, u_ref),),
+                insert_after=None,
                 payload=(UserMessage(text="[summary]"),),
                 strategy="summary",
-                barrier=True,
             ),
             HistoryRecord(
                 ref=TapeRef(session_id="x", ordinal=2),
@@ -343,7 +392,6 @@ def test_replay_tape_accepts_mixed_record_types() -> None:
         ],
     )
     messages = runtime.context().messages
-    assert all(isinstance(m, UserMessage) for m in messages)
     assert [m.text for m in messages if isinstance(m, UserMessage)] == [
         "[summary]",
         "post",
@@ -407,8 +455,8 @@ def test_full_tool_round_trip_through_append_history_validates() -> None:
     validate_context(runtime.context().messages)
 
 
-def test_compaction_override_via_append_validates() -> None:
-    """A barrier-summary override yields a validation-clean resolved context."""
+def test_compaction_splice_via_append_validates() -> None:
+    """A barrier-summary splice yields a validation-clean resolved context."""
     runtime = _runtime()
     refs: list[TapeRef] = []
     refs.append(runtime.append_history(UserMessage(text="u1")))
@@ -419,11 +467,11 @@ def test_compaction_override_via_append_validates() -> None:
     )
     refs.append(runtime.append_history(ToolResult(call_id="c1", content="ok")))
     refs.append(runtime.append_history(AssistantMessage(text="done")))
-    runtime.append_override(
-        suppresses=tuple(refs),
+    runtime.append_splice(
+        mask=((refs[0], refs[-1]),),
+        insert_after=None,
         payload=(UserMessage(text="[summary]"),),
         strategy="summary",
-        barrier=True,
     )
     runtime.append_history(UserMessage(text="follow up"))
     messages = runtime.context().messages

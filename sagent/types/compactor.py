@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sagent.types.history import HistoryEntry
 from sagent.types.model import Model
-from sagent.types.tape import ContextOverride, TapeRecord, TapeRef
+from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ __all__ = [
 class Compactor(Protocol):
     """Conversation compaction strategy.
 
-    Compactors produce :class:`ContextOverride` events instead of
+    Compactors produce :class:`ContextSplice` events instead of
     replacement history. The agent's wrapper appends the override to
     the runtime tape; the resolver renders it like any other override.
 
@@ -67,7 +67,7 @@ class Compactor(Protocol):
         model: Model,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
-    ) -> ContextOverride:
+    ) -> ContextSplice:
         """Produce a barrier override that replaces older context.
 
         Args:
@@ -80,7 +80,7 @@ class Compactor(Protocol):
           custom_instructions: Extra instructions for the summarizer.
 
         Returns:
-          override: Barrier ``ContextOverride`` with the summary payload.
+          override: Barrier ``ContextSplice`` with the summary payload.
 
         """
         ...

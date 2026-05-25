@@ -8,12 +8,16 @@ The session file is append-only JSONL. Each record carries a ``kind``:
 - ``{"kind": "history", "ref": {...}, "type": "user|assistant|tool_result",
   ...}`` — one ``HistoryRecord`` (entry + ref). Legacy records without
   ``ref`` get a synthetic ref on load.
+- ``{"kind": "context_splice", "ref": {...}, "mask": [[from, to], ...],
+  "insert_after": ref | null, "payload": [...], ...}`` —
+  one ``ContextSplice``.
+
+Legacy formats (read-only; converter promotes them to ``ContextSplice``):
+
 - ``{"kind": "context_override", "ref": {...}, "suppresses": [...],
-  "inject_after": ... | null, "payload": [...], ...}`` —
-  one ``ContextOverride``.
-- ``{"kind": "context_clear", "ref": {...}}`` — one ``ContextClear``.
-- ``{"kind": "clear"}`` — legacy barrier; promoted to ``ContextClear`` on
-  load.
+  "inject_after": ... | null, "payload": [...], "barrier": bool, ...}``
+- ``{"kind": "context_clear", "ref": {...}}``
+- ``{"kind": "clear"}`` (legacy barrier shape from before the splice model)
 - ``{"kind": "update", "id": N, "content": "...", "is_error": false}`` —
   legacy splice patch; applied to the matching ``HistoryRecord.entry``
   during load only.
@@ -45,8 +49,7 @@ from sagent.types.history import (
 )
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.tape import (
-    ContextClear,
-    ContextOverride,
+    ContextSplice,
     HistoryRecord,
     TapeRecord,
     TapeRef,
@@ -56,6 +59,13 @@ from sagent.types.tape import (
 providers_lib = lazy_import("sagent.providers")
 
 logger = logging.getLogger(__name__)
+
+_BARRIER_STRATEGIES: frozenset[str] = frozenset(
+    {"clear", "summary", "summary_fallback", "context_rescue"}
+)
+"""Splice strategies that wipe prior context; the resolver's view after
+one of these is independent of what came before, so the prior
+``tool_state`` snapshot is moot and resets to ``None``."""
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -182,35 +192,26 @@ def _history_record_to_json(record: HistoryRecord) -> dict[str, object]:
     }
 
 
-def _override_to_json(override: ContextOverride) -> dict[str, object]:
-    """Encode a ``ContextOverride`` as a ``kind=context_override`` record."""
-    inject_after: object = (
-        _ref_to_json(override.inject_after)
-        if override.inject_after is not None
-        else None
-    )
+def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
+    """Encode a ``ContextSplice`` as a ``kind=context_splice`` record."""
     return {
-        "kind": "context_override",
-        "ref": _ref_to_json(override.ref),
-        "suppresses": [_ref_to_json(r) for r in override.suppresses],
-        "inject_after": inject_after,
-        "payload": [_entry_to_json(e) for e in override.payload],
-        "strategy": override.strategy,
-        "barrier": override.barrier,
-        "token_before": override.token_before,
-        "token_after": override.token_after,
-        "fallback_reason": override.fallback_reason,
-        "preserved_tail_count": override.preserved_tail_count,
-        "paired_externally": sorted(override.paired_externally),
-    }
-
-
-def _clear_to_json(clear: ContextClear) -> dict[str, object]:
-    """Encode a ``ContextClear`` as a ``kind=context_clear`` record."""
-    return {
-        "kind": "context_clear",
-        "ref": _ref_to_json(clear.ref),
-        "barrier": clear.barrier,
+        "kind": "context_splice",
+        "ref": _ref_to_json(splice.ref),
+        "mask": [
+            [_ref_to_json(r_from), _ref_to_json(r_to)] for r_from, r_to in splice.mask
+        ],
+        "insert_after": (
+            _ref_to_json(splice.insert_after)
+            if splice.insert_after is not None
+            else None
+        ),
+        "payload": [_entry_to_json(e) for e in splice.payload],
+        "strategy": splice.strategy,
+        "token_before": splice.token_before,
+        "token_after": splice.token_after,
+        "fallback_reason": splice.fallback_reason,
+        "preserved_tail_count": splice.preserved_tail_count,
+        "paired_externally": sorted(splice.paired_externally),
     }
 
 
@@ -218,25 +219,27 @@ def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
     """Dispatch by record type to the appropriate JSON encoder."""
     if isinstance(record, HistoryRecord):
         return _history_record_to_json(record)
-    if isinstance(record, ContextOverride):
-        return _override_to_json(record)
-    return _clear_to_json(record)
+    return _splice_to_json(record)
 
 
-def _override_from_json(
+def _splice_from_json(
     rec: Mapping[str, object],
     ref: TapeRef,
-) -> ContextOverride | None:
-    """Decode a ``kind=context_override`` record into a ``ContextOverride``."""
-    raw_suppresses = rec.get("suppresses")
-    suppresses: list[TapeRef] = []
-    if isinstance(raw_suppresses, list):
-        for item in cast(list[object], raw_suppresses):
-            decoded = _ref_from_json(item)
-            if decoded is not None:
-                suppresses.append(decoded)
-    raw_inject = rec.get("inject_after")
-    inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
+) -> ContextSplice | None:
+    """Decode a ``kind=context_splice`` record into a ``ContextSplice``."""
+    raw_mask = rec.get("mask")
+    mask_pairs: list[tuple[TapeRef, TapeRef]] = []
+    if isinstance(raw_mask, list):
+        for item in cast(list[object], raw_mask):
+            if not isinstance(item, list) or len(cast(list[object], item)) != 2:
+                continue
+            pair = cast(list[object], item)
+            r_from = _ref_from_json(pair[0])
+            r_to = _ref_from_json(pair[1])
+            if r_from is not None and r_to is not None:
+                mask_pairs.append((r_from, r_to))
+    raw_insert = rec.get("insert_after")
+    insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
     raw_payload = rec.get("payload")
     payload: list[HistoryEntry] = []
     if isinstance(raw_payload, list):
@@ -253,22 +256,141 @@ def _override_from_json(
             for item in cast(list[object], raw_paired)
             if isinstance(item, str)
         )
-    # ``replay()`` skips payload validation: legacy sessions written
-    # before the pairing invariant existed may carry invalid payloads.
-    # The runtime's rescue path handles whatever the resolved view ends
-    # up looking like.
-    return ContextOverride.replay(
+    # ``replay()`` skips both mask-disjointness and payload-pairing
+    # validation; legacy sessions converted to splice format may carry
+    # masks the validator would reject.
+    return ContextSplice.replay(
         ref=ref,
-        suppresses=tuple(suppresses),
-        inject_after=inject_after,
+        mask=tuple(mask_pairs),
+        insert_after=insert_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        barrier=bool(rec.get("barrier", False)),
         token_before=int_val(rec.get("token_before"), 0),
         token_after=int_val(rec.get("token_after"), 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
         preserved_tail_count=int_val(rec.get("preserved_tail_count"), 0),
         paired_externally=paired,
+    )
+
+
+def _legacy_override_to_splice(
+    rec: Mapping[str, object],
+    ref: TapeRef,
+) -> ContextSplice | None:
+    """Convert legacy ``kind=context_override`` to ``ContextSplice``.
+
+    The conversion:
+      - ``suppresses`` set → single ``mask`` range from min to max ordinal.
+        Non-contiguous suppression is approximated; intervening refs
+        get masked too. Acceptable for legacy data because the affected
+        sessions are already in an indeterminate state (the producer
+        was microcompact, now deleted).
+      - ``inject_after`` → ``insert_after``.
+      - ``barrier=True`` with empty ``suppresses`` → mask range from
+        tape head up to (and including) ``inject_after``, or empty
+        mask if ``inject_after`` is None and the producer relied on
+        barrier semantics alone.
+
+    Args:
+      rec: Decoded legacy record.
+      ref: Synthetic or persisted ref for the new splice.
+
+    Returns:
+      splice: ``ContextSplice`` carrying the legacy producer's intent.
+
+    """
+    raw_suppresses = rec.get("suppresses")
+    suppresses: list[TapeRef] = []
+    if isinstance(raw_suppresses, list):
+        for item in cast(list[object], raw_suppresses):
+            decoded = _ref_from_json(item)
+            if decoded is not None:
+                suppresses.append(decoded)
+    raw_inject = rec.get("inject_after")
+    inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
+    barrier = bool(rec.get("barrier", False))
+    if suppresses:
+        lo = min(r.ordinal for r in suppresses)
+        hi = max(r.ordinal for r in suppresses)
+        sid = suppresses[0].session_id
+        mask = (
+            (TapeRef(session_id=sid, ordinal=lo), TapeRef(session_id=sid, ordinal=hi)),
+        )
+    elif barrier and inject_after is not None:
+        sid = inject_after.session_id
+        mask = ((TapeRef(session_id=sid, ordinal=0), inject_after),)
+    elif barrier:
+        sid = ref.session_id
+        prev_ord = max(0, ref.ordinal - 1)
+        mask = (
+            (
+                TapeRef(session_id=sid, ordinal=0),
+                TapeRef(session_id=sid, ordinal=prev_ord),
+            ),
+        )
+    else:
+        mask = ()
+    raw_payload = rec.get("payload")
+    payload: list[HistoryEntry] = []
+    if isinstance(raw_payload, list):
+        for item in cast(list[object], raw_payload):
+            if isinstance(item, dict):
+                entry = _entry_from_json(cast(Mapping[str, object], item))
+                if entry is not None:
+                    payload.append(entry)
+    raw_paired = rec.get("paired_externally")
+    paired: frozenset[str] = frozenset()
+    if isinstance(raw_paired, list):
+        paired = frozenset(
+            str(item)
+            for item in cast(list[object], raw_paired)
+            if isinstance(item, str)
+        )
+    return ContextSplice.replay(
+        ref=ref,
+        mask=mask,
+        insert_after=inject_after,
+        payload=tuple(payload),
+        strategy=str(rec.get("strategy") or ""),
+        token_before=int_val(rec.get("token_before"), 0),
+        token_after=int_val(rec.get("token_after"), 0),
+        fallback_reason=str(rec.get("fallback_reason") or ""),
+        preserved_tail_count=int_val(rec.get("preserved_tail_count"), 0),
+        paired_externally=paired,
+    )
+
+
+def _legacy_clear_to_splice(ref: TapeRef, last_visible_ord: int) -> ContextSplice:
+    """Convert a legacy ``kind=context_clear`` / ``kind=clear`` to splice.
+
+    A clear was a full-prefix barrier with no payload. The equivalent
+    splice masks every record on the tape so far and inserts nothing.
+
+    Args:
+      ref: Synthetic or persisted ref for the new splice.
+      last_visible_ord: Ordinal of the most recent record on the tape
+          before the clear; ``-1`` when the tape was empty.
+
+    Returns:
+      splice: Equivalent ``ContextSplice``.
+
+    """
+    if last_visible_ord < 0:
+        mask: tuple[tuple[TapeRef, TapeRef], ...] = ()
+    else:
+        sid = ref.session_id
+        mask = (
+            (
+                TapeRef(session_id=sid, ordinal=0),
+                TapeRef(session_id=sid, ordinal=last_visible_ord),
+            ),
+        )
+    return ContextSplice.replay(
+        ref=ref,
+        mask=mask,
+        insert_after=None,
+        payload=(),
+        strategy="clear",
     )
 
 
@@ -586,7 +708,7 @@ def load_session(
     - ``kind=history`` without a ref → ``HistoryRecord`` with a
       synthetic ref minted from the loaded session id and a monotonic
       ordinal cursor.
-    - ``kind=clear`` → ``ContextClear`` with a synthetic ref.
+    - ``kind=clear`` → barrier ``ContextSplice`` with a synthetic ref.
     - ``kind=update`` → applied in-place to the matching
       ``HistoryRecord.entry`` (best-effort; dropped if no match).
 
@@ -647,24 +769,35 @@ def load_session(
                 elif kind == "tool_state":
                     snapshot = dict(rec)
                 elif kind == "clear":
-                    tape.append(ContextClear(ref=_next_synthetic_ref()))
+                    ref = _next_synthetic_ref()
+                    last_ord = tape[-1].ref.ordinal if tape else -1
+                    tape.append(_legacy_clear_to_splice(ref, last_ord))
                     snapshot = None
                 elif kind == "context_clear":
                     ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                    tape.append(
-                        ContextClear(ref=ref, barrier=bool(rec.get("barrier", True)))
-                    )
+                    last_ord = tape[-1].ref.ordinal if tape else -1
+                    tape.append(_legacy_clear_to_splice(ref, last_ord))
                     snapshot = None
                 elif kind == "history":
                     entry = _entry_from_json(rec)
                     if entry is not None:
                         ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
                         tape.append(HistoryRecord(ref=ref, entry=entry))
-                elif kind == "context_override":
+                elif kind == "context_splice":
                     ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                    override = _override_from_json(rec, ref)
-                    if override is not None:
-                        tape.append(override)
+                    splice = _splice_from_json(rec, ref)
+                    if splice is not None:
+                        tape.append(splice)
+                        if splice.strategy in _BARRIER_STRATEGIES:
+                            snapshot = None
+                elif kind == "context_override":
+                    # Legacy: convert to ContextSplice on read.
+                    ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
+                    splice = _legacy_override_to_splice(rec, ref)
+                    if splice is not None:
+                        tape.append(splice)
+                        if splice.strategy in _BARRIER_STRATEGIES:
+                            snapshot = None
                 elif kind == "update":
                     # Legacy splice patch: apply to the latest matching
                     # ``HistoryRecord.entry`` in place; dropped silently
@@ -701,7 +834,7 @@ def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:
     for record in tape:
         if isinstance(record, HistoryRecord):
             max_id = max(max_id, record.entry.id)
-        elif isinstance(record, ContextOverride):
+        else:
             for entry in record.payload:
                 max_id = max(max_id, entry.id)
     if max_id >= 0:
@@ -747,7 +880,7 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> list[TapeRecord]:
 
     Both shapes are then materialized as tape edits: synthesized
     ``ToolResult`` entries become fresh ``HistoryRecord``s; dropped
-    orphan ``ToolResult`` records get a ``ContextOverride`` that
+    orphan ``ToolResult`` records get a ``ContextSplice`` that
     suppresses them. The result is a tape whose resolved view matches
     :func:`repair_dangling_tool_calls`'s output bit-for-bit.
 
@@ -790,17 +923,18 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> list[TapeRecord]:
             assert isinstance(record, HistoryRecord)
             suppress_refs.append(record.ref)
     if suppress_refs:
-        ref = TapeRef(session_id=session_id, ordinal=next_ordinal)
-        next_ordinal += 1
-        new_tape.append(
-            ContextOverride(
-                ref=ref,
-                suppresses=tuple(suppress_refs),
-                inject_after=None,
-                payload=(),
-                strategy="orphan_tool_result_repair",
-            ),
-        )
+        for orphan in suppress_refs:
+            ref = TapeRef(session_id=session_id, ordinal=next_ordinal)
+            next_ordinal += 1
+            new_tape.append(
+                ContextSplice(
+                    ref=ref,
+                    mask=((orphan, orphan),),
+                    insert_after=None,
+                    payload=(),
+                    strategy="orphan_tool_result_repair",
+                ),
+            )
     # Synthesized ``[interrupted]`` ``ToolResult`` entries land at the
     # end of ``repaired``; append as fresh ``HistoryRecord``s.
     for idx in range(len(history_entries), len(repaired)):

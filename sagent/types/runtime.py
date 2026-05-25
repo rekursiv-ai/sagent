@@ -21,7 +21,7 @@ from sagent.types.history import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import ContextOverride
+from sagent.types.tape import ContextSplice
 
 
 __all__ = [
@@ -307,13 +307,13 @@ class CompactStarted:
 class CompactComplete:
     """Compaction task finished; compactor's overrides are in the tape.
 
-    The compaction task appends one or more ``ContextOverride`` records
+    The compaction task appends one or more ``ContextSplice`` records
     directly to the runtime tape. This event tells observers (renderers,
     persistence) that compaction is done and exposes the appended
     records plus fallback metadata.
     """
 
-    records: tuple[ContextOverride, ...]
+    records: tuple[ContextSplice, ...]
     """Overrides appended by the compactor (typically one barrier)."""
 
     fallback_reason: str = ""

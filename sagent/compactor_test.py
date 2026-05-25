@@ -26,7 +26,7 @@ from sagent.types.history import (
 )
 from sagent.types.model import Model, ModelRequest, ModelResponse
 from sagent.types.tape import (
-    ContextOverride,
+    ContextSplice,
     HistoryRecord,
     TapeRecord,
     TapeRef,
@@ -58,7 +58,7 @@ async def _build_compact_override(
     model: Model,
     *,
     custom_instructions: str | None = None,
-) -> ContextOverride:
+) -> ContextSplice:
     """Test helper: run ``compactor.compact`` and return the raw override."""
     tape: list[TapeRecord] = list(_tape_from(history))
     mint = _ref_factory(start=len(tape))

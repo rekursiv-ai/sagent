@@ -167,8 +167,8 @@ def load_tool_description(name: str) -> str:
     Tool descriptions are optional prompt fragments, so missing files soft-fail
     to a generic agent-visible description. Other recipe assets stay strict at
     their call sites. Paths are explicit in recipe.yaml -- no fallback search.
-    Substitutes ``{{NOW}}`` with the current
-    ``Month YYYY``.
+    Substitutes ``{{NOW}}`` with the current local date and time
+    (``Weekday, Month DD, YYYY HH:MM ZZZ``).
 
     Args:
       name: Tool name (case-insensitive lookup).
@@ -196,7 +196,7 @@ def load_tool_description(name: str) -> str:
         )
         return _MISSING_TOOL_DESCRIPTION
     if _NOW_PLACEHOLDER in text:
-        text = text.replace(_NOW_PLACEHOLDER, time.strftime("%B %Y"))
+        text = text.replace(_NOW_PLACEHOLDER, time.strftime("%A, %B %d, %Y %H:%M %Z"))
     return text
 
 
