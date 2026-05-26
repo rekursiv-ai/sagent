@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import json
 import logging
@@ -119,6 +119,19 @@ def searxng(
 # ---------------------------------------------------------------------------
 
 _DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
+_DUCKDUCKGO_HEADERS = {
+    "Accept": "*/*",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Accept-Language": "all,all-ALL;q=0.7",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Referer": _DUCKDUCKGO_URL,
+}
+_DUCKDUCKGO_COOKIES = {"kl": "wt-wt"}
+_DUCKDUCKGO_MAX_QUERY_CHARS = 499
 
 
 def duckduckgo(
@@ -140,13 +153,54 @@ def duckduckgo(
       results: Parsed search results.
 
     """
+    if len(query) > _DUCKDUCKGO_MAX_QUERY_CHARS:
+        return []
+    request_headers = dict(_DUCKDUCKGO_HEADERS)
+    if headers:
+        request_headers.update(headers)
     body = fetch(
         _DUCKDUCKGO_URL,
         method="POST",
-        data={"q": query, "b": ""},
-        headers=headers,
+        data={"q": _duckduckgo_quote_bangs(query), "b": "", "kl": "wt-wt"},
+        headers=request_headers,
+        cookies=_DUCKDUCKGO_COOKIES,
+        raw_headers=True,
     )
-    return _duckduckgo_parse(body.decode("utf-8"), num_results)
+    html = body.decode("utf-8")
+    _duckduckgo_check_captcha(html)
+    return _duckduckgo_parse(html, num_results)
+
+
+def _duckduckgo_quote_bangs(query: str) -> str:
+    """Quote DDG bang tokens to keep them in ordinary web search."""
+    return " ".join(
+        f"'{token}'" if token.startswith("!") else token for token in query.split()
+    )
+
+
+def _duckduckgo_check_captcha(page_html: str) -> None:
+    """Raise when DDG returns its challenge page."""
+    soup = bs4.BeautifulSoup(page_html, "html.parser")
+    if soup.select_one("form#challenge-form") is not None:
+        raise CaptchaError("DuckDuckGo returned a CAPTCHA challenge.")
+
+
+def _duckduckgo_extract_url(href: str) -> str | None:
+    """Extract a usable URL from DDG result links."""
+    if not href:
+        return None
+    url = f"https:{href}" if href.startswith("//") else href
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+    if (
+        hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com")
+    ) and parsed.path == "/l/":
+        wrapped = parse_qs(parsed.query).get("uddg", [])
+        if wrapped:
+            return wrapped[0]
+    if parsed.scheme in {"http", "https"}:
+        return url
+    return None
 
 
 def _duckduckgo_parse(
@@ -157,28 +211,27 @@ def _duckduckgo_parse(
     soup = bs4.BeautifulSoup(page_html, "html.parser")
     _strip_scripts(soup)
     results: list[SearchResult] = []
-
-    for div in soup.select("div.result"):
-        a = div.select_one("a.result__a")
-        if a is None:
+    for container in soup.select("div#links > div.web-result"):
+        link = container.select_one("h2 a[href]")
+        if link is None:
             continue
-        href = a.get("href", "")
-        if not isinstance(href, str) or not href.startswith("http"):
+        href = link.get("href", "")
+        if not isinstance(href, str):
             continue
-        title = _clean_text(a.get_text(separator=" ", strip=True))
+        url = _duckduckgo_extract_url(href)
+        if url is None:
+            continue
+        title = _clean_text(link.get_text(separator=" ", strip=True))
         if not title:
             continue
 
-        snippet_el = div.select_one("a.result__snippet")
+        snippet_el = container.select_one("a.result__snippet")
         snippet = (
             _clean_text(snippet_el.get_text(separator=" ", strip=True))
-            if snippet_el
+            if snippet_el is not None
             else ""
         )
-
-        results.append(
-            SearchResult(url=href, title=title, snippet=snippet),
-        )
+        results.append(SearchResult(url=url, title=title, snippet=snippet))
         if len(results) >= max_results:
             break
 

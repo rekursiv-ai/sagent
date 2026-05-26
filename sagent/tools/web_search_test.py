@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.lib.web.search import SearchResult
+from sagent.lib.web.search import CaptchaError, SearchResult
 from sagent.tools.web_search import WebSearch, _build_query
 from sagent.types.history import ToolResult
 
@@ -123,6 +123,16 @@ def test_run_value_error_returns_tool_result_error() -> None:
         result = asyncio.run(WebSearch().run({"query": "x"}))
     assert result.is_error
     assert "nope" in result.content
+
+
+def test_run_captcha_error_returns_tool_result_error() -> None:
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=CaptchaError("captcha"),
+    ):
+        result = asyncio.run(WebSearch().run({"query": "x"}))
+    assert result.is_error
+    assert "captcha" in result.content
 
 
 def test_run_invalid_backend() -> None:

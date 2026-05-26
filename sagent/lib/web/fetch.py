@@ -98,6 +98,7 @@ def _build_headers(
     url: str,
     content_type: str | None,
     extra: dict[str, str] | None,
+    raw_headers: bool,
 ) -> dict[str, str]:
     """Build canonical-order Chrome request headers.
 
@@ -121,6 +122,8 @@ def _build_headers(
     automatically right after Host when body is present, which matches
     Chrome's POST wire order.
     """
+    if raw_headers:
+        return dict(extra or {})
     h: dict[str, str] = {
         "Connection": "keep-alive",
         "sec-ch-ua": _CHROME_SIGNATURE[1],
@@ -193,6 +196,7 @@ def fetch(
     json: JSONValue = ...,
     headers: dict[str, str] | None = ...,
     cookies: dict[str, str] | None = ...,
+    raw_headers: bool = ...,
     retries: int = ...,
     timeout_sec: float = ...,
     max_redirects: int = ...,
@@ -212,6 +216,7 @@ def fetch(
     json: JSONValue = ...,
     headers: dict[str, str] | None = ...,
     cookies: dict[str, str] | None = ...,
+    raw_headers: bool = ...,
     retries: int = ...,
     timeout_sec: float = ...,
     max_redirects: int = ...,
@@ -231,6 +236,7 @@ def fetch(
     json: JSONValue = None,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
+    raw_headers: bool = False,
     retries: int = 0,
     timeout_sec: float = 30,
     max_redirects: int = _DEFAULT_MAX_REDIRECTS,
@@ -251,6 +257,7 @@ def fetch(
         Mutually exclusive with ``data``.
       headers: Extra headers; merged with defaults (caller wins).
       cookies: Cookie name-value pairs, serialized to a Cookie header.
+      raw_headers: Send exactly ``headers`` plus cookies and auth; skip defaults.
       retries: Number of retry attempts for transient failures.
       timeout_sec: Socket timeout in seconds.
       max_redirects: Maximum redirects to follow. 0 to disable.
@@ -288,6 +295,7 @@ def fetch(
         url=url,
         content_type=body_content_type,
         extra=headers,
+        raw_headers=raw_headers,
     )
     if basic_auth is not None:
         merged.setdefault("Authorization", basic_auth)
