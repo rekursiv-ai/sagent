@@ -51,7 +51,6 @@ from sagent.types.exceptions import PromptTooLongError
 from sagent.types.history import (
     AssistantMessage,
     ToolCall,
-    ToolResult,
     UserMessage,
 )
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
@@ -61,6 +60,14 @@ logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+_GOOGLE_THINKING_BUDGETS = {
+    "min": 1_024,
+    "low": 4_096,
+    "medium": 8_192,
+    "high": 16_384,
+    "xhigh": 20_480,
+    "max": 24_576,
+}
 
 
 class Google:
@@ -219,6 +226,12 @@ class _GeminiModel:
                 self._client = httpx.AsyncClient()
             return self._client
 
+    async def close(self) -> None:
+        """Close the reusable HTTP client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     @property
     def max_request_tokens(self) -> int:
         """Maximum input tokens the model accepts."""
@@ -242,12 +255,12 @@ class _GeminiModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether the model supports extended thinking."""
-        return False
+        return self._profile.supports_thinking
 
     @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
-        return False
+        return self._profile.supports_thinking
 
     @property
     def supports_cache_control(self) -> bool:
@@ -393,7 +406,7 @@ class _GeminiModel:
         Args:
           request: Fully-built model request.
           on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Ignored (Gemini streams thinking inline as text).
+          on_thinking: Called per thinking chunk; ``None`` disables thinking streaming.
 
         Returns:
           response: Parsed ``ModelResponse`` with usage and cost filled in.
@@ -403,7 +416,6 @@ class _GeminiModel:
           ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
-        del on_thinking  # gemini streams thinking inline as text; no separate hook
         url = f"{_API_BASE}/models/{self._model_id}:streamGenerateContent?alt=sse"
         body = _build_request(request, self.max_image_dim, self.max_image_bytes)
         client = await self._get_client()
@@ -430,7 +442,10 @@ class _GeminiModel:
                     raise ValueError(f"Google API 400: {err_body}")
             r.raise_for_status()
             return await _consume_gemini_stream(
-                r, on_text=on_text, pricing=self._profile.pricing
+                r,
+                on_text=on_text,
+                on_thinking=on_thinking,
+                pricing=self._profile.pricing,
             )
 
 
@@ -541,9 +556,14 @@ def _build_request(
                     pending_tool_parts.append(block)
     _flush_tool_parts(contents, pending_tool_parts)
 
-    gen_config: MutableJSON = cast(MutableJSON, {"temperature": request.temperature})
+    thinking_config = _thinking_config(request)
+    gen_config: MutableJSON = {}
+    if thinking_config is None:
+        gen_config["temperature"] = request.temperature
     if request.max_response_tokens is not None:
         gen_config["maxOutputTokens"] = request.max_response_tokens
+    if thinking_config is not None:
+        gen_config["thinkingConfig"] = cast(MutableJSONValue, thinking_config)
     body: MutableJSON = cast(
         MutableJSON,
         {
@@ -577,6 +597,21 @@ def _build_request(
             ],
         )
     return body
+
+
+def _thinking_config(request: ModelRequest) -> MutableJSON | None:
+    """Return Gemini thinking config for a sagent request."""
+    if request.effort is not None:
+        budget = _GOOGLE_THINKING_BUDGETS.get(request.effort)
+        if budget is None:
+            valid = ", ".join(sorted(_GOOGLE_THINKING_BUDGETS))
+            raise ValueError(
+                f"Invalid Google effort {request.effort!r}. Valid efforts: {valid}.",
+            )
+        return {"includeThoughts": True, "thinkingBudget": budget}
+    if request.thinking in ("adaptive", "enabled"):
+        return {"includeThoughts": True, "thinkingBudget": -1}
+    return None
 
 
 def _attachment_part(
@@ -617,6 +652,7 @@ async def _consume_gemini_stream(
     r: httpx.Response,
     *,
     on_text: Callable[[str], None] | None,
+    on_thinking: Callable[[str], None] | None = None,
     pricing: Pricing,
     chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
@@ -627,9 +663,12 @@ async def _consume_gemini_stream(
     events.
     """
     text_chunks: list[str] = []
+    thinking_chunks: list[str] = []
     tool_calls: list[ToolCall] = []
     usage: MutableJSON = {}
     finish_reason: str | None = None
+    malformed_chunks = 0
+    parsed_chunks = 0
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
@@ -644,8 +683,11 @@ async def _consume_gemini_stream(
                 continue
             try:
                 event = cast(MutableJSON, json.loads(data_str))
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                malformed_chunks += 1
+                logger.warning("Google stream malformed JSON chunk: %s", exc)
                 continue
+            parsed_chunks += 1
             if chunk_unwrap is not None:
                 event = chunk_unwrap(event)
             event_usage = event.get("usageMetadata")
@@ -663,7 +705,11 @@ async def _consume_gemini_stream(
             for part in parts:
                 if "text" in part:
                     chunk = part.get("text")
-                    if isinstance(chunk, str):
+                    if isinstance(chunk, str) and part.get("thought") is True:
+                        thinking_chunks.append(chunk)
+                        if on_thinking is not None:
+                            on_thinking(chunk)
+                    elif isinstance(chunk, str):
                         text_chunks.append(chunk)
                         if on_text is not None:
                             on_text(chunk)
@@ -681,8 +727,12 @@ async def _consume_gemini_stream(
                             )
                         )
 
+    if malformed_chunks and not parsed_chunks:
+        raise ValueError("Google stream returned only malformed JSON chunks.")
+
     return _build_response(
         text="".join(text_chunks),
+        thinking="".join(thinking_chunks),
         tool_calls=tool_calls,
         usage=usage,
         finish_reason=finish_reason,
@@ -693,6 +743,7 @@ async def _consume_gemini_stream(
 def _build_response(
     *,
     text: str,
+    thinking: str = "",
     tool_calls: list[ToolCall],
     usage: MutableJSON,
     finish_reason: str | None,
@@ -711,7 +762,13 @@ def _build_response(
     # Gemini doesn't expose a stable message id - synthesize one.
     message_id = f"gemini_{uuid.uuid4().hex[:16]}"
     return ModelResponse(
-        message=AssistantMessage(text=text, tool_calls=tuple(tool_calls)),
+        message=AssistantMessage(
+            text=text,
+            thinking_blocks=({"type": "thinking", "thinking": thinking},)
+            if thinking
+            else (),
+            tool_calls=tuple(tool_calls),
+        ),
         tokens=TokenCount(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -728,9 +785,3 @@ def _build_response(
         output_cost=out_cost,
         total_cost=total_cost,
     )
-
-
-# Force ToolResult into the import graph so attachment translation works when
-# we add full ToolResult-driven plumbing in step 5; the type itself is the
-# attachments container the Read tool produces.
-_ = ToolResult

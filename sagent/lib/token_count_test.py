@@ -41,6 +41,7 @@ class _StubTool:
     tool_id: str = "application/x-tool-stub"
     description: str = ""
     directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+    clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         del args

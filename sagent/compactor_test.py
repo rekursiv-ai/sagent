@@ -97,6 +97,7 @@ class _ScriptedModel(MockModelCaps):
     model_id: str = "compact-model"
     max_request_tokens: int = 200_000
     stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
+    received: list[ModelRequest] = field(default_factory=list)
     _stream_idx: int = field(default=0, init=False)
     stream_calls: int = field(default=0, init=False)
 
@@ -106,7 +107,8 @@ class _ScriptedModel(MockModelCaps):
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
     ) -> ModelResponse:
-        del request, on_text, on_thinking
+        del on_text, on_thinking
+        self.received.append(request)
         self.stream_calls += 1
         item = self.stream_responses[self._stream_idx]
         self._stream_idx += 1
@@ -318,6 +320,27 @@ async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
     result = await _apply_compact(compactor, history, model)
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_safe_split_handles_large_unresolved_prefix_quickly() -> None:
+    history: list[HistoryEntry] = []
+    for idx in range(10_000):
+        call_id = f"t{idx}"
+        history.append(
+            AssistantMessage(
+                text="",
+                tool_calls=(ToolCall(id=call_id, name="Bash", args={}),),
+            )
+        )
+        if idx % 10:
+            history.append(ToolResult(call_id=call_id, content="done"))
+    compactor = SummaryCompactor(keep_recent=1)
+    model = _ScriptedModel(stream_responses=[_summary_resp("summary")])
+
+    result = await _apply_compact(compactor, history, model)
+
+    assert isinstance(result[0], UserMessage)
 
 
 @pytest.mark.asyncio
@@ -609,6 +632,32 @@ async def test_verify_summary_failure_keeps_first_pass() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert body in first.text
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_retries_with_shrunk_history_on_overflow() -> None:
+    overflow = PromptTooLongError(actual_tokens=24, limit_tokens=8)
+    model = _ScriptedModel(
+        stream_responses=[
+            _summary_resp("first pass"),
+            overflow,
+            ModelResponse(message=AssistantMessage(text="verified after shrink")),
+        ]
+    )
+    compactor = SummaryCompactor(verify_summary=True, max_attempts=3)
+    history: list[HistoryEntry] = [
+        UserMessage(text="first round has enough bytes to drop"),
+        AssistantMessage(text="first response"),
+        UserMessage(text="second round"),
+    ]
+
+    result = await _apply_compact(compactor, history, model)
+
+    assert model.stream_calls == 3
+    assert len(model.received[2].messages) < len(model.received[1].messages)
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert "verified after shrink" in first.text
 
 
 if __name__ == "__main__":

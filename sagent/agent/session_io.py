@@ -25,9 +25,9 @@ Legacy formats (read-only; converter promotes them to ``ContextSplice``):
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import base64
 import dataclasses
@@ -48,6 +48,11 @@ from sagent.types.history import (
     reset_id_counter,
 )
 from sagent.types.model import Model, ModelSpec, TokenCount
+from sagent.types.runtime import (
+    RuntimeEvent,
+    SaveSession,
+    StatusChanged,
+)
 from sagent.types.tape import (
     ContextSplice,
     HistoryRecord,
@@ -55,6 +60,9 @@ from sagent.types.tape import (
     TapeRef,
 )
 
+
+if TYPE_CHECKING:
+    from sagent.agent.agent import Agent
 
 providers_lib = lazy_import("sagent.providers")
 
@@ -695,6 +703,80 @@ def append_session(
             _ = f.write(line + "\n")
 
 
+def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[], None]:
+    """Attach a ``SaveSession`` observer that appends tape deltas to disk.
+
+    Tracks ``len(runtime.tape)`` (not resolved-context length) so
+    compaction barriers and overrides land in the JSONL faithfully.
+    ``meta`` is rewritten on every ``StatusChanged`` so a status edit
+    survives a crash even when no tape record has been appended.
+
+    Called automatically by ``Agent.__init__`` when ``session_dir`` is
+    set, so child agents spawned via ``AgentSpawn`` and any directly-
+    constructed Agent both persist without their host having to
+    remember to wire this up.
+
+    Args:
+      agent: The agent whose tape and meta will be persisted.
+      session_dir: Destination directory; ``session.jsonl`` lives
+          under it. Created on first write.
+
+    Returns:
+      rebaseline: A zero-arg callable that resets the observer's
+          "last persisted" cursor to the current tape length and
+          forces the next event to rewrite ``meta``. Call this from
+          ``Agent.resume()`` after ``replay_tape``: the persisted
+          tape was just loaded from disk; without rebaselining, the
+          next ``SaveSession`` would append all resumed records back
+          to the same file, duplicating them.
+
+    """
+    persisted_tape_len = len(agent.runtime.tape)
+    meta_written = False
+    last_status = agent.status
+
+    def _on_event(event: RuntimeEvent) -> None:
+        nonlocal persisted_tape_len, meta_written, last_status
+        if not isinstance(event, (SaveSession, StatusChanged)):
+            return
+        tape_delta = list(agent.runtime.tape[persisted_tape_len:])
+        status_changed = agent.status != last_status
+        write_meta = tape_delta or status_changed or not meta_written
+        spec = agent.model_spec
+        meta = SessionMeta(
+            session_id=agent.session_id,
+            model_id=agent.model.model_id,
+            provider=spec.provider if spec else "",
+            auth=spec.auth if spec else "",
+            account=(spec.account or "") if spec else "",
+            name=agent.name,
+            status=agent.status,
+            tokens=agent.total_tokens,
+            total_cost_usd=agent.total_cost_usd,
+            num_tool_call_rounds=agent.num_tool_call_rounds,
+            compact_count=agent.compaction_state.compact_count,
+            bash_cwd=agent.tool_state.bash_cwd,
+            total_active_elapsed_seconds=agent.activity.elapsed_seconds,
+        )
+        append_session(
+            session_dir / "session.jsonl",
+            meta=meta.serialize() if write_meta else None,
+            tape_delta=tape_delta or None,
+            tool_state_snapshot=serialize_tool_state(agent.tool_state),
+        )
+        persisted_tape_len = len(agent.runtime.tape)
+        meta_written = True
+        last_status = agent.status
+
+    def _rebaseline() -> None:
+        nonlocal persisted_tape_len, meta_written
+        persisted_tape_len = len(agent.runtime.tape)
+        meta_written = False
+
+    agent.runtime.observers.append(_on_event)
+    return _rebaseline
+
+
 def load_session(
     session_dir: Path,
     defaults: dict[str, object],
@@ -819,9 +901,14 @@ def load_session(
         restore_tool_state(state, snapshot)
     elif meta.bash_cwd:
         state.bash_cwd = meta.bash_cwd
-    tape = _repair_dangling_tape(tape)
+    tape = _repair_dangling_tape(_sort_tape_by_ordinal(tape))
     _seed_id_counter(tape)
     return meta, tape, state
+
+
+def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
+    """Return loaded tape records in canonical ordinal order."""
+    return sorted(tape, key=lambda record: record.ref.ordinal)
 
 
 def _record_ordinal(record: TapeRecord) -> int:

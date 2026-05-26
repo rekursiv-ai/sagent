@@ -134,8 +134,18 @@ class FakeAgent:
 
     @property
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
-        """Read view of bg entries; FakeAgent has no detached merge."""
-        return self._bg
+        """Read view of explicit and detached background entries."""
+        merged: dict[str, BackgroundTaskEntry] = {}
+        for qid, task in self.runtime.detached.items():
+            merged[qid] = BackgroundTaskEntry(
+                task=task,
+                tool_name="?",
+                queue_id=qid,
+                started=0.0,
+                kind="detached",
+            )
+        merged.update(self._bg)
+        return merged
 
     def cancel_background(self, job_id: str) -> None:
         """Remove ``job_id`` from the explicit-bg registry, if present."""
@@ -147,6 +157,11 @@ class FakeAgent:
 
     def halt(self) -> None:
         """Stub for ``AgentLike.halt``; published as a ``Halt`` runtime event."""
+        self.runtime.publish(Halt())
+
+    def shutdown(self, *, force: bool = False) -> None:
+        """Stub for ``AgentLike.shutdown``; publish a halt-like event."""
+        del force
         self.runtime.publish(Halt())
 
     def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:

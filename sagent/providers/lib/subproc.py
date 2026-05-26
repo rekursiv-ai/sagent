@@ -27,13 +27,18 @@ from sagent.lib.json import MutableJSON
 from sagent.types.exceptions import log_task_exception
 
 
-__all__ = ["Subproc"]
+__all__ = ["Subproc", "SubprocessTransportError"]
 
 logger = logging.getLogger(__name__)
 
 
 _STDERR_TAIL_LINES = 100
 _TERMINATE_GRACE_SEC = 2.0
+_READ_IDLE_TIMEOUT_SEC = 60.0
+
+
+class SubprocessTransportError(RuntimeError):
+    """Subprocess transport failed and the provider may respawn."""
 
 
 class Subproc:
@@ -45,6 +50,7 @@ class Subproc:
       tmpdir: Directory deleted by :meth:`close`. ``None`` leaves nothing
           for the wrapper to clean.
       cwd: Working directory for the child. ``None`` inherits.
+      read_timeout_sec: Maximum idle seconds while waiting for one stdout line.
 
     """
 
@@ -55,14 +61,17 @@ class Subproc:
         env: dict[str, str] | None = None,
         tmpdir: Path | None = None,
         cwd: Path | None = None,
+        read_timeout_sec: float = _READ_IDLE_TIMEOUT_SEC,
     ) -> None:
         self._argv = argv
         self._env = env
         self._tmpdir = tmpdir
         self._cwd = cwd
+        self._read_timeout_sec = read_timeout_sec
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._stderr_task: asyncio.Task[None] | None = None
+        self.sagent_google_cli_state: object | None = None
         self._closed = False
 
     async def start(self) -> None:
@@ -102,7 +111,7 @@ class Subproc:
             proc.stdin.write(line.encode() + b"\n")
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as exc:
-            raise RuntimeError(
+            raise SubprocessTransportError(
                 f"subprocess stdin closed: {self._diagnostic()}",
             ) from exc
 
@@ -116,7 +125,15 @@ class Subproc:
         proc = self._proc
         assert proc is not None
         assert proc.stdout is not None
-        raw = await proc.stdout.readline()
+        try:
+            raw = await asyncio.wait_for(
+                proc.stdout.readline(), timeout=self._read_timeout_sec
+            )
+        except TimeoutError as exc:
+            raise SubprocessTransportError(
+                f"subprocess stdout idle timeout after {self._read_timeout_sec:g}s: "
+                f"{self._diagnostic()}",
+            ) from exc
         if not raw:
             return ""
         return raw.rstrip(b"\n").decode("utf-8", errors="replace")

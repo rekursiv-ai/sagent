@@ -30,7 +30,12 @@ import uuid
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
-from sagent.providers import PROVIDER_NAMES, build_provider
+from sagent.providers import (
+    PROVIDER_NAMES,
+    build_provider,
+    default_auth_for_provider,
+)
+from sagent.thinking import ThinkingState
 from sagent.tools.core import (
     agent_counter_var,
     agent_label_var,
@@ -42,6 +47,7 @@ from sagent.tools.core import (
     max_depth_var,
     opt_int,
     opt_str,
+    provider_not_allowed_result,
 )
 from sagent.types.compactor import Compactor
 from sagent.types.history import (
@@ -107,27 +113,13 @@ def _get_agent_class() -> type[_Agent]:
     return agent_lib.Agent
 
 
-class AgentSpawn:
-    """Factory tool: spawn a child agent with per-invocation knobs.
+def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
+    """Build the ``AgentSpawn`` directive schema for a given provider allow-list.
 
-    Constructor args mirror :class:`sagent.agent.Agent.__init__`; any
-    arg left as ``None`` falls through to the parent (or ultimately a
-    hard default) at call time.
-
-    Model selection is exposed to the LLM as four independent strings
-    - ``provider``, ``auth``, ``model_id``, ``account`` - mirroring
-    ``cli.py``'s CLI flags. Each follows the standard ``LLM arg →
-    factory arg → parent.model_spec.<field>`` fallthrough. When every
-    field matches the parent's spec the child simply reuses
-    ``parent.model``; otherwise a fresh ``Model`` is built via
-    :func:`providers.build_provider`.
+    The ``provider`` field's enumeration in the description string is
+    rendered from ``allow_providers``; the rest of the schema is fixed.
     """
-
-    name: str = "AgentSpawn"
-    tool_id: str = "application/x-tool-agentspawn"
-    description: str = load_tool_description("agentspawn")
-    emit_tool_summary: bool = False
-    directive_schema: JSON = json_freeze(
+    return json_freeze(
         {
             "type": "object",
             "properties": {
@@ -147,8 +139,11 @@ class AgentSpawn:
                     "description": (
                         "Provider class name from ``sagent.providers``"
                         " (e.g. "
-                        + ", ".join(f"``{n}``" for n in PROVIDER_NAMES)
-                        + "). Defaults to inheriting the parent's provider."
+                        + ", ".join(f"``{n}``" for n in allow_providers)
+                        + "). Prefer ``*Subscription`` variants when listed;"
+                        " they reuse the host's logged-in CLI subscription"
+                        " and don't need API-key env vars. Defaults to"
+                        " inheriting the parent's provider."
                     ),
                 },
                 "auth": {
@@ -157,7 +152,10 @@ class AgentSpawn:
                         "Auth method suffix - dispatches to"
                         " a zero-argument ``<Provider>.from_<auth>()``"
                         " (for example, ``env`` for API-key environment"
-                        " variables). Defaults to inheriting the parent's auth."
+                        " variables, ``credentials`` for subscription"
+                        " providers). Prefer ``credentials`` over ``env``"
+                        " when the chosen provider supports both. Defaults"
+                        " to inheriting the parent's auth."
                     ),
                 },
                 "model_id": {
@@ -235,6 +233,35 @@ class AgentSpawn:
         }
     )
 
+
+class AgentSpawn:
+    """Factory tool: spawn a child agent with per-invocation knobs.
+
+    Constructor args mirror :class:`sagent.agent.Agent.__init__`; any
+    arg left as ``None`` falls through to the parent (or ultimately a
+    hard default) at call time.
+
+    Model selection is exposed to the LLM as four independent strings
+    - ``provider``, ``auth``, ``model_id``, ``account`` - mirroring
+    ``cli.py``'s CLI flags. Each follows the standard ``LLM arg →
+    factory arg → parent.model_spec.<field>`` fallthrough. When every
+    field matches the parent's spec the child simply reuses
+    ``parent.model``; otherwise a fresh ``Model`` is built via
+    :func:`providers.build_provider`.
+
+    ``allow_providers`` narrows the set of providers exposed to the
+    LLM in :attr:`directive_schema` and gated in :meth:`_resolve_model`.
+    The default ``None`` means "every provider in ``sagent.providers``".
+    Restrict it at construction (typically from ``--allow-providers``)
+    on hosts that only have credentials for a subset.
+    """
+
+    name: str = "AgentSpawn"
+    tool_id: str = "application/x-tool-agentspawn"
+    description: str = load_tool_description("agentspawn")
+    clearable_results: bool = False
+    emit_tool_summary: bool = False
+
     def __init__(
         self,
         *,
@@ -249,9 +276,11 @@ class AgentSpawn:
         compactor: Compactor | None = None,
         max_attempts: int | None = None,
         thinking: str | None = None,
+        thinking_state: ThinkingState | None = None,
         effort: str | None = None,
         session_root_dir: str | Path | None = None,
         verbosity: int = 1,
+        allow_providers: tuple[str, ...] | None = None,
     ) -> None:
         self._provider = provider
         self._auth = auth
@@ -264,11 +293,18 @@ class AgentSpawn:
         self._compactor = compactor
         self._max_attempts = max_attempts
         self._thinking = thinking
+        self._thinking_state = thinking_state
         self._effort = effort
         self._session_root_dir = (
             Path(session_root_dir) if session_root_dir is not None else None
         )
         self._verbosity = verbosity
+        self._allow_providers: tuple[str, ...] = (
+            tuple(allow_providers)
+            if allow_providers is not None
+            else tuple(PROVIDER_NAMES)
+        )
+        self.directive_schema: JSON = _build_directive_schema(self._allow_providers)
         self.on_persistent_spawn: (
             Callable[[str, asyncio.Queue[RuntimeEvent | None]], None] | None
         ) = None
@@ -454,7 +490,7 @@ class AgentSpawn:
             "max_tool_call_rounds": child_max_rounds,
             "session_dir": self._child_session_dir(parent_agent),
         }
-        for name in ("max_attempts", "thinking", "effort"):
+        for name in ("max_attempts", "thinking", "thinking_state", "effort"):
             resolved = self._inherit(name, parent_agent)
             if resolved is not None:
                 init_kwargs[name] = resolved
@@ -646,7 +682,7 @@ class AgentSpawn:
         """Generic ``factory arg → parent → None`` fall-through.
 
         Used for knobs that are NOT LLM-settable: ``compactor``,
-        ``max_attempts``, ``thinking``, ``effort``. The factory stores
+        ``max_attempts``, ``thinking``, ``thinking_state``, ``effort``. The factory stores
         these as ``self._<name>`` (private); the parent exposes them
         as ``<name>`` (public property). Convention is rigid across
         all inheritable knobs so a single arg is enough. When every
@@ -705,13 +741,26 @@ class AgentSpawn:
         p = _pick_field(
             provider, self._provider, parent_spec.provider if parent_spec else None
         )
-        a = _pick_field(auth, self._auth, parent_spec.auth if parent_spec else None)
+        if auth is not None:
+            a = auth
+        elif self._auth is not None:
+            a = self._auth
+        elif parent_spec is not None and p == parent_spec.provider:
+            a = parent_spec.auth
+        elif p is not None:
+            a = default_auth_for_provider(p)
+        else:
+            a = None
         m = _pick_field(
             model_id, self._model_id, parent_spec.model_id if parent_spec else None
         )
         ac = _pick_field(
             account, self._account, parent_spec.account if parent_spec else None
         )
+        if account == "" or self._account == "":
+            return ToolResult(
+                call_id="", content="account cannot be empty.", is_error=True
+            )
 
         if (
             parent_agent is not None
@@ -739,6 +788,11 @@ class AgentSpawn:
                     " to inherit from."
                 ),
                 is_error=True,
+            )
+        parent_provider = parent_spec.provider if parent_spec is not None else None
+        if p != parent_provider and p not in self._allow_providers:
+            return provider_not_allowed_result(
+                p, self._allow_providers, parent_provider
             )
         built_provider = build_provider(p, a, account=ac)
         new_model = built_provider.model(m)
@@ -796,22 +850,29 @@ class AgentSpawn:
         self,
         parent_agent: _Agent | None,
     ) -> Path | None:
-        """Per-child subdir under ``session_root_dir``, or None.
+        """Per-child subdir for transcript persistence, or None.
 
-        Shape: ``<root>/<parent_session_id>/<child_uuid>/``.
+        Two resolution paths:
 
-        Resolution order for root:
-        1. Explicit ``session_root_dir`` from factory construction.
-        2. Parent agent's ``session_dir`` (inherits logging from parent).
-        3. ``None`` → ephemeral (no transcript).
+        1. **Explicit ``session_root_dir``** (factory construction):
+           ``<root>/<parent_session_id>/<child_uuid>/``. The
+           ``parent_session_id`` prefix disambiguates sibling children
+           spawned by different parent sessions that share a flat root
+           (e.g. the slack v1 router pointing every worker at one dir).
+        2. **Inherited from parent's ``session_dir``** (the common path):
+           ``<parent_session_dir>/<child_uuid>/``. The parent's session
+           dir already encodes its identity in its path, so we skip the
+           redundant ``parent_session_id`` prepend that case (1) needs.
+
+        Returns ``None`` when neither source supplies a root (ephemeral
+        child, no transcript).
         """
-        root = self._session_root_dir
-        if root is None and parent_agent is not None:
-            root = parent_agent.session_dir
-        if root is None:
+        if self._session_root_dir is not None:
+            parent_id = parent_agent.session_id if parent_agent is not None else "root"
+            return self._session_root_dir / parent_id / str(uuid.uuid4())
+        if parent_agent is None or parent_agent.session_dir is None:
             return None
-        parent_id = parent_agent.session_id if parent_agent is not None else "root"
-        return root / parent_id / str(uuid.uuid4())
+        return parent_agent.session_dir / str(uuid.uuid4())
 
 
 def _pick_field(

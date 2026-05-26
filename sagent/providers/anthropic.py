@@ -15,7 +15,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import asyncio
@@ -37,7 +37,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log, token_count
-from sagent.lib.json import MutableJSON, json_unfreeze
+from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -56,6 +56,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ _STREAM_IDLE_TIMEOUT = 600.0
 _CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
 _CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
+_REDACT_THINKING_BETA = "redact-thinking-2026-02-12"
+_DEFAULT_API_TARGET_INPUT_TOKENS = 40_000
 
 # Models that support server-side ``clear_tool_uses_20250919``. Per
 # Anthropic docs: Sonnet 4/4.5, Haiku 4.5, Opus 4/4.1/4.5. We treat
@@ -111,6 +114,62 @@ def context_betas(model_id: str) -> list[str]:
     if supports_native_context_management(model_id):
         betas.append(_CONTEXT_MANAGEMENT_BETA)
     return betas
+
+
+def build_context_management(
+    *,
+    has_thinking: bool = False,
+    cache_cold: bool = False,
+    server_side_context_management: bool = False,
+    trigger_tokens: int = 0,
+    target_input_tokens: int = _DEFAULT_API_TARGET_INPUT_TOKENS,
+    tools: Sequence[Tool] = (),
+) -> dict[str, list[MutableJSON]] | None:
+    """Build ``context_management`` body for the Anthropic API.
+
+    Args:
+      has_thinking: Whether thinking mode is active.
+      cache_cold: Whether the prompt cache TTL likely expired.
+      server_side_context_management: Opt in to Anthropic's server-side
+          ``clear_tool_uses_20250919`` beta. Off by default.
+      trigger_tokens: Threshold at which the server starts clearing.
+      target_input_tokens: Desired post-clear token count.
+      tools: Advertised tools; ``Tool.clearable_results`` determines which
+          tool results may be cleared.
+
+    Returns:
+      context_management: Context-management config, or ``None`` if no edits
+          apply.
+
+    """
+    edits: list[MutableJSON] = []
+    if has_thinking:
+        keep: MutableJSON | str = (
+            {"type": "thinking_turns", "value": 1} if cache_cold else "all"
+        )
+        edits.append({"type": "clear_thinking_20251015", "keep": keep})
+    if server_side_context_management and trigger_tokens > 0:
+        clearable = [t.name for t in tools if getattr(t, "clearable_results", False)]
+        unclearable = [
+            t.name for t in tools if not getattr(t, "clearable_results", False)
+        ]
+        clear_at_least = max(trigger_tokens - target_input_tokens, 1_000)
+        edits.append(
+            cast(
+                MutableJSON,
+                {
+                    "type": "clear_tool_uses_20250919",
+                    "trigger": {"type": "input_tokens", "value": trigger_tokens},
+                    "clear_at_least": {
+                        "type": "input_tokens",
+                        "value": clear_at_least,
+                    },
+                    "clear_tool_inputs": clearable,
+                    "exclude_tools": unclearable,
+                },
+            ),
+        )
+    return {"edits": edits} if edits else None
 
 
 # Model limits and pricing.
@@ -228,27 +287,65 @@ class Anthropic:
         ),
     }
 
-    def __init__(self, *, api_key: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        server_side_context_management: bool = False,
+        redact_thinking: bool = False,
+    ) -> None:
         self._api_key = api_key
+        self._server_side_context_management = server_side_context_management
+        self._redact_thinking = redact_thinking
         self._lock = asyncio.Lock()
         self._sdk: anthropic.AsyncAnthropic | None = None
 
+    @property
+    def server_side_context_management(self) -> bool:
+        """Whether Anthropic's ``clear_tool_uses_20250919`` beta is enabled."""
+        return self._server_side_context_management
+
     @classmethod
-    def from_key(cls, api_key: str) -> Anthropic:
+    def from_key(
+        cls,
+        api_key: str,
+        *,
+        server_side_context_management: bool = False,
+        redact_thinking: bool = False,
+    ) -> Anthropic:
         """Create provider from an API key.
 
         Args:
           api_key: Anthropic API key (``sk-ant-...``).
+          server_side_context_management: Opt in to Anthropic's
+              ``clear_tool_uses_20250919`` beta. Defaults to off; sagent's
+              own client-side compactor handles budget. See the runtime
+              prompt section "Context management" for the rationale.
+          redact_thinking: Request redacted thinking blocks from Anthropic.
 
         Returns:
           provider: Configured Anthropic provider instance.
 
         """
-        return cls(api_key=api_key)
+        return cls(
+            api_key=api_key,
+            server_side_context_management=server_side_context_management,
+            redact_thinking=redact_thinking,
+        )
 
     @classmethod
-    def from_env(cls) -> Anthropic:
+    def from_env(
+        cls,
+        *,
+        server_side_context_management: bool = False,
+        redact_thinking: bool = False,
+    ) -> Anthropic:
         """Create provider from ``ANTHROPIC_API_KEY`` env var.
+
+        Args:
+          server_side_context_management: Opt in to Anthropic's
+              ``clear_tool_uses_20250919`` beta. Defaults to off.
+          redact_thinking: Request redacted thinking blocks from Anthropic.
 
         Returns:
           provider: Configured Anthropic provider instance.
@@ -260,7 +357,11 @@ class Anthropic:
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             raise RuntimeError("Anthropic API key not configured.")
-        return cls(api_key=key)
+        return cls(
+            api_key=key,
+            server_side_context_management=server_side_context_management,
+            redact_thinking=redact_thinking,
+        )
 
     def model(
         self, model_id: str | None = None, max_request_tokens: int | None = None
@@ -334,18 +435,21 @@ class Anthropic:
         self,
         system: str | None,
         messages: list[anthropic.types.MessageParam] | None = None,
+        *,
+        cache_ttl: str = "5m",
     ) -> list[anthropic.types.TextBlockParam] | str | anthropic.NotGiven:
         """Build the system prompt for an API call.
 
         Args:
           system: System prompt text, or ``None`` to omit.
           messages: Conversation messages (used by subscription subclass).
+          cache_ttl: Prompt-cache TTL (``5m`` or ``1h``) for providers using blocks.
 
         Returns:
           system_param: System prompt in API format, or ``NOT_GIVEN``.
 
         """
-        del messages  # unused in plain API mode
+        del messages, cache_ttl  # unused in plain API mode
         if system is not None:
             return system
         return anthropic.NOT_GIVEN
@@ -361,6 +465,8 @@ class Anthropic:
 
         """
         betas = context_betas(model_id)
+        if self._redact_thinking:
+            betas.append(_REDACT_THINKING_BETA)
         return {"anthropic-beta": ",".join(betas)} if betas else {}
 
     def extra_body(
@@ -368,19 +474,31 @@ class Anthropic:
         *,
         has_thinking: bool,
         cache_cold: bool,
+        trigger_tokens: int,
+        tools: Sequence[Tool],
     ) -> MutableJSON | None:
         """Return per-request extra body fields.
 
         Args:
           has_thinking: True when the request enables extended thinking.
           cache_cold: True when the cache TTL likely expired.
+          trigger_tokens: Threshold at which server-side clearing starts.
+          tools: Advertised tools, used to derive clearing policy.
 
         Returns:
           body: Extra body payload, or ``None`` to skip.
 
         """
-        del has_thinking, cache_cold
-        return None
+        cm = build_context_management(
+            has_thinking=has_thinking,
+            cache_cold=cache_cold,
+            server_side_context_management=self._server_side_context_management,
+            trigger_tokens=trigger_tokens,
+            tools=tools,
+        )
+        if cm is None:
+            return None
+        return {"context_management": cast(MutableJSONValue, cm)}
 
     async def handle_auth_error(self) -> None:
         """Handle a 401 from the API. No-op for API-key auth."""
@@ -555,7 +673,7 @@ class _AnthropicModel:
     @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
-        return self._provider.subscription
+        return self._provider.server_side_context_management
 
     @property
     def supports_persistent_retry(self) -> bool:
@@ -631,7 +749,9 @@ class _AnthropicModel:
         except anthropic.AuthenticationError:
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
-            kwargs["system"] = self._provider.build_system(request.system, messages)
+            kwargs["system"] = self._provider.build_system(
+                request.system, messages, cache_ttl=request.cache_ttl
+            )
             result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
         return result.input_tokens
 
@@ -699,7 +819,9 @@ class _AnthropicModel:
             "messages": messages,
             "max_tokens": max_tok,
             "temperature": request.temperature,
-            "system": self._provider.build_system(request.system, messages),
+            "system": self._provider.build_system(
+                request.system, messages, cache_ttl=request.cache_ttl
+            ),
         }
         if thinking == "adaptive":
             kwargs["thinking"] = {"type": "adaptive"}
@@ -730,24 +852,13 @@ class _AnthropicModel:
         body = self._provider.extra_body(
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,
+            trigger_tokens=(
+                self.max_request_tokens // 2
+                if supports_native_context_management(self._model_id)
+                else 0
+            ),
+            tools=request.tools or (),
         )
-        if supports_native_context_management(self._model_id):
-            # ``clear_tool_uses_20250919``: server-side clearing of old
-            # tool results when the prompt exceeds ``trigger``. ``keep``
-            # preserves the most recent N tool uses (matches our
-            # ``microcompact_keep_recent`` default). ``clear_at_least``
-            # prevents cache-busting for trivially small clears.
-            cm_config = {
-                "edits": [
-                    {
-                        "type": "clear_tool_uses_20250919",
-                        "trigger": {"type": "input_tokens", "value": 100_000},
-                        "keep": {"type": "tool_uses", "value": 5},
-                        "clear_at_least": {"type": "input_tokens", "value": 1_000},
-                    }
-                ],
-            }
-            body = {**(body or {}), "context_management": cm_config}
         if body is not None:
             kwargs["extra_body"] = body
         headers = self._provider.extra_headers(self._model_id)
@@ -811,7 +922,9 @@ class _AnthropicModel:
         except anthropic.AuthenticationError:
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
-            kwargs["system"] = self._provider.build_system(request.system, messages)
+            kwargs["system"] = self._provider.build_system(
+                request.system, messages, cache_ttl=request.cache_ttl
+            )
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.APIStatusError as e:
             if not _is_prompt_too_long_text(str(e)):

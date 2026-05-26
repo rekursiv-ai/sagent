@@ -44,6 +44,7 @@ class PlayAudio:
 
     name: str = "PlayAudio"
     tool_id: str = "application/x-tool-playaudio"
+    clearable_results: bool = True
     description: str = load_tool_description("PlayAudio")
     directive_schema: JSON = json_freeze(
         {

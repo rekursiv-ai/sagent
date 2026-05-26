@@ -114,6 +114,7 @@ class PaperDetails:
 
     name: str = "PaperDetails"
     tool_id: str = "application/x-tool-paperdetails"
+    clearable_results: bool = True
     description: str = load_tool_description("PaperDetails")
     directive_schema: JSON = json_freeze(
         {

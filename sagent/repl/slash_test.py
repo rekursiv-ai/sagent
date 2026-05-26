@@ -17,6 +17,7 @@ from sagent.repl.slash import (
     Recompact,
     Tasks,
     Text,
+    Thinking,
     Unknown,
     parse_slash,
 )
@@ -68,6 +69,13 @@ def test_parse_slash_recompact_with_args() -> None:
     assert action.args == "extra hints"
 
 
+def test_recompact_action_docstring_describes_compact_alias() -> None:
+    assert Recompact.__doc__ is not None
+    assert "alias" in Recompact.__doc__.lower()
+    assert "/compact" in Recompact.__doc__
+    assert "reload" not in Recompact.__doc__.lower()
+
+
 def test_parse_slash_model_no_args() -> None:
     action = parse_slash("/model")
     assert isinstance(action, ModelSwitch)
@@ -90,6 +98,41 @@ def test_parse_slash_provider_no_args() -> None:
     action = parse_slash("/provider")
     assert isinstance(action, ModelSwitch)
     assert action.args == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "adaptive-show",
+        "adaptive-hide",
+        "on-show",
+        "on-hide",
+        "off-hide",
+        "redact-hide",
+        "adaptive",
+        "on",
+        "off",
+        "redact",
+        "show",
+        "hide",
+    ],
+)
+def test_parse_slash_thinking_commands(command: str) -> None:
+    action = parse_slash(f"/thinking {command}")
+    assert isinstance(action, Thinking)
+    assert action.command == command
+
+
+def test_parse_slash_thinking_missing_mode_returns_unknown() -> None:
+    action = parse_slash("/thinking")
+    assert isinstance(action, Unknown)
+    assert "show" in action.text
+
+
+def test_parse_slash_thinking_unknown_mode_returns_unknown() -> None:
+    action = parse_slash("/thinking nope")
+    assert isinstance(action, Unknown)
+    assert "redact-hide" in action.text
 
 
 def test_parse_slash_halt_no_target() -> None:

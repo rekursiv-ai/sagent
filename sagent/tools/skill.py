@@ -160,6 +160,7 @@ class Skill:
 
     name: str = "Skill"
     tool_id: str = "application/x-tool-skill"
+    clearable_results: bool = False
     description: str = load_tool_description("Skill")
     directive_schema: JSON = json_freeze(
         {

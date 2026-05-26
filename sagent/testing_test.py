@@ -73,6 +73,23 @@ def test_fake_agent_default_state() -> None:
     assert dict(a.background) == {}
 
 
+def test_fake_agent_background_merges_runtime_detached() -> None:
+    a = FakeAgent()
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(0))
+        a.runtime.detached["det-1"] = task
+
+        merged = a.background
+
+        assert merged["det-1"].kind == "detached"
+        assert merged["det-1"].queue_id == "det-1"
+        _ = task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    finally:
+        loop.close()
+
+
 @pytest.mark.asyncio
 async def test_fake_agent_null_model_stream_returns_empty() -> None:
     """The internal ``_NullModel`` wired into the default runtime is callable."""

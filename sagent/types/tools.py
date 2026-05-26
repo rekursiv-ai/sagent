@@ -41,6 +41,9 @@ class Tool(Protocol):
     directive_schema: JSON
     """Frozen JSON Schema for the tool's directive."""
 
+    clearable_results: bool
+    """Whether server-side context management may drop this tool's results."""
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Build a short label for a pending invocation.
 

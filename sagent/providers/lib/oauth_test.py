@@ -91,8 +91,19 @@ def test_parse_manual_auth_code_raw_code_with_state() -> None:
     assert parse_manual_auth_code("abc#stateXY", "stateXY") == "abc"
 
 
-def test_parse_manual_auth_code_raw_code_no_state() -> None:
-    assert parse_manual_auth_code("abc", "ignored") == "abc"
+def test_parse_manual_auth_code_raw_code_no_state_raises() -> None:
+    with pytest.raises(ValueError, match="State missing"):
+        parse_manual_auth_code("abc", "ignored")
+
+
+def test_auth_code_listener_start_twice_raises() -> None:
+    listener = AuthCodeListener("state", port=0)
+    listener.start()
+    try:
+        with pytest.raises(RuntimeError, match="already started"):
+            listener.start()
+    finally:
+        listener.stop()
 
 
 def test_parse_manual_auth_code_empty_raises() -> None:

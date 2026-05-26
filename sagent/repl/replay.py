@@ -53,10 +53,11 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                 thinking_blocks=blocks,
                 tool_calls=calls,
             ):
-                for block in blocks:
-                    body = str(block.get("thinking") or block.get("text") or "")
-                    if body:
-                        printer.write_thinking(body)
+                if agent.show_thinking:
+                    for block in blocks:
+                        body = str(block.get("thinking") or block.get("text") or "")
+                        if body:
+                            printer.write_thinking(body)
                 if text.strip():
                     printer.write_markdown(text)
                 for tc in calls:

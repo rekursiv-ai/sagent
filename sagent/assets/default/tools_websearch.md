@@ -19,6 +19,9 @@ MANDATORY CITATION RULE — strict compliance required:
 Additional notes:
   - Domain allow-lists and block-lists are available for scoping results
   - `backend` selects the search engine: `duckduckgo` (default)
+  - If the chosen backend errors out, is rate-limited, or returns no usable
+    results, retry with a different `backend` before concluding the query is
+    unanswerable. Backends fail independently.
 
 DATE AWARENESS — critical for query accuracy:
   - The current local date and time is {{NOW}}.

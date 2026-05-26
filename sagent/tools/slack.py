@@ -124,6 +124,7 @@ class Slack:
 
     name: str = "Slack"
     tool_id: str = "application/x-tool-slack"
+    clearable_results: bool = False
     description: str = load_tool_description("Slack")
     directive_schema: JSON = json_freeze(
         {

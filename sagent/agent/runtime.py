@@ -296,6 +296,39 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 logger = logging.getLogger(__name__)
 
 
+def widen_barrier_mask(
+    override: ContextSplice,
+    tape: Sequence[TapeRecord],
+) -> ContextSplice:
+    """Rewrite a compaction barrier to cover the current tape.
+
+    Args:
+      override: Compactor-produced barrier splice.
+      tape: Runtime tape at adopt time.
+
+    Returns:
+      widened: ``override`` with its mask widened to the current tape.
+
+    """
+    bounds = _tape_ref_bounds(tape)
+    if bounds is None:
+        return override
+    return dataclasses.replace(override, mask=(bounds,))
+
+
+def _tape_ref_bounds(
+    tape: Sequence[TapeRecord],
+) -> tuple[TapeRef, TapeRef] | None:
+    """Return ordinal bounds for all records in ``tape``."""
+    if not tape:
+        return None
+    refs = [record.ref for record in tape]
+    return min(refs, key=lambda ref: ref.ordinal), max(
+        refs,
+        key=lambda ref: ref.ordinal,
+    )
+
+
 def _sanitize_for_send(
     entries: Sequence[HistoryEntry],
 ) -> tuple[HistoryEntry, ...]:
@@ -662,6 +695,9 @@ class AgentRuntime:
         # Task[None]: tools post results to inbox, not via return value.
         self.detached: dict[str, asyncio.Task[None]] = {}
         self.observers: list[Callable[[RuntimeEvent], None]] = []
+        self.before_tool_spawn: (
+            Callable[[AssistantMessage], RuntimeEvent | None] | None
+        ) = None
         # Lifted from run_forever locals for observer/REPL visibility.
         # Task[None]: tools/model post results to inbox, not via return.
         self.running_tools: dict[str, asyncio.Task[None]] = {}
@@ -749,7 +785,7 @@ class AgentRuntime:
           event: Event to deliver to every observer; exceptions are logged.
 
         """
-        for obs in self.observers:
+        for obs in tuple(self.observers):
             try:
                 obs(event)
             except Exception:
@@ -929,19 +965,17 @@ class AgentRuntime:
             self.tape.append(record)
             self._cached_resolved = None
             self._tape_by_ref[ref] = record
-            self._placeholder_refs.clear()
-            self._parent_assistant_refs.clear()
+            self._clear_detached_anchors()
             return ref
-        first_ref = self.tape[0].ref
-        last_ref = self.tape[-1].ref
+        bounds = _tape_ref_bounds(self.tape)
+        assert bounds is not None
         ref = self.append_splice(
-            mask=((first_ref, last_ref),),
+            mask=(bounds,),
             insert_after=None,
             payload=(),
             strategy="clear",
         )
-        self._placeholder_refs.clear()
-        self._parent_assistant_refs.clear()
+        self._clear_detached_anchors()
         return ref
 
     def replay_tape(self, records: Sequence[TapeRecord]) -> None:
@@ -991,10 +1025,23 @@ class AgentRuntime:
           record: Pre-built tape record whose ``ref`` was minted via
               :meth:`mint_ref` on this runtime.
 
+        Raises:
+          InvalidSpliceError: When ``record`` is a ``ContextSplice``
+              whose mask overlaps another alive splice's mask without
+              absorbing it.
+
         """
+        if isinstance(record, ContextSplice):
+            self._validate_no_alive_mask_overlap(record.mask)
         self.tape.append(record)
         self._cached_resolved = None
         self._index_record(record)
+
+    def _clear_detached_anchors(self) -> None:
+        """Forget per-call detached splice anchors invalidated by barriers."""
+        self._placeholder_refs.clear()
+        self._parent_assistant_refs.clear()
+        self._last_detached_splice_for_call.clear()
 
     def _index_record(self, record: TapeRecord) -> None:
         """Cache ref->record and call_id->anchor mappings after append."""
@@ -1040,17 +1087,17 @@ class AgentRuntime:
         prior = placeholder_record.entry
         if not isinstance(prior, ToolResult):
             return None
-        real = dataclasses.replace(prior, content=content, is_error=is_error)
-        # First splice for this call_id masks the placeholder; subsequent
-        # retries mask the previous splice (since the placeholder is
-        # already masked and the rule forbids double-masking).
         prior_splice_ref = self._last_detached_splice_for_call.get(call_id)
-        if prior_splice_ref is None:
-            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
-                (placeholder_ref, placeholder_ref),
-            )
-        else:
-            mask = ((prior_splice_ref, prior_splice_ref),)
+        visible_refs = set(self.context().origins)
+        target_ref = (
+            prior_splice_ref
+            if prior_splice_ref is not None and prior_splice_ref in visible_refs
+            else placeholder_ref
+        )
+        if target_ref not in visible_refs:
+            return None
+        real = dataclasses.replace(prior, content=content, is_error=is_error)
+        mask = ((target_ref, target_ref),)
         new_ref = self.append_splice(
             mask=mask,
             insert_after=parent_ref,
@@ -1117,6 +1164,15 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                            if self.compact_task:
+                                self.compact_task.cancel()
+                                self.compact_task = None
+                                self.publish(
+                                    CompactFailed(
+                                        exception=asyncio.CancelledError(),
+                                        tape_len=len(self.tape),
+                                    ),
+                                )
                             # Halt intentionally leaves the cohort intact:
                             # running tools keep going and their results land
                             # via the normal cohort gate after the user resumes.
@@ -1142,6 +1198,15 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                            if self.compact_task:
+                                self.compact_task.cancel()
+                                self.compact_task = None
+                                self.publish(
+                                    CompactFailed(
+                                        exception=asyncio.CancelledError(),
+                                        tape_len=len(self.tape),
+                                    ),
+                                )
                             self._stop_all_tools(mode="detach")
                             # Cancel and forget every detached task. Clear
                             # is a hard reset; without this, surviving
@@ -1353,6 +1418,14 @@ class AgentRuntime:
 
                         case ModelResponseComplete(message=msg):
                             self.model_call = None
+                            if self.before_tool_spawn is not None:
+                                rejected = self.before_tool_spawn(msg)
+                                if rejected is not None:
+                                    self.inbox.push_front(
+                                        rejected,
+                                        *items[item_idx + 1 :],
+                                    )
+                                    break
                             self.append_history(msg)
                             self.publish(item)
                             if self._mid_stream_queue:
@@ -2196,6 +2269,7 @@ class AgentRuntime:
                 CompactFailed(exception=exc, tape_len=tape_len),
             )
             return
+        override = widen_barrier_mask(override, self.tape)
         self.adopt_record(override)
         self.inbox.push_back(
             CompactComplete(

@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import override
+from unittest.mock import MagicMock, patch
 
 import asyncio
 import itertools
@@ -15,6 +17,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.state import agent_registry
+from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
 from sagent.tools import agent_spawn as _agent_spawn_mod
 from sagent.tools.agent_spawn import (
@@ -367,7 +370,7 @@ def test_inherit_no_parent() -> None:
 
 
 def test_resolve_model_reuses_parent_when_spec_matches() -> None:
-    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account="")
+    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
     parent = Agent(
         model=StubProviderModel(model_id="stub"),
         tools=[],
@@ -378,7 +381,7 @@ def test_resolve_model_reuses_parent_when_spec_matches() -> None:
         provider="StubP",
         auth="env",
         model_id="stub",
-        account="",
+        account=None,
         parent_agent=parent,
     )
     assert isinstance(resolved, tuple)
@@ -400,6 +403,58 @@ def test_resolve_model_no_args_reuses_parent_model() -> None:
     assert isinstance(resolved, tuple)
     model, _ = resolved
     assert model is parent.model
+
+
+def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:
+    parent = _make_parent()
+    parent.model_spec = ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-5.5",
+        account="work",
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        resolved = AgentSpawn()._resolve_model(
+            provider="Google",
+            auth=None,
+            model_id="gemini-3-pro",
+            account=None,
+            parent_agent=parent,
+        )
+    assert isinstance(resolved, tuple)
+    _, spec = resolved
+    assert spec == ModelSpec(
+        provider="Google",
+        auth="env",
+        model_id="gemini-3-pro",
+        account="work",
+    )
+    build.assert_called_once_with("Google", "env", account="work")
+
+
+def test_resolve_model_rejects_empty_account() -> None:
+    parent = _make_parent()
+    parent.model_spec = ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-5.5",
+        account="work",
+    )
+    result = AgentSpawn()._resolve_model(
+        provider=None,
+        auth=None,
+        model_id="gpt-5",
+        account="",
+        parent_agent=parent,
+    )
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "account cannot be empty" in result.content
 
 
 @pytest.mark.asyncio
@@ -849,9 +904,121 @@ def test_directive_schema_documents_notify_on_asleep() -> None:
     because the schema's nested JSON value type (recursive union) makes
     structural narrowing fragile across type checkers.
     """
-    rendered = repr(AgentSpawn.directive_schema)
+    rendered = repr(AgentSpawn().directive_schema)
     assert "'notify_on_asleep'" in rendered
     assert "'persistent only'" in rendered.lower() or "persistent" in rendered.lower()
+
+
+def test_directive_schema_prefers_subscription_providers() -> None:
+    """The provider/auth descriptions must steer the LLM toward
+    subscription providers so it doesn't default to env-API-key auth
+    on hosts where only a CLI subscription is configured. Regression
+    guard: session b0e1ced6 spawned ``provider="OpenAI", auth="env"``
+    on a host with no API key set, when a subscription variant was
+    available in the schema enumeration.
+    """
+    rendered = repr(AgentSpawn().directive_schema)
+    assert "Subscription" in rendered
+    assert "credentials" in rendered
+
+
+def test_allow_providers_filters_schema_enumeration() -> None:
+    """Restricting ``allow_providers`` narrows the provider enum
+    rendered in the schema description, hiding providers the host has
+    no credentials for. Companion to ``--allow-providers`` CLI flag.
+    """
+    spawn = AgentSpawn(allow_providers=("OpenAISubscription",))
+    rendered = repr(spawn.directive_schema)
+    assert "``OpenAISubscription``" in rendered
+    assert "DashScope" not in rendered
+    assert "MiniMax" not in rendered
+    assert "Moonshot" not in rendered
+
+
+def test_allow_providers_default_includes_all() -> None:
+    """Default construction (no ``allow_providers``) enumerates every
+    provider known to ``sagent.providers``.
+    """
+    spawn = AgentSpawn()
+    rendered = repr(spawn.directive_schema)
+    for name in PROVIDER_NAMES:
+        assert f"``{name}``" in rendered, f"missing {name}"
+
+
+def test_resolve_model_rejects_provider_outside_allow_list() -> None:
+    """An explicit ``provider`` not in the allow list is rejected with
+    a ``ToolResult`` error rather than reaching ``build_provider``.
+    """
+    parent = _make_parent()
+    t = AgentSpawn(allow_providers=("OpenAISubscription",))
+    result = t._resolve_model(
+        provider="Anthropic",
+        auth="env",
+        model_id="claude-opus-4-7",
+        account=None,
+        parent_agent=parent,
+    )
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "not in the allowed list" in result.content
+    assert "Anthropic" in result.content
+
+
+def test_resolve_model_parent_provider_always_allowed() -> None:
+    """The parent's own provider is always accepted, even when not
+    in the allow list -- inheritance must keep working. The returned
+    model must be the parent's exact model instance.
+    """
+    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
+    parent_model = StubProviderModel(model_id="stub")
+    parent = Agent(
+        model=parent_model,
+        tools=[],
+        model_spec=spec,
+    )
+    t = AgentSpawn(allow_providers=("OpenAISubscription",))
+    resolved = t._resolve_model(
+        provider="StubP",
+        auth="env",
+        model_id="stub",
+        account=None,
+        parent_agent=parent,
+    )
+    assert isinstance(resolved, tuple)
+    model, returned_spec = resolved
+    assert model is parent_model
+    assert returned_spec == spec
+
+
+@pytest.mark.asyncio
+async def test_spawned_child_writes_own_session_jsonl(tmp_path: Path) -> None:
+    """Child agents persist their own ``session.jsonl`` under the parent's dir.
+
+    Regression test for session 8588644a: subagents did all the real work
+    (Read/Edit/Write) but their tape was never written to disk because the
+    persistence observer was only installed by the CLI for the root agent.
+    With ``Agent.__init__`` auto-installing the observer when ``session_dir``
+    is set, every child constructed by ``AgentSpawn`` -- which already
+    threads a derived ``session_dir`` through ``_child_session_dir`` --
+    self-persists. This test proves the chain works end-to-end.
+    """
+    parent_model = StubProviderModel(responses=[AssistantMessage(text="child-said")])
+    parent = Agent(model=parent_model, tools=[], session_dir=tmp_path)
+    with _parent_context(parent):
+        t = AgentSpawn()
+        result = await t.run({"prompt": "do it"})
+    assert not result.is_error
+    # Inherited layout: ``<parent_session_dir>/<child_uuid>/session.jsonl``.
+    # The parent's session_dir already encodes its identity, so no
+    # redundant parent_id prepend.
+    child_files = list(tmp_path.glob("*/session.jsonl"))  # noqa: ASYNC240 -- post-spawn test assertion; no live concurrency to protect
+    assert child_files, (
+        f"expected at least one child session.jsonl directly under"
+        f" {tmp_path}; found nothing"
+    )
+    # The child's session.jsonl must carry real records, not be empty.
+    content = child_files[0].read_text(encoding="utf-8")
+    assert content.strip(), "child session.jsonl is empty"
 
 
 if __name__ == "__main__":

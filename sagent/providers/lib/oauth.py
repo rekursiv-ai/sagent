@@ -104,7 +104,9 @@ def parse_manual_auth_code(value: str, expected_state: str) -> str:
             state = ""
     if not code:
         raise ValueError("Authorization code not found")
-    if state and state != expected_state:
+    if not state:
+        raise ValueError("State missing in pasted authorization code")
+    if state != expected_state:
         raise ValueError("State mismatch in pasted authorization code")
     return code
 
@@ -221,6 +223,8 @@ class AuthCodeListener:
 
     def start(self) -> None:
         """Start the localhost HTTP server in a background thread."""
+        if self._server is not None:
+            raise RuntimeError("auth code listener already started")
         self._server = AuthCodeServer(("127.0.0.1", self._port), AuthCodeHandler, self)
         self._thread = threading.Thread(
             target=self._server.serve_forever,

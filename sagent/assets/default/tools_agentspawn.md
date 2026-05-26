@@ -13,19 +13,21 @@ Arguments:
   or files you've read.
 - `system` (optional) — override the child's system prompt. Defaults
   to inheriting this agent's system prompt.
-- `provider` / `auth` / `model_id` / `account` (all optional) —
+- `provider` / `auth` / `model_id` / `account` (all optional) --
   swap the child's model backend. Mirrors the CLI flags:
   `provider` is a class name from `sagent.providers`
   (e.g. `Anthropic`, `Google`, `OpenAI`, `Moonshot`);
   `auth` is the suffix of a zero-argument `from_<auth>` classmethod on that
-  provider (for example, `env` for API-key environment variables);
+  provider (for example, `env` for API-key environment variables,
+  `credentials` for subscription providers);
   `model_id` is the provider-specific model string (e.g.
   `claude-sonnet-4-6`, `gemini-3.1-pro-preview`); `account` selects among
   named credential slots. Each defaults to inheriting
   the parent's value, so passing none = same backend as parent.
-  Common use: `provider="Google", auth="env",
-  model_id="gemini-3.1-pro-preview"` to delegate a review to Gemini
-  Flash while staying on Claude for the main loop.
+  Prefer `*Subscription` providers when listed in the schema; they reuse the
+  host's logged-in CLI subscription and don't need API-key env vars.
+  Example: `provider="OpenAISubscription", model_id="gpt-5.5"` to
+  delegate a review to GPT while staying on Anthropic for the main loop.
 - `tools` (optional) — a list of tool names; the child gets only
   these. Defaults to inheriting this agent's full toolset
   (including this ``AgentSpawn`` tool, so children can spawn their own

@@ -292,7 +292,7 @@ class Compact:
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class Recompact:
-    """Reload last pre-compact transcript and re-run compaction."""
+    """Alias for ``/compact``; trigger context compaction."""
 
     args: str = ""
     """Free-form compaction instructions for the compactor."""

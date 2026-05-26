@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import asyncio
 import json
 
 import pytest
@@ -21,14 +23,19 @@ from sagent.providers.anthropic_cli import (
     _serialize_for_stdin,
     _user_line,
 )
-from sagent.providers.lib.subproc import Subproc
+from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.subproc import (
+    Subproc,
+    SubprocessTransportError,
+)
 from sagent.types.history import (
     AssistantMessage,
+    HistoryEntry,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest
+from sagent.types.model import ModelRequest, ModelResponse
 
 
 _CRED_PAYLOAD: dict[str, object] = {
@@ -364,6 +371,165 @@ def test_should_respawn_triggers() -> None:
     assert model._should_respawn(request) is False
 
 
+@pytest.mark.asyncio
+async def test_stream_eof_respawns_and_resets_sent_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subprocess EOF is transport failure and resets Anthropic send state."""
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+
+    class _DeadProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
+            del skip_non_json
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _DeadProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _DeadProc())
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    with pytest.raises(Exception, match="stdout closed"):
+        await model.stream(request)
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
+@pytest.mark.asyncio
+async def test_stream_read_timeout_respawns_and_resets_sent_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+
+    class _StalledProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            raise SubprocessTransportError("subprocess stdout idle timeout")
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _StalledProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _StalledProc())
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    with pytest.raises(Exception, match="stdout idle timeout"):
+        await model.stream(request)
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
+@pytest.mark.asyncio
+async def test_stream_repeated_transport_failures_trip_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated subprocess transport failures stop respawning indefinitely."""
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+
+    class _DeadProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
+            del skip_non_json
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _DeadProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            if respawn_count == 2:
+                raise RuntimeError("transport failure budget exhausted")
+            return cast(Subproc, _DeadProc())
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+
+    with pytest.raises(Exception, match="stdout closed"):
+        await model.stream(request)
+    with pytest.raises(RuntimeError, match="transport failure budget exhausted"):
+        await model.stream(request)
+
+    assert respawn_count == 2
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
+@pytest.mark.asyncio
+async def test_stream_application_error_does_not_respawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Application ``ValueError`` escapes without subprocess respawn."""
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, object())
+
+        async def respawn(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, object())
+
+    async def _send_entry(proc: Subproc, history: object) -> None:
+        del proc, history
+        raise ValueError("application bug")
+
+    async def _drain_until_result(
+        proc: Subproc,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking
+        raise AssertionError("unreachable")
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
+    monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    with pytest.raises(ValueError, match="application bug"):
+        await model.stream(request)
+    assert respawn_count == 0
+
+
 def test_should_respawn_skips_when_no_active() -> None:
     """Before the first acquire, the model has no active and skips respawn."""
     provider = AnthropicCLI()
@@ -373,13 +539,234 @@ def test_should_respawn_skips_when_no_active() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    spawned_systems: list[str] = []
+    used_systems: list[str] = []
+    warmed = asyncio.Event()
+
+    class _Proc:
+        def __init__(self, system: str) -> None:
+            self.system = system
+
+        async def close(self) -> None:
+            pass
+
+    async def spawn_initialized() -> Subproc:
+        spawned_systems.append(model._pending_system)
+        if len(spawned_systems) == 2:
+            warmed.set()
+        return cast(Subproc, _Proc(model._pending_system))
+
+    async def send_entry(proc: Subproc, entry: HistoryEntry) -> None:
+        del entry
+        used_systems.append(cast(_Proc, proc).system)
+
+    async def drain_until_result(
+        proc: Subproc,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking
+        return ModelResponse(message=AssistantMessage(text="ok"))
+
+    model._hot_spare = HotSpare(spawn_initialized)
+    model._send_entry = send_entry  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    model._drain_until_result = drain_until_result  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+
+    _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
+    await warmed.wait()
+    _ = await model.stream(ModelRequest(messages=[UserMessage(text="b")], system="B"))
+
+    assert used_systems == ["A", "B"]
+    assert spawned_systems == ["A", "A", "B"]
+    await model.close()
+
+
+@pytest.mark.asyncio
+async def test_send_new_entries_skips_assistant_replay() -> None:
+    """Respawn replay sends only user-like entries to the CLI subprocess."""
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    lines: list[str] = []
+
+    class _Proc:
+        async def write_line(self, line: str) -> None:
+            lines.append(line)
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+            del skip_non_json
+            return cast(MutableJSON, {"type": "result", "usage": {}})
+
+    await model._send_new_entries(
+        cast(Subproc, _Proc()),
+        [
+            UserMessage(text="first"),
+            AssistantMessage(text="hidden"),
+            UserMessage(text="second"),
+        ],
+    )
+
+    payloads = [json.loads(line) for line in lines]
+    assert [payload["message"]["content"] for payload in payloads] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    model._turn_count = 100
+    model._last_input_tokens = model._max_request_tokens
+    response = ModelResponse(message=AssistantMessage(text="ok"))
+
+    class _Proc:
+        pass
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        async def respawn(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        def record_success(self) -> None:
+            pass
+
+    async def _send_entry(proc: Subproc, history: HistoryEntry) -> None:
+        del proc, history
+
+    async def _drain_until_result(
+        proc: Subproc,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking
+        return response
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
+    monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
+
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    _ = await model.stream(request)
+
+    assert model._turn_count == 1
+    assert model._last_input_tokens == 0
+    assert model._should_respawn(request) is False
+
+
+@pytest.mark.asyncio
+async def test_background_spare_warm_does_not_reset_active_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+
+    async def _spawn_initialized() -> Subproc:
+        return cast(Subproc, object())
+
+    monkeypatch.setattr(model, "_spawn_initialized", _spawn_initialized)
+    model._turn_count = 7
+    model._last_input_tokens = 123
+
+    await model._spawn_spare_initialized()
+
+    assert model._turn_count == 7
+    assert model._last_input_tokens == 123
+
+
+@pytest.mark.asyncio
+async def test_terminal_is_error_respawns_and_resets_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+
+    class _ErrorProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+            del skip_non_json
+            return cast(MutableJSON, {"type": "result", "is_error": True})
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _ErrorProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _ErrorProc())
+
+    user = UserMessage(text="hi")
+    model._system_hash = _hash_system(None)
+    model._last_sent_index = 0
+    model._sent_history_head = user
+    model._turn_count = 9
+    model._last_input_tokens = 123
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+
+    with pytest.raises(SubprocessTransportError, match="result is_error"):
+        _ = await model.stream(ModelRequest(messages=[user]))
+
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+    assert model._turn_count == 0
+    assert model._last_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_send_new_entries_replay_drains_each_prior_turn() -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+
+    class _Proc:
+        pending = False
+
+        async def write_line(self, line: str) -> None:
+            del line
+            assert not self.pending
+            self.pending = True
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+            del skip_non_json
+            assert self.pending
+            self.pending = False
+            return cast(MutableJSON, {"type": "result", "usage": {}})
+
+    proc = _Proc()
+
+    await model._send_new_entries(
+        cast(Subproc, proc),
+        [
+            UserMessage(text="first"),
+            AssistantMessage(text="hidden"),
+            UserMessage(text="current"),
+        ],
+    )
+
+    assert proc.pending is True
+
+
 def test_serialize_for_stdin_user_passthrough() -> None:
     """``UserMessage`` falls through ``_serialize_for_stdin`` to ``_user_line``."""
     line = _serialize_for_stdin(UserMessage(text="ping"), max_image_dim=8000)
     assert line["type"] == "user"
 
 
-_ = AssistantMessage  # touch the optional import so static checks pass
 _ = ToolCall
 
 

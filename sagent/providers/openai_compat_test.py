@@ -18,7 +18,10 @@ from sagent.providers.openai_compat import (
     consume_stream,
     parse_response,
 )
-from sagent.types.exceptions import PromptTooLongError
+from sagent.types.exceptions import (
+    PromptTooLongError,
+    StreamInterruptedError,
+)
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
@@ -261,7 +264,11 @@ def _sse_response(events: list[MutableJSON]) -> httpx.Response:
     """Build an in-memory httpx Response carrying SSE lines."""
     lines = [f"data: {json.dumps(e)}\n\n" for e in events]
     lines.append("data: [DONE]\n\n")
-    body = "".join(lines).encode()
+    return _sse_response_body("".join(lines).encode())
+
+
+def _sse_response_body(body: bytes) -> httpx.Response:
+    """Build an in-memory httpx Response carrying raw SSE bytes."""
     return httpx.Response(
         200,
         content=body,
@@ -287,6 +294,7 @@ async def test_consume_stream_text_and_usage() -> None:
     resp = await consume_stream(
         r,
         on_text=text_acc.append,
+        on_thinking=None,
         pricing=Pricing(),
         reasoning_field=None,
     )
@@ -345,6 +353,7 @@ async def test_consume_stream_tool_call_accumulates() -> None:
     resp = await consume_stream(
         _sse_response(events),
         on_text=None,
+        on_thinking=None,
         pricing=Pricing(),
         reasoning_field=None,
     )
@@ -376,12 +385,15 @@ async def test_consume_stream_reasoning_captured() -> None:
             ],
         },
     ]
+    thinking_chunks: list[str] = []
     resp = await consume_stream(
         _sse_response(events),
         on_text=None,
+        on_thinking=thinking_chunks.append,
         pricing=Pricing(),
         reasoning_field="reasoning_content",
     )
+    assert thinking_chunks == ["think ", "more"]
     assert resp.message.thinking_blocks == (
         {"type": "reasoning", "text": "think more"},
     )
@@ -394,11 +406,37 @@ async def test_consume_stream_skips_malformed_data() -> None:
         b'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}\n\n'
         b"data: [DONE]\n\n"
     )
-    r = httpx.Response(200, content=body)
     resp = await consume_stream(
-        r, on_text=None, pricing=Pricing(), reasoning_field=None
+        _sse_response_body(body),
+        on_text=None,
+        on_thinking=None,
+        pricing=Pricing(),
+        reasoning_field=None,
     )
     assert resp.message.text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
+    body = (
+        b'data: {"id": "stream-1", "choices": '
+        b'[{"delta": {"content": "partial"}, "finish_reason": "stop"}], '
+        b'"usage": {"prompt_tokens": 4, "completion_tokens": 2}}\n\n'
+    )
+    with pytest.raises(StreamInterruptedError) as exc_info:
+        await consume_stream(
+            _sse_response_body(body),
+            on_text=None,
+            on_thinking=None,
+            pricing=Pricing(request=1.0, response=2.0),
+            reasoning_field=None,
+        )
+    response = exc_info.value.response
+    assert response.message.text == "partial"
+    assert response.message_id == "stream-1"
+    assert response.tokens.input_tokens == 4
+    assert response.tokens.output_tokens == 2
+    assert response.total_cost == pytest.approx(0.000008)
 
 
 class _DummyProvider(OpenAICompat):
@@ -469,13 +507,35 @@ def test_model_properties_defaults() -> None:
     assert m.max_image_bytes == 20 * 1024 * 1024
 
 
-def test_model_is_context_overflow_detection() -> None:
+@pytest.mark.parametrize(
+    "message",
+    [
+        "context_length_exceeded",
+        "Maximum context length blah",
+        "Request size exceeds model context window",
+        "request size exceeds model context",
+        "input too large",
+    ],
+)
+def test_model_is_context_overflow_detection(message: str) -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
-    assert m.is_context_overflow(RuntimeError("context_length_exceeded")) is True
-    assert m.is_context_overflow(RuntimeError("Maximum context length blah")) is True
-    assert m.is_context_overflow(RuntimeError("other failure")) is False
+    assert m.is_context_overflow(RuntimeError(message)) is True
     assert m.is_retryable_provider_error(RuntimeError("transient")) is False
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "other failure",
+        "internal error: too long traceback",
+        "request took too long",
+    ],
+)
+def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> None:
+    p = _DummyProvider.from_key("k")
+    m = p.model()
+    assert m.is_context_overflow(RuntimeError(message)) is False
 
 
 def test_model_max_request_tokens_override() -> None:
@@ -499,6 +559,17 @@ async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() ->
     m = p.model("stub-1")
     req = ModelRequest(messages=[UserMessage(text="hello world")])
     assert await m.actual_request_tokens(req) == m.approx_request_tokens(req)
+
+
+@pytest.mark.asyncio
+async def test_model_close_closes_reusable_http_client() -> None:
+    p = _DummyProvider.from_key("k")
+    m = p.model("stub-1")
+    client = httpx.AsyncClient()
+    m._client = client
+    await m.close()
+    assert client.is_closed
+    assert m._client is None
 
 
 def _make_provider_with_mock(
@@ -549,23 +620,24 @@ async def test_stream_parses_sse_via_mock_transport() -> None:
     assert chunks == ["hi"]
 
 
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (400, "context_length_exceeded"),
+        (400, "input too large"),
+        (413, "context_length_exceeded"),
+        (413, "Request size exceeds model context window"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_stream_400_too_long_raises_prompt_too_long() -> None:
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="context_length_exceeded")
-
-    transport = httpx.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    with pytest.raises(PromptTooLongError):
-        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
-
-
-@pytest.mark.asyncio
-async def test_stream_413_too_long_raises_prompt_too_long() -> None:
+async def test_stream_4xx_context_overflow_raises_prompt_too_long(
+    status_code: int,
+    message: str,
+) -> None:
     """Status code is not the signal: any 4xx with overflow body normalizes."""
 
     def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(413, text="context_length_exceeded")
+        return httpx.Response(status_code, text=message)
 
     transport = httpx.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)

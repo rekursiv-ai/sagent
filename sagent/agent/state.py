@@ -455,6 +455,15 @@ class AgentLike(Protocol):
         """
         ...
 
+    def shutdown(self, *, force: bool = False) -> None:
+        """End the agent serve loop.
+
+        Args:
+          force: When True, also cancel foreground and visible background jobs.
+
+        """
+        ...
+
 
 # Process-wide registry of live agents, keyed by label.
 agent_registry: dict[str, AgentLike] = {}

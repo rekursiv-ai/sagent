@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
 import asyncio
+import base64
 import logging
 
 
@@ -58,6 +59,8 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
+from sagent.agent.agent import _validate_input
+from sagent.agent.background import split_bg_args
 from sagent.lib.json import json_unfreeze
 from sagent.types.exceptions import log_task_exception
 from sagent.types.tools import Tool
@@ -73,7 +76,14 @@ _STARTUP_TIMEOUT_SEC = 10.0
 
 
 class ToolsBridge:
-    """MCP streamable-http server proxying a mutable list of sagent tools.
+    """Provider-scoped MCP server proxying a mutable list of sagent tools.
+
+    This is not an AgentTool parity adapter. CLI providers consume MCP
+    tool calls inside their own turn, so the runtime does not see
+    per-tool ``ToolCall`` entries and cannot publish labels, schedule
+    detached background work, or splice detached results here. The bridge
+    validates arguments, rejects ``background`` / ``delay``, runs the raw
+    tool, and converts its result to MCP content blocks.
 
     Args:
       tools: Initial tool list; subsequent calls to :meth:`update_tools`
@@ -190,11 +200,66 @@ class ToolsBridge:
                         text=f"[Error] unknown tool: {name!r}",
                     )
                 ]
-            result = await tool.run(cast(Mapping[str, object], arguments))
-            text = result.content
-            if result.is_error and text:
-                text = f"[Error] {text}"
-            return [mcp_types.TextContent(type="text", text=text or "")]
+            return await self._call_tool(name, arguments)
+
+    async def _call_tool(
+        self,
+        name: str,
+        arguments: dict[str, object],
+    ) -> list[mcp_types.ContentBlock]:
+        """Run one tool and convert its result to MCP content blocks."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=f"[Error] unknown tool: {name!r}",
+                )
+            ]
+        bg_requested, delay_sec, clean_args = split_bg_args(arguments)
+        validation_error = _validate_input(tool.name, tool.directive_schema, clean_args)
+        if validation_error is not None:
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=f"[Error] {validation_error}",
+                )
+            ]
+        if bg_requested or delay_sec > 0:
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=(
+                        "[Error] MCP bridge cannot detach tool calls; "
+                        "retry without background or delay."
+                    ),
+                )
+            ]
+        try:
+            result = await tool.run(cast(Mapping[str, object], clean_args))
+        except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to MCP error content; server cancellation remains uncaught.
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=f"[Error] {type(exc).__name__}: {exc}",
+                )
+            ]
+        text = result.content
+        if result.is_error:
+            text = f"[Error] {text}" if text else "[Error]"
+        blocks: list[mcp_types.ContentBlock] = [
+            mcp_types.TextContent(type="text", text=text or "")
+        ]
+        blocks.extend(
+            mcp_types.ImageContent(
+                type="image",
+                data=base64.b64encode(att.data).decode(),
+                mimeType=att.descriptor,
+            )
+            for att in result.attachments
+            if att.descriptor.startswith("image/")
+        )
+        return blocks
 
     def _build_app(self, manager: StreamableHTTPSessionManager) -> Starlette:
         """Build the Starlette ASGI app embedding the streamable-http manager."""

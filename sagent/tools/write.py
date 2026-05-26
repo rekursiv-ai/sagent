@@ -28,6 +28,7 @@ class Write:
 
     name: str = "Write"
     tool_id: str = "application/x-tool-write"
+    clearable_results: bool = False
     description: str = load_tool_description("Write")
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+import argparse
 import inspect
+import json
+import logging
 import sys
 
 from sagent.types.providers import Provider
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _MODEL_PROVIDER_MAP: list[tuple[str, str]] = [
@@ -71,23 +79,27 @@ def build_provider(
     auth: str = "env",
     *,
     account: str | None = None,
+    **extra: object,
 ) -> Provider:
-    """Dispatch ``<provider>.from_<auth>()`` or treat *auth* as a literal key.
+    """Dispatch ``<provider>.from_<auth>()``.
 
     Args:
       provider_name: Provider class name (e.g. ``"Anthropic"``).
-      auth: Either a method suffix (``"env"``, ``"credentials"``) or a
-          literal API key string. When no ``from_<auth>`` method exists
-          the value is forwarded to ``from_key(auth)``.
+      auth: Auth method suffix (``"env"``, ``"credentials"``, ``"key"``).
       account: Credential slot forwarded to providers that accept it.
           Ignored by providers without an ``account`` parameter.
+      **extra: Additional kwargs forwarded to the factory IFF its
+          signature accepts them. Lets callers (CLI flags, programmatic
+          users) tune provider-specific knobs (e.g.
+          ``server_side_context_management`` on ``Anthropic``) without
+          this dispatcher needing to know about each one.
 
     Returns:
       provider: Constructed provider instance.
 
     Raises:
       AttributeError: If the provider class is unknown or has no
-          matching auth method and no ``from_key``.
+          matching auth method.
 
     """
     providers = sys.modules["sagent.providers"]
@@ -95,20 +107,137 @@ def build_provider(
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
     factory = getattr(cls, f"from_{auth}", None)
-    if factory is not None:
-        kwargs: dict[str, object] = {}
-        try:
-            sig = inspect.signature(factory)
-        except (TypeError, ValueError):
-            sig = None
-        if sig is not None and "account" in sig.parameters:
-            kwargs["account"] = account
-        return factory(**kwargs)
-    # No from_{auth} method — treat auth as a literal API key.
-    from_key = getattr(cls, "from_key", None)
-    if from_key is None:
+    if factory is None:
         raise AttributeError(
-            f"provider {provider_name!r} has no ``from_{auth}`` method "
-            f"and no ``from_key``",
+            f"provider {provider_name!r} has no ``from_{auth}`` method",
         )
-    return from_key(auth)
+    try:
+        sig = inspect.signature(factory)
+    except (TypeError, ValueError):
+        sig = None
+    kwargs: dict[str, object] = {}
+    if sig is not None:
+        if "account" in sig.parameters:
+            kwargs["account"] = account
+        for k, v in extra.items():
+            if k in sig.parameters:
+                kwargs[k] = v
+            else:
+                _LOGGER.warning(
+                    "provider %s factory ``%s`` does not accept ``%s``;"
+                    " dropping value %r",
+                    provider_name,
+                    factory.__qualname__,
+                    k,
+                    v,
+                )
+    return factory(**kwargs)
+
+
+def default_auth_for_provider(provider_name: str) -> str:
+    """Return the conventional auth method for ``provider_name``.
+
+    Args:
+      provider_name: Provider class name.
+
+    Returns:
+      auth: Default auth suffix for that provider.
+
+    Raises:
+      AttributeError: If the provider class is unknown or has no defaultable auth.
+
+    """
+    providers = sys.modules["sagent.providers"]
+    cls = getattr(providers, provider_name, None)
+    if cls is None:
+        raise AttributeError(f"unknown provider {provider_name!r}")
+    if provider_name.endswith(("CLI", "Subscription")) and hasattr(
+        cls, "from_credentials"
+    ):
+        return "credentials"
+    if hasattr(cls, "from_env"):
+        return "env"
+    if hasattr(cls, "from_key"):
+        return "key"
+    raise AttributeError(f"provider {provider_name!r} has no default auth method")
+
+
+def parse_provider_arg(spec: str) -> tuple[str, str, object]:
+    """Parse a ``Class.key=JSON-value`` triple from a CLI ``--provider-arg``.
+
+    Args:
+      spec: A literal of the form ``Class.key=JSON``. ``JSON`` is decoded
+          with ``json.loads``; on decode failure the raw string is returned
+          as the value (so ``--provider-arg X.path=/tmp/foo`` works without
+          shell-quoting the path).
+
+    Returns:
+      triple: ``(class_name, key, value)`` ready to be merged into a
+          per-class kwargs dict.
+
+    Raises:
+      argparse.ArgumentTypeError: If ``spec`` is missing the required
+          ``Class.key=value`` shape.
+
+    """
+    cls_name, dot, rest = spec.partition(".")
+    if not dot or not cls_name:
+        raise argparse.ArgumentTypeError(
+            f"expected Class.key=value, got {spec!r}",
+        )
+    key, eq, raw = rest.partition("=")
+    if not eq or not key:
+        raise argparse.ArgumentTypeError(
+            f"expected Class.key=value, got {spec!r}",
+        )
+    try:
+        value: object = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw
+    return cls_name, key, value
+
+
+def collect_provider_args(
+    specs: Iterable[str],
+    provider_name: str,
+) -> dict[str, object]:
+    """Resolve ``--provider-arg`` specs against a provider class via MRO.
+
+    A spec keyed on ``OpenAI`` applies to ``OpenAISubscription`` too --
+    the subscription inherits the constructor surface from ``OpenAI``.
+    Walking the MRO of the chosen class lets the user target a base
+    class without re-typing it for every subclass.
+
+    Specs targeting a class outside the chosen provider's MRO are
+    silently ignored (the user may pass multi-provider configs in one
+    session).
+
+    Args:
+      specs: Iterable of raw ``Class.key=JSON`` strings (already
+          ``parse_provider_arg``-able).
+      provider_name: The leaf provider class chosen for this session.
+
+    Returns:
+      kwargs: Merged ``{key: value}`` dict, with leaf-class specs
+          winning over base-class specs on key collision.
+
+    """
+    providers = sys.modules["sagent.providers"]
+    cls = getattr(providers, provider_name, None)
+    if cls is None:
+        raise AttributeError(f"unknown provider {provider_name!r}")
+    mro_names = {c.__name__ for c in cls.__mro__}
+    # Bucket by class name so leaf specs can overwrite base specs at apply
+    # time. ``cls.__mro__`` orders leaf-first; reverse it so that when we
+    # later merge we end with leaf-most values winning.
+    by_class: dict[str, dict[str, object]] = {}
+    for spec in specs:
+        cls_name, key, value = parse_provider_arg(spec)
+        if cls_name not in mro_names:
+            continue
+        by_class.setdefault(cls_name, {})[key] = value
+    merged: dict[str, object] = {}
+    for ancestor in reversed(cls.__mro__):
+        if ancestor.__name__ in by_class:
+            merged.update(by_class[ancestor.__name__])
+    return merged

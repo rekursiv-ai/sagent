@@ -48,6 +48,7 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -63,15 +64,23 @@ from sagent import (
 from sagent.agent import Agent
 from sagent.agent.session_io import (
     SessionMeta,
-    append_session,
     load_session,
-    serialize_tool_state,
 )
 from sagent.compactor import SummaryCompactor
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.prompt import build_system
-from sagent.providers import build_provider
+from sagent.providers import (
+    PROVIDER_NAMES,
+    build_provider,
+    collect_provider_args,
+)
 from sagent.repl import run_repl
+from sagent.thinking import (
+    THINKING_COMMANDS,
+    ThinkingState,
+    resolve_thinking_command,
+    should_redact_thinking,
+)
 from sagent.tools.advisor import Advisor
 from sagent.tools.core import set_recipe
 
@@ -102,7 +111,11 @@ DEFAULT_TOOLS = [
 ]
 
 
-def resolve_tools(names: list[str]) -> list[types.tools.Tool]:
+def resolve_tools(
+    names: list[str],
+    *,
+    allow_providers: tuple[str, ...] | None = None,
+) -> list[types.tools.Tool]:
     """Instantiate tools by class name from the ``tools`` module.
 
     Bash is constructed last with ``peers=`` set to its sibling tools
@@ -111,6 +124,10 @@ def resolve_tools(names: list[str]) -> list[types.tools.Tool]:
 
     Args:
       names: Tool class names to look up in the tools submodule.
+      allow_providers: Optional provider allow-list forwarded to
+        ``AgentSpawn`` and ``AgentSelf`` so their schemas and catalogs
+        only enumerate providers the host can actually use. ``None``
+        means "every provider in ``sagent.providers``".
 
     Returns:
       tools: Instantiated tool objects in the requested order.
@@ -121,6 +138,7 @@ def resolve_tools(names: list[str]) -> list[types.tools.Tool]:
     """
     if names == ["none"]:
         return []
+    provider_aware = {"AgentSpawn", "AgentSelf"}
     non_bash: dict[str, types.tools.Tool] = {}
     for name in names:
         if name == "Bash":
@@ -128,7 +146,10 @@ def resolve_tools(names: list[str]) -> list[types.tools.Tool]:
         cls = getattr(tools, name, None)
         if cls is None:
             raise SystemExit(f"unknown tool: {name!r}")
-        non_bash[name] = cls()
+        if name in provider_aware:
+            non_bash[name] = cls(allow_providers=allow_providers)
+        else:
+            non_bash[name] = cls()
     resolved: list[types.tools.Tool] = []
     peers = tuple(non_bash.values())
     for name in names:
@@ -262,6 +283,17 @@ def parse_agent_args(
         ),
     )
     parser.add_argument(
+        "--allow-providers",
+        default=os.environ.get("SAGENT_ALLOW_PROVIDERS", ",".join(PROVIDER_NAMES)),
+        metavar="LIST",
+        help=(
+            "Comma-separated provider names this agent and its spawned"
+            " children may use. Reads ``SAGENT_ALLOW_PROVIDERS`` env var"
+            " as fallback; default if neither is set is every provider"
+            " in ``sagent.providers``. Default: %(default)s."
+        ),
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help=(
@@ -294,6 +326,34 @@ def parse_agent_args(
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Automatic compaction (default: on; --no-compact to disable).",
+    )
+    parser.add_argument(
+        "--provider-arg",
+        dest="provider_args",
+        action="append",
+        default=[],
+        metavar="Class.key=JSON",
+        help=(
+            "Provider-class-scoped kwarg, repeatable. Each value has shape"
+            " ``Class.key=JSON-value``. The class name is matched against"
+            " the chosen provider's MRO so a base-class spec applies to all"
+            " subclasses (e.g. ``OpenAI.server_side_context_management=true``"
+            " covers ``OpenAISubscription`` too). Kwargs the factory"
+            " doesn't accept are dropped with a warning. JSON values give"
+            " types for free; on JSON decode failure the raw string is"
+            " forwarded (so paths and bare identifiers work without quoting)."
+        ),
+    )
+    parser.add_argument(
+        "--thinking",
+        default="default",
+        choices=("default", *THINKING_COMMANDS),
+        help=(
+            "Thinking state or partial command. Full states: adaptive-show,"
+            " adaptive-hide, on-show, on-hide, off-hide, redact-hide."
+            " Partials: adaptive, on, off, redact, show, hide."
+            " Default: no Agent override."
+        ),
     )
     parser.add_argument(
         "--effort",
@@ -475,8 +535,31 @@ def _parse_cli_args(
     return parse_agent_args(parser, argv)
 
 
+def _parse_allow_providers(spec: str) -> tuple[str, ...]:
+    """Parse ``--allow-providers`` / ``SAGENT_ALLOW_PROVIDERS`` CSV.
+
+    Exits with a clear error on empty input or unknown provider names.
+    """
+    parsed = tuple(p.strip() for p in spec.split(",") if p.strip())
+    if not parsed:
+        sys.stderr.write(
+            "Error: --allow-providers requires at least one provider name;"
+            f" valid: {list(PROVIDER_NAMES)}\n"
+        )
+        sys.exit(1)
+    unknown = [p for p in parsed if p not in PROVIDER_NAMES]
+    if unknown:
+        sys.stderr.write(
+            f"Error: --allow-providers contains unknown: {unknown};"
+            f" valid: {list(PROVIDER_NAMES)}\n"
+        )
+        sys.exit(1)
+    return parsed
+
+
 def _build_provider_model(
     args: argparse.Namespace,
+    thinking_state: ThinkingState | None,
 ) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Build the provider/model pair requested by CLI flags."""
     auth = str(args.auth)
@@ -485,9 +568,76 @@ def _build_provider_model(
     if args.provider == "SelfHosted":
         auth = model_id or "env"
         model_lookup = None
-    provider = build_provider(str(args.provider), auth, account=args.account)
+    provider_name = str(args.provider)
+    extra = _provider_kwargs(
+        collect_provider_args(
+            getattr(args, "provider_args", []) or [],
+            provider_name,
+        )
+    )
+    if thinking_state is not None and _provider_accepts_arg(
+        provider_name, auth, "redact_thinking"
+    ):
+        extra["redact_thinking"] = should_redact_thinking(thinking_state)
+    provider = build_provider(
+        provider_name,
+        auth,
+        account=args.account,
+        **extra,
+    )
     model = provider.model(model_lookup)
     return provider, model, auth
+
+
+def _provider_kwargs(args: Mapping[str, object]) -> dict[str, object]:
+    """Return provider-constructor kwargs from scoped config args."""
+    return {k: v for k, v in args.items() if k != "thinking"}
+
+
+def _resolve_cli_thinking_state(args: argparse.Namespace) -> ThinkingState | None:
+    """Resolve CLI thinking flags to an Agent-level state override."""
+    provider_args = collect_provider_args(
+        getattr(args, "provider_args", []) or [],
+        str(args.provider),
+    )
+    raw = str(args.thinking)
+    if raw == "default":
+        scoped = provider_args.get("thinking")
+        if scoped is None:
+            return None
+        raw = str(scoped)
+    return resolve_thinking_command(raw)
+
+
+def _validate_cli_thinking_state(
+    args: argparse.Namespace,
+    model: types.model.Model,
+    resolved_auth: str,
+    state: ThinkingState | None,
+) -> None:
+    """Validate a resolved CLI thinking state against model/provider support."""
+    if state is None:
+        return
+    if state != "off-hide" and not model.supports_thinking:
+        raise ValueError(f"model {model.model_id!r} does not support thinking")
+    if state == "redact-hide" and not _provider_accepts_arg(
+        str(args.provider), resolved_auth, "redact_thinking"
+    ):
+        raise ValueError("current provider does not support redacted thinking")
+
+
+def _provider_accepts_arg(provider_name: str, auth: str, key: str) -> bool:
+    """Return whether the provider factory accepts ``key``."""
+    cls = getattr(providers, provider_name, None)
+    if cls is None:
+        return False
+    factory = getattr(cls, f"from_{auth}", None)
+    if factory is None:
+        return False
+    try:
+        return key in inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) -> None:
@@ -753,56 +903,6 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
     return _on_signal
 
 
-def _install_session_persistence(agent: Agent, session_dir: Path) -> None:
-    """Attach a ``SaveSession`` observer that appends tape deltas to disk.
-
-    Tracks ``len(runtime.tape)`` (not resolved-context length) so
-    compaction barriers and overrides land in the JSONL faithfully.
-    ``meta`` is rewritten on every ``StatusChanged`` so a status edit
-    survives a crash even when no tape record has been appended.
-    """
-    persisted_tape_len = len(agent.runtime.tape)
-    meta_written = False
-    last_status = agent.status
-
-    def _on_event(event: types.runtime.RuntimeEvent) -> None:
-        nonlocal persisted_tape_len, meta_written, last_status
-        if not isinstance(
-            event, (types.runtime.SaveSession, types.runtime.StatusChanged)
-        ):
-            return
-        tape_delta = list(agent.runtime.tape[persisted_tape_len:])
-        status_changed = agent.status != last_status
-        write_meta = tape_delta or status_changed or not meta_written
-        spec = agent.model_spec
-        meta = SessionMeta(
-            session_id=agent.session_id,
-            model_id=agent.model.model_id,
-            provider=spec.provider if spec else "",
-            auth=spec.auth if spec else "",
-            account=(spec.account or "") if spec else "",
-            name=agent.name,
-            status=agent.status,
-            tokens=agent.total_tokens,
-            total_cost_usd=agent.total_cost_usd,
-            num_tool_call_rounds=agent.num_tool_call_rounds,
-            compact_count=agent.compaction_state.compact_count,
-            bash_cwd=agent.tool_state.bash_cwd,
-            total_active_elapsed_seconds=agent.activity.elapsed_seconds,
-        )
-        append_session(
-            session_dir / "session.jsonl",
-            meta=meta.serialize() if write_meta else None,
-            tape_delta=tape_delta or None,
-            tool_state_snapshot=serialize_tool_state(agent.tool_state),
-        )
-        persisted_tape_len = len(agent.runtime.tape)
-        meta_written = True
-        last_status = agent.status
-
-    agent.runtime.observers.append(_on_event)
-
-
 def main() -> None:
     """Parse args and launch the REPL or headless runner."""
     parser = argparse.ArgumentParser(
@@ -838,8 +938,18 @@ def main() -> None:
         loaded_session = load_session(Path(session_dir), {})
         if loaded_session is not None:
             _apply_resume_model_defaults(args, loaded_session[0])
+    allow_providers = _parse_allow_providers(args.allow_providers)
+    if args.provider not in allow_providers:
+        sys.stderr.write(
+            f"Error: --provider={args.provider!r} is not in"
+            f" --allow-providers {list(allow_providers)}; widen the allow"
+            " list or pick an allowed provider.\n"
+        )
+        sys.exit(1)
     try:
-        provider, model, resolved_auth = _build_provider_model(args)
+        thinking_state = _resolve_cli_thinking_state(args)
+        provider, model, resolved_auth = _build_provider_model(args, thinking_state)
+        _validate_cli_thinking_state(args, model, resolved_auth, thinking_state)
     except (AttributeError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
@@ -869,7 +979,7 @@ def main() -> None:
         sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
 
     tool_names = args.tools or DEFAULT_TOOLS
-    agent_tools = resolve_tools(tool_names)
+    agent_tools = resolve_tools(tool_names, allow_providers=allow_providers)
     if args.advisor:
         advisor_model = provider.model(args.advisor)
         agent_tools.append(
@@ -899,6 +1009,13 @@ def main() -> None:
         effort=args.effort,
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
+        thinking_state=thinking_state,
+        provider_args=_provider_kwargs(
+            collect_provider_args(
+                getattr(args, "provider_args", []) or [],
+                model_spec.provider,
+            )
+        ),
     )
     if args.max_request_tokens is not None:
         agent.max_request_tokens = args.max_request_tokens
@@ -907,8 +1024,6 @@ def main() -> None:
 
     if loaded_session is not None:
         agent.resume(*loaded_session)
-    if session_dir is not None:
-        _install_session_persistence(agent, Path(session_dir))
 
     agent.tool_state.additional_dirs = list(args.add_dir)
 

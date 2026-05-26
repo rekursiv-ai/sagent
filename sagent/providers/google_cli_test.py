@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+import asyncio
 import json
 import time
 
@@ -16,12 +18,17 @@ from sagent.providers.google_cli import (
     GoogleCLI,
     _dispatch_session_update,
     _GoogleCLIModel,
+    _GoogleCLIProcState,
     _hash_system,
     _read_expiry,
     _serialize_prompt_blocks,
     _user_prompt_blocks,
 )
-from sagent.providers.lib.subproc import Subproc
+from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.subproc import (
+    Subproc,
+    SubprocessTransportError,
+)
 from sagent.types.history import (
     AssistantMessage,
     ToolResult,
@@ -318,6 +325,129 @@ def test_should_respawn_triggers() -> None:
     assert model._should_respawn(request) is False
 
 
+@pytest.mark.asyncio
+async def test_stream_eof_respawns_and_resets_sent_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subprocess EOF is transport failure and resets Google send state."""
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    respawn_count = 0
+
+    class _DeadProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
+            del skip_non_json
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _DeadProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _DeadProc())
+
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    with pytest.raises(Exception, match="stdout closed"):
+        await model.stream(request)
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
+@pytest.mark.asyncio
+async def test_stream_read_timeout_respawns_and_resets_sent_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    respawn_count = 0
+
+    class _StalledProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            raise SubprocessTransportError("subprocess stdout idle timeout")
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _StalledProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _StalledProc())
+
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    with pytest.raises(Exception, match="stdout idle timeout"):
+        await model.stream(request)
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
+@pytest.mark.asyncio
+async def test_stream_repeated_transport_failures_trip_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated subprocess transport failures stop respawning indefinitely."""
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    respawn_count = 0
+
+    class _DeadProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
+            del skip_non_json
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _DeadProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            if respawn_count == 2:
+                raise RuntimeError("transport failure budget exhausted")
+            return cast(Subproc, _DeadProc())
+
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+
+    with pytest.raises(Exception, match="stdout closed"):
+        await model.stream(request)
+    with pytest.raises(RuntimeError, match="transport failure budget exhausted"):
+        await model.stream(request)
+
+    assert respawn_count == 2
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+
+
 def test_should_respawn_skips_when_no_active() -> None:
     """Before the first acquire, the model has no active and skips respawn."""
     provider = GoogleCLI()
@@ -325,6 +455,283 @@ def test_should_respawn_skips_when_no_active() -> None:
     assert model._should_respawn(ModelRequest(messages=[UserMessage(text="hi")])) is (
         False
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    spawned_systems: list[str] = []
+    used_systems: list[str] = []
+    warmed = asyncio.Event()
+
+    class _Proc:
+        async def close(self) -> None:
+            pass
+
+    async def spawn_initialized() -> Subproc:
+        proc = cast(Subproc, _Proc())
+        spawned_systems.append(model._pending_system)
+        if len(spawned_systems) == 2:
+            warmed.set()
+        state = _GoogleCLIProcState(
+            proc=proc,
+            session_id=f"session-{model._pending_system}",
+            tmpdir=Path.cwd(),
+            system_hash=_hash_system(model._pending_system),
+        )
+        _GoogleCLIModel._attach_proc_state(state)
+        return proc
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del proc, prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        used_systems.append(model._system_hash)
+        return "STOP"
+
+    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    model._hot_spare = HotSpare(spawn_initialized)
+
+    _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
+    await warmed.wait()
+    _ = await model.stream(ModelRequest(messages=[UserMessage(text="b")], system="B"))
+
+    assert used_systems == [_hash_system("A"), _hash_system("B")]
+    assert spawned_systems == ["A", "A", "B"]
+    await model.close()
+
+
+@pytest.mark.asyncio
+async def test_hot_spare_warmup_does_not_overwrite_active_session_id() -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    ready = asyncio.Event()
+    warmed = asyncio.Event()
+
+    class _DummyProc:
+        session_ids: list[str]
+
+        def __init__(self) -> None:
+            self.session_ids = []
+
+        async def close(self) -> None:
+            pass
+
+    async def spawn_initialized() -> Subproc:
+        proc = cast(Subproc, _DummyProc())
+        session_id = "active-session"
+        if not ready.is_set():
+            ready.set()
+        else:
+            session_id = "spare-session"
+            warmed.set()
+        state = _GoogleCLIProcState(
+            proc=proc,
+            session_id=session_id,
+            tmpdir=Path.cwd(),
+            system_hash=_hash_system(None),
+        )
+        _GoogleCLIModel._attach_proc_state(state)
+        return proc
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        cast(_DummyProc, proc).session_ids.append(model._session_id)
+        return "STOP"
+
+    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    model._hot_spare = HotSpare(spawn_initialized)
+    proc = await model._hot_spare.acquire()
+    await warmed.wait()
+    response = await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+    assert cast(_DummyProc, proc).session_ids == ["active-session"]
+    assert response.message_id == "active-session"
+    await model.close()
+
+
+@pytest.mark.asyncio
+async def test_exchange_turn_skips_assistant_replay() -> None:
+    """Respawn replay sends only user-like entries to the CLI subprocess."""
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    prompts: list[list[MutableJSON]] = []
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del proc, text_parts, thinking_parts, on_text, on_thinking
+        prompts.append(prompt_blocks)
+        return "STOP"
+
+    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    response = await model._exchange_turn(
+        cast(Subproc, object()),
+        ModelRequest(
+            messages=[
+                UserMessage(text="first"),
+                AssistantMessage(text="hidden"),
+                UserMessage(text="second"),
+            ]
+        ),
+        on_text=None,
+        on_thinking=None,
+    )
+
+    assert [[block["text"] for block in prompt] for prompt in prompts] == [
+        ["first"],
+        ["second"],
+    ]
+    assert response.stop_reason == "model_finished"
+
+
+@pytest.mark.asyncio
+async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    model._turn_count = 100
+    model._last_input_tokens = model._max_request_tokens
+
+    class _Proc:
+        pass
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        async def respawn(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        def record_success(self) -> None:
+            pass
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del proc, prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        return "STOP"
+
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
+
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+    response = await model.stream(request)
+
+    assert response.message_id == "session"
+    assert model._turn_count == 1
+    assert model._last_input_tokens == 0
+    assert model._should_respawn(request) is False
+
+
+@pytest.mark.asyncio
+async def test_exchange_turn_returns_current_output_only() -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    text_callbacks: list[str] = []
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del proc, thinking_parts, on_thinking
+        text = cast(str, prompt_blocks[0]["text"])
+        text_parts.append(text)
+        if on_text is not None:
+            on_text(text)
+        return "STOP"
+
+    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    response = await model._exchange_turn(
+        cast(Subproc, object()),
+        ModelRequest(messages=[UserMessage(text="first"), UserMessage(text="current")]),
+        on_text=text_callbacks.append,
+        on_thinking=None,
+    )
+
+    assert response.message.text == "current"
+    assert text_callbacks == ["current"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_json_rpc_error_respawns_and_resets_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    respawn_count = 0
+
+    class _ErrorProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+            del skip_non_json
+            return cast(MutableJSON, {"id": 1, "error": {"message": "boom"}})
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _ErrorProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, _ErrorProc())
+
+    user = UserMessage(text="hi")
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    model._last_sent_index = 0
+    model._sent_history_head = user
+    model._turn_count = 9
+    model._last_input_tokens = 123
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+
+    with pytest.raises(SubprocessTransportError, match="JSON-RPC error"):
+        _ = await model.stream(ModelRequest(messages=[user]))
+
+    assert respawn_count == 1
+    assert model._last_sent_index == 0
+    assert model._sent_history_head is None
+    assert model._turn_count == 0
+    assert model._last_input_tokens == 0
 
 
 def test_build_response_estimates_tokens_and_cost() -> None:

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Mapping, Sequence
+from typing import cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from anthropic.types import MessageParam
 
 import anthropic as anthropic_sdk
 import httpx
 import pytest
 
+from sagent.lib.json import MutableJSON
 from sagent.providers.anthropic import (
     Anthropic,
     _assistant_blocks,
@@ -19,6 +23,7 @@ from sagent.providers.anthropic import (
     _strip_context_tag,
     _tool_result_block,
     _tool_use_block,
+    build_context_management,
     context_betas,
     supports_native_context_management,
 )
@@ -40,6 +45,7 @@ from sagent.types.model import (
     Pricing,
     TokenCount,
 )
+from sagent.types.tools import Tool
 
 
 def _make_request(
@@ -228,6 +234,24 @@ def test_assistant_blocks_drops_signature_only_thinking() -> None:
         "text",
     ]
     assert blocks[0].get("thinking") == "kept"
+
+
+def test_assistant_blocks_preserves_mixed_thinking_modes() -> None:
+    asst = AssistantMessage(
+        text="ok",
+        thinking_blocks=(
+            {"type": "thinking", "thinking": "visible", "signature": "sig1"},
+            {"type": "redacted_thinking", "data": "opaque"},
+            {"type": "thinking", "thinking": "visible again", "signature": "sig2"},
+        ),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert blocks[:3] == [
+        {"type": "thinking", "thinking": "visible", "signature": "sig1"},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {"type": "thinking", "thinking": "visible again", "signature": "sig2"},
+    ]
+    assert blocks[3] == {"type": "text", "text": "ok"}
 
 
 def test_tool_use_block_remaps_id_through_remapper() -> None:
@@ -489,9 +513,15 @@ def test_anthropic_model_supports_flags() -> None:
     assert m.supports_effort is True
     assert m.supports_cache_control is True
     assert m.supports_persistent_retry is True
-    assert m.supports_context_management is False  # API-key, not sub.
+    assert m.supports_context_management is False
     assert m.supports_account_auth is False
     assert m.valid_service_tiers == ("auto", "standard_only")
+
+
+def test_anthropic_model_supports_context_management_when_opted_in() -> None:
+    p = Anthropic.from_key("k", server_side_context_management=True)
+    m = p.model("claude-opus-4-7")
+    assert m.supports_context_management is True
 
 
 def test_anthropic_build_kwargs_emits_service_tier() -> None:
@@ -606,6 +636,18 @@ def test_anthropic_provider_extra_headers_includes_context_management() -> None:
     assert "context-management-2025-06-27" in headers.get("anthropic-beta", "")
 
 
+def test_anthropic_provider_extra_headers_redact_thinking_opt_in() -> None:
+    p = Anthropic.from_key("k", redact_thinking=True)
+    headers = p.extra_headers("claude-opus-4-7")
+    assert "redact-thinking-2026-02-12" in headers.get("anthropic-beta", "")
+
+
+def test_anthropic_provider_extra_headers_redact_thinking_default_off() -> None:
+    p = Anthropic.from_key("k")
+    headers = p.extra_headers("claude-opus-4-7")
+    assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
+
+
 def test_anthropic_provider_extra_headers_unknown_model_empty() -> None:
     p = Anthropic.from_key("k")
     assert p.extra_headers("claude-3-opus-20240229") == {}
@@ -613,12 +655,39 @@ def test_anthropic_provider_extra_headers_unknown_model_empty() -> None:
 
 def test_anthropic_provider_extra_body_default_none() -> None:
     p = Anthropic.from_key("k")
-    assert p.extra_body(has_thinking=False, cache_cold=False) is None
+    assert (
+        p.extra_body(
+            has_thinking=False,
+            cache_cold=False,
+            trigger_tokens=100_000,
+            tools=(),
+        )
+        is None
+    )
 
 
-def test_build_kwargs_includes_context_management_for_supported_model() -> None:
-    """Supported models get the server-side ``clear_tool_uses`` config injected."""
+def test_build_kwargs_no_context_management_by_default() -> None:
+    """Default is ``server_side_context_management=False`` -- no cm_config injected.
+
+    Sagent's own client-side compactor handles budget. Server-side clearing
+    must be explicitly opted in (see session bd952b0c audit for rationale).
+    """
     p = Anthropic.from_key("k")
+    model = p.model("claude-opus-4-7+1m")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    msgs: list[MessageParam] = [
+        cast(
+            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        )
+    ]
+    kwargs = model._build_kwargs(req, msgs)
+    body = kwargs.get("extra_body")
+    assert body is None or "context_management" not in cast(dict[str, object], body)
+
+
+def test_build_kwargs_includes_context_management_when_opted_in() -> None:
+    """``server_side_context_management=True`` injects the ``clear_tool_uses`` config."""
+    p = Anthropic.from_key("k", server_side_context_management=True)
     model = p.model("claude-opus-4-7+1m")
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
@@ -626,13 +695,121 @@ def test_build_kwargs_includes_context_management_for_supported_model() -> None:
         tools=None,
         max_response_tokens=128_000,
     )
-    kwargs = model._build_kwargs(
-        req, [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
-    )
+    msgs: list[MessageParam] = [
+        cast(
+            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        )
+    ]
+    kwargs = model._build_kwargs(req, msgs)
     body = cast(dict[str, object], kwargs["extra_body"])
     cm = cast(dict[str, object], body["context_management"])
     edits = cast(list[dict[str, object]], cm["edits"])
     assert any(e["type"] == "clear_tool_uses_20250919" for e in edits)
+
+
+def test_context_management_missing_clearable_results_defaults_unclearable() -> None:
+    class LegacyTool:
+        name = "Legacy"
+
+    config = build_context_management(
+        server_side_context_management=True,
+        trigger_tokens=100_000,
+        tools=cast(Sequence[Tool], [LegacyTool()]),
+    )
+    assert config is not None
+    edit = cast(Mapping[str, object], config["edits"][0])
+    assert edit["clear_tool_inputs"] == []
+    assert edit["exclude_tools"] == ["Legacy"]
+
+
+def test_build_kwargs_context_management_trigger_scales_with_context_window() -> None:
+    """``trigger`` is half of the model's context window."""
+    p = Anthropic.from_key("k", server_side_context_management=True)
+    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    msgs: list[MessageParam] = [
+        cast(
+            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        )
+    ]
+
+    m200 = p.model("claude-opus-4-7")
+    kw200 = m200._build_kwargs(req, msgs)
+    body200 = cast(dict[str, object], kw200["extra_body"])
+    cm200 = cast(dict[str, object], body200["context_management"])
+    edit200 = cast(list[dict[str, object]], cm200["edits"])[0]
+    trig200 = cast(dict[str, object], edit200["trigger"])
+    assert trig200["value"] == 100_000
+
+    m1m = p.model("claude-opus-4-7+1m")
+    kw1m = m1m._build_kwargs(req, msgs)
+    body1m = cast(dict[str, object], kw1m["extra_body"])
+    cm1m = cast(dict[str, object], body1m["context_management"])
+    edit1m = cast(list[dict[str, object]], cm1m["edits"])[0]
+    trig1m = cast(dict[str, object], edit1m["trigger"])
+    assert trig1m["value"] == 500_000
+
+
+def test_build_kwargs_preserves_provider_context_management() -> None:
+    """Subclass-supplied ``context_management`` must NOT be clobbered.
+
+    Regression test: ``Anthropic._build_kwargs`` previously always
+    overwrote the ``context_management`` key with a hardcoded
+    ``clear_tool_uses_20250919`` config, silently discarding whatever
+    a subclass with its own env-gated, thinking-aware,
+    whitelist-filtered policy had built.
+    Bug: the subclass opted out of server clearing via env vars, but
+    the base class injected aggressive clearing anyway.
+    """
+    # Custom config that mimics what a subclass builds when
+    # ``USE_API_CLEAR_TOOL_RESULTS`` is set + thinking is on.
+    custom_cm: MutableJSON = {
+        "edits": [
+            {"type": "clear_thinking_20251015", "keep": "all"},
+            {
+                "type": "clear_tool_uses_20250919",
+                "trigger": {"type": "input_tokens", "value": 180_000},
+                "clear_at_least": {"type": "input_tokens", "value": 140_000},
+                "clear_tool_inputs": ["Bash", "Read", "Grep"],
+                "exclude_tools": ["Edit", "Write"],
+            },
+        ],
+    }
+
+    class _CustomCmAnthropic(Anthropic):
+        @override
+        def extra_body(
+            self,
+            *,
+            has_thinking: bool,
+            cache_cold: bool,
+            trigger_tokens: int,
+            tools: Sequence[Tool],
+        ) -> MutableJSON | None:
+            del has_thinking, cache_cold, trigger_tokens, tools
+            return {"context_management": custom_cm}
+
+    # Opt the base into server-side clearing so the gate is open -- the
+    # test then proves the subclass policy wins over the base default.
+    p = _CustomCmAnthropic.from_key("k", server_side_context_management=True)
+    model = p.model("claude-opus-4-7+1m")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    msgs: list[MessageParam] = [
+        cast(
+            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+        )
+    ]
+    kwargs = model._build_kwargs(req, msgs)
+    body = cast(dict[str, object], kwargs["extra_body"])
+    cm = cast(dict[str, object], body["context_management"])
+    # The subclass config must round-trip untouched.
+    assert cm is custom_cm
+    edits = cast(list[dict[str, object]], cm["edits"])
+    # Subscription's whitelist must survive (proves no merge/clobber).
+    tool_edit = next(e for e in edits if e["type"] == "clear_tool_uses_20250919")
+    assert tool_edit["clear_tool_inputs"] == ["Bash", "Read", "Grep"]
+    assert tool_edit["exclude_tools"] == ["Edit", "Write"]
+    trig = cast(dict[str, object], tool_edit["trigger"])
+    assert trig["value"] == 180_000
 
 
 def test_build_kwargs_no_context_management_for_unknown_model() -> None:

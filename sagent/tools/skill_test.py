@@ -137,6 +137,7 @@ def test_metadata_basics() -> None:
     t = Skill()
     assert t.name == "Skill"
     assert t.tool_id == "application/x-tool-skill"
+    assert t.clearable_results is False
     assert t.summary({"skill": "alpha"}) == "Skill alpha"
     assert t.summary({}) == "Skill"
     assert t.summary_result(ToolResult(call_id="", content="")) is None
