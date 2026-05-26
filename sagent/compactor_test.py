@@ -12,6 +12,7 @@ import pytest
 from sagent.agent.context import resolve_context
 from sagent.compactor import (
     SummaryCompactor,
+    _request_entries,
     build_continuation,
 )
 from sagent.testing import MockModelCaps
@@ -137,13 +138,14 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     compactor = SummaryCompactor()
     history: list[HistoryEntry] = [UserMessage(text="orig")]
     result = await _apply_compact(compactor, history, model)
-    assert len(result) == 1
+    assert len(result) == 2
     first = result[0]
     assert isinstance(first, UserMessage)
     # Continuation message embeds the formatted summary.
     assert "Summary:" in first.text
     assert body in first.text
     assert "<analysis>" not in first.text
+    assert result[-1] == history[-1]
 
 
 @pytest.mark.asyncio
@@ -381,6 +383,68 @@ async def test_compact_drops_groups_on_prompt_too_long() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_shrinks_tool_results_before_dropping_groups() -> None:
+    body = "post-shrink summary"
+    overflow = PromptTooLongError(actual_tokens=250_000, limit_tokens=200_000)
+    call = ToolCall(id="call_1", name="Bash", args={})
+    model = _ScriptedModel(
+        stream_responses=[overflow, _summary_resp(body)],
+    )
+    compactor = SummaryCompactor(max_attempts=3)
+    history: list[HistoryEntry] = [
+        AssistantMessage(text="I checked the log", tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000_000),
+    ]
+
+    result = await _apply_compact(compactor, history, model)
+
+    assert model.stream_calls == 2
+    retry_results = [
+        entry for entry in model.received[-1].messages if isinstance(entry, ToolResult)
+    ]
+    assert len(retry_results) == 1
+    assert retry_results[0].call_id == "call_1"
+    assert len(retry_results[0].content) < 1_000_000
+    assert retry_results[0].content
+    assert any(
+        isinstance(entry, AssistantMessage) and entry.text == "I checked the log"
+        for entry in model.received[-1].messages
+    )
+    assert isinstance(result[0], UserMessage)
+    assert body in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_compact_drops_groups_after_shrunken_retry_overflows() -> None:
+    body = "post-drop summary"
+    overflow = PromptTooLongError(actual_tokens=250_000, limit_tokens=200_000)
+    call = ToolCall(id="call_1", name="Bash", args={})
+    model = _ScriptedModel(
+        stream_responses=[overflow, overflow, _summary_resp(body)],
+    )
+    compactor = SummaryCompactor(max_attempts=3)
+    history: list[HistoryEntry] = [
+        AssistantMessage(text="I checked the log", tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000_000),
+    ]
+
+    result = await _apply_compact(compactor, history, model)
+
+    assert model.stream_calls == 3
+    second_results = [
+        entry for entry in model.received[1].messages if isinstance(entry, ToolResult)
+    ]
+    assert len(second_results) == 1
+    assert len(second_results[0].content) < 1_000_000
+    final_results = [
+        entry for entry in model.received[-1].messages if isinstance(entry, ToolResult)
+    ]
+    assert final_results == []
+    assert isinstance(result[0], UserMessage)
+    assert body in result[0].text
+
+
+@pytest.mark.asyncio
 async def test_compact_drops_groups_on_token_gap_unknown() -> None:
     """``token_gap=None`` triggers the fallback group-drop heuristic."""
     body = "post-shrink"
@@ -413,6 +477,85 @@ async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
     # Keep-recent saturates: tail preserved verbatim + continuation prepended.
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
+    assert result[1:] == history
+
+
+@pytest.mark.asyncio
+async def test_compact_preserves_single_current_user_turn() -> None:
+    body = "summary"
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    compactor = SummaryCompactor()
+    current = UserMessage(text="continue the task")
+
+    result = await _apply_compact(compactor, [current], model)
+
+    assert isinstance(result[0], UserMessage)
+    assert body in result[0].text
+    assert result[-1] == current
+
+
+@pytest.mark.asyncio
+async def test_request_entries_drop_invalid_tool_ordering() -> None:
+    call = ToolCall(id="call_1", name="Bash", args={})
+    result = _request_entries(
+        [
+            [
+                AssistantMessage(tool_calls=(call,)),
+                UserMessage(text="interrupts pending tool call"),
+                ToolResult(call_id="call_1", content="late"),
+            ]
+        ]
+    )
+
+    assert len(result) == 1
+    only = result[0]
+    assert isinstance(only, UserMessage)
+    assert only.text == "interrupts pending tool call"
+
+
+@pytest.mark.asyncio
+async def test_request_entries_drop_partial_multi_tool_turn() -> None:
+    first = ToolCall(id="call_1", name="Bash", args={})
+    second = ToolCall(id="call_2", name="Read", args={})
+    result = _request_entries(
+        [
+            [
+                AssistantMessage(tool_calls=(first, second)),
+                ToolResult(call_id="call_1", content="early"),
+                UserMessage(text="interrupts pending tool call"),
+            ]
+        ]
+    )
+
+    assert len(result) == 1
+    only = result[0]
+    assert isinstance(only, UserMessage)
+    assert only.text == "interrupts pending tool call"
+
+
+@pytest.mark.asyncio
+async def test_request_entries_drop_duplicate_tool_results() -> None:
+    call = ToolCall(id="call_1", name="Bash", args={})
+    result = _request_entries(
+        [
+            [
+                AssistantMessage(tool_calls=(call,)),
+                ToolResult(call_id="call_1", content="first"),
+                ToolResult(call_id="call_1", content="second"),
+            ]
+        ]
+    )
+
+    assert len(result) == 3
+    assert isinstance(result[0], UserMessage)
+    assert result[0].text == "[earlier messages elided]"
+    assistant = result[1]
+    assert isinstance(assistant, AssistantMessage)
+    assert assistant.tool_calls == (call,)
+    first_result = result[2]
+    assert isinstance(first_result, ToolResult)
+    assert first_result.call_id == "call_1"
+    assert first_result.content == "first"
 
 
 @pytest.mark.asyncio
@@ -563,6 +706,26 @@ def test_override_aware_constructs_cleanly() -> None:
 
 
 # --- verify_summary flag --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_compactor_summary_request_sees_canonical_tool_result() -> None:
+    body = "summary"
+    call = ToolCall(id="call_1", name="Bash", args={})
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    compactor = SummaryCompactor()
+    history: list[HistoryEntry] = [
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000_000),
+    ]
+
+    _ = await _apply_compact(compactor, history, model)
+
+    results = [
+        entry for entry in model.received[-1].messages if isinstance(entry, ToolResult)
+    ]
+    assert len(results) == 1
+    assert results[0].content == "x" * 1_000_000
 
 
 @pytest.mark.asyncio

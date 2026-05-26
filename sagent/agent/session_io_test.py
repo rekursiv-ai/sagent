@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import json
 
-from sagent.agent import session_io
-from sagent.agent.context import resolve_context
+from sagent.agent import (
+    runtime as agent_runtime,
+    session_io,
+)
+from sagent.agent.context import resolve_context, validate_context
 from sagent.agent.session_io import (
     SessionMeta,
+    append_context_repair,
     append_session,
     load_session,
     rebuild_content_cache,
@@ -39,6 +44,19 @@ from sagent.types.tape import (
 
 if TYPE_CHECKING:
     import pytest
+
+
+class _NoopModel:
+    async def stream(
+        self,
+        history: list[HistoryEntry],
+        system: str,
+        tools: list[agent_runtime.Tool],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, system, tools, on_text, on_thinking
+        return AssistantMessage(text="")
 
 
 def _records_from(entries: list[HistoryEntry]) -> list[TapeRecord]:
@@ -222,6 +240,53 @@ def test_load_session_missing_returns_none(tmp_path: Path) -> None:
     assert load_session(tmp_path, {}) is None
 
 
+def test_append_context_repair_masks_current_view(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
+    old_records = _records_from(
+        [
+            UserMessage(text="x" * 1_000),
+            UserMessage(text="y" * 1_000),
+        ]
+    )
+    state = ToolState()
+    state.invoked_skills.add("debug")
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=old_records,
+        tool_state_snapshot=serialize_tool_state(state),
+    )
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    assert (
+        sum(
+            len(m.text)
+            for m in resolve_context(tape).messages
+            if isinstance(m, UserMessage)
+        )
+        == 2_000
+    )
+
+    repair = append_context_repair(
+        session_file,
+        tape,
+        payload=[UserMessage(text="slim repair")],
+        strategy="manual_repair",
+    )
+
+    loaded_after = load_session(tmp_path, {})
+    assert loaded_after is not None
+    _, repaired_tape, repaired_state = loaded_after
+    messages = resolve_context(repaired_tape).messages
+    assert repair.strategy == "manual_repair"
+    assert [m.text for m in messages if isinstance(m, UserMessage)] == ["slim repair"]
+    assert repaired_state.invoked_skills == set()
+    validate_context(messages)
+
+
 def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
@@ -338,6 +403,70 @@ def test_load_session_orders_loaded_tape_by_ordinal(tmp_path: Path) -> None:
     assert [entry.text for entry in user_messages] == ["zero", "one", "synthetic"]
 
 
+def test_out_of_order_barrier_resets_prior_tool_state(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    old_state = ToolState()
+    old_state.invoked_skills.add("debug")
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "abc"},
+        {"kind": "tool_state", **serialize_tool_state(old_state)},
+        {
+            "kind": "context_splice",
+            "ref": {"session_id": "abc", "ordinal": 2},
+            "mask": [
+                [
+                    {"session_id": "abc", "ordinal": 0},
+                    {"session_id": "abc", "ordinal": 1},
+                ]
+            ],
+            "insert_after": None,
+            "payload": [{"type": "user", "text": "after"}],
+            "strategy": "summary",
+            "paired_externally": [],
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 0},
+            "type": "user",
+            "text": "before",
+        },
+    )
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, _, state = loaded
+    assert state.invoked_skills == set()
+
+
+def test_load_session_dangling_repair_resets_prior_tool_state(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="dangling", model_id="m", provider="P", auth="env")
+    state = ToolState()
+    state.invoked_skills.add("debug")
+    state.bash_cwd = "/stale"
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            HistoryRecord(
+                ref=TapeRef(session_id="dangling", ordinal=0),
+                entry=AssistantMessage(
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                ),
+            ),
+        ],
+        tool_state_snapshot=serialize_tool_state(state),
+    )
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, repaired_state = loaded
+    validate_context(resolve_context(tape).messages)
+    assert repaired_state.invoked_skills == set()
+    assert repaired_state.bash_cwd == ToolState().bash_cwd
+
+
 def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
     """Disk-loaded ``ToolResult`` with no matching ``tool_use`` is hidden on resume.
 
@@ -375,6 +504,68 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
         isinstance(m, ToolResult) and m.call_id == "ghost_1" for m in resolved
     ), f"orphan ToolResult should be suppressed on load; resolved: {resolved}"
     assert [m for m in resolved if isinstance(m, UserMessage)] == [user1, user2]
+
+
+def test_load_session_repairs_orphan_tool_result_from_splice_payload(
+    tmp_path: Path,
+) -> None:
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(
+        session_id="orphan-splice", model_id="m", provider="P", auth="env"
+    )
+    user = UserMessage(text="go")
+    assistant = AssistantMessage(
+        tool_calls=(ToolCall(id="kept", name="Echo", args={}),)
+    )
+    result = ToolResult(call_id="kept", content="done")
+    summary = UserMessage(text="[summary]")
+    orphan = ToolResult(call_id="ghost", content="late")
+    refs = [TapeRef(session_id="orphan-splice", ordinal=i) for i in range(5)]
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            HistoryRecord(ref=refs[0], entry=user),
+            HistoryRecord(ref=refs[1], entry=assistant),
+            HistoryRecord(ref=refs[2], entry=result),
+            ContextSplice(
+                ref=refs[3],
+                mask=((refs[0], refs[2]),),
+                insert_after=None,
+                payload=(summary,),
+                strategy="summary",
+            ),
+            ContextSplice(
+                ref=refs[4],
+                mask=((refs[2], refs[2]),),
+                insert_after=refs[1],
+                payload=(orphan,),
+                strategy="detached_splice",
+                paired_externally=frozenset({"ghost"}),
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    resolved = resolve_context(tape).messages
+    validate_context(resolved)
+    assert resolved == [summary]
+    assert any(
+        isinstance(record, ContextSplice)
+        and record.strategy == "orphan_tool_result_repair"
+        and record.mask == ((refs[0], refs[4]),)
+        for record in tape
+    )
+    runtime = agent_runtime.AgentRuntime(model=_NoopModel())
+    runtime.replay_tape(tape)
+    runtime.append_splice(
+        mask=((runtime.tape[0].ref, runtime.tape[-1].ref),),
+        insert_after=None,
+        payload=(UserMessage(text="[next summary]"),),
+        strategy="summary",
+    )
 
 
 def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:

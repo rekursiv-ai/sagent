@@ -56,6 +56,8 @@ _RE_ANALYSIS = re.compile(r"<analysis>[\s\S]*?</analysis>")
 _RE_SUMMARY = re.compile(r"<summary>([\s\S]*?)</summary>")
 
 _MAX_FALLBACK_SUMMARY_CHARS = 10_000
+_COMPACTOR_TOOL_RESULT_CHARS = 8_000
+_COMPACTOR_TOOL_RESULT_NOTICE = "[tool result truncated for compaction]"
 
 
 def _entry_chars(entry: HistoryEntry) -> int:
@@ -210,7 +212,7 @@ class SummaryCompactor:
         if direction == "from":
             effective_keep = max(effective_keep, _trailing_user_tail_len(history))
 
-        if effective_keep > 0 and len(history) > effective_keep:
+        if effective_keep > 0:
             if direction == "from":
                 to_summarize, to_keep = _safe_split(
                     history, effective_keep, direction="from"
@@ -267,6 +269,13 @@ class SummaryCompactor:
                 summary_text = response.message.text
                 break
             except PromptTooLongError as exc:
+                if _shrink_groups_for_compaction(groups):
+                    logger.warning(
+                        "Prompt too long (attempt %d/%d), shrinking tool results.",
+                        attempt + 1,
+                        self._max_attempts,
+                    )
+                    continue
                 drop = _groups_to_drop(groups, exc, self._chars_per_token)
                 logger.warning(
                     "Prompt too long (attempt %d/%d), dropping %d groups.",
@@ -395,6 +404,13 @@ class SummaryCompactor:
                 )
                 break
             except PromptTooLongError as exc:
+                if _shrink_groups_for_compaction(groups):
+                    logger.warning(
+                        "Verifier prompt too long (attempt %d/%d), shrinking tool results.",
+                        attempt + 1,
+                        self._max_attempts,
+                    )
+                    continue
                 drop = _groups_to_drop(groups, exc, self._chars_per_token)
                 logger.warning(
                     "Verifier prompt too long (attempt %d/%d), dropping %d groups.",
@@ -420,35 +436,76 @@ def _request_entries(groups: list[list[HistoryEntry]]) -> list[HistoryEntry]:
     return entries
 
 
+def _shrink_groups_for_compaction(groups: list[list[HistoryEntry]]) -> bool:
+    """Shrink oversized tool results in-place before dropping whole groups."""
+    changed = False
+    for group_idx, group in enumerate(groups):
+        shrunk: list[HistoryEntry] = []
+        for entry in group:
+            if (
+                isinstance(entry, ToolResult)
+                and len(entry.content) > _COMPACTOR_TOOL_RESULT_CHARS
+                and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
+            ):
+                shrunk.append(
+                    dataclasses.replace(
+                        entry,
+                        content=(
+                            f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n"
+                            f"{entry.content[:_COMPACTOR_TOOL_RESULT_CHARS]}"
+                        ),
+                    )
+                )
+                changed = True
+            else:
+                shrunk.append(entry)
+        groups[group_idx] = shrunk
+    return changed
+
+
 def _drop_orphan_tool_results(
     entries: list[HistoryEntry],
 ) -> list[HistoryEntry]:
-    """Filter out ``ToolResult`` entries with no preceding matching ``ToolCall``.
-
-    Walks ``entries`` in order, tracking ``call_id``s seen on
-    ``AssistantMessage.tool_calls``. Any ``ToolResult`` whose
-    ``call_id`` was not previously declared is dropped.
-
-    Args:
-      entries: Provider-facing entries about to be sent in a request.
-
-    Returns:
-      filtered: ``entries`` with orphan ``ToolResult`` records removed.
-
-    """
-    declared: set[str] = set()
+    """Filter entries that would violate tool-call/result ordering."""
+    seen_results: set[str] = set()
     out: list[HistoryEntry] = []
+    pending_assistant: AssistantMessage | None = None
+    pending_results: list[ToolResult] = []
     for entry in entries:
         if isinstance(entry, AssistantMessage):
-            for tc in entry.tool_calls:
-                declared.add(tc.id)
-            out.append(entry)
-        elif isinstance(entry, ToolResult):
-            if entry.call_id in declared:
+            _flush_answered_tool_turn(out, pending_assistant, pending_results)
+            pending_assistant = entry if entry.tool_calls else None
+            pending_results = []
+            if pending_assistant is None:
                 out.append(entry)
+        elif isinstance(entry, ToolResult):
+            if (
+                pending_assistant is not None
+                and entry.call_id in {tc.id for tc in pending_assistant.tool_calls}
+                and entry.call_id not in seen_results
+            ):
+                pending_results.append(entry)
+                seen_results.add(entry.call_id)
         else:
+            _flush_answered_tool_turn(out, pending_assistant, pending_results)
+            pending_assistant = None
+            pending_results = []
             out.append(entry)
+    _flush_answered_tool_turn(out, pending_assistant, pending_results)
     return out
+
+
+def _flush_answered_tool_turn(
+    out: list[HistoryEntry],
+    assistant: AssistantMessage | None,
+    results: list[ToolResult],
+) -> None:
+    """Append a tool turn only when every call has a result."""
+    if assistant is None:
+        return
+    if len(results) == len(assistant.tool_calls):
+        out.append(assistant)
+        out.extend(results)
 
 
 def _format_summary(raw: str) -> str:
@@ -561,7 +618,11 @@ def _safe_split(
     safe = _safe_split_boundaries(history)
     while idx > 0 and not safe[idx]:
         idx -= 1
-    if idx == 0:
+    if direction == "from" and idx == 0:
+        if keep_recent >= n:
+            return [], history
+        return history, []
+    if direction == "up_to" and idx == n:
         return history, []
     return history[:idx], history[idx:]
 

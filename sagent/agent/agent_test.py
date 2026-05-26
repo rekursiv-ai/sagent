@@ -206,6 +206,34 @@ def test_agent_budget_defaults_from_model() -> None:
     assert a.budget.max_request_tokens == 100_000
 
 
+@pytest.mark.asyncio
+async def test_agent_model_stream_materializes_request() -> None:
+    call = types.history.ToolCall(id="call_1", name="Bash", args={})
+    model = StubModel()
+    budget = types.model.ContextBudget(
+        max_request_tokens=100_000,
+        max_response_tokens=1_024,
+        message_budget_chars=10,
+    )
+    agent = Agent(model=model, budget=budget)
+
+    agent.runtime.append_history(types.history.UserMessage(text="start"))
+    agent.runtime.append_history(types.history.AssistantMessage(tool_calls=(call,)))
+    agent.runtime.append_history(
+        types.history.ToolResult(call_id="call_1", content="x" * 1_000)
+    )
+    _ = await agent._agent_model.stream(
+        agent.runtime.context().messages,
+        "",
+        [],
+        lambda _: None,
+        lambda _: None,
+    )
+    result = model.received[-1].messages[2]
+    assert isinstance(result, types.history.ToolResult)
+    assert "<elided>" in result.content
+
+
 def test_agent_budget_override_respected() -> None:
     b = types.model.ContextBudget.from_model(StubModel())
     a = _build_agent(budget=b)
@@ -3524,6 +3552,54 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
     tools_seen = model.estimated_tools[-1]
     assert tools_seen is not None
     assert isinstance(tools_seen[0], BackgroundAwareTool)
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_receives_canonical_context() -> None:
+    seen_context: list[Sequence[types.history.HistoryEntry]] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del model, custom_instructions
+            seen_context.append(context)
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+            )
+
+    call = types.history.ToolCall(id="call_1", name="Bash", args={})
+    budget = types.model.ContextBudget(
+        max_request_tokens=100_000,
+        max_response_tokens=1_024,
+        message_budget_chars=10,
+    )
+    a = Agent(model=StubModel(), compactor=_RecordingCompactor(), budget=budget)
+    a.runtime.append_history(types.history.UserMessage(text="start"))
+    a.runtime.append_history(types.history.AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(
+        types.history.ToolResult(call_id="call_1", content="x" * 1_000)
+    )
+
+    assert await a.compact_now() is True
+    result = seen_context[-1][2]
+    assert isinstance(result, types.history.ToolResult)
+    assert result.content == "x" * 1_000
 
 
 @pytest.mark.asyncio

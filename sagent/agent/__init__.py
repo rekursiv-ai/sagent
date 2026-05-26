@@ -28,10 +28,8 @@ Composition (no inheritance):
   execution; post-processes the result for empty-marker and
   oversized-content handling.
 - ``_AgentCompactor`` bridges the rich ``SummaryCompactor`` interface
-  to the runtime's lean ``compact(history, model, args)``. Writes
-  ``pre_compact_<N>.jsonl`` transcripts under ``session_dir`` and runs
-  the post-compaction enrich pipeline (file reattach, status injection,
-  tool restore).
+  to the runtime's lean compactor protocol and runs the post-compaction
+  enrich pipeline (file reattach, status injection, tool restore).
 """
 
 from sagent.agent.agent import (
