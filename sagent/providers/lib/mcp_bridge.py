@@ -59,9 +59,9 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
-from sagent.agent.agent import _validate_input
 from sagent.agent.background import split_bg_args
 from sagent.lib.json import json_unfreeze
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
 from sagent.types.tools import Tool
 
@@ -217,14 +217,6 @@ class ToolsBridge:
                 )
             ]
         bg_requested, delay_sec, clean_args = split_bg_args(arguments)
-        validation_error = _validate_input(tool.name, tool.directive_schema, clean_args)
-        if validation_error is not None:
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=f"[Error] {validation_error}",
-                )
-            ]
         if bg_requested or delay_sec > 0:
             return [
                 mcp_types.TextContent(
@@ -233,6 +225,16 @@ class ToolsBridge:
                         "[Error] MCP bridge cannot detach tool calls; "
                         "retry without background or delay."
                     ),
+                )
+            ]
+        validation_error = validate_tool_input(
+            tool.name, tool.directive_schema, clean_args
+        )
+        if validation_error is not None:
+            return [
+                mcp_types.TextContent(
+                    type="text",
+                    text=f"[Error] {validation_error}",
                 )
             ]
         try:

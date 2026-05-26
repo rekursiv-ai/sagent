@@ -540,6 +540,110 @@ def test_should_respawn_skips_when_no_active() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_failed_turn_keeps_proven_system_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    system = "attempted system"
+
+    class _Proc:
+        pass
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        async def discard_spare(self) -> None:
+            pass
+
+        async def respawn(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+    async def _exchange_turn(
+        proc: Subproc,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        del proc, request, on_text, on_thinking
+        raise SubprocessTransportError("boom")
+
+    model._system_hash = _hash_system("proven system")
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_exchange_turn", _exchange_turn)
+
+    with pytest.raises(SubprocessTransportError, match="boom"):
+        _ = await model.stream(
+            ModelRequest(messages=[UserMessage(text="hi")], system=system)
+        )
+
+    assert model._system_hash == _hash_system("proven system")
+
+
+@pytest.mark.asyncio
+async def test_stream_same_system_after_first_acquire_does_not_respawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    respawn_count = 0
+    system = "be precise"
+
+    class _Proc:
+        pass
+
+    class _HotSpare:
+        def __init__(self) -> None:
+            self.active: Subproc | None = None
+
+        async def acquire(self) -> Subproc:
+            if self.active is None:
+                self.active = cast(Subproc, _Proc())
+            return self.active
+
+        async def respawn(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            self.active = cast(Subproc, _Proc())
+            return self.active
+
+        async def discard_spare(self) -> None:
+            pass
+
+        def record_success(self) -> None:
+            pass
+
+    async def _send_entry(proc: Subproc, entry: HistoryEntry) -> None:
+        del proc, entry
+
+    async def _drain_until_result(
+        proc: Subproc,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking
+        return ModelResponse(message=AssistantMessage(text="ok"))
+
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
+    monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
+
+    first = UserMessage(text="first")
+    second = UserMessage(text="second")
+    _ = await model.stream(ModelRequest(messages=[first], system=system))
+    _ = await model.stream(ModelRequest(messages=[first, second], system=system))
+
+    assert respawn_count == 0
+    assert model._system_hash == _hash_system(system)
+
+
+@pytest.mark.asyncio
 async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
@@ -568,8 +672,10 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
         proc: Subproc,
         on_text: Callable[[str], None] | None,
         on_thinking: Callable[[str], None] | None,
+        *,
+        update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking
+        del proc, on_text, on_thinking, update_input_tokens
         return ModelResponse(message=AssistantMessage(text="ok"))
 
     model._hot_spare = HotSpare(spawn_initialized)
@@ -586,8 +692,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_new_entries_skips_assistant_replay() -> None:
-    """Respawn replay sends only user-like entries to the CLI subprocess."""
+async def test_exchange_turn_skips_assistant_replay() -> None:
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
     lines: list[str] = []
@@ -600,16 +705,21 @@ async def test_send_new_entries_skips_assistant_replay() -> None:
             del skip_non_json
             return cast(MutableJSON, {"type": "result", "usage": {}})
 
-    await model._send_new_entries(
+    response = await model._exchange_turn(
         cast(Subproc, _Proc()),
-        [
-            UserMessage(text="first"),
-            AssistantMessage(text="hidden"),
-            UserMessage(text="second"),
-        ],
+        ModelRequest(
+            messages=[
+                UserMessage(text="first"),
+                AssistantMessage(text="hidden"),
+                UserMessage(text="second"),
+            ]
+        ),
+        on_text=None,
+        on_thinking=None,
     )
 
     payloads = [json.loads(line) for line in lines]
+    assert response.message.text == ""
     assert [payload["message"]["content"] for payload in payloads] == [
         "first",
         "second",
@@ -729,7 +839,7 @@ async def test_terminal_is_error_respawns_and_resets_state(
 
 
 @pytest.mark.asyncio
-async def test_send_new_entries_replay_drains_each_prior_turn() -> None:
+async def test_exchange_turn_drains_each_user_like_entry() -> None:
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
 
@@ -749,16 +859,60 @@ async def test_send_new_entries_replay_drains_each_prior_turn() -> None:
 
     proc = _Proc()
 
-    await model._send_new_entries(
+    _ = await model._exchange_turn(
         cast(Subproc, proc),
-        [
-            UserMessage(text="first"),
-            AssistantMessage(text="hidden"),
-            UserMessage(text="current"),
-        ],
+        ModelRequest(
+            messages=[
+                UserMessage(text="first"),
+                AssistantMessage(text="hidden"),
+                UserMessage(text="current"),
+            ]
+        ),
+        on_text=None,
+        on_thinking=None,
     )
 
-    assert proc.pending is True
+    assert proc.pending is False
+
+
+@pytest.mark.asyncio
+async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None:
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    model._last_input_tokens = 7
+    drain_count = 0
+
+    class _Proc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(
+            self, *, skip_non_json: bool = False
+        ) -> MutableJSON | None:
+            del skip_non_json
+            nonlocal drain_count
+            drain_count += 1
+            if drain_count == 1:
+                return cast(
+                    MutableJSON,
+                    {
+                        "type": "result",
+                        "usage": {"input_tokens": model._max_request_tokens},
+                    },
+                )
+            return None
+
+    with pytest.raises(SubprocessTransportError, match="stdout closed"):
+        _ = await model._exchange_turn(
+            cast(Subproc, _Proc()),
+            ModelRequest(
+                messages=[UserMessage(text="replay"), UserMessage(text="current")]
+            ),
+            on_text=None,
+            on_thinking=None,
+        )
+
+    assert model._last_input_tokens == 7
 
 
 def test_serialize_for_stdin_user_passthrough() -> None:

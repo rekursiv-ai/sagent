@@ -128,11 +128,7 @@ async def run_repl(
             await agent.serve_forever()
         finally:
             agent.shutdown(force=True)
-            bg_tasks = [
-                job.task
-                for job in list(agent.background.values())
-                if not job.task.done()
-            ]
+            bg_tasks = _background_tasks_for_repl_cancel(agent)
             for t in bg_tasks:
                 _ = t.cancel()
             if bg_tasks:
@@ -155,6 +151,15 @@ async def run_repl(
             "sagent --continue-all     # most recent session across all dirs\n"
             "sagent --resume-all       # interactive picker across all dirs\n"
         )
+
+
+def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]]:
+    """Return unfinished REPL-owned background tasks safe to raw-cancel."""
+    return [
+        job.task
+        for job in list(agent.background.values())
+        if job.kind != "persistent_subagent" and not job.task.done()
+    ]
 
 
 def _publish_startup_idle_if_settled(runtime: agent_runtime.AgentRuntime) -> None:

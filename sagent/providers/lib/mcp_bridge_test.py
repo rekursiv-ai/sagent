@@ -248,6 +248,23 @@ async def test_call_tool_rejects_background_args() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
+async def test_call_tool_rejects_background_before_required_arg_validation() -> None:
+    """MCP detach rejection has priority over wrapper schema validation."""
+    tool = _StrictTool()
+    bridge = ToolsBridge([cast(Tool, tool)])
+    await bridge.start()
+    try:
+        blocks = await bridge._call_tool("Strict", {"background": True})
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text.startswith("[Error]")
+        assert "cannot detach" in blocks[0].text
+        assert tool.seen_args is None
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
 async def test_call_tool_contains_ordinary_tool_exceptions() -> None:
     """MCP execution returns ordinary tool exceptions as error content."""
     bridge = ToolsBridge([cast(Tool, _BoomTool())])
