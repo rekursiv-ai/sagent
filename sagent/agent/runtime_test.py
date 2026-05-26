@@ -728,6 +728,96 @@ async def test_detached_result_after_compaction_barrier_surfaces_fallback() -> N
     assert len(fallbacks) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_compaction_absorbs_detached_splices_landing_during_await() -> None:
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            args: str = "",
+        ) -> ContextSplice:
+            del context, model, args
+            mask = ((tape[0].ref, tape[-1].ref),)
+            compact_started.set()
+            await release_compact.wait()
+            return ContextSplice(
+                ref=mint_ref(),
+                mask=mask,
+                insert_after=None,
+                payload=(UserMessage(text="[summary]"),),
+                strategy="summary",
+            )
+
+    agent, _ = make_agent([AssistantMessage(text="done")])
+    agent.compactor = BlockingCompactor()
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(
+            tool_calls=(
+                ToolCall(id="t1", name="echo", args={}),
+                ToolCall(id="t2", name="echo", args={}),
+                ToolCall(id="t3", name="echo", args={}),
+            ),
+        ),
+    )
+    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t2", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t3", content="[detached]"))
+    agent.append_history(UserMessage(text="resume"))
+
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(Compact(args=""))
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        agent.inbox.push_back(
+            DetachedResult(call_id="t1", content="one", is_error=False)
+        )
+        agent.inbox.push_back(
+            DetachedResult(call_id="t2", content="two", is_error=False)
+        )
+        agent.inbox.push_back(
+            DetachedResult(call_id="t3", content="three", is_error=False)
+        )
+        await wait_until(
+            lambda: (
+                sum(
+                    isinstance(record, ContextSplice)
+                    and record.strategy == "detached_splice"
+                    for record in agent.tape
+                )
+                == 3
+            ),
+            timeout_sec=1.0,
+        )
+        release_compact.set()
+        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    splices = [record for record in agent.tape if isinstance(record, ContextSplice)]
+    detached_splices = [
+        record for record in splices if record.strategy == "detached_splice"
+    ]
+    summary = next(record for record in splices if record.strategy == "summary")
+    mask_lo = summary.mask[0][0].ordinal
+    mask_hi = summary.mask[0][1].ordinal
+    assert all(mask_lo <= record.ref.ordinal <= mask_hi for record in detached_splices)
+    assert not any(record.strategy == "context_rescue" for record in splices)
+
+
 def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
     agent, _ = make_agent([])
     agent.append_history(UserMessage(text="go"))

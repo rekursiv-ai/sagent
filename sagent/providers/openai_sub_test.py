@@ -194,6 +194,7 @@ def test_build_input_assistant_text_and_tool_call() -> None:
     assert call_item["id"] == "fc_0"
     assert call_item["name"] == "Bash"
     assert call_item["arguments"] == json.dumps({"cmd": "ls"})
+    assert call_item["status"] == "completed"
 
 
 def test_build_input_tool_result_pair_matches_call_id() -> None:
@@ -204,6 +205,7 @@ def test_build_input_tool_result_pair_matches_call_id() -> None:
     assert out_item["type"] == "function_call_output"
     assert out_item["call_id"] == "fc_0"
     assert out_item["output"] == "done"
+    assert out_item["status"] == "completed"
 
 
 def test_build_tool_result_item_error_prefixes_marker() -> None:

@@ -876,6 +876,7 @@ def _build_assistant_items(
                 "call_id": native_id,
                 "name": tc.name,
                 "arguments": json.dumps(dict(tc.args)),
+                "status": "completed",
             }
         )
 
@@ -893,6 +894,7 @@ def _build_tool_result_item(
         "type": "function_call_output",
         "call_id": native_id,
         "output": output,
+        "status": "completed",
     }
 
 

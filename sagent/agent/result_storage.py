@@ -45,6 +45,8 @@ def post_process_result(
     *,
     session_dir: Path | None,
     persist_threshold: int,
+    message_budget_chars: int = 0,
+    used_message_chars: int = 0,
 ) -> ToolResult:
     """Persist oversized content, inject empty marker, return new result.
 
@@ -56,6 +58,8 @@ def post_process_result(
       persist_threshold: Per-result content-length threshold. ``0``
           disables persistence; results above the threshold are
           off-loaded to disk and replaced with a preview.
+      message_budget_chars: Aggregate live tool-result budget. ``0`` disables it.
+      used_message_chars: Live tool-result characters already in context.
 
     Returns:
       processed: Possibly-modified ``ToolResult``. ``call_id`` /
@@ -68,16 +72,38 @@ def post_process_result(
             result,
             content=f"({tool_name} completed with no output)",
         )
-    if (
-        persist_threshold > 0
-        and len(content) > persist_threshold
-        and tool_name not in PERSIST_EXEMPT_TOOLS
-        and not result.is_error
+    if _should_persist(
+        content,
+        tool_name,
+        is_error=result.is_error,
+        persist_threshold=persist_threshold,
+        message_budget_chars=message_budget_chars,
+        used_message_chars=used_message_chars,
     ):
         preview = _persist_oversized(result.call_id, content, session_dir=session_dir)
         if preview is not None:
             return dataclasses.replace(result, content=preview)
     return result
+
+
+def _should_persist(
+    content: str,
+    tool_name: str,
+    *,
+    is_error: bool,
+    persist_threshold: int,
+    message_budget_chars: int,
+    used_message_chars: int,
+) -> bool:
+    """Return True when result content should be off-loaded."""
+    if tool_name in PERSIST_EXEMPT_TOOLS or is_error:
+        return False
+    if persist_threshold > 0 and len(content) > persist_threshold:
+        return True
+    return (
+        message_budget_chars > 0
+        and used_message_chars + len(content) > message_budget_chars
+    )
 
 
 def _persist_oversized(

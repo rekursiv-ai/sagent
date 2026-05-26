@@ -79,6 +79,7 @@ from sagent.agent.state import (
 )
 from sagent.lib import last_models
 from sagent.lib.tool_validation import validate_tool_input
+from sagent.request_materialization import materialize_request
 from sagent.thinking import (
     ThinkingState,
     request_thinking,
@@ -561,6 +562,21 @@ class Agent:
             )
         merged.update(self._bg)
         return merged
+
+    def live_tool_result_chars(self) -> int:
+        """Return live non-exempt tool-result characters in the current context."""
+        tool_names: dict[str, str] = {}
+        total = 0
+        for entry in self.runtime.context().messages:
+            if isinstance(entry, types.history.AssistantMessage):
+                for tc in entry.tool_calls:
+                    tool_names[tc.id] = tc.name
+            elif (
+                isinstance(entry, types.history.ToolResult)
+                and tool_names.get(entry.call_id) != "Read"
+            ):
+                total += len(entry.content)
+        return total
 
     def publish(self, event: types.runtime.RuntimeEvent) -> None:
         """Forward an event to the runtime's observer list.
@@ -1225,6 +1241,10 @@ class Agent:
             system=self.system_prompt() or None,
             tools=self.live_tools() or None,
         )
+        request = materialize_request(
+            request,
+            tool_result_budget_chars=self.budget.message_budget_chars,
+        )
         used = model.approx_request_tokens(request)
         if not await self._agent_compactor.should_compact(
             input_tokens=used,
@@ -1553,15 +1573,18 @@ class _AgentModel:
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             fresh_system = self._agent.system_prompt()
-            request = types.model.ModelRequest(
-                messages=list(history),
-                system=fresh_system or None,
-                tools=rich_tools or None,
-                max_response_tokens=self._agent.max_response_tokens,
-                thinking=rich_thinking,
-                effort=rich_effort,
-                cache_ttl=self._agent.cache_ttl,
-                service_tier=rich_service_tier,
+            request = materialize_request(
+                types.model.ModelRequest(
+                    messages=list(history),
+                    system=fresh_system or None,
+                    tools=rich_tools or None,
+                    max_response_tokens=self._agent.max_response_tokens,
+                    thinking=rich_thinking,
+                    effort=rich_effort,
+                    cache_ttl=self._agent.cache_ttl,
+                    service_tier=rich_service_tier,
+                ),
+                tool_result_budget_chars=self._agent.budget.message_budget_chars,
             )
             try:
                 response = await send_with_retry(
@@ -1718,6 +1741,8 @@ class _AgentTool:
             self._inner.name,
             session_dir=self._agent.session_dir,
             persist_threshold=self._agent.budget.persist_threshold,
+            message_budget_chars=self._agent.budget.message_budget_chars,
+            used_message_chars=self._agent.live_tool_result_chars(),
         )
 
     async def _run_bg(
@@ -1736,6 +1761,8 @@ class _AgentTool:
                 self._inner.name,
                 session_dir=self._agent.session_dir,
                 persist_threshold=self._agent.budget.persist_threshold,
+                message_budget_chars=self._agent.budget.message_budget_chars,
+                used_message_chars=self._agent.live_tool_result_chars(),
             )
             content, is_error = processed.content, processed.is_error
         except asyncio.CancelledError:
@@ -1829,10 +1856,13 @@ class _AgentCompactor:
         # before the runtime freezes and appends.
         try:
             used = self._agent.model.approx_request_tokens(
-                types.model.ModelRequest(
-                    messages=payload,
-                    system=self._agent.system_prompt() or None,
-                    tools=self._agent.live_tools() or None,
+                materialize_request(
+                    types.model.ModelRequest(
+                        messages=payload,
+                        system=self._agent.system_prompt() or None,
+                        tools=self._agent.live_tools() or None,
+                    ),
+                    tool_result_budget_chars=self._agent.budget.message_budget_chars,
                 ),
             )
             headroom = (
@@ -1869,10 +1899,13 @@ class _AgentCompactor:
         fallback_reason = override.fallback_reason
         try:
             payload_tokens = self._agent.model.approx_request_tokens(
-                types.model.ModelRequest(
-                    messages=payload,
-                    system=self._agent.system_prompt() or None,
-                    tools=self._agent.live_tools() or None,
+                materialize_request(
+                    types.model.ModelRequest(
+                        messages=payload,
+                        system=self._agent.system_prompt() or None,
+                        tools=self._agent.live_tools() or None,
+                    ),
+                    tool_result_budget_chars=self._agent.budget.message_budget_chars,
                 ),
             )
             threshold = (

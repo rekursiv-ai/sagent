@@ -41,6 +41,23 @@ def test_oversized_result_persists_to_disk(tmp_path: Path) -> None:
     assert on_disk.read_text() == big
 
 
+def test_aggregate_budget_persists_before_per_result_threshold(
+    tmp_path: Path,
+) -> None:
+    body = "X" * 5_000
+    result = ToolResult(call_id="call_budget", content=body)
+    out = post_process_result(
+        result,
+        "Bash",
+        session_dir=tmp_path,
+        persist_threshold=10_000,
+        message_budget_chars=6_000,
+        used_message_chars=2_000,
+    )
+    assert PERSISTED_TAG in out.content
+    assert (tmp_path / "tool-results" / "call_budget.txt").read_text() == body
+
+
 def test_exempt_tool_skips_persist(tmp_path: Path) -> None:
     """C9: Read (and other exempt tools) bypass disk offload."""
     assert "Read" in PERSIST_EXEMPT_TOOLS

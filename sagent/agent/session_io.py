@@ -4,7 +4,7 @@ The session file is append-only JSONL. Each record carries a ``kind``:
 
 - ``{"kind": "meta", ...}`` — session metadata. Last record wins.
 - ``{"kind": "tool_state", ...}`` — ToolState snapshot. Last record
-  within the most recent barrier section wins.
+  after the most recent structural barrier splice wins.
 - ``{"kind": "history", "ref": {...}, "type": "user|assistant|tool_result",
   ...}`` — one ``HistoryRecord`` (entry + ref). Legacy records without
   ``ref`` get a synthetic ref on load.
@@ -35,6 +35,7 @@ import json
 import logging
 import time
 
+from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
@@ -67,13 +68,6 @@ if TYPE_CHECKING:
 providers_lib = lazy_import("sagent.providers")
 
 logger = logging.getLogger(__name__)
-
-_BARRIER_STRATEGIES: frozenset[str] = frozenset(
-    {"clear", "summary", "summary_fallback", "context_rescue"}
-)
-"""Splice strategies that wipe prior context; the resolver's view after
-one of these is independent of what came before, so the prior
-``tool_state`` snapshot is moot and resets to ``None``."""
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -467,8 +461,8 @@ def serialize_tool_state(state: ToolState) -> dict[str, object]:
     """Serialize the persistable subset of a ``ToolState``.
 
     ``_content_cache`` is intentionally omitted: it is re-derived on
-    resume by reading disk. Tracked file metadata (mtime, sha) is
-    preserved so post-resume staleness checks behave the same way.
+    resume by reading disk. Tracked file metadata is preserved so
+    post-resume staleness checks behave the same way.
 
     Args:
       state: ``ToolState`` to snapshot.
@@ -486,7 +480,6 @@ def serialize_tool_state(state: ToolState) -> dict[str, object]:
                 "limit": entry.limit,
                 "last_lines": entry.last_lines,
                 "mtime": entry.mtime,
-                "sha": "",
             },
         )
     return {
@@ -669,6 +662,41 @@ class SessionMeta:
         )
 
 
+def append_context_repair(
+    path: Path,
+    tape: Sequence[TapeRecord],
+    *,
+    payload: Sequence[HistoryEntry],
+    strategy: str = "manual_repair",
+) -> ContextSplice:
+    """Append a barrier ``ContextSplice`` replacing the current tape view.
+
+    Args:
+      path: Destination ``session.jsonl`` path.
+      tape: Loaded tape to repair.
+      payload: Replacement provider-facing context.
+      strategy: Splice strategy label written to the tape.
+
+    Returns:
+      repair: Appended splice record.
+
+    Raises:
+      ValueError: If ``tape`` is empty.
+
+    """
+    if not tape:
+        raise ValueError("cannot repair an empty tape")
+    repair = ContextSplice(
+        ref=_next_tape_ref(tape),
+        mask=((tape[0].ref, tape[-1].ref),),
+        insert_after=None,
+        payload=tuple(payload),
+        strategy=strategy,
+    )
+    append_session(path, tape_delta=[repair])
+    return repair
+
+
 def append_session(
     path: Path,
     *,
@@ -814,6 +842,8 @@ def load_session(
     meta_raw: dict[str, object] | None = None
     tape: list[TapeRecord] = []
     snapshot: dict[str, object] | None = None
+    snapshot_line = 0
+    barrier_candidates: list[tuple[ContextSplice, int]] = []
     corrupt_preserved = False
     ordinal_cursor = 0
 
@@ -850,6 +880,7 @@ def load_session(
                     meta_raw = dict(rec)
                 elif kind == "tool_state":
                     snapshot = dict(rec)
+                    snapshot_line = line_num
                 elif kind == "clear":
                     ref = _next_synthetic_ref()
                     last_ord = tape[-1].ref.ordinal if tape else -1
@@ -870,16 +901,14 @@ def load_session(
                     splice = _splice_from_json(rec, ref)
                     if splice is not None:
                         tape.append(splice)
-                        if splice.strategy in _BARRIER_STRATEGIES:
-                            snapshot = None
+                        barrier_candidates.append((splice, line_num))
                 elif kind == "context_override":
                     # Legacy: convert to ContextSplice on read.
                     ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
                     splice = _legacy_override_to_splice(rec, ref)
                     if splice is not None:
                         tape.append(splice)
-                        if splice.strategy in _BARRIER_STRATEGIES:
-                            snapshot = None
+                        barrier_candidates.append((splice, line_num))
                 elif kind == "update":
                     # Legacy splice patch: apply to the latest matching
                     # ``HistoryRecord.entry`` in place; dropped silently
@@ -895,13 +924,20 @@ def load_session(
         logger.warning("Could not read session file, starting fresh.")
         return None
 
+    tape = _sort_tape_by_ordinal(tape)
+    if snapshot is not None and _has_later_barrier(
+        barrier_candidates,
+        tape,
+        snapshot_line=snapshot_line,
+    ):
+        snapshot = None
     meta = SessionMeta.deserialize(meta_raw or {})
+    tape, repaired = _repair_dangling_tape(tape)
     state = ToolState()
-    if snapshot is not None:
+    if snapshot is not None and not repaired:
         restore_tool_state(state, snapshot)
-    elif meta.bash_cwd:
+    elif meta.bash_cwd and not repaired:
         state.bash_cwd = meta.bash_cwd
-    tape = _repair_dangling_tape(_sort_tape_by_ordinal(tape))
     _seed_id_counter(tape)
     return meta, tape, state
 
@@ -909,6 +945,39 @@ def load_session(
 def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
     """Return loaded tape records in canonical ordinal order."""
     return sorted(tape, key=lambda record: record.ref.ordinal)
+
+
+def _has_later_barrier(
+    barrier_candidates: Sequence[tuple[ContextSplice, int]],
+    tape: Sequence[TapeRecord],
+    *,
+    snapshot_line: int,
+) -> bool:
+    """Return True when a structural barrier was read after a snapshot."""
+    return any(
+        line_num > snapshot_line and _is_barrier_splice(splice, tape)
+        for splice, line_num in barrier_candidates
+    )
+
+
+def _is_barrier_splice(splice: ContextSplice, tape: Sequence[TapeRecord]) -> bool:
+    """Return True when ``splice`` masks all earlier tape records."""
+    earlier = [record.ref for record in tape if record.ref.ordinal < splice.ref.ordinal]
+    if not earlier or splice.insert_after is not None:
+        return False
+    masked = {
+        ref.ordinal
+        for r_from, r_to in splice.mask
+        for ref in earlier
+        if r_from.ordinal <= ref.ordinal <= r_to.ordinal
+    }
+    return masked == {ref.ordinal for ref in earlier}
+
+
+def _next_tape_ref(tape: Sequence[TapeRecord]) -> TapeRef:
+    """Return the next ordinal ref for ``tape``'s session."""
+    last = max(tape, key=lambda record: record.ref.ordinal)
+    return TapeRef(session_id=last.ref.session_id, ordinal=last.ref.ordinal + 1)
 
 
 def _record_ordinal(record: TapeRecord) -> int:
@@ -954,10 +1023,10 @@ def _apply_update_in_place(
             return
 
 
-def _repair_dangling_tape(tape: list[TapeRecord]) -> list[TapeRecord]:
+def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], bool]:
     """Repair orphan ``tool_use`` / ``ToolResult`` records loaded from disk.
 
-    Walks the loaded tape's ``HistoryRecord`` entries through
+    Walks the loaded tape's resolved entries through
     :func:`repair_dangling_tool_calls`, which:
 
     * Synthesizes ``[interrupted]`` ``ToolResult`` entries for orphan
@@ -965,31 +1034,25 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> list[TapeRecord]:
     * Drops ``ToolResult`` entries whose ``call_id`` has no preceding
       ``AssistantMessage.tool_calls`` match (orphan results).
 
-    Both shapes are then materialized as tape edits: synthesized
-    ``ToolResult`` entries become fresh ``HistoryRecord``s; dropped
-    orphan ``ToolResult`` records get a ``ContextSplice`` that
-    suppresses them. The result is a tape whose resolved view matches
-    :func:`repair_dangling_tool_calls`'s output bit-for-bit.
+    Both shapes are materialized as one barrier splice whose payload is
+    :func:`repair_dangling_tool_calls`'s output, so repairs apply equally
+    to ``HistoryRecord`` entries and ``ContextSplice`` payloads.
 
     Args:
       tape: Loaded tape records.
 
     Returns:
-      tape: Possibly with appended overrides/records that bring the
-          resolved view into provider-valid shape.
+      repaired_tape: Possibly with appended overrides/records that bring
+          the resolved view into provider-valid shape.
+      repaired: True when a repair barrier was appended.
 
     """
     if not tape:
-        return tape
-    history_entries: list[HistoryEntry] = []
-    history_positions: list[int] = []
-    for i, record in enumerate(tape):
-        if isinstance(record, HistoryRecord):
-            history_entries.append(record.entry)
-            history_positions.append(i)
-    repaired = repair_dangling_tool_calls(history_entries)
-    if repaired == history_entries:
-        return tape
+        return tape, False
+    resolved = resolve_context(tape)
+    repaired = repair_dangling_tool_calls(resolved.messages)
+    if repaired == resolved.messages:
+        return tape, False
 
     next_ordinal = max(record.ref.ordinal for record in tape) + 1
     session_id = ""
@@ -998,37 +1061,16 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> list[TapeRecord]:
             session_id = record.ref.session_id
             break
 
-    new_tape: list[TapeRecord] = list(tape)
-    # Identify orphan ``ToolResult`` records that ``repair`` dropped:
-    # any ToolResult whose id appears in ``history_entries`` but not in
-    # ``repaired`` gets suppressed by a fresh override.
-    repaired_ids = {e.id for e in repaired}
-    suppress_refs: list[TapeRef] = []
-    for entry, tape_idx in zip(history_entries, history_positions, strict=True):
-        if entry.id not in repaired_ids and isinstance(entry, ToolResult):
-            record = tape[tape_idx]
-            assert isinstance(record, HistoryRecord)
-            suppress_refs.append(record.ref)
-    if suppress_refs:
-        for orphan in suppress_refs:
-            ref = TapeRef(session_id=session_id, ordinal=next_ordinal)
-            next_ordinal += 1
-            new_tape.append(
-                ContextSplice(
-                    ref=ref,
-                    mask=((orphan, orphan),),
-                    insert_after=None,
-                    payload=(),
-                    strategy="orphan_tool_result_repair",
-                ),
-            )
-    # Synthesized ``[interrupted]`` ``ToolResult`` entries land at the
-    # end of ``repaired``; append as fresh ``HistoryRecord``s.
-    for idx in range(len(history_entries), len(repaired)):
-        ref = TapeRef(session_id=session_id, ordinal=next_ordinal)
-        next_ordinal += 1
-        new_tape.append(HistoryRecord(ref=ref, entry=repaired[idx]))
-    return new_tape
+    return [
+        *tape,
+        ContextSplice(
+            ref=TapeRef(session_id=session_id, ordinal=next_ordinal),
+            mask=((tape[0].ref, tape[-1].ref),),
+            insert_after=None,
+            payload=tuple(repaired),
+            strategy="orphan_tool_result_repair",
+        ),
+    ], True
 
 
 def repair_dangling_tool_calls(
