@@ -23,6 +23,7 @@ from sagent.repl.render import (
     make_render_observer,
 )
 from sagent.repl.run_repl import (
+    _background_tasks_for_repl_cancel,
     _parse_model_args,
     _publish_startup_idle_if_settled,
     do_login,
@@ -248,6 +249,7 @@ class _FakeAgent:
     thinking: str | None = "adaptive"
     show_thinking: bool = True
     provider_args: dict[str, object] = field(default_factory=dict)
+    background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
     def set_thinking_state(self, state: str) -> None:
         self.thinking_state = state
@@ -664,6 +666,37 @@ def test_run_repl_invokes_replay_messages() -> None:
     # stays green even when the call site is dropped (see eb4700ef).
     src = inspect.getsource(run_repl)
     assert "replay_messages(" in src
+
+
+@pytest.mark.asyncio
+async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() -> None:
+    agent = _FakeAgent()
+    tool_task = asyncio.create_task(asyncio.sleep(10.0))
+    child_task = asyncio.create_task(asyncio.sleep(10.0))
+    agent.background = {
+        "tool": BackgroundTaskEntry(
+            task=tool_task,
+            tool_name="Bash",
+            queue_id="tool",
+            started=0.0,
+            kind="tool",
+            hidden=False,
+        ),
+        "child": BackgroundTaskEntry(
+            task=child_task,
+            tool_name="Agent",
+            queue_id="child",
+            started=0.0,
+            kind="persistent_subagent",
+            hidden=False,
+        ),
+    }
+    try:
+        assert _background_tasks_for_repl_cancel(_as_agent(agent)) == [tool_task]
+    finally:
+        _ = tool_task.cancel()
+        _ = child_task.cancel()
+        await asyncio.gather(tool_task, child_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

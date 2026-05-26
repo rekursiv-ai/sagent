@@ -606,6 +606,60 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_writeback_failure_returns_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GoogleCLI()
+    model = provider.model("gemini-2.5-flash")
+    assert isinstance(model, _GoogleCLIModel)
+    success_count = 0
+
+    class _Proc:
+        pass
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _Proc())
+
+        def record_success(self) -> None:
+            nonlocal success_count
+            success_count += 1
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> str | None:
+        del proc, prompt_blocks, thinking_parts, on_text, on_thinking
+        text_parts.append("ok")
+        return "STOP"
+
+    async def writeback_credentials() -> None:
+        raise OSError("credential writeback failed")
+
+    user = UserMessage(text="hi")
+    model._system_hash = _hash_system(None)
+    model._session_id = "session"
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
+    monkeypatch.setattr(model, "_writeback_credentials", writeback_credentials)
+
+    response = await model.stream(ModelRequest(messages=[user]))
+
+    assert response.message.text == "ok"
+    assert response.message_id == "session"
+    assert success_count == 1
+    assert model._last_sent_index == 1
+    assert model._sent_history_head is user
+    assert model._turn_count == 1
+
+
+@pytest.mark.asyncio
 async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")

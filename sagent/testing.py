@@ -22,6 +22,8 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+import time
+
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
@@ -33,7 +35,7 @@ from sagent.tools.core import (
 )
 from sagent.types.history import AssistantMessage, HistoryEntry
 from sagent.types.model import ModelRequest, Pricing
-from sagent.types.runtime import Halt, RuntimeEvent
+from sagent.types.runtime import Halt, Kill, Quit, RuntimeEvent
 
 
 class MockModelCaps:
@@ -123,6 +125,9 @@ class FakeAgent:
     _bg: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
     """Background task registry (mirrors ``Agent._bg``)."""
 
+    _tool_registry: dict[str, tuple[str, float]] = field(default_factory=dict)
+    """Detached runtime tool metadata (mirrors ``Agent._tool_registry``)."""
+
     cost_tracker: CostTracker = field(default_factory=CostTracker)
     """Token + cost ledger (mirrors ``Agent.cost_tracker``)."""
 
@@ -137,11 +142,12 @@ class FakeAgent:
         """Read view of explicit and detached background entries."""
         merged: dict[str, BackgroundTaskEntry] = {}
         for qid, task in self.runtime.detached.items():
+            name, started = self._tool_registry.get(qid, ("?", time.time()))
             merged[qid] = BackgroundTaskEntry(
                 task=task,
-                tool_name="?",
+                tool_name=name,
                 queue_id=qid,
-                started=0.0,
+                started=started,
                 kind="detached",
             )
         merged.update(self._bg)
@@ -159,10 +165,24 @@ class FakeAgent:
         """Stub for ``AgentLike.halt``; published as a ``Halt`` runtime event."""
         self.runtime.publish(Halt())
 
+    def kill_all_tools(self) -> None:
+        """Cancel every visible explicit background tool job."""
+        for job_id, job in tuple(self._bg.items()):
+            if job.kind == "tool" and not job.hidden:
+                self._cancel_background(job_id)
+        self.runtime.inbox.push_back(Kill())
+
+    def _cancel_background(self, job_id: str) -> None:
+        """Cancel and forget one explicit background job."""
+        job = self._bg.pop(job_id, None)
+        if job is not None and not job.task.done():
+            job.task.cancel()
+
     def shutdown(self, *, force: bool = False) -> None:
-        """Stub for ``AgentLike.shutdown``; publish a halt-like event."""
-        del force
-        self.runtime.publish(Halt())
+        """Stub for ``AgentLike.shutdown``; queue a quit event."""
+        if force:
+            self.kill_all_tools()
+        self.runtime.inbox.push_back(Quit())
 
     def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:
         """Return all captured events that are instances of ``cls``."""

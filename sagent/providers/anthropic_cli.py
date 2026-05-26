@@ -389,6 +389,7 @@ class _AnthropicCLIModel:
 
         try:
             response = await self._exchange_turn(proc, request, on_text, on_thinking)
+            self._system_hash = _hash_system(self._pending_system)
             self._last_sent_index = len(request.messages)
         except SubprocessTransportError:
             self._reset_active_state()
@@ -448,29 +449,13 @@ class _AnthropicCLIModel:
         ]
         for entry in user_like_entries[:-1]:
             await self._send_entry(proc, entry)
-            _ = await self._drain_until_result(proc, on_text=None, on_thinking=None)
+            _ = await self._drain_until_result(
+                proc, on_text=None, on_thinking=None, update_input_tokens=False
+            )
         if not user_like_entries:
             return await self._drain_until_result(proc, on_text, on_thinking)
         await self._send_entry(proc, user_like_entries[-1])
         return await self._drain_until_result(proc, on_text, on_thinking)
-
-    async def _send_new_entries(
-        self,
-        proc: Subproc,
-        history: list[HistoryEntry],
-    ) -> None:
-        """Replay prior entries quietly, leaving the current turn pending."""
-        new_entries = history[self._last_sent_index :]
-        if self._last_sent_index == 0 and history:
-            self._sent_history_head = history[0]
-        user_like_entries = [
-            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
-        ]
-        for entry in user_like_entries[:-1]:
-            await self._send_entry(proc, entry)
-            _ = await self._drain_until_result(proc, on_text=None, on_thinking=None)
-        if user_like_entries:
-            await self._send_entry(proc, user_like_entries[-1])
 
     async def _send_entry(self, proc: Subproc, entry: HistoryEntry) -> None:
         """Write one history entry to stdin."""
@@ -482,6 +467,8 @@ class _AnthropicCLIModel:
         proc: Subproc,
         on_text: Callable[[str], None] | None,
         on_thinking: Callable[[str], None] | None,
+        *,
+        update_input_tokens: bool = True,
     ) -> ModelResponse:
         """Read stream events until ``result``; assemble a ``ModelResponse``."""
         text_parts: list[str] = []
@@ -515,9 +502,10 @@ class _AnthropicCLIModel:
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
         assert usage_event is not None
-        self._last_input_tokens = int_val(
-            cast(MutableJSON, usage_event.get("usage") or {}).get("input_tokens"), 0
-        )
+        if update_input_tokens:
+            self._last_input_tokens = int_val(
+                cast(MutableJSON, usage_event.get("usage") or {}).get("input_tokens"), 0
+            )
         return _build_model_response(
             usage_event=usage_event,
             text="".join(text_parts),
@@ -525,13 +513,6 @@ class _AnthropicCLIModel:
             stop_reason=stop_reason,
             fallback_message_id=message_id,
         )
-
-    async def _spawn_active_initialized(self) -> Subproc:
-        """Spawn an active ``claude`` subprocess and reset active counters."""
-        proc = await self._spawn_initialized()
-        self._system_hash = _hash_system(self._pending_system)
-        self._reset_active_state()
-        return proc
 
     async def _spawn_spare_initialized(self) -> Subproc:
         """Spawn a spare ``claude`` subprocess without touching active counters."""

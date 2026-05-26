@@ -31,24 +31,32 @@ from sagent.types.runtime import (
     Compact,
     CompactComplete,
     CompactFailed,
+    CompactStarted,
     Detach,
     DetachedResult,
     Halt,
     Kill,
     ModelIdle,
     ModelResponseCancelled,
+    ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
     ModelSwitch,
     ModelSwitchRejected,
     Quit,
+    Recompact,
     RuntimeEvent,
     ToolResultPartial,
     Undetach,
     UserQueuedMessage,
 )
-from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
+from sagent.types.tape import (
+    ContextSplice,
+    HistoryRecord,
+    TapeRecord,
+    TapeRef,
+)
 
 
 def _summary_override(
@@ -1196,6 +1204,84 @@ async def test_compact_rewrites_history() -> None:
     )
 
 
+def test_widen_barrier_mask_preserves_mask_gaps() -> None:
+    """Disjoint barrier masks stay disjoint when widened."""
+    refs = tuple(TapeRef(session_id="s", ordinal=idx) for idx in range(4))
+    tape: tuple[TapeRecord, ...] = tuple(
+        HistoryRecord(ref=ref, entry=UserMessage(text=str(ref.ordinal))) for ref in refs
+    )
+    override = ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=4),
+        mask=((refs[0], refs[0]), (refs[2], refs[2])),
+        insert_after=None,
+        payload=(UserMessage(text="summary"),),
+        strategy="summary",
+    )
+
+    widened = agent_runtime.widen_barrier_mask(override, tape)
+
+    assert widened.mask == ((refs[0], refs[0]), (refs[2], refs[3]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_late_model_response_complete_during_compaction_is_ignored() -> None:
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    class _BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            args: str = "",
+        ) -> ContextSplice:
+            del context, model, args
+            compact_started.set()
+            await release_compact.wait()
+            return _summary_override(
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
+            )
+
+    async def _sleep_forever() -> None:
+        await asyncio.sleep(10.0)
+
+    stale_task: asyncio.Task[None] = asyncio.create_task(_sleep_forever())
+    agent, _collector = make_agent([])
+    agent.compactor = _BlockingCompactor()
+    agent.append_history(UserMessage(text="before"))
+    agent.model_call = stale_task
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(Compact())
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        agent.inbox.push_back(
+            ModelResponseComplete(
+                message=AssistantMessage(text="stale response"),
+                generation=0,
+            ),
+        )
+        await asyncio.sleep(0.05)
+        assert "stale response" not in _assistant_texts(agent)
+        release_compact.set()
+        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
+        messages = agent.context().messages
+        assert len(messages) == 1
+        assert isinstance(messages[0], UserMessage)
+        assert messages[0].text == "[summary]"
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> None:
@@ -2335,18 +2421,49 @@ async def test_unknown_tool_returns_error_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_with_no_compactor_returns_early() -> None:
-    """``_compact_and_post`` no-ops when compactor is None.
-
-    Direct call avoids the run_forever gate (which would re-fire the model
-    forever waiting for a CompactComplete that never arrives).
-    """
-    agent, _ = make_agent([AssistantMessage(text="ok")])
+async def test_compact_with_no_compactor_unblocks_runtime() -> None:
+    """Compact with no compactor completes and releases blocked gates."""
+    agent, collector = make_agent([AssistantMessage(text="post")])
     agent.compactor = None
-    # _compact_and_post short-circuits at the None check.
-    await agent._compact_and_post("")
-    # Inbox stays empty (no CompactComplete or UserMessage produced).
-    assert agent.inbox._queue.empty()
+    complete = asyncio.Event()
+
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, CompactComplete):
+            complete.set()
+
+    agent.observers.append(_watch)
+    agent.inbox.push_back(Compact())
+
+    async def drive() -> None:
+        await asyncio.wait_for(complete.wait(), timeout=1.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=2.0), drive())
+    assert collector.has(CompactStarted)
+    assert agent.compact_task is None
+
+
+@pytest.mark.asyncio
+async def test_recompact_with_no_compactor_unblocks_runtime() -> None:
+    """Recompact with no compactor completes and releases blocked gates."""
+    agent, collector = make_agent([AssistantMessage(text="post")])
+    agent.compactor = None
+    complete = asyncio.Event()
+
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, CompactComplete):
+            complete.set()
+
+    agent.observers.append(_watch)
+    agent.inbox.push_back(Recompact(args="again"))
+
+    async def drive() -> None:
+        await asyncio.wait_for(complete.wait(), timeout=1.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=2.0), drive())
+    assert collector.has(CompactStarted)
+    assert agent.compact_task is None
 
 
 @pytest.mark.asyncio

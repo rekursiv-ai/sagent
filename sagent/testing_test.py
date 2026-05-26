@@ -19,7 +19,7 @@ from sagent.types.history import (
     UserMessage,
 )
 from sagent.types.model import Pricing
-from sagent.types.runtime import ModelResponseComplete
+from sagent.types.runtime import Kill, ModelResponseComplete, Quit
 
 
 def test_mock_model_caps_static_flags() -> None:
@@ -79,11 +79,31 @@ def test_fake_agent_background_merges_runtime_detached() -> None:
     try:
         task = loop.create_task(asyncio.sleep(0))
         a.runtime.detached["det-1"] = task
+        a._tool_registry["det-1"] = ("Read", 123.0)
 
         merged = a.background
 
         assert merged["det-1"].kind == "detached"
         assert merged["det-1"].queue_id == "det-1"
+        assert merged["det-1"].tool_name == "Read"
+        assert merged["det-1"].started == 123.0
+        _ = task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    finally:
+        loop.close()
+
+
+def test_fake_agent_background_uses_defaults_for_unregistered_detached() -> None:
+    a = FakeAgent()
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(0))
+        a.runtime.detached["det-1"] = task
+
+        merged = a.background
+
+        assert merged["det-1"].tool_name == "?"
+        assert merged["det-1"].started > 0.0
         _ = task.cancel()
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:
@@ -152,6 +172,68 @@ def test_fake_agent_cancel_background_unknown_id_is_noop() -> None:
     a = FakeAgent()
     a.cancel_background("does-not-exist")
     assert dict(a.background) == {}
+
+
+@pytest.mark.asyncio
+async def test_fake_agent_shutdown_pushes_quit() -> None:
+    a = FakeAgent()
+
+    a.shutdown()
+    items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=0.1)
+
+    assert isinstance(items[-1], Quit)
+    assert a.events == []
+
+
+@pytest.mark.asyncio
+async def test_fake_agent_force_shutdown_cancels_visible_background() -> None:
+    a = FakeAgent()
+    task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        a.register_background(
+            "q1",
+            BackgroundTaskEntry(
+                task=task,
+                tool_name="Tool",
+                queue_id="q1",
+                started=0.0,
+            ),
+        )
+
+        a.shutdown(force=True)
+        items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=0.1)
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert task.cancelled()
+        assert [type(item) for item in items] == [Kill, Quit]
+        assert a.events == []
+    finally:
+        _ = task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_fake_agent_force_shutdown_keeps_hidden_background_running() -> None:
+    a = FakeAgent()
+    task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        a.register_background(
+            "q1",
+            BackgroundTaskEntry(
+                task=task,
+                tool_name="Tool",
+                queue_id="q1",
+                started=0.0,
+                hidden=True,
+            ),
+        )
+
+        a.shutdown(force=True)
+
+        assert not task.cancelled()
+    finally:
+        _ = task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def test_with_fake_agent_installs_in_context_vars() -> None:

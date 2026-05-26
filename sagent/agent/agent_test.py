@@ -19,12 +19,12 @@ from sagent import (
     providers as providers_module,
     types,
 )
+from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import (
     ActivityTracker,
     Agent,
     SystemPromptArg,
     _resolve_target_spec,
-    _validate_input,
 )
 from sagent.agent.background import (
     BackgroundAwareTool,
@@ -1080,6 +1080,37 @@ async def test_shutdown_force_uses_persistent_subagent_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_force_cancels_missing_registry_persistent_subagent() -> None:
+    a = _build_agent()
+
+    async def hang() -> None:
+        await asyncio.sleep(10.0)
+
+    task = asyncio.create_task(hang())
+    a.register_background(
+        "child",
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="Agent",
+            queue_id="missing-child",
+            started=0.0,
+            hidden=False,
+            kind="persistent_subagent",
+        ),
+    )
+    try:
+        a.shutdown(force=True)
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+    finally:
+        if not task.done():
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
 async def test_compact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
@@ -1547,14 +1578,60 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
 
 
 @pytest.mark.asyncio
-async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
-    """After the barrier summarized prior context away, per-tool recall
-    caches that assume the original tool results are still visible must
-    be cleared. Otherwise ``Read.check_unchanged`` returns ``"[unchanged]"``
-    stubs pointing at content the model can no longer see, and
-    ``Skill.run`` short-circuits without re-emitting the body.
-    """
+async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _NoopCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
 
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+            )
+
+    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
+    agent_compactor = a._agent_compactor
+    assert agent_compactor is not None
+    f = tmp_path / "foo.py"
+    f.write_text("x")
+    a.tool_state.mark_read(str(f), content="x")
+    a.tool_state.invoked_skills.update({"alpha", "beta"})
+    a.runtime.append_history(types.history.UserMessage(text="old"))
+
+    override = await agent_compactor.compact(
+        a.runtime.tape,
+        a.runtime.context().messages,
+        a._agent_model,
+        a.runtime.mint_ref,
+        "",
+    )
+
+    assert a.tool_state.read_cache
+    assert a.tool_state.invoked_skills == {"alpha", "beta"}
+
+    a.runtime.adopt_record(override)
+    a.publish(types.runtime.CompactComplete(records=(override,)))
+
+    assert a.tool_state.read_cache == {}
+    assert a.tool_state.invoked_skills == set()
+
+
+@pytest.mark.asyncio
+async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
         async def should_compact(
@@ -1583,23 +1660,15 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     f = tmp_path / "foo.py"
     f.write_text("x")
     a.tool_state.mark_read(str(f), content="x")
-    a.tool_state.invoked_skills.add("alpha")
-    a.tool_state.invoked_skills.add("beta")
-    assert a.tool_state.read_cache, "read_cache should be populated pre-compact"
+    a.tool_state.invoked_skills.update({"alpha", "beta"})
+    assert a.tool_state.read_cache
     assert a.tool_state.invoked_skills == {"alpha", "beta"}
 
     a.runtime.append_history(types.history.UserMessage(text="old"))
     await a.compact_now()
 
-    assert a.tool_state.read_cache == {}, (
-        "compact_now must clear read_cache so Read.check_unchanged stops"
-        " returning [unchanged] stubs for content the model can no longer see"
-    )
-    assert a.tool_state.invoked_skills == set(), (
-        "compact_now must clear invoked_skills so Skill.run re-emits the body"
-        " on next invocation, since the prior <skill> block is no longer in"
-        " context after the barrier"
-    )
+    assert a.tool_state.read_cache == {}
+    assert a.tool_state.invoked_skills == set()
 
 
 @pytest.mark.asyncio
@@ -2790,6 +2859,63 @@ async def test_clear_cancels_explicit_background_jobs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_background_tool_splices_placeholder() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SlowTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            await asyncio.get_running_loop().create_future()
+            return types.history.ToolResult(call_id="", content="done")
+
+    a = _build_agent(tools=[SlowTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    token = agent_runtime.current_call_id_var.set("bg-1")
+    try:
+        placeholder = await wrapper.run({"background": True})
+    finally:
+        agent_runtime.current_call_id_var.reset(token)
+    a.runtime.append_history(
+        types.history.AssistantMessage(
+            tool_calls=(
+                types.history.ToolCall(
+                    id="bg-1", name="Echo", args={"background": True}
+                ),
+            )
+        )
+    )
+    a.runtime.append_history(placeholder)
+    task = a.background["bg-1"].task
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    task.cancel()
+    await asyncio.wait_for(task, timeout=1.0)
+    items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=1.0)
+    detached = [
+        item for item in items if isinstance(item, types.runtime.DetachedResult)
+    ]
+    assert len(detached) == 1
+
+    spliced = a.runtime._splice_detached_result(
+        detached[0].call_id,
+        detached[0].content,
+        detached[0].is_error,
+    )
+
+    assert spliced is not None
+    assert spliced.content == "[cancelled]"
+    assert spliced.is_error
+    assert not any(
+        isinstance(entry, types.history.ToolResult)
+        and entry.content.startswith("[Running in background")
+        for entry in a.history
+    )
+
+
+@pytest.mark.asyncio
 async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
     started = asyncio.Event()
 
@@ -3178,108 +3304,6 @@ def test_status_setter_publishes_status_changed() -> None:
     a.status = "working"  # No-op: same value.
     a.status = "idle"
     assert events == ["working", "idle"]
-
-
-def test_validate_input_missing_required() -> None:
-    """C8: missing required field surfaces a structured error."""
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {"file_path": {"type": "string"}},
-            "required": ["file_path"],
-            "additionalProperties": False,
-        }
-    )
-    err = _validate_input("Read", schema, {})
-    assert err is not None
-    assert "file_path" in err
-    assert "InputValidationError" in err
-
-
-def test_validate_input_unexpected_field() -> None:
-    """C8: extra field with ``additionalProperties: false`` is reported."""
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {"msg": {"type": "string"}},
-            "additionalProperties": False,
-        }
-    )
-    err = _validate_input("Echo", schema, {"bogus": 1})
-    assert err is not None
-    assert "Unexpected parameter `bogus`" in err
-
-
-def test_validate_input_nested_required() -> None:
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {
-                "payload": {
-                    "type": "object",
-                    "properties": {"file_path": {"type": "string"}},
-                    "required": ["file_path"],
-                }
-            },
-        }
-    )
-    err = _validate_input("Nested", schema, {"payload": {}})
-    assert err is not None
-    assert "The required parameter `payload.file_path` is missing." in err
-
-
-def test_validate_input_nested_unexpected_field() -> None:
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {
-                "payload": {
-                    "type": "object",
-                    "properties": {"file_path": {"type": "string"}},
-                    "additionalProperties": False,
-                }
-            },
-        }
-    )
-    err = _validate_input(
-        "Nested", schema, {"payload": {"file_path": "x", "extra": True}}
-    )
-    assert err is not None
-    assert "Unexpected parameter `payload.extra`." in err
-
-
-def test_validate_input_array_items_nested_required() -> None:
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"id": {"type": "string"}},
-                        "required": ["id"],
-                    },
-                }
-            },
-        }
-    )
-    err = _validate_input("Nested", schema, {"items": [dict[str, object]()]})
-    assert err is not None
-    assert "The required parameter `items[0].id` is missing." in err
-
-
-def test_validate_input_valid_passes() -> None:
-    """C8: well-formed args return ``None``."""
-    schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {"msg": {"type": "string"}},
-            "required": ["msg"],
-            "additionalProperties": False,
-        }
-    )
-    assert _validate_input("Echo", schema, {"msg": "hi"}) is None
 
 
 def test_split_bg_args_strips_background_and_delay() -> None:

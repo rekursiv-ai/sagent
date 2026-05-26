@@ -197,6 +197,9 @@ class ModelResponseComplete:
     message: AssistantMessage
     """Final assembled ``AssistantMessage``."""
 
+    generation: int = -1
+    """Runtime model-call generation that produced this response."""
+
     input_tokens: int = 0
     """Input token count reported by the provider."""
 

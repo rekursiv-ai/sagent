@@ -36,7 +36,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
-from typing import cast
 
 import asyncio
 import contextlib
@@ -79,7 +78,7 @@ from sagent.agent.state import (
     unique_registry_label,
 )
 from sagent.lib import last_models
-from sagent.lib.json import JSON
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.thinking import (
     ThinkingState,
     request_thinking,
@@ -245,6 +244,7 @@ class Agent:
         for fn in (
             self._track_activity,
             self._track_tool_registry,
+            self._track_compaction,
             self._enforce_caps,
         ):
             self.runtime.observers.append(fn)
@@ -845,6 +845,8 @@ class Agent:
                         child = agent_registry.get(job.queue_id)
                         if child is not None:
                             child.shutdown(force=True)
+                        else:
+                            _ = job.task.cancel()
                     else:
                         _ = job.task.cancel()
         self.runtime.inbox.push_back(types.runtime.Quit())
@@ -1118,6 +1120,13 @@ class Agent:
                 self._tool_registry[tc.id] = (tc.name, now)
             if event.message.tool_calls:
                 self.activity.num_tool_call_rounds += 1
+
+    def _track_compaction(self, event: types.runtime.RuntimeEvent) -> None:
+        """Update compaction state after a barrier lands."""
+        if isinstance(event, types.runtime.CompactComplete) and event.records:
+            self.tool_state.reset_tool_recall()
+            self.compaction_state.compact_count += 1
+            self.compaction_state.compact_failures = 0
 
     def _enforce_caps(self, event: types.runtime.RuntimeEvent) -> None:
         """Push ``types.runtime.ModelResponseError`` when caps are hit."""
@@ -1670,7 +1679,7 @@ class _AgentTool:
         self._agent.runtime.publish(
             types.runtime.ToolLabel(call_id=call_id, text=label),
         )
-        validation_error = _validate_input(
+        validation_error = validate_tool_input(
             self._inner.name, self._inner.directive_schema, clean_args
         )
         if validation_error is not None:
@@ -1730,8 +1739,10 @@ class _AgentTool:
             )
             content, is_error = processed.content, processed.is_error
         except asyncio.CancelledError:
-            self._agent.cancel_background(call_id)
-            return
+            if call_id not in self._agent.background:
+                return
+            content = "[cancelled]"
+            is_error = True
         except Exception as exc:
             logger.exception("background tool %r failed", self._inner.name)
             content = f"{type(exc).__name__}: {exc}"
@@ -1812,12 +1823,6 @@ class _AgentCompactor:
             mint_ref=mint_ref,
             custom_instructions=args or None,
         )
-        # The barrier summarized prior context away. Per-tool recall
-        # caches (Read.check_unchanged, Skill.invoked_skills) would now
-        # return stubs pointing at content the model can no longer see;
-        # clear them so the next call re-emits the real content into
-        # the post-compact context.
-        self._agent.tool_state.reset_tool_recall()
         payload: list[types.history.HistoryEntry] = list(override.payload)
 
         # Post-compact enrich operates on the override's mutable payload
@@ -1846,9 +1851,6 @@ class _AgentCompactor:
             types.exceptions.log_exception_or_warning(
                 logger, "post_compact_enrich failed; continuing", exc
             )
-        self._agent.compaction_state.compact_count += 1
-        self._agent.compaction_state.compact_failures = 0
-
         # The runtime's gate needs the last entry to be UserMessage or
         # ToolResult so the next iteration calls the model. If the
         # compactor produced an empty payload or ended elsewhere,
@@ -1901,119 +1903,3 @@ class _AgentCompactor:
             payload=tuple(payload),
             fallback_reason=fallback_reason,
         )
-
-
-_INPUT_VALIDATION_PREFIX = "InputValidationError:"
-_TOOL_INPUT_RECOVERY_HINT = (
-    "This tool call was not executed because its JSON directive was missing or "
-    "misstated required fields. Do not repeat the same empty or incomplete call. "
-    "Either retry this tool with the required fields, choose a different tool "
-    "that fits the task, or explain why the required value is unavailable."
-)
-
-
-def _validate_input(
-    tool_name: str,
-    schema: JSON,
-    args: Mapping[str, object],
-) -> str | None:
-    """Pre-check ``args`` against ``schema``; return an error or ``None``.
-
-    Catches the two failure modes that wedge the model on retry: missing
-    ``required`` fields (typically a truncated ``stop_reason=max_tokens``
-    tool_use) and unexpected fields (model hallucinated a key that
-    doesn't exist).
-
-    Args:
-      tool_name: Tool name -- used in the error header.
-      schema: The tool's frozen ``directive_schema``.
-      args: Directive args parsed from the model output.
-
-    Returns:
-      error: Multi-line error text starting with
-          ``InputValidationError:`` when validation fails, ``None`` on
-          well-formed input.
-
-    """
-    issues = _validate_schema(schema, args, "")
-    if not issues:
-        return None
-    plural = "issues" if len(issues) > 1 else "issue"
-    parts = [
-        f"{_INPUT_VALIDATION_PREFIX} {tool_name} failed due to the following {plural}:",
-        *issues,
-    ]
-    required = _schema_strings(schema.get("required"))
-    props_raw = schema.get("properties")
-    accepted = [str(k) for k in props_raw] if isinstance(props_raw, Mapping) else []
-    if required:
-        keys = ", ".join(f"`{k}`" for k in required)
-        parts.append(f"\n{tool_name} requires: {keys}.")
-    if any(issue.startswith("Unexpected parameter") for issue in issues) and accepted:
-        keys = ", ".join(f"`{k}`" for k in accepted)
-        parts.append(f"{tool_name} accepts: {keys}.")
-    parts.append(f"\n{_TOOL_INPUT_RECOVERY_HINT}")
-    return "\n".join(parts)
-
-
-def _validate_schema(schema: object, value: object, path: str) -> list[str]:
-    """Return recursive JSON-schema validation issue strings."""
-    if not isinstance(schema, Mapping):
-        return []
-    schema_map = cast(Mapping[str, object], schema)
-    schema_type = schema_map.get("type")
-    if schema_type == "object" and isinstance(value, Mapping):
-        return _validate_object(schema_map, cast(Mapping[str, object], value), path)
-    if schema_type == "array" and isinstance(value, list):
-        items = schema_map.get("items")
-        value_items = cast(list[object], value)
-        return [
-            issue
-            for idx, item in enumerate(value_items)
-            for issue in _validate_schema(items, item, f"{path}[{idx}]")
-        ]
-    return []
-
-
-def _validate_object(
-    schema: Mapping[str, object],
-    args: Mapping[str, object],
-    path: str,
-) -> list[str]:
-    """Return object-schema validation issue strings."""
-    required = _schema_strings(schema.get("required"))
-    props_raw = schema.get("properties")
-    props: Mapping[str, object] = (
-        cast(Mapping[str, object], props_raw) if isinstance(props_raw, Mapping) else {}
-    )
-    issues = [
-        f"The required parameter `{_path_join(path, key)}` is missing."
-        for key in required
-        if key not in args
-    ]
-    if schema.get("additionalProperties") is False:
-        issues.extend(
-            f"Unexpected parameter `{_path_join(path, key)}`."
-            for key in args
-            if key not in props
-        )
-    for key, item in args.items():
-        child_schema = props.get(key)
-        if child_schema is not None:
-            issues.extend(_validate_schema(child_schema, item, _path_join(path, key)))
-    return issues
-
-
-def _schema_strings(value: object) -> list[str]:
-    """Return string items from a schema list field."""
-    if not isinstance(value, (list, tuple)):
-        return []
-    items = cast(Sequence[object], value)
-    return [item for item in items if isinstance(item, str)]
-
-
-def _path_join(prefix: str, key: str) -> str:
-    """Append ``key`` to a dotted validation path."""
-    if prefix:
-        return f"{prefix}.{key}"
-    return key

@@ -215,6 +215,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Literal, Protocol
 
 import asyncio
@@ -300,32 +301,58 @@ def widen_barrier_mask(
     override: ContextSplice,
     tape: Sequence[TapeRecord],
 ) -> ContextSplice:
-    """Rewrite a compaction barrier to cover the current tape.
+    """Rewrite a compaction barrier mask to cover current tape refs.
 
     Args:
       override: Compactor-produced barrier splice.
       tape: Runtime tape at adopt time.
 
     Returns:
-      widened: ``override`` with its mask widened to the current tape.
+      widened: ``override`` with its mask widened to current tape refs while
+      preserving gaps between the producer's original mask ranges.
 
     """
-    bounds = _tape_ref_bounds(tape)
-    if bounds is None:
+    mask = _widen_mask_ranges(override.mask, tape)
+    if mask == override.mask:
         return override
-    return dataclasses.replace(override, mask=(bounds,))
+    return dataclasses.replace(override, mask=mask)
 
 
-def _tape_ref_bounds(
+def _widen_mask_ranges(
+    mask: tuple[tuple[TapeRef, TapeRef], ...],
     tape: Sequence[TapeRecord],
-) -> tuple[TapeRef, TapeRef] | None:
-    """Return ordinal bounds for all records in ``tape``."""
+) -> tuple[tuple[TapeRef, TapeRef], ...]:
+    """Return ``mask`` widened over ``tape`` without filling existing gaps."""
     if not tape:
-        return None
-    refs = [record.ref for record in tape]
-    return min(refs, key=lambda ref: ref.ordinal), max(
-        refs,
-        key=lambda ref: ref.ordinal,
+        return mask
+    refs = sorted((record.ref for record in tape), key=lambda ref: ref.ordinal)
+    preserved_gaps = _preserved_mask_gaps(mask)
+    widened: list[tuple[TapeRef, TapeRef]] = []
+    start: TapeRef | None = None
+    previous: TapeRef | None = None
+    for ref in refs:
+        if any(lo < ref.ordinal < hi for lo, hi in preserved_gaps):
+            if start is not None and previous is not None:
+                widened.append((start, previous))
+                start = None
+            continue
+        if start is None:
+            start = ref
+        previous = ref
+    if start is not None and previous is not None:
+        widened.append((start, previous))
+    return tuple(widened)
+
+
+def _preserved_mask_gaps(
+    mask: tuple[tuple[TapeRef, TapeRef], ...],
+) -> tuple[tuple[int, int], ...]:
+    """Return ordinal gaps between sorted mask ranges."""
+    ranges = sorted(mask, key=lambda item: item[0].ordinal)
+    return tuple(
+        (left[1].ordinal, right[0].ordinal)
+        for left, right in pairwise(ranges)
+        if left[1].ordinal + 1 < right[0].ordinal
     )
 
 
@@ -707,6 +734,7 @@ class AgentRuntime:
         # stop-cohort path so a preempted cohort doesn't fire complete.
         self._cohort_seen: bool = False
         self.model_call: asyncio.Task[None] | None = None
+        self._model_call_generation: int = 0
         self.compact_task: asyncio.Task[None] | None = None
         # Buffered ModelSwitch awaiting a safe moment (no in-flight
         # model call, no compaction). Applied at the end of each
@@ -967,10 +995,14 @@ class AgentRuntime:
             self._tape_by_ref[ref] = record
             self._clear_detached_anchors()
             return ref
-        bounds = _tape_ref_bounds(self.tape)
-        assert bounds is not None
+        refs = [record.ref for record in self.tape]
         ref = self.append_splice(
-            mask=(bounds,),
+            mask=(
+                (
+                    min(refs, key=lambda tape_ref: tape_ref.ordinal),
+                    max(refs, key=lambda tape_ref: tape_ref.ordinal),
+                ),
+            ),
             insert_after=None,
             payload=(),
             strategy="clear",
@@ -1164,6 +1196,7 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                                self._model_call_generation += 1
                             if self.compact_task:
                                 self.compact_task.cancel()
                                 self.compact_task = None
@@ -1198,6 +1231,7 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                                self._model_call_generation += 1
                             if self.compact_task:
                                 self.compact_task.cancel()
                                 self.compact_task = None
@@ -1338,6 +1372,7 @@ class AgentRuntime:
                             if self.model_call:
                                 self.model_call.cancel()
                                 self.model_call = None
+                                self._model_call_generation += 1
                             self._stop_all_tools(mode="detach")
                             queued.clear()
                             # Capture buffered mid-stream input into the snapshot
@@ -1416,7 +1451,15 @@ class AgentRuntime:
                         case ModelResponseThinking():
                             self.publish(item)
 
-                        case ModelResponseComplete(message=msg):
+                        case ModelResponseComplete(message=msg, generation=generation):
+                            if generation not in (-1, self._model_call_generation):
+                                logger.debug(
+                                    "runtime stale model response ignored: "
+                                    "generation=%d current=%d",
+                                    generation,
+                                    self._model_call_generation,
+                                )
+                                continue
                             self.model_call = None
                             if self.before_tool_spawn is not None:
                                 rejected = self.before_tool_spawn(msg)
@@ -1703,10 +1746,12 @@ class AgentRuntime:
                     # cancellation as a retry rather than waiting for the
                     # user's next input.
                     self._assert_alternation_invariant()
-                    self.model_call = asyncio.create_task(
-                        self._stream_and_post(),
+                    self._model_call_generation += 1
+                    model_call: asyncio.Task[None] = asyncio.create_task(
+                        self._stream_and_post(self._model_call_generation),
                     )
-                    self.model_call.add_done_callback(
+                    self.model_call = model_call
+                    model_call.add_done_callback(
                         log_task_exception(logger, "model-call task crashed"),
                     )
                     self.publish(ModelCallStarted())
@@ -2098,7 +2143,7 @@ class AgentRuntime:
         for cid in [c for c, t in self.detached.items() if t.done()]:
             del self.detached[cid]
 
-    async def _stream_and_post(self) -> None:
+    async def _stream_and_post(self, generation: int) -> None:
         """Stream a model response, posting chunks and the final message."""
         chars = 0
 
@@ -2118,7 +2163,9 @@ class AgentRuntime:
                 on_text,
                 on_thinking,
             )
-            self.inbox.push_back(ModelResponseComplete(message=response))
+            self.inbox.push_back(
+                ModelResponseComplete(message=response, generation=generation),
+            )
         except asyncio.CancelledError:
             # Publish directly (not via inbox): the Halt handler has
             # already armed ``AWAIT_USER``, so an inbox push would gate
@@ -2251,6 +2298,7 @@ class AgentRuntime:
         override on the tape and publishes ``CompactComplete``.
         """
         if self.compactor is None:
+            self.inbox.push_back(CompactComplete(records=()))
             return
         tape_len = len(self.tape)
         try:

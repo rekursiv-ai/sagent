@@ -408,7 +408,10 @@ class _GoogleCLIModel:
             raise
         self._hot_spare.record_success()
         self._turn_count += 1
-        await self._writeback_credentials()
+        try:
+            await self._writeback_credentials()
+        except Exception:
+            logger.exception("GoogleCLI: credential writeback failed.")
         return response
 
     async def close(self) -> None:
