@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import logging
+
 import httpx
 import pytest
 
@@ -195,6 +197,82 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
 
 
 @pytest.mark.asyncio
+async def test_google_stream_routes_thought_parts_to_thinking() -> None:
+    sse_body = (
+        b'data: {"candidates":[{"content":{"parts":[{"text":"thinking",'
+        b'"thought":true},{"text":"answer"}]}}],'
+        b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}\n\n'
+    )
+    thinking_chunks: list[str] = []
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    resp = await m.stream(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        on_thinking=thinking_chunks.append,
+    )
+    assert thinking_chunks == ["thinking"]
+    assert resp.message.text == "answer"
+    assert resp.message.thinking_blocks == (
+        {"type": "thinking", "thinking": "thinking"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_stream_logs_and_skips_malformed_json_chunk(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sse_body = (
+        b"data: {not-json}\n\n"
+        b'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n'
+    )
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with caplog.at_level(logging.WARNING, logger="sagent.providers.google"):
+        resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert resp.message.text == "ok"
+    assert any("malformed JSON chunk" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_google_stream_raises_when_all_json_chunks_are_malformed() -> None:
+    sse_body = b"data: {not-json}\n\ndata: also-not-json\n\n"
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(ValueError, match="only malformed JSON chunks"):
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
 async def test_google_stream_max_tokens_finish_reason() -> None:
     """``MAX_TOKENS`` finish reason normalizes to ``max_tokens``."""
     sse_body = (
@@ -285,11 +363,84 @@ def test_google_model_properties() -> None:
     m = p.model("gemini-2.5-pro")
     assert m.max_request_tokens == 1_000_000
     assert m.supports_streaming is True
-    assert m.supports_thinking is False
-    assert m.supports_effort is False
+    assert m.supports_thinking is True
+    assert m.supports_effort is True
     assert m.supports_cache_control is False
     assert m.max_image_dim == 3072
     assert m.max_image_bytes == 20 * 1024 * 1024
+
+
+def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
+    body = _build_request(
+        ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive")
+    )
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert gen_config["thinkingConfig"] == {
+        "includeThoughts": True,
+        "thinkingBudget": -1,
+    }
+
+
+def test_build_request_enabled_thinking_uses_dynamic_budget() -> None:
+    body = _build_request(
+        ModelRequest(messages=[UserMessage(text="x")], thinking="enabled")
+    )
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert gen_config["thinkingConfig"] == {
+        "includeThoughts": True,
+        "thinkingBudget": -1,
+    }
+
+
+def test_build_request_effort_min_sets_small_budget() -> None:
+    body = _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="min"))
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert gen_config["thinkingConfig"] == {
+        "includeThoughts": True,
+        "thinkingBudget": 1_024,
+    }
+
+
+def test_build_request_effort_max_sets_largest_budget() -> None:
+    body = _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="max"))
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert gen_config["thinkingConfig"] == {
+        "includeThoughts": True,
+        "thinkingBudget": 24_576,
+    }
+
+
+def test_build_request_invalid_effort_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="Invalid Google effort"):
+        _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="turbo"))
+
+
+def test_build_request_thinking_omits_temperature() -> None:
+    body = _build_request(
+        ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive")
+    )
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert "thinkingConfig" in gen_config
+    assert "temperature" not in gen_config
+
+
+def test_build_request_without_thinking_keeps_temperature() -> None:
+    body = _build_request(
+        ModelRequest(messages=[UserMessage(text="x")], temperature=0.3)
+    )
+    gen_config = cast(MutableJSON, body["generationConfig"])
+    assert gen_config["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_google_model_close_closes_reusable_http_client() -> None:
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    client = httpx.AsyncClient()
+    m._client = client
+    await m.close()
+    assert client.is_closed
+    assert m._client is None
 
 
 def test_google_model_context_overflow_detection() -> None:

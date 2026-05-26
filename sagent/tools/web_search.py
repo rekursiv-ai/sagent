@@ -22,6 +22,7 @@ class WebSearch:
 
     name: str = "WebSearch"
     tool_id: str = "application/x-tool-websearch"
+    clearable_results: bool = True
 
     @property
     def description(self) -> str:

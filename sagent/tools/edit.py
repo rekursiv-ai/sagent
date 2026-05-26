@@ -81,6 +81,7 @@ class Edit:
 
     name: str = "Edit"
     tool_id: str = "application/x-tool-edit"
+    clearable_results: bool = False
     description: str = load_tool_description("Edit")
     directive_schema: JSON = json_freeze(
         {

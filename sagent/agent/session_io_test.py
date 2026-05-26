@@ -306,6 +306,38 @@ def test_append_session_no_ops_on_empty_batch(tmp_path: Path) -> None:
     assert not session_file.exists()
 
 
+def test_load_session_orders_loaded_tape_by_ordinal(tmp_path: Path) -> None:
+    """Persisted and synthetic refs load in canonical ordinal order."""
+    session_file = tmp_path / "session.jsonl"
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "abc"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 1},
+            "type": "user",
+            "text": "one",
+        },
+        {"kind": "history", "type": "user", "text": "synthetic"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 0},
+            "type": "user",
+            "text": "zero",
+        },
+    )
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    assert [record.ref.ordinal for record in tape] == [0, 1, 2]
+    user_messages: list[UserMessage] = []
+    for entry in _history_from_tape(tape):
+        assert isinstance(entry, UserMessage)
+        user_messages.append(entry)
+    assert [entry.text for entry in user_messages] == ["zero", "one", "synthetic"]
+
+
 def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
     """Disk-loaded ``ToolResult`` with no matching ``tool_use`` is hidden on resume.
 

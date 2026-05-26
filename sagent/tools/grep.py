@@ -89,6 +89,7 @@ class Grep:
 
     name: str = "Grep"
     tool_id: str = "application/x-tool-grep"
+    clearable_results: bool = True
     description: str = load_tool_description("Grep")
     emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(

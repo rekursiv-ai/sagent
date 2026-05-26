@@ -6,6 +6,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import override
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -459,6 +460,69 @@ async def test_max_response_tokens_within_cap_applied() -> None:
 
 
 @pytest.mark.asyncio
+async def test_account_empty_string_errors() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="gpt-5.5",
+            account="work",
+        ),
+    )
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"account": ""})
+    assert result.is_error
+    assert "account cannot be empty" in result.content
+
+
+@pytest.mark.asyncio
+async def test_provider_change_without_auth_uses_target_default() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="gpt-5.5",
+            account="work",
+        ),
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"provider": "Google", "model_id": "gemini-3-pro"})
+    assert not result.is_error
+    build.assert_called_once_with("Google", "env", account="work")
+
+
+@pytest.mark.asyncio
+async def test_account_default_string_is_preserved() -> None:
+    agent = _make_agent(
+        spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="gpt-5.5",
+            account="work",
+        ),
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5")
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"model_id": "gpt-5", "account": "default"})
+    assert not result.is_error
+    build.assert_called_once_with("OpenAI", "env", account="default")
+
+
+@pytest.mark.asyncio
 async def test_model_id_change_unknown_provider_errors() -> None:
     agent = _make_agent(
         spec=ModelSpec(
@@ -473,6 +537,54 @@ async def test_model_id_change_unknown_provider_errors() -> None:
         result = await t.run({"model_id": "newmodel"})
     assert result.is_error
     assert "Failed to build model" in result.content
+
+
+@pytest.mark.asyncio
+async def test_provider_catalog_respects_allow_list() -> None:
+    """``catalog=providers`` lists only providers in the allow list."""
+    agent = _make_agent()
+    t = AgentSelf(allow_providers=("OpenAISubscription",))
+    with _active(agent):
+        result = await t.run({"catalog": "providers"})
+    assert not result.is_error
+    assert "OpenAISubscription" in result.content
+    assert "DashScope" not in result.content
+    assert "Moonshot" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_rejects_provider_outside_allow_list() -> None:
+    """``catalog=models, catalog_provider=...`` returns a clear message
+    when the named provider isn't in the allow list.
+    """
+    agent = _make_agent()
+    t = AgentSelf(allow_providers=("OpenAISubscription",))
+    with _active(agent):
+        result = await t.run({"catalog": "models", "catalog_provider": "DashScope"})
+    assert not result.is_error
+    assert "not in the allowed list" in result.content
+
+
+@pytest.mark.asyncio
+async def test_provider_switch_rejected_when_outside_allow_list() -> None:
+    """An ``AgentSelf`` patch that asks to switch ``provider`` to a
+    name not in the allow list returns an error before any
+    ``build_provider`` call. Regression guard for the write surface
+    of the allow-list contract (the read surface is the catalog).
+    """
+    spec = ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-stub",
+        account="",
+    )
+    agent = _make_agent(spec=spec)
+    t = AgentSelf(allow_providers=("OpenAISubscription",))
+    with _active(agent):
+        result = await t.run({"provider": "Anthropic", "auth": "env"})
+    assert result.is_error
+    assert "not in the allowed list" in result.content
+    assert "Anthropic" in result.content
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, cast, override
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -43,7 +44,10 @@ from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import Subproc
+from sagent.providers.lib.subproc import (
+    Subproc,
+    SubprocessTransportError,
+)
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
@@ -185,6 +189,16 @@ class GoogleCLI(Google):
         return self._account
 
 
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _GoogleCLIProcState:
+    """ACP session state owned by one Gemini CLI subprocess."""
+
+    proc: Subproc
+    session_id: str
+    tmpdir: Path
+    system_hash: str
+
+
 class _GoogleCLIModel:
     """``gemini --experimental-acp`` subprocess wrapped as a sagent ``Model``.
 
@@ -216,7 +230,11 @@ class _GoogleCLIModel:
         self._next_rpc_id = 1
         self._session_id: str = ""
         self._tmpdir: Path | None = None
-        self._hot_spare = HotSpare(self._spawn_initialized)
+        self._warming_proc: _GoogleCLIProcState | None = None
+        self._hot_spare = HotSpare(
+            self._spawn_initialized_proc,
+            close_partial=self._close_warming_proc,
+        )
         self._pending_system: str = ""
         self._sent_history_head: HistoryEntry | None = None
 
@@ -370,21 +388,25 @@ class _GoogleCLIModel:
 
         """
         self._pending_system = request.system or ""
+        if self._hot_spare.active is not None:
+            self._promote_proc_state(self._hot_spare.active)
         if self._should_respawn(request):
+            if _hash_system(request.system) != self._system_hash:
+                await self._hot_spare.discard_spare()
             await self._hot_spare.respawn()
-            self._last_sent_index = 0
-            self._sent_history_head = None
+            self._reset_active_state()
         proc = await self._hot_spare.acquire()
+        self._promote_proc_state(proc)
         self._sync_tools_bridge(request)
 
         try:
             response = await self._exchange_turn(proc, request, on_text, on_thinking)
             self._last_sent_index = len(request.messages)
-        except (RuntimeError, ValueError):
-            await self._hot_spare.respawn()
-            self._last_sent_index = 0
-            self._sent_history_head = None
+        except SubprocessTransportError:
+            self._reset_active_state()
+            await self._hot_spare.respawn_after_transport_failure()
             raise
+        self._hot_spare.record_success()
         self._turn_count += 1
         await self._writeback_credentials()
         return response
@@ -423,6 +445,28 @@ class _GoogleCLIModel:
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
 
+    def _promote_proc_state(self, proc: Subproc) -> None:
+        """Copy state from the active subprocess wrapper onto model fields."""
+        state = self._proc_state(proc)
+        if state is None:
+            return
+        self._session_id = state.session_id
+        self._system_hash = state.system_hash
+        self._tmpdir = state.tmpdir
+
+    @classmethod
+    def _attach_proc_state(cls, state: _GoogleCLIProcState) -> None:
+        """Attach Google CLI state to its subprocess wrapper."""
+        state.proc.sagent_google_cli_state = state
+
+    @classmethod
+    def _proc_state(cls, proc: Subproc) -> _GoogleCLIProcState | None:
+        """Return Google CLI state carried by ``proc``, if any."""
+        state = getattr(proc, "sagent_google_cli_state", None)
+        if isinstance(state, _GoogleCLIProcState):
+            return state
+        return None
+
     async def _exchange_turn(
         self,
         proc: Subproc,
@@ -434,13 +478,24 @@ class _GoogleCLIModel:
         new_entries = request.messages[self._last_sent_index :]
         if self._last_sent_index == 0 and request.messages:
             self._sent_history_head = request.messages[0]
+        user_like_entries = [
+            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
+        ]
+        for entry in user_like_entries[:-1]:
+            blocks = _serialize_prompt_blocks(entry, self.max_image_dim)
+            _ = await self._send_prompt(
+                proc,
+                blocks,
+                [],
+                [],
+                None,
+                None,
+            )
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         stop_reason: str | None = None
-        for entry in new_entries:
-            if isinstance(entry, AssistantMessage):
-                continue
-            blocks = _serialize_prompt_blocks(entry, self.max_image_dim)
+        if user_like_entries:
+            blocks = _serialize_prompt_blocks(user_like_entries[-1], self.max_image_dim)
             stop_reason = await self._send_prompt(
                 proc,
                 blocks,
@@ -471,12 +526,14 @@ class _GoogleCLIModel:
         while True:
             msg = await proc.read_json_line(skip_non_json=True)
             if msg is None:
-                raise RuntimeError(
+                raise SubprocessTransportError(
                     "GoogleCLI: subprocess stdout closed before response"
                 )
             if msg.get("id") == request_id:
                 if "error" in msg:
-                    raise RuntimeError(f"GoogleCLI: JSON-RPC error: {msg['error']}")
+                    raise SubprocessTransportError(
+                        f"GoogleCLI: JSON-RPC error: {msg['error']}"
+                    )
                 result = cast(MutableJSON, msg.get("result") or {})
                 return cast(str | None, result.get("stopReason"))
             if msg.get("method") == "session/update":
@@ -530,12 +587,30 @@ class _GoogleCLIModel:
             total_cost=total_cost,
         )
 
-    async def _spawn_initialized(self) -> Subproc:
+    async def _spawn_initialized_proc(self) -> Subproc:
+        """Spawn ``gemini`` and attach isolated ACP state to the subprocess."""
+        state = await self._spawn_initialized()
+        self._attach_proc_state(state)
+        return state.proc
+
+    def _reset_active_state(self) -> None:
+        """Reset active subprocess counters after a respawn boundary."""
+        self._turn_count = 0
+        self._last_input_tokens = 0
+        self._reset_delta_state()
+
+    def _reset_delta_state(self) -> None:
+        """Reset sent-history delta tracking."""
+        self._last_sent_index = 0
+        self._sent_history_head = None
+
+    async def _spawn_initialized(self) -> _GoogleCLIProcState:
         """Spawn ``gemini`` and run the ACP handshake to a live ``sessionId``."""
         if self._tools_bridge is None:
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
         tmpdir = Path(tempfile.mkdtemp(prefix="sagent-google-cli-"))
+        system_hash = _hash_system(self._pending_system)
         _populate_google_tmpdir(tmpdir, self._provider.account, self._pending_system)
         workdir = tmpdir / "workdir"
         proc = Subproc(
@@ -544,15 +619,38 @@ class _GoogleCLIModel:
             tmpdir=tmpdir,
             cwd=workdir,
         )
-        await proc.start()
-        await self._acp_handshake(proc, workdir)
-        self._system_hash = _hash_system(self._pending_system)
-        self._turn_count = 0
-        self._last_input_tokens = 0
-        self._tmpdir = tmpdir
-        return proc
+        state = _GoogleCLIProcState(
+            proc=proc,
+            session_id="",
+            tmpdir=tmpdir,
+            system_hash=system_hash,
+        )
+        self._warming_proc = state
+        try:
+            await proc.start()
+            session_id = await self._acp_handshake(proc, workdir)
+        except BaseException:
+            await proc.close()
+            self._warming_proc = None
+            raise
+        state = _GoogleCLIProcState(
+            proc=proc,
+            session_id=session_id,
+            tmpdir=tmpdir,
+            system_hash=system_hash,
+        )
+        self._warming_proc = None
+        return state
 
-    async def _acp_handshake(self, proc: Subproc, workdir: Path) -> None:
+    async def _close_warming_proc(self) -> None:
+        """Close the subprocess currently being warmed, if any."""
+        if self._warming_proc is None:
+            return
+        state = self._warming_proc
+        self._warming_proc = None
+        await state.proc.close()
+
+    async def _acp_handshake(self, proc: Subproc, workdir: Path) -> str:
         """Run ``initialize`` → ``authenticate`` → ``session/new`` (§3.2)."""
         assert self._tools_bridge is not None
         await _rpc_call(
@@ -588,7 +686,7 @@ class _GoogleCLIModel:
             raise RuntimeError(
                 f"GoogleCLI: session/new returned no sessionId: {result}"
             )
-        self._session_id = session_id
+        return session_id
 
     def _allocate_rpc_id(self) -> int:
         """Allocate the next JSON-RPC id, incrementing in place."""

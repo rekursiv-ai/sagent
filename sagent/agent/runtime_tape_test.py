@@ -286,6 +286,44 @@ def test_append_splice_rejects_insert_after_inside_own_mask() -> None:
         )
 
 
+def test_adopt_record_rejects_mask_overlap_like_append_splice() -> None:
+    """``adopt_record`` enforces the same splice invariants as append."""
+    runtime = _runtime()
+    hr = runtime.append_history(UserMessage(text="x"))
+    prior = runtime.append_splice(
+        mask=((hr, hr),),
+        insert_after=None,
+        payload=(UserMessage(text="first"),),
+        strategy="test",
+    )
+    bad_mask = ((hr, hr),)
+    with pytest.raises(InvalidSpliceError):
+        runtime.append_splice(
+            mask=bad_mask,
+            insert_after=None,
+            payload=(UserMessage(text="summary"),),
+            strategy="summary",
+        )
+    legacy_override = ContextSplice(
+        ref=runtime.mint_ref(),
+        mask=bad_mask,
+        insert_after=None,
+        payload=(UserMessage(text="summary"),),
+        strategy="summary",
+    )
+    with pytest.raises(InvalidSpliceError):
+        runtime.adopt_record(legacy_override)
+
+    absorbing_override = ContextSplice(
+        ref=runtime.mint_ref(),
+        mask=((hr, prior),),
+        insert_after=None,
+        payload=(UserMessage(text="summary"),),
+        strategy="summary",
+    )
+    runtime.adopt_record(absorbing_override)
+
+
 # --- append_clear -----------------------------------------------------------
 
 

@@ -34,7 +34,10 @@ from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import Subproc
+from sagent.providers.lib.subproc import (
+    Subproc,
+    SubprocessTransportError,
+)
 from sagent.types.history import (
     AssistantMessage,
     HistoryEntry,
@@ -77,7 +80,13 @@ class AnthropicCLI(Anthropic):
 
     @classmethod
     @override
-    def from_key(cls, api_key: str) -> Anthropic:
+    def from_key(
+        cls,
+        api_key: str,
+        *,
+        server_side_context_management: bool = False,
+        redact_thinking: bool = False,
+    ) -> Anthropic:
         """Create an API-key provider (delegates to :class:`Anthropic`).
 
         The CLI-wrapping provider is incompatible with API-key auth, so
@@ -85,12 +94,18 @@ class AnthropicCLI(Anthropic):
 
         Args:
           api_key: Anthropic API key (``sk-ant-...``).
+          server_side_context_management: Forwarded to ``Anthropic.from_key``.
+          redact_thinking: Forwarded to ``Anthropic.from_key``.
 
         Returns:
           provider: ``Anthropic`` provider instance.
 
         """
-        return Anthropic.from_key(api_key)
+        return Anthropic.from_key(
+            api_key,
+            server_side_context_management=server_side_context_management,
+            redact_thinking=redact_thinking,
+        )
 
     @classmethod
     def from_credentials(cls, *, account: str | None = None) -> AnthropicCLI:
@@ -202,7 +217,11 @@ class _AnthropicCLIModel:
         self._turn_count = 0
         self._last_input_tokens = 0
         self._tools_bridge: ToolsBridge | None = None
-        self._hot_spare = HotSpare(self._spawn_initialized)
+        self._warming_proc: Subproc | None = None
+        self._hot_spare = HotSpare(
+            self._spawn_spare_initialized,
+            close_partial=self._close_warming_proc,
+        )
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
         self._sent_history_head: HistoryEntry | None = None
@@ -361,21 +380,21 @@ class _AnthropicCLIModel:
         """
         self._pending_system = request.system or ""
         if self._should_respawn(request):
+            if _hash_system(request.system) != self._system_hash:
+                await self._hot_spare.discard_spare()
             await self._hot_spare.respawn()
-            self._last_sent_index = 0
-            self._sent_history_head = None
+            self._reset_active_state()
         proc = await self._hot_spare.acquire()
         self._sync_tools_bridge(request)
 
         try:
-            await self._send_new_entries(proc, request.messages)
+            response = await self._exchange_turn(proc, request, on_text, on_thinking)
             self._last_sent_index = len(request.messages)
-            response = await self._drain_until_result(proc, on_text, on_thinking)
-        except (RuntimeError, ValueError):
-            await self._hot_spare.respawn()
-            self._last_sent_index = 0
-            self._sent_history_head = None
+        except SubprocessTransportError:
+            self._reset_active_state()
+            await self._hot_spare.respawn_after_transport_failure()
             raise
+        self._hot_spare.record_success()
         self._turn_count += 1
         return response
 
@@ -413,19 +432,50 @@ class _AnthropicCLIModel:
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
 
+    async def _exchange_turn(
+        self,
+        proc: Subproc,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        """Replay prior entries quietly, then return the current turn result."""
+        new_entries = request.messages[self._last_sent_index :]
+        if self._last_sent_index == 0 and request.messages:
+            self._sent_history_head = request.messages[0]
+        user_like_entries = [
+            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
+        ]
+        for entry in user_like_entries[:-1]:
+            await self._send_entry(proc, entry)
+            _ = await self._drain_until_result(proc, on_text=None, on_thinking=None)
+        if not user_like_entries:
+            return await self._drain_until_result(proc, on_text, on_thinking)
+        await self._send_entry(proc, user_like_entries[-1])
+        return await self._drain_until_result(proc, on_text, on_thinking)
+
     async def _send_new_entries(
         self,
         proc: Subproc,
         history: list[HistoryEntry],
     ) -> None:
-        """Write each new history entry to stdin as a user-line."""
+        """Replay prior entries quietly, leaving the current turn pending."""
+        new_entries = history[self._last_sent_index :]
         if self._last_sent_index == 0 and history:
             self._sent_history_head = history[0]
-        for entry in history[self._last_sent_index :]:
-            if isinstance(entry, AssistantMessage):
-                continue
-            line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
-            await proc.write_line(line)
+        user_like_entries = [
+            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
+        ]
+        for entry in user_like_entries[:-1]:
+            await self._send_entry(proc, entry)
+            _ = await self._drain_until_result(proc, on_text=None, on_thinking=None)
+        if user_like_entries:
+            await self._send_entry(proc, user_like_entries[-1])
+
+    async def _send_entry(self, proc: Subproc, entry: HistoryEntry) -> None:
+        """Write one history entry to stdin."""
+        line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
+        await proc.write_line(line)
 
     async def _drain_until_result(
         self,
@@ -442,7 +492,7 @@ class _AnthropicCLIModel:
         while True:
             event = await proc.read_json_line(skip_non_json=False)
             if event is None:
-                raise RuntimeError(
+                raise SubprocessTransportError(
                     "AnthropicCLI: subprocess stdout closed before result"
                 )
             kind = event.get("type")
@@ -450,7 +500,9 @@ class _AnthropicCLIModel:
                 usage_event = event
                 stop_reason = cast(str | None, event.get("stop_reason"))
                 if event.get("is_error"):
-                    raise RuntimeError(f"AnthropicCLI: result is_error: {event}")
+                    raise SubprocessTransportError(
+                        f"AnthropicCLI: result is_error: {event}"
+                    )
                 break
             if kind == "stream_event":
                 _dispatch_stream_event(
@@ -474,6 +526,17 @@ class _AnthropicCLIModel:
             fallback_message_id=message_id,
         )
 
+    async def _spawn_active_initialized(self) -> Subproc:
+        """Spawn an active ``claude`` subprocess and reset active counters."""
+        proc = await self._spawn_initialized()
+        self._system_hash = _hash_system(self._pending_system)
+        self._reset_active_state()
+        return proc
+
+    async def _spawn_spare_initialized(self) -> Subproc:
+        """Spawn a spare ``claude`` subprocess without touching active counters."""
+        return await self._spawn_initialized()
+
     async def _spawn_initialized(self) -> Subproc:
         """Spawn a fresh ``claude`` subprocess ready to receive user lines."""
         if self._tools_bridge is None:
@@ -492,11 +555,34 @@ class _AnthropicCLIModel:
             env=_anthropic_subprocess_env(tmpdir),
             tmpdir=tmpdir,
         )
-        await proc.start()
-        self._system_hash = _hash_system(self._pending_system)
+        self._warming_proc = proc
+        try:
+            await proc.start()
+        except BaseException:
+            await proc.close()
+            self._warming_proc = None
+            raise
+        self._warming_proc = None
+        return proc
+
+    def _reset_active_state(self) -> None:
+        """Reset active subprocess counters after a respawn boundary."""
         self._turn_count = 0
         self._last_input_tokens = 0
-        return proc
+        self._reset_delta_state()
+
+    def _reset_delta_state(self) -> None:
+        """Reset sent-history delta tracking."""
+        self._last_sent_index = 0
+        self._sent_history_head = None
+
+    async def _close_warming_proc(self) -> None:
+        """Close the subprocess currently being warmed, if any."""
+        if self._warming_proc is None:
+            return
+        proc = self._warming_proc
+        self._warming_proc = None
+        await proc.close()
 
 
 def _hash_system(system: str | None) -> str:

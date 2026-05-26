@@ -658,6 +658,121 @@ async def test_detach_and_result_arrives_later() -> None:
 
 
 @pytest.mark.asyncio
+async def test_detached_result_splices_when_parent_is_reemitted() -> None:
+    agent, _ = make_agent([])
+    call = ToolCall(id="t1", name="echo", args={})
+    agent.append_history(UserMessage(text="go"))
+    original_parent = agent.append_history(AssistantMessage(tool_calls=(call,)))
+    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    parent_reemit = ContextSplice(
+        ref=agent.mint_ref(),
+        mask=((original_parent, original_parent),),
+        insert_after=original_parent,
+        payload=(AssistantMessage(tool_calls=(call,)),),
+        strategy="test_parent_reemit",
+        paired_externally=frozenset({"t1"}),
+    )
+    agent.adopt_record(parent_reemit)
+    agent.inbox.push_back(
+        DetachedResult(call_id="t1", content="late result", is_error=False)
+    )
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent)
+
+    results = [
+        entry
+        for entry in agent.context().messages
+        if isinstance(entry, ToolResult) and entry.call_id == "t1"
+    ]
+    assert [result.content for result in results] == ["late result"]
+
+
+@pytest.mark.asyncio
+async def test_detached_result_after_compaction_barrier_surfaces_fallback() -> None:
+    agent, _ = make_agent([])
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    summary = ContextSplice(
+        ref=agent.mint_ref(),
+        mask=((agent.tape[0].ref, agent.tape[-1].ref),),
+        insert_after=None,
+        payload=(UserMessage(text="[summary]"),),
+        strategy="test_compaction",
+    )
+    agent.adopt_record(summary)
+    agent.inbox.push_back(
+        DetachedResult(call_id="t1", content="late result", is_error=False)
+    )
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent)
+
+    fallbacks = [
+        entry
+        for entry in agent.context().messages
+        if isinstance(entry, UserMessage)
+        and "[Tool t1 completed]\nlate result" in entry.text
+    ]
+    assert len(fallbacks) == 1
+
+
+def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
+    agent, _ = make_agent([])
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    placeholder_ref = agent.append_history(
+        ToolResult(call_id="t1", content="[detached]")
+    )
+    compact_ref = agent.mint_ref()
+    _ = agent._splice_detached_result("t1", "real", False)
+    summary = ContextSplice(
+        ref=compact_ref,
+        mask=((agent.tape[0].ref, agent.tape[-1].ref),),
+        insert_after=None,
+        payload=(UserMessage(text="[summary]"),),
+        strategy="test_compaction",
+    )
+    agent.adopt_record(summary)
+
+    agent.append_clear()
+
+    assert agent.context().messages == []
+    assert placeholder_ref not in agent.context().origins
+
+
+def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
+    agent, _ = make_agent([])
+    agent.append_history(UserMessage(text="first"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    assert agent._splice_detached_result("t1", "old-real", False) is not None
+    agent.append_clear()
+    agent.append_history(UserMessage(text="second"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+
+    result = agent._splice_detached_result("t1", "new-real", False)
+
+    assert result is not None
+    texts = [
+        entry.content
+        for entry in agent.context().messages
+        if isinstance(entry, ToolResult)
+    ]
+    assert texts == ["new-real"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_splice_wakes_model_after_round_ended() -> None:
     """Splicing a ``DetachedResult`` after the round ended wakes the model.
@@ -1079,6 +1194,87 @@ async def test_compact_rewrites_history() -> None:
         isinstance(t, UserMessage) and t.text == "[summary of prior conversation]"
         for t in agent.context().messages
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> None:
+    """Inbox compaction absorbs detached splices appended during compact."""
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    class _BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            args: str = "",
+        ) -> ContextSplice:
+            del context, model, args
+            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
+                ((tape[0].ref, tape[-1].ref),) if tape else ()
+            )
+            compact_started.set()
+            await release_compact.wait()
+            return ContextSplice(
+                ref=mint_ref(),
+                mask=mask,
+                insert_after=None,
+                payload=(UserMessage(text="[summary]"),),
+                strategy="summary",
+            )
+
+    agent, _collector = make_agent([AssistantMessage(text="post-compact")])
+    agent.compactor = _BlockingCompactor()
+    agent.append_history(UserMessage(text="please run a tool"))
+    tc = ToolCall(id="tc-1", name="echo", args={})
+    agent.append_history(AssistantMessage(text="", tool_calls=(tc,)))
+    agent.append_history(ToolResult(call_id="tc-1", content="[Running in background]"))
+    agent.append_history(UserMessage(text="[worker is idle] ping"))
+
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(Compact(args=""))
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        agent.inbox.push_back(
+            DetachedResult(call_id="tc-1", content="real output", is_error=False)
+        )
+        await wait_until(
+            lambda: any(
+                isinstance(r, ContextSplice) and r.strategy == "detached_splice"
+                for r in agent.tape
+            ),
+            timeout_sec=1.0,
+        )
+        release_compact.set()
+        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
+        summary_splice = next(
+            r
+            for r in agent.tape
+            if isinstance(r, ContextSplice) and r.strategy == "summary"
+        )
+        detached_splice = next(
+            r
+            for r in agent.tape
+            if isinstance(r, ContextSplice) and r.strategy == "detached_splice"
+        )
+        assert detached_splice.ref.ordinal < summary_splice.ref.ordinal
+        mask_lo = summary_splice.mask[0][0].ordinal
+        mask_hi = summary_splice.mask[0][1].ordinal
+        assert mask_lo <= detached_splice.ref.ordinal <= mask_hi
+        messages = agent.context().messages
+        assert len(messages) == 1
+        assert isinstance(messages[0], UserMessage)
+        assert messages[0].text == "[summary]"
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 @pytest.mark.asyncio
@@ -2092,6 +2288,29 @@ async def test_publish_swallows_observer_exception() -> None:
 
     # Despite the raiser, the well-behaved collector still saw events.
     assert collector.has(ModelIdle)
+
+
+@pytest.mark.asyncio
+async def test_publish_uses_observer_snapshot_when_observer_removes_peer() -> None:
+    """Observer removal during publish must not skip pending observers."""
+    agent, _collector = make_agent([AssistantMessage(text="ok")])
+    calls: list[str] = []
+
+    def _remover(event: RuntimeEvent) -> None:
+        del event
+        calls.append("remover")
+        agent.observers.remove(_peer)
+
+    def _peer(event: RuntimeEvent) -> None:
+        del event
+        calls.append("peer")
+
+    agent.observers.append(_remover)
+    agent.observers.append(_peer)
+
+    agent.publish(ModelIdle())
+
+    assert calls == ["remover", "peer"]
 
 
 @pytest.mark.asyncio
@@ -4142,6 +4361,96 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
                 > idle_count_before_compact
             ),
             timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_halt_cancels_running_compaction() -> None:
+    """Halt must cancel in-flight compaction before waiting for user input."""
+    compact_started = asyncio.Event()
+
+    class _BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            args: str = "",
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, args
+            compact_started.set()
+            await asyncio.get_running_loop().create_future()
+            raise AssertionError("unreachable")
+
+    agent, _collector = make_agent([AssistantMessage(text="post-compact")])
+    agent.compactor = _BlockingCompactor()
+    agent.inbox.push_back(UserMessage(text="old"))
+
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(Compact(args=""))
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        assert agent.compact_task is not None
+        agent.inbox.push_back(Halt())
+        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_clear_cancels_running_compaction_without_adopting_result() -> None:
+    """Clear must invalidate a pre-clear compaction result."""
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    class _BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            args: str = "",
+        ) -> ContextSplice:
+            del context, model, args
+            compact_started.set()
+            await release_compact.wait()
+            return _summary_override(
+                [UserMessage(text="stale summary")], mint_ref, tape=tape
+            )
+
+    agent, _collector = make_agent([AssistantMessage(text="post-clear")])
+    agent.compactor = _BlockingCompactor()
+    agent.inbox.push_back(UserMessage(text="old"))
+
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(Compact(args=""))
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        assert agent.compact_task is not None
+        agent.inbox.push_back(Clear())
+        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
+        release_compact.set()
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not any(
+            isinstance(entry, UserMessage) and entry.text == "stale summary"
+            for entry in agent.context().messages
         )
         agent.inbox.push_back(Quit())
         await asyncio.wait_for(task, timeout=1.0)

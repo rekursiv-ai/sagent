@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from sagent.thinking import THINKING_COMMANDS
+
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Quit:
@@ -49,7 +51,7 @@ class Compact:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Recompact:
-    """User typed ``/recompact [hints]``; reload + re-run last compaction."""
+    """User typed ``/recompact [hints]``; alias for ``/compact [hints]``."""
 
     args: str = ""
 
@@ -59,6 +61,13 @@ class ModelSwitch:
     """User typed ``/model [args]``; reconfigure provider/model/auth."""
 
     args: str = ""
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Thinking:
+    """User typed ``/thinking <state|partial>``; update thinking state."""
+
+    command: str
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -113,6 +122,7 @@ type SlashAction = (
     | Compact
     | Recompact
     | ModelSwitch
+    | Thinking
     | Login
     | Help
     | Tasks
@@ -126,8 +136,8 @@ QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
 # Public list of supported commands; drives the unknown-command help line.
 _SUPPORTED = (
-    "/help /clear /compact /recompact /model /provider /login /tasks /halt /kill"
-    " /defer /quit /exit"
+    "/help /clear /compact /recompact /model /provider /thinking /login /tasks"
+    " /halt /kill /defer /quit /exit"
 )
 
 
@@ -167,6 +177,13 @@ def parse_slash(line: str) -> SlashAction | None:
     arg = _arg_after("/provider", stripped)
     if arg is not None:
         return ModelSwitch(args=f"--provider {arg}" if arg else "")
+    arg = _arg_after("/thinking", stripped)
+    if arg is not None:
+        if arg in THINKING_COMMANDS:
+            return Thinking(command=arg)
+        return Unknown(
+            text="/thinking requires one of: " + ", ".join(THINKING_COMMANDS)
+        )
     arg = _arg_after("/halt", stripped)
     if arg is not None:
         return Halt(target=arg)

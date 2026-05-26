@@ -300,6 +300,48 @@ def to_result(result: str | ToolResult) -> ToolResult:
     return result
 
 
+def provider_not_allowed_result(
+    name: str,
+    allow: tuple[str, ...],
+    parent_provider: str | None,
+) -> ToolResult:
+    """Build the shared ``provider not in allow list`` rejection.
+
+    Used by AgentSpawn and AgentSelf when an LLM-requested provider
+    falls outside the host's ``--allow-providers`` master knob. The
+    parent's own provider is always implicitly allowed; callers gate
+    on that *before* calling this helper.
+
+    Args:
+      name: The provider name the LLM tried to use.
+      allow: Currently-allowed provider names.
+      parent_provider: The parent agent's provider name, surfaced as
+        the most likely fallback for the LLM to retry with. ``None``
+        when no parent context exists (e.g. cold-start tests).
+
+    Returns:
+      result: A ``ToolResult`` with ``is_error=True`` and a
+      retry-hint suggesting either the parent provider or one of the
+      allowed names.
+
+    """
+    hint = (
+        f" The parent agent is on {parent_provider!r}."
+        if parent_provider is not None
+        else ""
+    )
+    return ToolResult(
+        call_id="",
+        content=(
+            f"Provider {name!r} is not in the allowed list"
+            f" {list(allow)}.{hint} Pass ``--allow-providers`` at CLI"
+            " startup to widen the set, or choose one of the allowed"
+            " names."
+        ),
+        is_error=True,
+    )
+
+
 def opt_int(directive: Mapping[str, object], key: str) -> int | None:
     """Coerce ``directive[key]`` to int, or None if absent.
 
@@ -401,6 +443,7 @@ class _ToolImpl:
         "_fn",
         "_is_async",
         "_max_result_chars",
+        "clearable_results",
         "description",
         "directive_schema",
         "emit_tool_summary",
@@ -416,6 +459,7 @@ class _ToolImpl:
         description: str | None = None,
         schema: JSON | None = None,
         max_result_chars: int = TOOL_RESULT_MAX_CHARS,
+        clearable_results: bool = False,
     ) -> None:
         self._fn = fn
         self._is_async = inspect.iscoroutinefunction(fn)
@@ -426,6 +470,7 @@ class _ToolImpl:
         hints = get_type_hints(fn, include_extras=True)
         hints.pop("return", None)
         self.directive_schema = schema or json_freeze(_build_schema(fn, hints))
+        self.clearable_results = clearable_results
         self.emit_tool_summary = False
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -486,6 +531,7 @@ def tool(
     description: str | None = ...,
     schema: JSON | None = ...,
     max_result_chars: int = ...,
+    clearable_results: bool = ...,
 ) -> _ToolImpl: ...
 
 
@@ -496,6 +542,7 @@ def tool(
     description: str | None = ...,
     schema: JSON | None = ...,
     max_result_chars: int = ...,
+    clearable_results: bool = ...,
 ) -> Callable[[Callable[..., object]], _ToolImpl]: ...
 
 
@@ -506,6 +553,7 @@ def tool(
     description: str | None = None,
     schema: JSON | None = None,
     max_result_chars: int = TOOL_RESULT_MAX_CHARS,
+    clearable_results: bool = False,
 ) -> _ToolImpl | Callable[[Callable[..., object]], _ToolImpl]:
     """Decorator to create a Tool from a function.
 
@@ -515,6 +563,7 @@ def tool(
       description: Override description (defaults to docstring).
       schema: Override JSON schema (defaults to auto-generated).
       max_result_chars: Truncate results beyond this length.
+      clearable_results: Whether provider context management may clear results.
 
     Returns:
       tool_impl: A Tool implementation wrapping fn.
@@ -527,6 +576,7 @@ def tool(
             description=description,
             schema=schema,
             max_result_chars=max_result_chars,
+            clearable_results=clearable_results,
         )
     return lambda f: _ToolImpl(
         f,
@@ -534,6 +584,7 @@ def tool(
         description=description,
         schema=schema,
         max_result_chars=max_result_chars,
+        clearable_results=clearable_results,
     )
 
 

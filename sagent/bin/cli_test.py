@@ -21,8 +21,11 @@ from sagent.bin.cli import (
     _event_to_json_record,
     _install_repl_logging,
     _last_assistant_text,
+    _parse_allow_providers,
     _parse_cli_args,
     _parse_stream_json,
+    _provider_kwargs,
+    _resolve_cli_thinking_state,
     _resolve_session_dir,
     parse_agent_args,
     resolve_tools,
@@ -68,6 +71,49 @@ def test_parse_cli_args_defaults() -> None:
 def test_parse_cli_args_no_compact() -> None:
     ns = _parse(["--no-compact"])
     assert ns.compact is False
+
+
+def test_parse_cli_args_thinking_default() -> None:
+    ns = _parse([])
+    assert ns.thinking == "default"
+    assert _resolve_cli_thinking_state(ns) is None
+
+
+def test_parse_cli_args_thinking_full_state() -> None:
+    ns = _parse(["--thinking", "on-show"])
+    assert _resolve_cli_thinking_state(ns) == "on-show"
+
+
+def test_parse_cli_args_thinking_precedes_provider_arg() -> None:
+    ns = _parse(
+        [
+            "--provider",
+            "OpenAISubscription",
+            "--thinking",
+            "adaptive-show",
+            "--provider-arg",
+            "OpenAISubscription.thinking=redact",
+        ]
+    )
+    assert _resolve_cli_thinking_state(ns) == "adaptive-show"
+
+
+def test_parse_cli_args_provider_arg_thinking_when_cli_default() -> None:
+    ns = _parse(
+        [
+            "--provider",
+            "OpenAISubscription",
+            "--provider-arg",
+            "OpenAISubscription.thinking=redact",
+        ]
+    )
+    assert _resolve_cli_thinking_state(ns) == "redact-hide"
+
+
+def test_provider_kwargs_removes_thinking_pseudo_arg() -> None:
+    assert _provider_kwargs({"thinking": "redact", "redact_thinking": True}) == {
+        "redact_thinking": True
+    }
 
 
 def test_parse_cli_args_session_paths() -> None:
@@ -465,6 +511,32 @@ def test_direct_script_bootstraps_dependencies() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "CLI agent (REPL or headless)." in proc.stdout
+
+
+def test_parse_allow_providers_ok() -> None:
+    """A well-formed CSV returns the parsed tuple."""
+    assert _parse_allow_providers("Anthropic,OpenAI") == ("Anthropic", "OpenAI")
+    assert _parse_allow_providers("  Anthropic ,  OpenAI ") == (
+        "Anthropic",
+        "OpenAI",
+    )
+
+
+def test_parse_allow_providers_empty_exits() -> None:
+    """Empty CSV exits rather than silently allowing only the parent provider."""
+    with pytest.raises(SystemExit) as exc:
+        _parse_allow_providers("")
+    assert exc.value.code == 1
+    with pytest.raises(SystemExit) as exc2:
+        _parse_allow_providers(", ,")
+    assert exc2.value.code == 1
+
+
+def test_parse_allow_providers_unknown_exits() -> None:
+    """Unknown provider names exit with a clear error."""
+    with pytest.raises(SystemExit) as exc:
+        _parse_allow_providers("Anthropic,FooBar")
+    assert exc.value.code == 1
 
 
 if __name__ == "__main__":

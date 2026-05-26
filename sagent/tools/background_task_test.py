@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import override
 
 import asyncio
 import contextlib
@@ -14,18 +15,30 @@ from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
 )
+from sagent.agent.state import agent_registry
 from sagent.lib.json import json_freeze
-from sagent.testing import with_fake_agent
+from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import current_agent_var
 from sagent.types.history import ToolResult
 from sagent.types.runtime import DetachedResult
 
 
+class _PersistentChild(FakeAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_calls: list[bool] = []
+
+    @override
+    def shutdown(self, *, force: bool = False) -> None:
+        self.shutdown_calls.append(force)
+
+
 class _DummyInner:
     name: str = "Dummy"
     tool_id: str = "application/x-tool-dummy"
     description: str = "dummy"
+    clearable_results: bool = False
     directive_schema = json_freeze(
         {
             "type": "object",
@@ -76,6 +89,7 @@ def test_aware_schema_without_properties_passes_through() -> None:
         name: str = "NP"
         tool_id: str = "application/x-tool-np"
         description: str = ""
+        clearable_results: bool = False
         directive_schema = json_freeze({"type": "object"})
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -298,6 +312,61 @@ async def test_cancel_success_clears_registry() -> None:
     assert "Cancelled" in result.content
     assert task.cancelled()
     assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_cancel_persistent_subagent_uses_shutdown_lifecycle() -> None:
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        child = _PersistentChild()
+        agent_registry["child"] = child
+        try:
+            agent.register_background(
+                "persistent:child",
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name="persistent-agent",
+                    queue_id="child",
+                    started=0.0,
+                    kind="persistent_subagent",
+                ),
+            )
+            result = await t.run({"operation": "cancel", "id": "persistent:child"})
+        finally:
+            agent_registry.pop("child", None)
+            _ = task.cancel()
+    assert "Cancelled" in result.content
+    assert child.shutdown_calls == [True]
+    assert not task.cancelled()
+    assert "persistent:child" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_persistent_subagent_returns_without_detached_result() -> None:
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        try:
+            agent.register_background(
+                "persistent:child",
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name="persistent-agent",
+                    queue_id="child",
+                    started=0.0,
+                    kind="persistent_subagent",
+                ),
+            )
+            result = await asyncio.wait_for(
+                t.run({"operation": "foreground", "id": "persistent:child"}),
+                timeout=0.01,
+            )
+        finally:
+            _ = task.cancel()
+    assert result.is_error
+    assert "Persistent subagent jobs cannot be foregrounded" in result.content
+    assert "persistent:child" in agent.background
 
 
 @pytest.mark.asyncio

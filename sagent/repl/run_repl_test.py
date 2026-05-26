@@ -27,6 +27,7 @@ from sagent.repl.run_repl import (
     _publish_startup_idle_if_settled,
     do_login,
     do_switch_model,
+    do_switch_thinking,
     format_tasks,
     make_queued_input_committer,
     run_repl,
@@ -105,7 +106,7 @@ def test_parse_model_args_bare_model_id() -> None:
 
 def test_parse_model_args_flag_provider() -> None:
     out = _parse("--provider", "Google", "gemini-3-pro")
-    assert out == ("Google", _DEFAULT_AUTH, None, "gemini-3-pro")
+    assert out == ("Google", "env", None, "gemini-3-pro")
 
 
 def test_parse_model_args_short_flag_provider_falls_back_to_default_model() -> None:
@@ -114,8 +115,9 @@ def test_parse_model_args_short_flag_provider_falls_back_to_default_model() -> N
     With no entry in ``~/.sagent/last-models.json`` for Google, the
     resolver falls back to ``Google.DEFAULT_MODEL``.
     """
-    out = _parse("-p", "Google")
-    assert out == ("Google", _DEFAULT_AUTH, None, Google.DEFAULT_MODEL)
+    with patch.object(last_models, "load", return_value={}):
+        out = _parse("-p", "Google")
+    assert out == ("Google", "env", None, Google.DEFAULT_MODEL)
 
 
 def test_parse_model_args_flag_auth() -> None:
@@ -130,8 +132,9 @@ def test_parse_model_args_flag_account() -> None:
 
 def test_parse_model_args_kv_provider_falls_back_to_default_model() -> None:
     """``/model provider=Google`` with no model picks Google.DEFAULT_MODEL."""
-    out = _parse("provider=Google")
-    assert out == ("Google", _DEFAULT_AUTH, None, Google.DEFAULT_MODEL)
+    with patch.object(last_models, "load", return_value={}):
+        out = _parse("provider=Google")
+    assert out == ("Google", "env", None, Google.DEFAULT_MODEL)
 
 
 def test_parse_model_args_kv_auth() -> None:
@@ -149,14 +152,16 @@ def test_parse_model_args_kv_model_id_alias() -> None:
     assert out == (_DEFAULT_PROV, _DEFAULT_AUTH, None, "claude-haiku-4")
 
 
-def test_parse_model_args_kv_account_default_normalized_to_none() -> None:
+def test_parse_model_args_kv_account_default_is_preserved() -> None:
     out = _parse("account=default")
-    assert out == (_DEFAULT_PROV, _DEFAULT_AUTH, None, _DEFAULT_MODEL)
+    assert out == (_DEFAULT_PROV, _DEFAULT_AUTH, "default", _DEFAULT_MODEL)
 
 
-def test_parse_model_args_kv_account_empty_normalized_to_none() -> None:
-    out = _parse("account=")
-    assert out == (_DEFAULT_PROV, _DEFAULT_AUTH, None, _DEFAULT_MODEL)
+def test_parse_model_args_kv_account_empty_is_preserved_for_repl_syntax() -> None:
+    parsed = _parse_model_args(["account="])
+    assert not isinstance(parsed, str)
+    assert parsed.account == ""
+    assert parsed.account_set is True
 
 
 def test_parse_model_args_unknown_kv_returns_error_string() -> None:
@@ -188,7 +193,7 @@ def test_provider_switch_uses_last_used_when_known(
     """
     monkeypatch.setattr(last_models, "load", lambda: {"Google": "remembered-model"})
     out = _parse("provider=Google")
-    assert out == ("Google", _DEFAULT_AUTH, None, "remembered-model")
+    assert out == ("Google", "env", None, "remembered-model")
 
 
 def test_provider_switch_preserves_current_model_when_new_provider_knows_it() -> None:
@@ -200,12 +205,13 @@ def test_provider_switch_preserves_current_model_when_new_provider_knows_it() ->
     or ``DEFAULT_MODEL``.
     """
     out = _parse("provider=AnthropicCLI")
-    assert out == ("AnthropicCLI", _DEFAULT_AUTH, None, _DEFAULT_MODEL)
+    assert out == ("AnthropicCLI", "credentials", None, _DEFAULT_MODEL)
 
 
 @dataclass(slots=True, kw_only=True)
 class _FakeModel:
     model_id: str = "claude-opus-4-7"
+    supports_thinking: bool = True
     _provider: object | None = None
 
 
@@ -238,6 +244,27 @@ class _FakeAgent:
     change_model_side_effect: BaseException | None = None
     relogin_calls: int = 0
     relogin_side_effect: BaseException | None = None
+    thinking_state: str | None = None
+    thinking: str | None = "adaptive"
+    show_thinking: bool = True
+    provider_args: dict[str, object] = field(default_factory=dict)
+
+    def set_thinking_state(self, state: str) -> None:
+        self.thinking_state = state
+        if state.startswith("adaptive") or state == "redact-hide":
+            self.thinking = "adaptive"
+        elif state.startswith("on"):
+            self.thinking = "enabled"
+        else:
+            self.thinking = None
+        self.show_thinking = state.endswith("-show")
+        self.provider_args["redact_thinking"] = state == "redact-hide"
+
+    def set_provider_arg(self, key: str, value: object) -> None:
+        self.provider_args[key] = value
+
+    def clear_provider_arg(self, key: str) -> None:
+        self.provider_args.pop(key, None)
 
     def swap_model(self, model: _FakeModel, *, spec: ModelSpec | None = None) -> None:
         self.swap_calls.append((model, spec))
@@ -380,6 +407,163 @@ def test_do_switch_model_change_model_error_writes_to_printer() -> None:
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
     assert any("no credentials" in line for line in printer.lines)
+
+
+def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        )
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
+    assert agent.thinking_state == "adaptive-show"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is True
+    assert agent.provider_args["redact_thinking"] is False
+    assert len(agent.change_model_calls) == 1
+
+
+def test_do_switch_thinking_same_state_skips_model_change() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        ),
+        thinking_state="adaptive-show",
+        thinking="adaptive",
+        show_thinking=True,
+        provider_args={"redact_thinking": False},
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
+    assert agent.thinking_state == "adaptive-show"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is True
+    assert agent.provider_args["redact_thinking"] is False
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_hide_preserves_adaptive_mode() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        )
+    )
+    printer = RecordingPrinter()
+    agent.thinking_state = "adaptive-show"
+    do_switch_thinking(_as_agent(agent), "hide", printer)
+    assert agent.thinking_state == "adaptive-hide"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is False
+    assert agent.provider_args["redact_thinking"] is False
+    assert len(agent.change_model_calls) == 1
+
+
+def test_do_switch_thinking_redact_enables_redaction_and_hides() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        )
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "redact", printer)
+    assert agent.thinking_state == "redact-hide"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is False
+    assert agent.provider_args["redact_thinking"] is True
+    assert len(agent.change_model_calls) == 1
+
+
+def test_do_switch_thinking_rejects_models_without_thinking() -> None:
+    agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
+    assert "does not support thinking" in printer.lines[0]
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_allows_off_without_model_thinking() -> None:
+    agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "off", printer)
+    assert agent.thinking_state == "off-hide"
+    assert agent.thinking is None
+
+
+def test_do_switch_thinking_show_errors_from_off() -> None:
+    agent = _FakeAgent(thinking_state="off-hide", thinking=None, show_thinking=False)
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "show", printer)
+    assert "cannot show" in printer.lines[0]
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_skips_redact_arg_without_provider_support() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
+        provider_args={"redact_thinking": True},
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
+    assert agent.thinking_state == "adaptive-show"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is True
+    assert "redact_thinking" not in agent.provider_args
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro")
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "redact", printer)
+    assert "does not support redacted thinking" in printer.lines[0]
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_rebuild_failure_preserves_state() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        ),
+        thinking_state="adaptive-show",
+        thinking="adaptive",
+        show_thinking=True,
+    )
+    agent.change_model_side_effect = RuntimeError("rebuild failed")
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "redact", printer)
+    assert agent.thinking_state == "adaptive-show"
+    assert agent.thinking == "adaptive"
+    assert agent.show_thinking is True
+    assert "rebuild failed" in printer.lines[0]
+
+
+def test_do_switch_thinking_show_errors_from_redact() -> None:
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic",
+            auth="env",
+            model_id="claude-opus-4-7",
+        ),
+        thinking_state="redact-hide",
+        show_thinking=False,
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "show", printer)
+    assert "cannot show" in printer.lines[0]
+    assert agent.change_model_calls == []
 
 
 @pytest.mark.asyncio

@@ -82,6 +82,22 @@ def test_to_result_passthrough_tool_result() -> None:
     assert to_result(src) is src
 
 
+def test_tool_decorator_clearable_results_default_false() -> None:
+    @tool
+    def example() -> str:
+        return "ok"
+
+    assert example.clearable_results is False
+
+
+def test_tool_decorator_clearable_results_opt_in() -> None:
+    @tool(clearable_results=True)
+    def example() -> str:
+        return "ok"
+
+    assert example.clearable_results is True
+
+
 def test_opt_int_missing_returns_none() -> None:
     assert opt_int({}, "k") is None
 

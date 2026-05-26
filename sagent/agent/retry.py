@@ -198,16 +198,18 @@ async def send_with_retry(
     last_error: Exception | None = None
     prior_emitted = ""
     attempt = -1
+    stream_attempt = 0
     persistent_attempt = 0
     stream_interrupts = 0
     while True:
         attempt += 1
         if attempt >= max_attempts:
             break
-        live = on_text if attempt == 0 else None
-        live_thinking = on_thinking if attempt == 0 else None
+        live = on_text if attempt == 0 and not prior_emitted else None
+        live_thinking = on_thinking if attempt == 0 and not prior_emitted else None
         chunks: list[str] = []
         capture = _make_stream_callback(chunks, live)
+        stream_attempt += 1
         try:
             resp = await model.stream(
                 request=request,
@@ -215,16 +217,20 @@ async def send_with_retry(
                 on_thinking=live_thinking,
             )
             full = "".join(chunks)
-            if on_text is not None and live is None and full:
-                suffix = full.removeprefix(prior_emitted)
-                if suffix:
-                    on_text(suffix)
+            if on_text is not None and live is None and full != prior_emitted:
+                if full.startswith(prior_emitted):
+                    suffix = full.removeprefix(prior_emitted)
+                    if suffix:
+                        on_text(suffix)
+                else:
+                    on_text("\n[retry response diverged; final response follows]\n")
+                    on_text(full)
             return resp
         except StreamInterruptedError as e:
             stream_interrupts += 1
             prior_emitted = "".join(chunks) if live is not None else prior_emitted
             publish_recoverable(
-                f"stream interrupted (attempt {attempt},"
+                f"stream interrupted (attempt {stream_attempt},"
                 f" {stream_interrupts} interrupts so far): {e}"
             )
             if stream_interrupts > _MAX_STREAM_INTERRUPT_RETRIES:

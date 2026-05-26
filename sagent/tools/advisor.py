@@ -104,6 +104,7 @@ class Advisor:
 
     name: str = "advisor"
     tool_id: str = "application/x-tool-advisor"
+    clearable_results: bool = False
     description: str = _DESCRIPTION
     directive_schema: JSON = json_freeze(
         {

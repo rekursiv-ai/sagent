@@ -120,10 +120,14 @@ class BackgroundAwareTool:
     """Wrapped tool's schema with ``background`` / ``delay`` properties
     merged into ``properties``."""
 
+    clearable_results: bool
+    """Forwarded from the wrapped tool."""
+
     def __init__(self, tool: Tool) -> None:
         self._tool = tool
         self.name = tool.name
         self.tool_id = tool.tool_id
+        self.clearable_results = tool.clearable_results
         self.description = tool.description
         schema: MutableJSON = cast(MutableJSON, dict(tool.directive_schema))
         raw_props = schema.get("properties")

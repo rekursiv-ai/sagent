@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import asyncio
 import contextlib
@@ -63,6 +64,7 @@ from sagent.agent.result_storage import post_process_result
 from sagent.agent.retry import send_with_retry
 from sagent.agent.session_io import (
     SessionMeta,
+    install_session_persistence,
     rebuild_content_cache,
     restore_model,
 )
@@ -78,6 +80,12 @@ from sagent.agent.state import (
 )
 from sagent.lib import last_models
 from sagent.lib.json import JSON
+from sagent.thinking import (
+    ThinkingState,
+    request_thinking,
+    should_redact_thinking,
+    should_show_thinking,
+)
 from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
@@ -155,10 +163,13 @@ class Agent:
         name: str = "Agent",
         description: str = "An AI agent.",
         max_tool_call_rounds: int | None = None,
-        thinking: str | None = "adaptive",
+        thinking: str | None = None,
+        thinking_state: ThinkingState | None = None,
         effort: str | None = None,
         max_budget_usd: float | None = None,
         persistent_retry: bool = False,
+        provider_args: Mapping[str, object] | None = None,
+        show_thinking: bool = True,
     ) -> None:
         self.name = name
         self.description = description
@@ -174,7 +185,14 @@ class Agent:
         self._budget = budget
         self.max_attempts = max_attempts
         self.max_tool_call_rounds = max_tool_call_rounds
-        self._thinking = thinking
+        self._thinking_state: ThinkingState | None = thinking_state
+        self._thinking = (
+            request_thinking(thinking_state) if thinking_state else thinking
+        )
+        self._show_thinking = (
+            should_show_thinking(thinking_state) if thinking_state else show_thinking
+        )
+        self._provider_args: dict[str, object] = dict(provider_args or {})
         self._effort = effort
         self._cache_ttl: str = "5m"
         self._service_tier: str | None = None
@@ -223,12 +241,24 @@ class Agent:
             system=self._build_system(),
         )
 
+        self.runtime.before_tool_spawn = self._before_tool_spawn
         for fn in (
             self._track_activity,
             self._track_tool_registry,
             self._enforce_caps,
         ):
             self.runtime.observers.append(fn)
+        # Persistence is an Agent-level concern, not a caller concern.
+        # Any Agent constructed with a ``session_dir`` -- root agents from
+        # the CLI, child agents from ``AgentSpawn``, slack/v1 worker
+        # agents -- self-installs its own ``session.jsonl`` observer.
+        # ``resume()`` re-baselines via ``self._rebaseline_persistence``
+        # so resumed tape records don't get rewritten to disk.
+        self._rebaseline_persistence: Callable[[], None] | None = (
+            install_session_persistence(self, self.session_dir)
+            if self.session_dir is not None
+            else None
+        )
 
     # -- Properties / config surface ----------------------------------
 
@@ -288,6 +318,22 @@ class Agent:
         self._budget = types.model.ContextBudget.from_model(self.model)
 
     @property
+    def thinking_state(self) -> ThinkingState | None:
+        """Canonical thinking state, or ``None`` when defaults apply."""
+        return self._thinking_state
+
+    def set_thinking_state(self, state: ThinkingState) -> None:
+        """Apply a canonical thinking state.
+
+        Args:
+          state: Canonical state controlling request mode, display, and redaction.
+
+        """
+        self._thinking_state = state
+        self._thinking = request_thinking(state)
+        self._show_thinking = should_show_thinking(state)
+
+    @property
     def thinking(self) -> str | None:
         """Extended-thinking mode (``"adaptive"`` etc.), or ``None`` to disable."""
         return self._thinking
@@ -300,7 +346,54 @@ class Agent:
           value: Mode string passed through to the provider, or ``None``.
 
         """
+        self._thinking_state = None
         self._thinking = value
+
+    @property
+    def show_thinking(self) -> bool:
+        """Whether the REPL renders readable thinking chunks."""
+        return self._show_thinking
+
+    @show_thinking.setter
+    def show_thinking(self, value: bool) -> None:
+        """Set whether readable thinking chunks render in the REPL.
+
+        Args:
+          value: True to render thinking chunks, False to suppress them.
+
+        """
+        self._show_thinking = value
+
+    @property
+    def provider_args(self) -> Mapping[str, object]:
+        """Provider factory keyword arguments reused for model rebuilds."""
+        return self._provider_args
+
+    def set_provider_arg(self, key: str, value: object) -> None:
+        """Set a provider factory argument for future model rebuilds.
+
+        Args:
+          key: Provider factory keyword.
+          value: JSON-like value forwarded to ``build_provider``.
+
+        """
+        self._provider_args[key] = value
+
+    def clear_provider_arg(self, key: str) -> None:
+        """Remove a provider factory argument from future model rebuilds.
+
+        Args:
+          key: Provider factory keyword.
+
+        """
+        self._provider_args.pop(key, None)
+
+    def _provider_build_args(self) -> dict[str, object]:
+        """Return provider args plus derived thinking redaction state."""
+        args = dict(self._provider_args)
+        if self._thinking_state is not None:
+            args["redact_thinking"] = should_redact_thinking(self._thinking_state)
+        return args
 
     @property
     def effort(self) -> str | None:
@@ -426,6 +519,13 @@ class Agent:
         """Rich tools in registration order (pre-wrap copies)."""
         return list(self._tools_map.values())
 
+    def live_tools(self) -> list[types.tools.Tool]:
+        """Return the provider-visible tool surface for model requests."""
+        return [
+            tool if tool.name == "BackgroundTask" else BackgroundAwareTool(tool)
+            for tool in self._tools_map.values()
+        ]
+
     @property
     def system(self) -> str:
         """Assembled system prompt (base + per-tool contributions)."""
@@ -509,9 +609,15 @@ class Agent:
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
         if not model.supports_thinking:
+            self._thinking_state = "off-hide"
             self._thinking = None
+            self._show_thinking = False
         if not model.supports_effort:
             self._effort = None
+        if not model.valid_service_tiers:
+            self._service_tier = None
+        if not model.supports_cache_control:
+            self._cache_ttl = "5m"
         if spec is not None:
             last_models.record(spec.provider, spec.model_id)
         _schedule_close(old)
@@ -570,7 +676,10 @@ class Agent:
             account=account,
         )
         provider_obj = providers.build_provider(
-            target.provider, target.auth, account=target.account
+            target.provider,
+            target.auth,
+            account=target.account,
+            **self._provider_build_args(),
         )
         new_model = provider_obj.model(target.model_id)
         if target.provider != spec.provider:
@@ -691,6 +800,11 @@ class Agent:
             if restored is not None:
                 new_model, new_spec = restored
                 self.swap_model(new_model, spec=new_spec)
+        # The tape we just replayed came from session.jsonl. Without
+        # rebaselining, the next ``SaveSession`` would write all those
+        # same records back to the same file, duplicating them.
+        if self._rebaseline_persistence is not None:
+            self._rebaseline_persistence()
 
     # -- Foreground slot / cancel verbs --------------------------------
 
@@ -705,10 +819,12 @@ class Agent:
           qid: Cohort call id of the task to cancel.
 
         """
+        self._cancel_background(qid)
         self.runtime.inbox.push_back(types.runtime.Kill(call_id=qid))
 
     def kill_all_tools(self) -> None:
         """Cancel every outstanding tool task."""
+        self._cancel_all_background()
         self.runtime.inbox.push_back(types.runtime.Kill())
 
     def shutdown(self, *, force: bool = False) -> None:
@@ -718,12 +834,19 @@ class Agent:
           force: When True, also cancel foreground + visible bg jobs.
 
         """
+        if not self._shutting_down:
+            _schedule_close(self.model)
         self._shutting_down = True
         if force:
             self.kill_all_tools()
             for job in list(self._bg.values()):
                 if not job.hidden and not job.task.done():
-                    _ = job.task.cancel()
+                    if job.kind == "persistent_subagent":
+                        child = agent_registry.get(job.queue_id)
+                        if child is not None:
+                            child.shutdown(force=True)
+                    else:
+                        _ = job.task.cancel()
         self.runtime.inbox.push_back(types.runtime.Quit())
 
     # -- Strategy methods ---------------------------------------------
@@ -737,11 +860,11 @@ class Agent:
         """
         await self._await_event(
             types.runtime.Compact(args=args),
-            (types.runtime.CompactComplete,),
+            (types.runtime.CompactComplete, types.runtime.CompactFailed),
         )
 
     async def recompact(self, args: str = "") -> None:
-        """Reload the most recent pre-compact transcript and re-run compaction.
+        """Alias ``/compact`` using a distinct runtime event.
 
         Args:
           args: Free-form compaction instructions forwarded to the compactor.
@@ -749,12 +872,13 @@ class Agent:
         """
         await self._await_event(
             types.runtime.Recompact(args=args),
-            (types.runtime.CompactComplete,),
+            (types.runtime.CompactComplete, types.runtime.CompactFailed),
         )
 
     async def clear(self) -> None:
         """Preempt and wipe history + per-tool recall caches."""
         self.tool_state.reset_tool_recall()
+        self._cancel_all_background()
         self.runtime.inbox.push_back(types.runtime.Clear())
 
     async def serve_forever(self) -> None:
@@ -1004,14 +1128,29 @@ class Agent:
             and event.message.tool_calls
         ):
             self.runtime.inbox.push_back(
-                types.runtime.ModelResponseError(
-                    RuntimeError(
-                        "Tool-call-round limit reached"
-                        f" ({self.max_tool_call_rounds} rounds)."
-                        f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]"
-                    )
-                )
+                types.runtime.ModelResponseError(self._tool_round_limit_error())
             )
+
+    def _before_tool_spawn(
+        self,
+        message: types.history.AssistantMessage,
+    ) -> types.runtime.RuntimeEvent | None:
+        """Reject capped tool rounds before runtime spawns tool tasks."""
+        if (
+            message.tool_calls
+            and self.max_tool_call_rounds is not None
+            and self.activity.num_tool_call_rounds + 1 >= self.max_tool_call_rounds
+        ):
+            return types.runtime.ModelResponseError(self._tool_round_limit_error())
+        return None
+
+    def _tool_round_limit_error(self) -> RuntimeError:
+        """Build the max-tool-call-rounds error."""
+        return RuntimeError(
+            "Tool-call-round limit reached"
+            f" ({self.max_tool_call_rounds} rounds)."
+            f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]"
+        )
 
     def cancel_background(self, job_id: str) -> None:
         """Remove ``job_id`` from the background-task registry, if present.
@@ -1021,6 +1160,18 @@ class Agent:
 
         """
         self._bg.pop(job_id, None)
+
+    def _cancel_background(self, job_id: str) -> None:
+        """Cancel and forget one explicit background job."""
+        job = self._bg.pop(job_id, None)
+        if job is not None and not job.task.done():
+            job.task.cancel()
+
+    def _cancel_all_background(self) -> None:
+        """Cancel and forget every explicit background tool job."""
+        for job_id, job in tuple(self._bg.items()):
+            if job.kind == "tool" and not job.hidden:
+                self._cancel_background(job_id)
 
     def register_background(self, job_id: str, entry: BackgroundTaskEntry) -> None:
         """Add ``entry`` to the background-task registry under ``job_id``.
@@ -1063,14 +1214,15 @@ class Agent:
         request = types.model.ModelRequest(
             messages=history,
             system=self.system_prompt() or None,
-            tools=self.tools or None,
+            tools=self.live_tools() or None,
         )
         used = model.approx_request_tokens(request)
         if not await self._agent_compactor.should_compact(
             input_tokens=used,
-            max_request_tokens=model.max_request_tokens,
+            max_request_tokens=self.max_request_tokens,
             max_response_tokens=self.max_response_tokens,
         ):
+            self.compaction_state.compact_failures = 0
             return True
         # Circuit breaker: after N consecutive auto-compact failures, stop
         # retrying and let the caller surface the prior error. Manual
@@ -1134,14 +1286,8 @@ class Agent:
             )
             self.last_compact_error = exc
             return False
+        override = agent_runtime.widen_barrier_mask(override, self.runtime.tape)
         self.runtime.adopt_record(override)
-        # Compaction summarized prior context away. Tools whose recall
-        # caches assume "I already showed you this in context" (Read's
-        # check_unchanged, Skill's invoked-skills memo) would now hand
-        # back stubs pointing at content the model can no longer see.
-        # Clear them so the next call re-emits the real content into
-        # the post-compact context.
-        self.tool_state.reset_tool_recall()
         self.publish(
             types.runtime.CompactComplete(
                 records=(override,),
@@ -1172,6 +1318,19 @@ def _context_overflow_error() -> types.exceptions.ContextOverflowError:
         "Use /clear to wipe history, /compact <hints> to retry with custom "
         "guidance, or /model to switch to a larger-window model.",
     )
+
+
+def _budget_for_model_ratio(
+    budget: types.model.ContextBudget,
+    model: types.model.Model,
+) -> types.model.ContextBudget:
+    """Return ``budget`` with chars-per-token inferred from ``model``."""
+    sample = "x" * 1_000
+    tokens = model.approx_text_tokens(sample)
+    if tokens <= 0:
+        return budget
+    chars_per_token = max(1, round(len(sample) / tokens))
+    return dataclasses.replace(budget, chars_per_token=chars_per_token)
 
 
 def _compact_failure_error(
@@ -1220,7 +1379,12 @@ def _resolve_target_spec(
     :meth:`Agent.change_model`.
     """
     prov_name = provider or spec.provider
-    final_auth = auth or spec.auth
+    if auth is not None:
+        final_auth = auth
+    elif prov_name == spec.provider:
+        final_auth = spec.auth
+    else:
+        final_auth = providers.default_auth_for_provider(prov_name)
     final_account = account if account is not None else spec.account
     if model_id is not None:
         final_model_id = model_id
@@ -1370,12 +1534,8 @@ class _AgentModel:
         # ``tools_map`` by name and wrap with ``BackgroundAwareTool`` so
         # the LLM-visible schema advertises the ``background`` / ``delay``
         # properties without polluting the raw tool's identity.
-        rich_tools: list[types.tools.Tool] = [
-            self._agent.tools_map[t.name]
-            if t.name == "BackgroundTask"
-            else BackgroundAwareTool(self._agent.tools_map[t.name])
-            for t in tools
-        ]
+        del tools
+        rich_tools = self._agent.live_tools()
         rich_thinking = self._agent.thinking if self._inner.supports_thinking else None
         rich_effort = self._agent.effort if self._inner.supports_effort else None
         rich_service_tier = (
@@ -1399,7 +1559,7 @@ class _AgentModel:
                     self._inner,
                     request,
                     on_text=on_text,
-                    on_thinking=on_thinking,
+                    on_thinking=on_thinking if self._agent.show_thinking else None,
                     max_attempts=self._agent.max_attempts,
                     persistent_retry=self._agent.persistent_retry,
                     publish_recoverable=lambda text: logger.info(
@@ -1503,6 +1663,13 @@ class _AgentTool:
         """
         call_id = agent_runtime.current_call_id_var.get("")
         bg_requested, delay_sec, clean_args = split_bg_args(args)
+        try:
+            label = self._inner.summary(clean_args)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            label = self._inner.name
+        self._agent.runtime.publish(
+            types.runtime.ToolLabel(call_id=call_id, text=label),
+        )
         validation_error = _validate_input(
             self._inner.name, self._inner.directive_schema, clean_args
         )
@@ -1512,11 +1679,6 @@ class _AgentTool:
                 content=validation_error,
                 is_error=True,
             )
-        self._agent.runtime.publish(
-            types.runtime.ToolLabel(
-                call_id=call_id, text=self._inner.summary(clean_args)
-            ),
-        )
         if bg_requested or delay_sec > 0:
             task = asyncio.create_task(
                 self._run_bg(call_id, clean_args, delay_sec),
@@ -1569,8 +1731,9 @@ class _AgentTool:
             content, is_error = processed.content, processed.is_error
         except asyncio.CancelledError:
             self._agent.cancel_background(call_id)
-            raise
-        except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
+            return
+        except Exception as exc:
+            logger.exception("background tool %r failed", self._inner.name)
             content = f"{type(exc).__name__}: {exc}"
             is_error = True
         self._agent.runtime.inbox.push_back(
@@ -1664,7 +1827,7 @@ class _AgentCompactor:
                 types.model.ModelRequest(
                     messages=payload,
                     system=self._agent.system_prompt() or None,
-                    tools=self._agent.tools or None,
+                    tools=self._agent.live_tools() or None,
                 ),
             )
             headroom = (
@@ -1673,7 +1836,7 @@ class _AgentCompactor:
             await post_compact_enrich(
                 history=payload,
                 tool_state=self._agent.tool_state,
-                budget=self._agent.budget,
+                budget=_budget_for_model_ratio(self._agent.budget, self._agent.model),
                 tools=self._agent.tools_map,
                 background_tasks=self._agent.background,
                 estimate_tokens=self._agent.max_request_tokens - used,
@@ -1707,7 +1870,7 @@ class _AgentCompactor:
                 types.model.ModelRequest(
                     messages=payload,
                     system=self._agent.system_prompt() or None,
-                    tools=self._agent.tools or None,
+                    tools=self._agent.live_tools() or None,
                 ),
             )
             threshold = (
@@ -1772,36 +1935,85 @@ def _validate_input(
           well-formed input.
 
     """
-    required_raw = schema.get("required")
-    required: list[str] = (
-        [k for k in required_raw if isinstance(k, str)]
-        if isinstance(required_raw, (list, tuple))
-        else []
-    )
-    props_raw = schema.get("properties")
-    accepted: list[str] = (
-        [str(k) for k in props_raw] if isinstance(props_raw, Mapping) else []
-    )
-    missing = [k for k in required if k not in args]
-    unexpected: list[str] = (
-        [k for k in args if k not in set(accepted)]
-        if schema.get("additionalProperties") is False
-        else []
-    )
-    if not missing and not unexpected:
+    issues = _validate_schema(schema, args, "")
+    if not issues:
         return None
-    issues: list[str] = [f"The required parameter `{k}` is missing." for k in missing]
-    issues.extend(f"Unexpected parameter `{k}`." for k in unexpected)
     plural = "issues" if len(issues) > 1 else "issue"
     parts = [
         f"{_INPUT_VALIDATION_PREFIX} {tool_name} failed due to the following {plural}:",
         *issues,
     ]
+    required = _schema_strings(schema.get("required"))
+    props_raw = schema.get("properties")
+    accepted = [str(k) for k in props_raw] if isinstance(props_raw, Mapping) else []
     if required:
         keys = ", ".join(f"`{k}`" for k in required)
         parts.append(f"\n{tool_name} requires: {keys}.")
-    if unexpected and accepted:
+    if any(issue.startswith("Unexpected parameter") for issue in issues) and accepted:
         keys = ", ".join(f"`{k}`" for k in accepted)
         parts.append(f"{tool_name} accepts: {keys}.")
     parts.append(f"\n{_TOOL_INPUT_RECOVERY_HINT}")
     return "\n".join(parts)
+
+
+def _validate_schema(schema: object, value: object, path: str) -> list[str]:
+    """Return recursive JSON-schema validation issue strings."""
+    if not isinstance(schema, Mapping):
+        return []
+    schema_map = cast(Mapping[str, object], schema)
+    schema_type = schema_map.get("type")
+    if schema_type == "object" and isinstance(value, Mapping):
+        return _validate_object(schema_map, cast(Mapping[str, object], value), path)
+    if schema_type == "array" and isinstance(value, list):
+        items = schema_map.get("items")
+        value_items = cast(list[object], value)
+        return [
+            issue
+            for idx, item in enumerate(value_items)
+            for issue in _validate_schema(items, item, f"{path}[{idx}]")
+        ]
+    return []
+
+
+def _validate_object(
+    schema: Mapping[str, object],
+    args: Mapping[str, object],
+    path: str,
+) -> list[str]:
+    """Return object-schema validation issue strings."""
+    required = _schema_strings(schema.get("required"))
+    props_raw = schema.get("properties")
+    props: Mapping[str, object] = (
+        cast(Mapping[str, object], props_raw) if isinstance(props_raw, Mapping) else {}
+    )
+    issues = [
+        f"The required parameter `{_path_join(path, key)}` is missing."
+        for key in required
+        if key not in args
+    ]
+    if schema.get("additionalProperties") is False:
+        issues.extend(
+            f"Unexpected parameter `{_path_join(path, key)}`."
+            for key in args
+            if key not in props
+        )
+    for key, item in args.items():
+        child_schema = props.get(key)
+        if child_schema is not None:
+            issues.extend(_validate_schema(child_schema, item, _path_join(path, key)))
+    return issues
+
+
+def _schema_strings(value: object) -> list[str]:
+    """Return string items from a schema list field."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    items = cast(Sequence[object], value)
+    return [item for item in items if isinstance(item, str)]
+
+
+def _path_join(prefix: str, key: str) -> str:
+    """Append ``key`` to a dotted validation path."""
+    if prefix:
+        return f"{prefix}.{key}"
+    return key

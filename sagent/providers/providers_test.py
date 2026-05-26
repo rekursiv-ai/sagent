@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import logging
 import sys
 
 import pytest
@@ -18,7 +20,9 @@ from sagent.providers import (
     OpenAICompat,
     SelfHosted,
     build_provider,
+    collect_provider_args,
     infer_provider,
+    parse_provider_arg,
 )
 
 
@@ -76,18 +80,18 @@ def test_infer_provider_other_local_paths(path: str) -> None:
     assert result == ("SelfHosted", path)
 
 
-def test_build_provider_anthropic_from_key() -> None:
-    p = build_provider("Anthropic", "sk-ant-test")
+def test_build_provider_anthropic_from_key_auth() -> None:
+    p = build_provider("Anthropic", "key", api_key="sk-ant-test")
     assert isinstance(p, Anthropic)
 
 
-def test_build_provider_google_from_key() -> None:
-    p = build_provider("Google", "AIzaTest")
+def test_build_provider_google_from_key_auth() -> None:
+    p = build_provider("Google", "key", api_key="AIzaTest")
     assert isinstance(p, Google)
 
 
-def test_build_provider_openai_from_key() -> None:
-    p = build_provider("OpenAI", "sk-test")
+def test_build_provider_openai_from_key_auth() -> None:
+    p = build_provider("OpenAI", "key", api_key="sk-test")
     assert isinstance(p, OpenAI)
 
 
@@ -104,29 +108,28 @@ def test_build_provider_from_env_dispatch(
     assert isinstance(p, Anthropic)
 
 
-def test_build_provider_openai_compat_from_key() -> None:
-    # OpenAICompat is the base; ``from_key`` requires no ENV_VAR.
-    p = build_provider("OpenAICompat", "any-key")
+def test_build_provider_openai_compat_from_key_auth() -> None:
+    p = build_provider("OpenAICompat", "key", api_key="any-key")
     assert isinstance(p, OpenAICompat)
 
 
-def test_build_provider_dashscope_from_key() -> None:
-    p = build_provider("DashScope", "sk-dash-test")
+def test_build_provider_dashscope_from_key_auth() -> None:
+    p = build_provider("DashScope", "key", api_key="sk-dash-test")
     assert isinstance(p, DashScope)
 
 
-def test_build_provider_minimax_from_key() -> None:
-    p = build_provider("MiniMax", "sk-mini-test")
+def test_build_provider_minimax_from_key_auth() -> None:
+    p = build_provider("MiniMax", "key", api_key="sk-mini-test")
     assert isinstance(p, MiniMax)
 
 
-def test_build_provider_moonshot_from_key() -> None:
-    p = build_provider("Moonshot", "sk-moon-test")
+def test_build_provider_moonshot_from_key_auth() -> None:
+    p = build_provider("Moonshot", "key", api_key="sk-moon-test")
     assert isinstance(p, Moonshot)
 
 
-def test_build_provider_llamacpp_from_key() -> None:
-    p = build_provider("LlamaCpp", "local")
+def test_build_provider_llamacpp_from_key_auth() -> None:
+    p = build_provider("LlamaCpp", "key", api_key="local")
     assert isinstance(p, LlamaCpp)
 
 
@@ -150,25 +153,21 @@ def test_build_provider_account_kw_threaded_when_accepted(
     assert calls == [{"account": "work"}]
 
 
-def test_build_provider_falls_back_to_from_key_when_no_auth_method(
+def test_build_provider_missing_auth_method_raises_even_with_from_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auth strings without a ``from_<auth>`` route to ``from_key(auth)``."""
-    captured: list[str] = []
-
     class StubProvKeyOnly:
         @classmethod
         def from_key(cls, api_key: str) -> StubProvKeyOnly:
-            captured.append(api_key)
+            del api_key
             return cls()
 
     providers_mod = sys.modules["sagent.providers"]
     monkeypatch.setattr(
         providers_mod, "StubProvKeyOnly", StubProvKeyOnly, raising=False
     )
-    out = build_provider("StubProvKeyOnly", "literal-key-here")
-    assert isinstance(out, StubProvKeyOnly)
-    assert captured == ["literal-key-here"]
+    with pytest.raises(AttributeError, match="no ``from_literal-key-here``"):
+        build_provider("StubProvKeyOnly", "literal-key-here")
 
 
 def test_build_provider_no_match_no_from_key_raises(
@@ -186,6 +185,92 @@ def test_build_provider_no_match_no_from_key_raises(
 def test_self_hosted_imported_via_dispatch() -> None:
     # We exercise that ``SelfHosted`` is exposed; we don't load HF weights.
     assert SelfHosted.DEFAULT_MODEL
+
+
+# ---- ``--provider-arg`` mechanism --------------------------------------
+
+
+def test_parse_provider_arg_typed_json_values() -> None:
+    assert parse_provider_arg("Anthropic.flag=true") == (
+        "Anthropic",
+        "flag",
+        True,
+    )
+    assert parse_provider_arg("Anthropic.n=42") == ("Anthropic", "n", 42)
+    assert parse_provider_arg('Anthropic.s="hi"') == (
+        "Anthropic",
+        "s",
+        "hi",
+    )
+    assert parse_provider_arg("Anthropic.opt=null") == (
+        "Anthropic",
+        "opt",
+        None,
+    )
+
+
+def test_parse_provider_arg_falls_back_to_string_on_decode_failure() -> None:
+    """Bare identifiers and paths pass through as strings."""
+    assert parse_provider_arg("Anthropic.path=/var/foo") == (
+        "Anthropic",
+        "path",
+        "/var/foo",
+    )
+    assert parse_provider_arg("Anthropic.tag=production") == (
+        "Anthropic",
+        "tag",
+        "production",
+    )
+
+
+def test_parse_provider_arg_rejects_malformed() -> None:
+    err = r"expected Class\.key=value"
+    with pytest.raises(argparse.ArgumentTypeError, match=err):
+        parse_provider_arg("no-dot=value")
+    with pytest.raises(argparse.ArgumentTypeError, match=err):
+        parse_provider_arg("Class.key-without-eq")
+    with pytest.raises(argparse.ArgumentTypeError, match=err):
+        parse_provider_arg(".key=value")
+
+
+def test_collect_provider_args_walks_mro() -> None:
+    """A spec keyed on a base class applies to the subclass."""
+    # Use the real provider hierarchy: ``OpenAISubscription`` inherits
+    # from ``OpenAI``, so a spec keyed on ``OpenAI`` must flow.
+    args = [
+        "OpenAI.server_side_context_management=true",
+        "Google.something=ignored",
+    ]
+    merged = collect_provider_args(args, "OpenAISubscription")
+    assert merged == {"server_side_context_management": True}
+
+
+def test_collect_provider_args_leaf_wins_over_base_on_collision() -> None:
+    args = [
+        "OpenAI.knob=1",
+        "OpenAISubscription.knob=2",
+    ]
+    assert collect_provider_args(args, "OpenAISubscription") == {"knob": 2}
+
+
+def test_collect_provider_args_ignores_unrelated_classes() -> None:
+    args = ["OpenAI.k=1", "Google.k=2"]
+    assert collect_provider_args(args, "Anthropic") == {}
+
+
+def test_collect_provider_args_unknown_provider_raises() -> None:
+    with pytest.raises(AttributeError, match="unknown provider"):
+        collect_provider_args(["X.k=1"], "DoesNotExist")
+
+
+def test_build_provider_warns_and_drops_unknown_kwargs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unknown kwargs are dropped with a warning rather than raising."""
+    with caplog.at_level(logging.WARNING, logger="sagent.providers.providers"):
+        p = build_provider("Anthropic", "key", api_key="sk-test", does_not_exist=42)
+    assert isinstance(p, Anthropic)
+    assert any("does_not_exist" in rec.message for rec in caplog.records)
 
 
 if __name__ == "__main__":

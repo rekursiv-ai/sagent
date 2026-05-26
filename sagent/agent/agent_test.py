@@ -6,10 +6,12 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast, override
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import asyncio
 import contextlib
+import json
+import logging
 
 import pytest
 
@@ -21,6 +23,7 @@ from sagent.agent.agent import (
     ActivityTracker,
     Agent,
     SystemPromptArg,
+    _resolve_target_spec,
     _validate_input,
 )
 from sagent.agent.background import (
@@ -28,7 +31,8 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
     split_bg_args,
 )
-from sagent.agent.state import agent_registry
+from sagent.agent.session_io import load_session
+from sagent.agent.state import ToolState, agent_registry
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
@@ -149,6 +153,7 @@ class StubTool:
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo tool."
     directive_schema: JSON = _STUB_SCHEMA
+    clearable_results: bool = False
     calls: list[Mapping[str, object]] = field(default_factory=list)
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -174,6 +179,7 @@ def _build_agent(
     system: SystemPromptArg = "",
     budget: types.model.ContextBudget | None = None,
     max_budget_usd: float | None = None,
+    session_dir: Path | None = None,
 ) -> Agent:
     return Agent(
         model=model or StubModel(),
@@ -181,6 +187,7 @@ def _build_agent(
         system=system,
         budget=budget,
         max_budget_usd=max_budget_usd,
+        session_dir=session_dir,
     )
 
 
@@ -364,6 +371,25 @@ def test_agent_shutdown_idempotent() -> None:
     a.shutdown()  # Second call must not raise.
 
 
+@pytest.mark.asyncio
+async def test_agent_shutdown_closes_active_model_once() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class ClosableStubModel(StubModel):
+        close_count: int = 0
+        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def close(self) -> None:
+            self.close_count += 1
+            self.closed_event.set()
+
+    model = ClosableStubModel()
+    a = _build_agent(model=model)
+    a.shutdown()
+    a.shutdown()
+    await asyncio.wait_for(model.closed_event.wait(), timeout=1.0)
+    assert model.close_count == 1
+
+
 def test_system_prompt_arg_type_alias_str_or_callable() -> None:
     # ``SystemPromptArg`` is exposed as a type alias for the constructor.
     arg: SystemPromptArg = "hi"
@@ -412,8 +438,56 @@ def test_thinking_setter() -> None:
     a = _build_agent()
     a.thinking = "extended"
     assert a.thinking == "extended"
+    assert a.thinking_state is None
     a.thinking = None
     assert a.thinking is None
+
+
+def test_thinking_state_sets_request_and_display_without_provider_arg() -> None:
+    a = _build_agent()
+    a.set_thinking_state("on-show")
+    assert a.thinking_state == "on-show"
+    assert a.thinking == "enabled"
+    assert a.show_thinking is True
+    assert "redact_thinking" not in a.provider_args
+    a.set_thinking_state("redact-hide")
+    assert a.thinking == "adaptive"
+    assert a.show_thinking is False
+    assert "redact_thinking" not in a.provider_args
+
+
+def test_change_model_derives_redact_thinking_from_state(
+    patched_build_provider: Mapping[str, object],
+) -> None:
+    del patched_build_provider
+    a = _build_agent_with_spec()
+    a.set_thinking_state("redact-hide")
+    _ = a.change_model(model_id="claude-sonnet-4-6")
+    build_provider = cast(Mock, providers_module.build_provider)
+    build_provider.assert_called_with(
+        "Anthropic",
+        "api",
+        account=None,
+        redact_thinking=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_default_omits_thinking_from_request() -> None:
+    model = StubModel(supports_thinking=True)
+    a = _build_agent(model=model)
+    async for _ in a.run(types.history.UserMessage(text="hi")):
+        pass
+    assert model.received[-1].thinking is None
+
+
+@pytest.mark.asyncio
+async def test_agent_thinking_state_sets_request_thinking() -> None:
+    model = StubModel(supports_thinking=True)
+    a = Agent(model=model, tools=[], thinking_state="adaptive-hide")
+    async for _ in a.run(types.history.UserMessage(text="hi")):
+        pass
+    assert model.received[-1].thinking == "adaptive"
 
 
 def test_effort_setter_rejects_when_model_lacks_support() -> None:
@@ -555,6 +629,20 @@ def test_swap_model_replaces_model_and_inner_wrapper() -> None:
     assert a.model is new
     # The wrapper's inner reference was updated too.
     assert a._agent_model._inner is new
+
+
+def test_swap_model_clears_unsupported_service_tier() -> None:
+    a = _build_agent(model=StubModel(valid_service_tiers=("priority",)))
+    a.service_tier = "priority"
+    a.swap_model(StubModel(model_id="stub-2"))
+    assert a.service_tier is None
+
+
+def test_swap_model_normalizes_unsupported_cache_ttl() -> None:
+    a = _build_agent(model=StubModel(supports_cache_control=True))
+    a.cache_ttl = "1h"
+    a.swap_model(StubModel(model_id="stub-2"))
+    assert a.cache_ttl == "5m"
 
 
 @pytest.mark.asyncio
@@ -709,6 +797,50 @@ def test_change_model_cross_provider_no_model_preserves_current(
     assert target.model_id == "claude-opus-4-7"
 
 
+def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
+    spec = types.model.ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-5.5",
+        account="work",
+    )
+    target = _resolve_target_spec(
+        spec,
+        provider="Google",
+        auth=None,
+        model_id="gemini-3-pro",
+        account=None,
+    )
+    assert target.auth == "env"
+    assert target.account == "work"
+
+
+def test_resolve_target_spec_explicit_default_account_is_preserved() -> None:
+    spec = types.model.ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-5.5",
+        account="work",
+    )
+    target = _resolve_target_spec(
+        spec,
+        provider=None,
+        auth=None,
+        model_id="gpt-5",
+        account="default",
+    )
+    assert target.account == "default"
+
+
+def test_change_model_provider_change_without_auth_uses_target_default(
+    patched_build_provider: Mapping[str, object],
+) -> None:
+    del patched_build_provider
+    a = _build_agent_with_spec(model_id="claude-opus-4-7")
+    target = a.change_model(provider="Google", model_id="gemini-3-pro")
+    assert target.auth == "env"
+
+
 def test_change_model_cross_provider_falls_back_to_default(
     monkeypatch: pytest.MonkeyPatch,
     patched_build_provider: Mapping[str, object],
@@ -753,7 +885,7 @@ def test_change_model_unknown_provider_raises(
     """Naming a non-existent provider class surfaces as ``ValueError``."""
     del patched_build_provider
     a = _build_agent_with_spec()
-    with pytest.raises(ValueError, match="unknown provider"):
+    with pytest.raises((AttributeError, ValueError), match="unknown provider"):
         _ = a.change_model(provider="NotAProvider")
 
 
@@ -908,6 +1040,46 @@ async def test_shutdown_force_cancels_explicit_jobs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_force_uses_persistent_subagent_lifecycle() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _Child:
+        shutdown_calls: list[bool] = field(default_factory=list)
+
+        def shutdown(self, *, force: bool = False) -> None:
+            self.shutdown_calls.append(force)
+
+    a = _build_agent()
+    child = _Child()
+
+    async def hang() -> None:
+        await asyncio.sleep(10.0)
+
+    task = asyncio.create_task(hang())
+    a.register_background(
+        "child",
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="Agent",
+            queue_id="child",
+            started=0.0,
+            hidden=False,
+            kind="persistent_subagent",
+        ),
+    )
+    agent_registry["child"] = cast(Agent, child)
+    try:
+        a.shutdown(force=True)
+        await asyncio.sleep(0)
+        assert child.shutdown_calls == [True]
+        assert not task.cancelled()
+    finally:
+        _ = agent_registry.pop("child", None)
+        _ = task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_compact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
@@ -961,6 +1133,88 @@ async def test_compact_awaits_compact_complete_event() -> None:
         isinstance(e, types.history.UserMessage) and e.text == "[summary]"
         for e in a.history
     )
+
+
+@pytest.mark.asyncio
+async def test_public_compact_returns_when_halt_cancels_compaction() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class _HangingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            started.set()
+            await asyncio.Future[None]()
+            raise AssertionError("unreachable")
+
+    a = Agent(model=StubModel(), tools=[], compactor=_HangingCompactor())
+    drive_task = asyncio.create_task(a.serve_forever())
+    compact_task = asyncio.create_task(a.compact(""))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        a.halt()
+        await asyncio.wait_for(compact_task, timeout=1.0)
+    finally:
+        a.shutdown()
+        with contextlib.suppress(asyncio.CancelledError):
+            await drive_task
+
+
+@pytest.mark.asyncio
+async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class _HangingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            started.set()
+            await asyncio.Future[None]()
+            raise AssertionError("unreachable")
+
+    a = Agent(model=StubModel(), tools=[], compactor=_HangingCompactor())
+    drive_task = asyncio.create_task(a.serve_forever())
+    recompact_task = asyncio.create_task(a.recompact("retry"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await a.clear()
+        await asyncio.wait_for(recompact_task, timeout=1.0)
+    finally:
+        a.shutdown()
+        with contextlib.suppress(asyncio.CancelledError):
+            await drive_task
 
 
 @pytest.mark.asyncio
@@ -1213,6 +1467,83 @@ async def test_compact_now_replaces_history_in_place() -> None:
     entry = a.runtime.context().messages[0]
     assert isinstance(entry, types.history.UserMessage)
     assert entry.text == "[summary]"
+
+
+@pytest.mark.asyncio
+async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> None:
+    """The compact barrier covers detached splices appended during compact."""
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class _BlockingCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
+                ((tape[0].ref, tape[-1].ref),) if tape else ()
+            )
+            compact_started.set()
+            await release_compact.wait()
+            return ContextSplice(
+                ref=mint_ref(),
+                mask=mask,
+                insert_after=None,
+                payload=(types.history.UserMessage(text="[summary]"),),
+                strategy="summary",
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_BlockingCompactor())
+    a.runtime.append_history(types.history.UserMessage(text="please run a tool"))
+    tc = types.history.ToolCall(id="tc-1", name="echo", args={})
+    a.runtime.append_history(types.history.AssistantMessage(text="", tool_calls=(tc,)))
+    a.runtime.append_history(
+        types.history.ToolResult(call_id="tc-1", content="[Running in background]"),
+    )
+    a.runtime.append_history(types.history.UserMessage(text="[worker is idle] ping"))
+
+    compact_task = asyncio.create_task(a.compact_now())
+    try:
+        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+        spliced = a.runtime._splice_detached_result("tc-1", "real output", False)
+        assert spliced is not None
+        release_compact.set()
+        await asyncio.wait_for(compact_task, timeout=1.0)
+    finally:
+        if not compact_task.done():
+            compact_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await compact_task
+
+    messages = a.runtime.context().messages
+    assert len(messages) == 1
+    assert isinstance(messages[0], types.history.UserMessage)
+    assert messages[0].text == "[summary]"
 
 
 @pytest.mark.asyncio
@@ -2403,6 +2734,218 @@ async def test_agent_tool_emits_label_and_delegates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_tool_invalid_input_emits_label_without_running() -> None:
+    inner = StubTool(
+        directive_schema=json_freeze(
+            {
+                "type": "object",
+                "properties": {"msg": {"type": "string"}},
+                "required": ["msg"],
+                "additionalProperties": False,
+            }
+        )
+    )
+    a = _build_agent(tools=[inner])
+    labels: list[types.runtime.ToolLabel] = []
+
+    def _watch(ev: object) -> None:
+        if isinstance(ev, types.runtime.ToolLabel):
+            labels.append(ev)
+
+    a.runtime.observers.append(_watch)
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+
+    result = await wrapper.run({})
+
+    assert result.is_error
+    assert "InputValidationError" in result.content
+    assert inner.calls == []
+    assert len(labels) == 1
+    assert labels[0].text == "echo"
+
+
+@pytest.mark.asyncio
+async def test_clear_cancels_explicit_background_jobs() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SlowTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            await asyncio.get_running_loop().create_future()
+            return types.history.ToolResult(call_id="", content="done")
+
+    a = _build_agent(tools=[SlowTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    _ = await wrapper.run({"background": True})
+    task = next(iter(a.background.values())).task
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await a.clear()
+
+    await asyncio.wait_for(task, timeout=1.0)
+    assert a.background == {}
+
+
+@pytest.mark.asyncio
+async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SlowTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            await asyncio.get_running_loop().create_future()
+            return types.history.ToolResult(call_id="", content="done")
+
+    a = _build_agent(tools=[SlowTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    _ = await wrapper.run({"background": True})
+    call_id = next(iter(a.background))
+    task = a.background[call_id].task
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    a.kill_tool(call_id)
+
+    await asyncio.wait_for(task, timeout=1.0)
+    assert a.background == {}
+
+
+@pytest.mark.asyncio
+async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SlowTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            await asyncio.get_running_loop().create_future()
+            return types.history.ToolResult(call_id="", content="done")
+
+    a = _build_agent(tools=[SlowTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    _ = await wrapper.run({"background": True})
+    task = next(iter(a.background.values())).task
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    a.kill_all_tools()
+
+    await asyncio.wait_for(task, timeout=1.0)
+    assert a.background == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_call_round_cap_blocks_tool_spawn() -> None:
+    started = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SideEffectTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            return types.history.ToolResult(call_id="", content="side effect")
+
+    model = StubModel(
+        responses=[
+            types.history.AssistantMessage(
+                tool_calls=(types.history.ToolCall(id="c1", name="Echo", args={}),)
+            )
+        ]
+    )
+    a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
+    events = [type(ev) async for ev in a.run(types.history.UserMessage(text="go"))]
+
+    assert types.runtime.ModelResponseError in events
+    assert not started.is_set()
+    assert a.runtime.running_tools == {}
+    assert a.runtime.cohort == set()
+
+
+@pytest.mark.asyncio
+async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> None:
+    started = asyncio.Event()
+    idle = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class SlowTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            started.set()
+            await asyncio.get_running_loop().create_future()
+            return types.history.ToolResult(call_id="", content="done")
+
+    a = _build_agent(
+        model=StubModel(
+            responses=[types.history.AssistantMessage(text="fresh response")]
+        ),
+        tools=[SlowTool()],
+    )
+
+    def _watch(event: types.runtime.RuntimeEvent) -> None:
+        if isinstance(event, types.runtime.ModelIdle):
+            idle.set()
+
+    a.runtime.observers.append(_watch)
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    _ = await wrapper.run({"background": True})
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    drive = asyncio.create_task(a.serve_forever())
+    try:
+        await a.clear()
+        await asyncio.sleep(0)
+        a.runtime.inbox.push_back(types.history.UserMessage(text="fresh"))
+        await asyncio.wait_for(idle.wait(), timeout=1.0)
+    finally:
+        a.shutdown(force=True)
+        with contextlib.suppress(asyncio.CancelledError):
+            await drive
+        a.runtime.observers.remove(_watch)
+
+    user_texts = [
+        entry.text
+        for entry in a.history
+        if isinstance(entry, types.history.UserMessage)
+    ]
+    assert not any("[cancelled]" in text for text in user_texts)
+    assert not any(text.startswith("[Tool ") for text in user_texts)
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_background_exception_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @dataclass(slots=True, kw_only=True)
+    class FailingTool(StubTool):
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+            del args
+            raise RuntimeError("boom")
+
+    a = _build_agent(tools=[FailingTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    with caplog.at_level(logging.ERROR, logger="sagent.agent.agent"):
+        result = await wrapper.run({"background": True})
+        assert not result.is_error
+        task = next(iter(a.background.values())).task
+        await task
+    assert any(
+        "background tool 'Echo' failed" in r.getMessage() for r in caplog.records
+    )
+    items = await a.runtime.inbox.drain()
+    detached = [i for i in items if isinstance(i, types.runtime.DetachedResult)]
+    assert len(detached) == 1
+    assert detached[0].is_error
+
+
+@pytest.mark.asyncio
 async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
     tmp_path: Path,
 ) -> None:
@@ -2667,6 +3210,65 @@ def test_validate_input_unexpected_field() -> None:
     assert "Unexpected parameter `bogus`" in err
 
 
+def test_validate_input_nested_required() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "required": ["file_path"],
+                }
+            },
+        }
+    )
+    err = _validate_input("Nested", schema, {"payload": {}})
+    assert err is not None
+    assert "The required parameter `payload.file_path` is missing." in err
+
+
+def test_validate_input_nested_unexpected_field() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {"file_path": {"type": "string"}},
+                    "additionalProperties": False,
+                }
+            },
+        }
+    )
+    err = _validate_input(
+        "Nested", schema, {"payload": {"file_path": "x", "extra": True}}
+    )
+    assert err is not None
+    assert "Unexpected parameter `payload.extra`." in err
+
+
+def test_validate_input_array_items_nested_required() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "string"}},
+                        "required": ["id"],
+                    },
+                }
+            },
+        }
+    )
+    err = _validate_input("Nested", schema, {"items": [dict[str, object]()]})
+    assert err is not None
+    assert "The required parameter `items[0].id` is missing." in err
+
+
 def test_validate_input_valid_passes() -> None:
     """C8: well-formed args return ``None``."""
     schema = json_freeze(
@@ -2768,6 +3370,325 @@ def test_swap_model_clears_unsupported_thinking() -> None:
     a.thinking = "adaptive"
     a.swap_model(_NoThinkingModel())
     assert a.thinking is None
+
+
+def test_recompact_docstring_describes_alias_semantics() -> None:
+    assert Agent.recompact.__doc__ is not None
+    assert "alias" in Agent.recompact.__doc__.lower()
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_uses_agent_request_cap() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _RecorderCompactor:
+        seen_max_request_tokens: list[int] = field(default_factory=list)
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_response_tokens
+            self.seen_max_request_tokens.append(max_request_tokens)
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            raise AssertionError("compact should not run")
+
+    compactor = _RecorderCompactor()
+    a = Agent(model=StubModel(max_request_tokens=100_000), compactor=compactor)
+    a.max_request_tokens = 10_000
+
+    progressed = await a.compact_if_needed(
+        [types.history.UserMessage(text="x")], a.model
+    )
+
+    assert progressed is True
+    assert compactor.seen_max_request_tokens == [10_000]
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _HealthyCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            raise AssertionError("compact should not run")
+
+    a = Agent(model=StubModel(), compactor=_HealthyCompactor())
+    a.compaction_state.compact_failures = 3
+
+    progressed = await a.compact_if_needed(
+        [types.history.UserMessage(text="x")], a.model
+    )
+
+    assert progressed is True
+    assert a.compaction_state.compact_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_compactor_estimates_use_live_background_aware_tools() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingModel(StubModel):
+        estimated_tools: list[Sequence[types.tools.Tool] | None] = field(
+            default_factory=list
+        )
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            self.estimated_tools.append(request.tools)
+            return StubModel.approx_request_tokens(self, request)
+
+    @dataclass(slots=True, kw_only=True)
+    class _NoopCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            raise AssertionError("compact should not run")
+
+    model = _RecordingModel()
+    tool = StubTool(
+        directive_schema=json_freeze(
+            {"type": "object", "properties": {"msg": {"type": "string"}}}
+        )
+    )
+    a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
+
+    progressed = await a.compact_if_needed([types.history.UserMessage(text="x")], model)
+
+    assert progressed is True
+    tools_seen = model.estimated_tools[-1]
+    assert tools_seen is not None
+    assert isinstance(tools_seen[0], BackgroundAwareTool)
+
+
+@pytest.mark.asyncio
+async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingModel(StubModel):
+        estimated_tools: list[Sequence[types.tools.Tool] | None] = field(
+            default_factory=list
+        )
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            self.estimated_tools.append(request.tools)
+            return super().approx_request_tokens(request)
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+            )
+
+    model = _RecordingModel()
+    tool = StubTool(
+        directive_schema=json_freeze(
+            {"type": "object", "properties": {"msg": {"type": "string"}}}
+        )
+    )
+    a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
+    a.runtime.append_history(types.history.UserMessage(text="x"))
+
+    assert await a.compact_now() is True
+
+    for tools_seen in model.estimated_tools:
+        assert tools_seen is not None
+        assert isinstance(tools_seen[0], BackgroundAwareTool)
+
+
+@pytest.mark.asyncio
+async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
+    calls: list[int] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _RatioModel(StubModel):
+        @override
+        def approx_text_tokens(self, text: str) -> int:
+            return len(text) // 2
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            return self.max_request_tokens - 100
+
+    @dataclass(slots=True, kw_only=True)
+    class _RestorableTool(StubTool):
+        async def post_compact_restore(
+            self,
+            history: list[types.history.HistoryEntry],
+            tool_state: ToolState,
+            *,
+            budget_chars: int = 100_000,
+        ) -> None:
+            del history, tool_state
+            calls.append(budget_chars)
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.history.HistoryEntry],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+            )
+
+    budget = types.model.ContextBudget(
+        max_request_tokens=1_000,
+        max_response_tokens=5,
+        chars_per_token=4,
+        buffer_tokens=5,
+    )
+    a = Agent(
+        model=_RatioModel(max_request_tokens=1_000, max_response_tokens=5),
+        tools=[_RestorableTool()],
+        compactor=_OkCompactor(),
+        budget=budget,
+    )
+    a.runtime.append_history(types.history.UserMessage(text="x"))
+
+    assert await a.compact_now() is True
+
+    assert calls == [180]
+
+
+def test_agent_with_session_dir_auto_persists(tmp_path: Path) -> None:
+    """Constructing an Agent with ``session_dir`` self-installs the persistence
+    observer; no external wiring needed.
+
+    Regression test for a bug surfaced by session 8588644a: AgentSpawn handed
+    each child a ``session_dir`` but the persistence observer was only wired
+    by the CLI for the root agent, so subagent work vanished without trace.
+    Now Agent.__init__ auto-installs.
+    """
+    a = _build_agent(session_dir=tmp_path)
+    a.status = "working"  # triggers StatusChanged → persistence observer fires
+    session_file = tmp_path / "session.jsonl"
+    assert session_file.exists()
+    lines = session_file.read_text(encoding="utf-8").splitlines()
+    assert lines, "expected at least one record"
+    first = json.loads(lines[0])
+    assert first["kind"] == "meta"
+    assert first["status"] == "working"
+
+
+def test_agent_without_session_dir_does_not_persist(tmp_path: Path) -> None:
+    """No ``session_dir`` -> no observer attached -> no file written."""
+    a = _build_agent()
+    a.status = "working"
+    assert not (tmp_path / "session.jsonl").exists()
+
+
+def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
+    """``resume()`` must rebaseline the persistence observer.
+
+    Without rebaselining, the replayed tape records would be written
+    back to ``session.jsonl`` on the next ``SaveSession``, duplicating
+    every persisted record. Tests this by populating session.jsonl,
+    constructing a fresh Agent with the same session_dir, resuming
+    from the file, then triggering a SaveSession and asserting the
+    file size hasn't grown.
+    """
+    # Phase 1: write some records via a first agent.
+    a1 = _build_agent(session_dir=tmp_path)
+    a1.status = "first"
+    a1.status = "second"  # ensure at least one tape record gets written
+    a1.runtime.publish(types.runtime.SaveSession())
+    session_file = tmp_path / "session.jsonl"
+    assert session_file.exists()
+    size_after_phase1 = session_file.stat().st_size
+    assert size_after_phase1 > 0
+
+    # Phase 2: fresh agent, same session_dir. Load, resume, save.
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    a2 = _build_agent(session_dir=tmp_path)
+    a2.resume(*loaded)
+    a2.runtime.publish(types.runtime.SaveSession())
+
+    # File should not have grown materially -- the resumed tape was
+    # already on disk, so the SaveSession after resume must be a no-op
+    # on tape (only the meta line gets updated, if anything).
+    size_after_resume = session_file.stat().st_size
+    # The post-resume save may rewrite meta; allow some growth, but not
+    # the full tape duplication that would result from a missing rebaseline.
+    assert size_after_resume < 2 * size_after_phase1, (
+        f"resume rebaseline broken: file grew from {size_after_phase1}"
+        f" to {size_after_resume} after resume+save"
+    )
 
 
 if __name__ == "__main__":

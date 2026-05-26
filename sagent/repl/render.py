@@ -15,6 +15,7 @@ implementations live in :mod:`repl.console_pane` (rich-backed) and on
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 import logging
@@ -225,17 +226,22 @@ def render_tool_result(printer: Printer, result: ToolResult) -> None:
         printer.write_tool_summary(result.summary)
 
 
-def make_render_observer(printer: Printer) -> RenderObserver:
+def make_render_observer(
+    printer: Printer,
+    *,
+    show_thinking: Callable[[], bool] | None = None,
+) -> RenderObserver:
     """Return a ``RuntimeEvent``-consuming observer bound to ``printer``.
 
     Args:
       printer: Printer that receives formatted output.
+      show_thinking: Predicate controlling thinking display. ``None`` always shows.
 
     Returns:
       observer: Callable that the agent appends to ``self.observers``.
 
     """
-    return RenderObserver(printer)
+    return RenderObserver(printer, show_thinking=show_thinking)
 
 
 class RenderObserver:
@@ -246,8 +252,14 @@ class RenderObserver:
     flushed at stable Markdown boundaries or atomic events).
     """
 
-    def __init__(self, printer: Printer) -> None:
+    def __init__(
+        self,
+        printer: Printer,
+        *,
+        show_thinking: Callable[[], bool] | None = None,
+    ) -> None:
         self._printer = printer
+        self._show_thinking = show_thinking or (lambda: True)
         self._stream_buf: str = ""
         self._child_text: dict[str, str] = {}
         self._child_items: dict[str, list[object]] = {}
@@ -269,7 +281,8 @@ class RenderObserver:
             case ModelResponsePartial(text=text):
                 self._feed_stream(text)
             case ModelResponseThinking(text=text):
-                self._printer.write_thinking(text)
+                if self._show_thinking():
+                    self._printer.write_thinking(text)
             case ModelResponseComplete():
                 self._flush_stream()
             case ToolLabel(text=text):
@@ -439,10 +452,11 @@ sagent commands
 
   /clear                      wipe context (logs preserved on disk)
   /compact [hints]            compact history
-  /recompact [hints]          re-run the most recent compaction
+  /recompact [hints]          alias for /compact
 
   /model    [args]            switch model
   /provider <name>            switch provider
+  /thinking <state|partial>   adaptive/on/off/redact/show/hide
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)

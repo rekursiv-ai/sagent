@@ -132,6 +132,7 @@ from sagent.repl.slash import (
     SlashAction,
     Tasks as SlashTasks,
     Text as SlashText,
+    Thinking as SlashThinking,
     parse_slash,
 )
 from sagent.tools.core import agent_registry
@@ -323,6 +324,9 @@ async def _dispatch(
         return False
     if isinstance(action, SlashModelSwitch):
         _run_repl.do_switch_model(agent, action.args, printer)
+        return False
+    if isinstance(action, SlashThinking):
+        _run_repl.do_switch_thinking(agent, action.command, printer)
         return False
     if isinstance(action, SlashLogin):
         await _run_repl.do_login(agent, printer)

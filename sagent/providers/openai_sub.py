@@ -132,11 +132,14 @@ _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _TOKEN_URL = "https://auth.openai.com/oauth/token"  # noqa: S105 -- not a secret; OAuth endpoint URL
 _AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
 _BASE_URL = "https://chatgpt.com/backend-api/codex"
-_DEFAULT_PATH = Path.home() / ".codex" / "auth.json"
+DEFAULT_CREDENTIALS_PATH = Path.home() / ".codex" / "auth.json"
 _SCOPES = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
-_REFRESH_BUFFER_SEC = 300.0
+DEFAULT_REFRESH_BUFFER_SEC = 300.0
+# OAuth-registered redirect URI port. Not user-tunable: the OAuth app
+# fingerprinted as Codex CLI has this port baked into its allowed
+# redirects on OpenAI's side.
 _CALLBACK_PORT = 1455
 # Codex's subscription backend currently exposes a smaller practical
 # context window than the public API model metadata. Local budgeting must
@@ -147,6 +150,15 @@ _SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
 _STREAM_IDLE_TIMEOUT = 600.0
 
 _EFFORT_PREFIXES = ("o", "gpt-5")
+_OPENAI_REASONING_EFFORT = {
+    "none": "minimal",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
 
 _FINISH_MAP: dict[str, str] = {
     "completed": "stop",
@@ -206,12 +218,14 @@ class OpenAISubscription(OpenAI):
         account_id: str,
         expires_at: float,
         account: str | None = None,
+        refresh_buffer_sec: float = DEFAULT_REFRESH_BUFFER_SEC,
     ) -> None:
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._account_id = account_id  # ChatGPT account id (from JWT)
         self._account = account  # local credential slot name
         self._expires_at = expires_at
+        self._refresh_buffer_sec = refresh_buffer_sec
         self._sdk: openai.AsyncOpenAI | None = None
         self._sdk_token: str | None = None
         self._lock = asyncio.Lock()
@@ -240,6 +254,7 @@ class OpenAISubscription(OpenAI):
         creds: OpenAISubscription.Credentials | None = None,
         *,
         account: str | None = None,
+        refresh_buffer_sec: float = DEFAULT_REFRESH_BUFFER_SEC,
     ) -> OpenAISubscription:
         """Create provider from OAuth credentials.
 
@@ -247,6 +262,8 @@ class OpenAISubscription(OpenAI):
           creds: Pre-loaded credentials, or ``None`` to auto-load from disk.
           account: Named credential slot. ``None`` uses the legacy
             ``~/.codex/auth.json`` path.
+          refresh_buffer_sec: Seconds before token expiry to trigger
+              proactive refresh.
 
         Returns:
           provider: Subscription provider instance.
@@ -260,6 +277,7 @@ class OpenAISubscription(OpenAI):
             account_id=creds["account_id"],
             expires_at=creds["expires_at"],
             account=account,
+            refresh_buffer_sec=refresh_buffer_sec,
         )
 
     @classmethod
@@ -438,7 +456,7 @@ class OpenAISubscription(OpenAI):
     @property
     def expired(self) -> bool:
         """True if the access token is within 5 min of expiry."""
-        return time.time() > self._expires_at - _REFRESH_BUFFER_SEC
+        return time.time() > self._expires_at - self._refresh_buffer_sec
 
     async def get_sdk(self) -> openai.AsyncOpenAI:
         """Return OAuth-authed SDK client, refreshing as needed.
@@ -596,7 +614,7 @@ class OpenAISubscription(OpenAI):
           FileNotFoundError: If no credentials file exists.
 
         """
-        p = path or credentials_path(_DEFAULT_PATH, account)
+        p = path or credentials_path(DEFAULT_CREDENTIALS_PATH, account)
         if not p.exists():
             raise FileNotFoundError(f"No credentials at {p}")
         raw: MutableJSON = json.loads(p.read_text(encoding="utf-8"))
@@ -631,7 +649,7 @@ class OpenAISubscription(OpenAI):
             ``~/.codex/auth.json`` path.
 
         """
-        p = path or credentials_path(_DEFAULT_PATH, account)
+        p = path or credentials_path(DEFAULT_CREDENTIALS_PATH, account)
         existing: MutableJSON = {}
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError, OSError):
@@ -661,8 +679,8 @@ class _OpenAISubModel(_OpenAIModel):
     @property
     @override
     def supports_thinking(self) -> bool:
-        """Whether the model surfaces reasoning/thinking text."""
-        return False
+        """Whether the model accepts a thinking/reasoning request."""
+        return self.supports_effort
 
     @property
     @override
@@ -732,23 +750,22 @@ class _OpenAISubModel(_OpenAIModel):
         Args:
           request: Model request to send.
           on_text: Callback invoked with each text chunk as it arrives.
-          on_thinking: Reserved; the OpenAI Responses API does not
-              expose reasoning summaries as separate stream deltas.
+          on_thinking: Callback invoked with each reasoning chunk as it arrives.
 
         Returns:
           response: Assembled model response after the stream closes.
 
         """
-        del on_thinking  # not exposed as a stream delta on this endpoint
         sdk = await self._provider.get_sdk()
         # The ChatGPT Codex subscription endpoint rejects some public
         # Responses API knobs, including ``temperature`` and
         # ``max_output_tokens``.
+        reasoning_effort = self._reasoning_effort(request)
         reasoning: oai_shared.Reasoning | openai.Omit | None = (
             oai_shared.Reasoning(
-                effort=cast("oai_shared.ReasoningEffort", request.effort),
+                effort=cast("oai_shared.ReasoningEffort", reasoning_effort),
             )
-            if request.effort is not None and self.supports_effort
+            if reasoning_effort is not None
             else openai.omit
         )
         create_kwargs: dict[str, object] = {
@@ -785,6 +802,7 @@ class _OpenAISubModel(_OpenAIModel):
                 event_stream,
                 pricing=self._profile.pricing,
                 on_text=on_text,
+                on_thinking=on_thinking,
             )
         except Exception as exc:
             if self.is_context_overflow(exc):
@@ -793,6 +811,18 @@ class _OpenAISubModel(_OpenAIModel):
                 # recovery retry unchanged history instead of dropping groups.
                 raise PromptTooLongError(str(exc)) from exc
             raise
+
+    def _reasoning_effort(self, request: ModelRequest) -> str | None:
+        """Map sagent thinking/effort knobs onto OpenAI reasoning effort."""
+        if not self.supports_effort:
+            return None
+        if request.effort is not None:
+            return _OPENAI_REASONING_EFFORT.get(request.effort, "high")
+        if request.thinking == "adaptive":
+            return "medium"
+        if request.thinking == "enabled":
+            return "high"
+        return None
 
 
 def _build_tools(
@@ -871,9 +901,11 @@ async def _consume_stream(
     *,
     pricing: Pricing,
     on_text: Callable[[str], None] | None,
+    on_thinking: Callable[[str], None] | None,
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     tool_args: dict[str, list[str]] = {}
     input_tokens = 0
@@ -892,6 +924,16 @@ async def _consume_stream(
                     text_parts.append(event.delta)
                     if on_text is not None:
                         on_text(event.delta)
+                elif isinstance(
+                    event,
+                    (
+                        oai_responses.ResponseReasoningTextDeltaEvent,
+                        oai_responses.ResponseReasoningSummaryTextDeltaEvent,
+                    ),
+                ):
+                    thinking_parts.append(event.delta)
+                    if on_thinking is not None:
+                        on_thinking(event.delta)
                 elif isinstance(
                     event,
                     oai_responses.ResponseFunctionCallArgumentsDeltaEvent,
@@ -942,6 +984,9 @@ async def _consume_stream(
     return ModelResponse(
         message=AssistantMessage(
             text="".join(text_parts),
+            thinking_blocks=({"type": "reasoning", "text": "".join(thinking_parts)},)
+            if thinking_parts
+            else (),
             tool_calls=tuple(tool_calls),
         ),
         tokens=TokenCount(

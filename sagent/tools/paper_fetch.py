@@ -140,6 +140,7 @@ class PaperFetch:
 
     name: str = "PaperFetch"
     tool_id: str = "application/x-tool-paperfetch"
+    clearable_results: bool = True
     description: str = load_tool_description("PaperFetch")
     directive_schema: JSON = json_freeze(
         {

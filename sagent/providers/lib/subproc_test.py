@@ -12,7 +12,15 @@ import logging
 
 import pytest
 
-from sagent.providers.lib.subproc import Subproc
+from sagent.providers.lib.subproc import (
+    Subproc,
+    SubprocessTransportError,
+)
+
+
+def test_default_read_idle_timeout_is_one_minute() -> None:
+    proc = Subproc(["python3", "-c", "pass"])
+    assert proc._read_timeout_sec == 60.0
 
 
 @pytest.mark.real_sleep
@@ -78,6 +86,22 @@ async def test_eof_returns_none() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
+async def test_read_json_line_timeout_is_transport_error() -> None:
+    """A silent stdout stall surfaces as a transport failure."""
+    proc = Subproc(
+        ["python3", "-c", "import time; time.sleep(60)"],
+        read_timeout_sec=0.01,
+    )
+    await proc.start()
+    try:
+        with pytest.raises(SubprocessTransportError, match="stdout idle timeout"):
+            _ = await proc.read_json_line()
+    finally:
+        await proc.close()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
 async def test_stderr_tail_captures_diagnostics() -> None:
     """Stderr is drained into the bounded ring buffer for diagnostics."""
     proc = Subproc(
@@ -127,8 +151,22 @@ async def test_write_after_subprocess_exit_raises_runtime_error() -> None:
     # Wait for the child to exit.
     assert proc._proc is not None
     _ = await proc._proc.wait()
-    with pytest.raises(RuntimeError, match="subprocess stdin closed"):
+    with pytest.raises(SubprocessTransportError, match="subprocess stdin closed"):
         await proc.write_line("x")
+    await proc.close()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_start_cancellation_closes_subprocess() -> None:
+    """Cancellation during ``start`` tears down the partially-started child."""
+    proc = Subproc(["python3", "-c", "import time; time.sleep(60)"])
+    task = asyncio.create_task(proc.start())
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert not proc.is_alive
     await proc.close()
 
 

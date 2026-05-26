@@ -12,6 +12,7 @@ first-class runtime events; the agent's loop handles them in turn.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import dataclasses
@@ -24,12 +25,14 @@ from sagent.lib.json import JSON, int_val, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
+    default_auth_for_provider,
     infer_provider,
 )
 from sagent.tools.core import (
     current_agent_var,
     get_tool_state,
     load_tool_description,
+    provider_not_allowed_result,
 )
 
 
@@ -37,11 +40,21 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
 
+_allow_providers_var: ContextVar[tuple[str, ...]] = ContextVar(
+    "_allow_providers", default=tuple(PROVIDER_NAMES)
+)
+"""Per-call provider allow-list. Set by :meth:`AgentSelf.run` so that
+module-level catalog helpers (``_provider_catalog_lines``,
+``_model_catalog_lines``) can filter their output without threading the
+list through every helper."""
+
+
 class AgentSelf:
     """Tool: patch the current agent state."""
 
     name: str = "AgentSelf"
     tool_id: str = "application/x-tool-agentself"
+    clearable_results: bool = False
     description: str = load_tool_description("agentself")
     directive_schema: ClassVar[JSON] = json_freeze(
         {
@@ -136,6 +149,17 @@ class AgentSelf:
         }
     )
 
+    def __init__(
+        self,
+        *,
+        allow_providers: tuple[str, ...] | None = None,
+    ) -> None:
+        self._allow_providers: tuple[str, ...] = (
+            tuple(allow_providers)
+            if allow_providers is not None
+            else tuple(PROVIDER_NAMES)
+        )
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this self-mutation call.
 
@@ -181,7 +205,11 @@ class AgentSelf:
           result: Outcome of the patch (summary text or error).
 
         """
-        return _apply_patch(args)
+        token = _allow_providers_var.set(self._allow_providers)
+        try:
+            return _apply_patch(args)
+        finally:
+            _allow_providers_var.reset(token)
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -274,6 +302,14 @@ def _apply_patch(d: Mapping[str, object]) -> types.history.ToolResult:
     parts = _commit_patch_plan(agent, plan_or_err)
     if d.get("diagnostics") is True:
         return _do_diagnostics(parts, d)
+    if d.get("catalog") is not None:
+        # Read-only catalog query without diagnostics: render only the
+        # catalog lines (plus any patch confirmation prefix).
+        lines: list[str] = []
+        if parts:
+            lines.append("AgentSelf updated: " + ", ".join(parts))
+        lines.extend(_catalog_lines(d, agent))
+        return types.history.ToolResult(call_id="", content="\n".join(lines))
     return types.history.ToolResult(
         call_id="",
         content="AgentSelf updated: " + ", ".join(parts) if parts else "No changes.",
@@ -432,8 +468,20 @@ def _plan_model(
         )
     model_id = str(d.get("model_id", "")).strip() or None
     prov_name = str(d.get("provider", "")).strip() or spec.provider
-    auth = str(d.get("auth", "")).strip() or spec.auth
-    account = str(d.get("account", "")).strip() or spec.account
+    if "auth" in d:
+        auth = str(d["auth"]).strip()
+    elif prov_name == spec.provider:
+        auth = spec.auth
+    else:
+        auth = default_auth_for_provider(prov_name)
+    if "account" in d:
+        account = str(d["account"]).strip()
+        if not account:
+            return types.history.ToolResult(
+                call_id="", content="account cannot be empty.", is_error=True
+            )
+    else:
+        account = spec.account
     if not model_id and prov_name == spec.provider:
         return types.history.ToolResult(
             call_id="",
@@ -444,6 +492,9 @@ def _plan_model(
         inferred = infer_provider(model_id, prov_name)
         if inferred is not None:
             prov_name, auth = inferred
+    allow = _allow_providers_var.get()
+    if prov_name != spec.provider and prov_name not in allow:
+        return provider_not_allowed_result(prov_name, allow, spec.provider)
     try:
         prov = build_provider(prov_name, auth, account=account)
         new_model = prov.model(model_id)
@@ -689,17 +740,22 @@ def _catalog_lines(d: Mapping[str, object], agent: Agent | None) -> list[str]:
 
 
 def _provider_catalog_lines() -> list[str]:
-    """List providers known to the local build."""
-    return ["Known providers: " + ", ".join(PROVIDER_NAMES)]
+    """List providers known to the local build, filtered by allow-list."""
+    return ["Known providers: " + ", ".join(_allow_providers_var.get())]
 
 
 def _model_catalog_lines(provider_name: str) -> list[str]:
-    """List statically known models for one provider."""
+    """List statically known models for one provider, gated by allow-list."""
     if not provider_name:
         return ["Known models: set catalog_provider or configure an active provider."]
     provider_cls = getattr(providers_module, provider_name, None)
     if not isinstance(provider_cls, type):
         return [f"Known models: unknown provider {provider_name!r}."]
+    if provider_name not in _allow_providers_var.get():
+        return [
+            f"Known models: {provider_name!r} is not in the allowed list"
+            f" {list(_allow_providers_var.get())}."
+        ]
     default = getattr(provider_cls, "DEFAULT_MODEL", None)
     known = getattr(provider_cls, "KNOWN_MODELS", None)
     lines = [f"Provider catalog: {provider_name}"]

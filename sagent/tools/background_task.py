@@ -23,6 +23,7 @@ import asyncio
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.state import agent_registry
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import current_agent_var, load_tool_description
 from sagent.types.history import ToolResult
@@ -40,6 +41,7 @@ class BackgroundTask:
 
     name: str = "BackgroundTask"
     tool_id: str = "application/x-tool-backgroundtask"
+    clearable_results: bool = False
     description: str = load_tool_description("BackgroundTask")
     directive_schema: JSON = json_freeze(
         {
@@ -174,7 +176,10 @@ class BackgroundTask:
             return ToolResult(
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
-        _ = job.task.cancel()
+        if job.kind == "persistent_subagent":
+            _shutdown_persistent(job)
+        else:
+            _ = job.task.cancel()
         # Explicit-bg entries live in the agent's bg registry; cohort-
         # detached entries land in ``runtime.detached`` and clean
         # themselves up when the task completes.
@@ -210,6 +215,15 @@ class BackgroundTask:
             return ToolResult(
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
+        if job.kind == "persistent_subagent":
+            return ToolResult(
+                call_id="",
+                content=(
+                    "Persistent subagent jobs cannot be foregrounded; use AgentSend "
+                    "to message the child or BackgroundTask cancel to stop it."
+                ),
+                is_error=True,
+            )
         try:
             spliced = _find_history_result(agent, job_id)
             if spliced is None:
@@ -219,6 +233,13 @@ class BackgroundTask:
             )
         finally:
             agent.cancel_background(job_id)
+
+
+def _shutdown_persistent(job: BackgroundTaskEntry) -> None:
+    """Shut down a persistent child through its public lifecycle hook."""
+    child = agent_registry.get(job.queue_id)
+    if child is not None:
+        child.shutdown(force=True)
 
 
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:

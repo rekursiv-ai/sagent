@@ -50,6 +50,7 @@ class _StubTool:
     tool_id: str = "application/x-tool-bash"
     description: str = "Run shell commands"
     directive_schema: Mapping[str, JSONValue] = MappingProxyType({"type": "object"})
+    clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         del args
@@ -105,6 +106,13 @@ class _DelayedStream:
 
 class _TextDeltaEvent:
     """Small stand-in for OpenAI's text-delta event class."""
+
+    def __init__(self, delta: str) -> None:
+        self.delta = delta
+
+
+class _ReasoningDeltaEvent:
+    """Small stand-in for OpenAI's reasoning-delta event classes."""
 
     def __init__(self, delta: str) -> None:
         self.delta = delta
@@ -418,9 +426,9 @@ def test_subscription_model_clamps_against_wire_contract() -> None:
     assert m.max_response_tokens == 32_000
 
 
-def test_subscription_model_overrides_supports_thinking_false() -> None:
+def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
     m = _make_provider().model("gpt-5.5")
-    assert m.supports_thinking is False
+    assert m.supports_thinking is True
     assert m.supports_account_auth is True
 
 
@@ -452,6 +460,36 @@ def test_subscription_expired_property_true_when_past() -> None:
 def test_subscription_expired_property_false_when_far_future() -> None:
     p = _make_provider(expires_at=9_999_999_999.0)
     assert p.expired is False
+
+
+async def _reasoning_effort_for(request: ModelRequest) -> str:
+    provider = _make_provider()
+    sdk = MagicMock()
+    sdk.responses = MagicMock()
+    sdk.responses.create = AsyncMock(return_value=_DelayedStream([], delay_sec=0.0))
+    with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
+        model = provider.model("gpt-5.5")
+        await model.stream(request)
+    await_args = sdk.responses.create.await_args
+    assert await_args is not None
+    reasoning = await_args.kwargs["reasoning"]
+    return str(reasoning.effort)
+
+
+@pytest.mark.anyio
+async def test_subscription_stream_maps_adaptive_thinking_to_reasoning_effort() -> None:
+    effort = await _reasoning_effort_for(
+        ModelRequest(messages=[UserMessage(text="hi")], thinking="adaptive")
+    )
+    assert effort == "medium"
+
+
+@pytest.mark.anyio
+async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> None:
+    effort = await _reasoning_effort_for(
+        ModelRequest(messages=[UserMessage(text="hi")], effort="max")
+    )
+    assert effort == "high"
 
 
 class TestHandleAuthError:
@@ -489,7 +527,7 @@ class TestHandleAuthError:
             expires_at=0.0,
         )
         with patch(
-            "sagent.providers.openai_sub._DEFAULT_PATH",
+            "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
             cred_file,
         ):
             await provider.handle_auth_error()
@@ -536,7 +574,7 @@ class TestHandleAuthError:
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub._DEFAULT_PATH",
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -573,7 +611,7 @@ class TestHandleAuthError:
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub._DEFAULT_PATH",
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
                 tmp_path / "does_not_exist.json",
             ),
         ):
@@ -634,7 +672,7 @@ class TestEnsureValidRace:
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub._DEFAULT_PATH",
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -705,7 +743,12 @@ class TestStreamIdleTimeout:
 
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(
-                _consume_stream(stream, pricing=Pricing(), on_text=None),
+                _consume_stream(
+                    stream,
+                    pricing=Pricing(),
+                    on_text=None,
+                    on_thinking=None,
+                ),
                 timeout=0.2,
             )
 
@@ -733,7 +776,12 @@ class TestStreamIdleTimeout:
         )
 
         response = await asyncio.wait_for(
-            _consume_stream(stream, pricing=Pricing(), on_text=None),
+            _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            ),
             timeout=0.2,
         )
 
@@ -741,10 +789,59 @@ class TestStreamIdleTimeout:
         assert response.message_id == "resp_123"
 
     @pytest.mark.anyio
+    async def test_stream_routes_reasoning_deltas_to_thinking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            _TextDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseReasoningTextDeltaEvent",
+            _ReasoningDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseReasoningSummaryTextDeltaEvent",
+            _ReasoningDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        thinking_chunks: list[str] = []
+        stream = _DelayedStream(
+            [
+                _ReasoningDeltaEvent("think "),
+                _TextDeltaEvent("answer"),
+                _ReasoningDeltaEvent("more"),
+                _CompletedEvent(),
+            ],
+            delay_sec=0.0,
+        )
+
+        response = await _consume_stream(
+            stream,
+            pricing=Pricing(),
+            on_text=None,
+            on_thinking=thinking_chunks.append,
+        )
+
+        assert thinking_chunks == ["think ", "more"]
+        assert response.message.text == "answer"
+        assert response.message.thinking_blocks == (
+            {"type": "reasoning", "text": "think more"},
+        )
+
+    @pytest.mark.anyio
     async def test_cancelled_stream_closes(self) -> None:
         stream = _NeverYieldingStream()
         task = asyncio.create_task(
-            _consume_stream(stream, pricing=Pricing(), on_text=None),
+            _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            ),
         )
         await asyncio.wait_for(stream.entered.wait(), timeout=0.2)
 

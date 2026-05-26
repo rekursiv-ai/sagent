@@ -41,6 +41,7 @@ class _StubAgent:
         default_factory=lambda: cast("Mapping[str, _StubTool]", {}),
     )
     total_cost_usd: float = 0.0
+    show_thinking: bool = True
 
 
 def _agent(
@@ -48,12 +49,14 @@ def _agent(
     history: list[HistoryEntry] | None = None,
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
+    show_thinking: bool = True,
 ) -> Agent:
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
     stub = _StubAgent(
         history=list(history) if history else [],
         tools_map=tools_map or {},
         total_cost_usd=total_cost_usd,
+        show_thinking=show_thinking,
     )
     return cast("Agent", stub)
 
@@ -103,6 +106,16 @@ def test_replay_assistant_thinking_blocks() -> None:
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
     assert p.thinkings == ["first block", "second block"]
+
+
+def test_replay_assistant_thinking_blocks_can_be_hidden() -> None:
+    history: list[HistoryEntry] = [
+        AssistantMessage(text="ok", thinking_blocks=({"thinking": "hidden"},))
+    ]
+    p = RecordingPrinter()
+    replay_messages(_agent(history=history, show_thinking=False), p)
+    assert p.thinkings == []
+    assert p.markdowns == ["ok"]
 
 
 def test_replay_tool_call_with_known_tool() -> None:

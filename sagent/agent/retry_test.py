@@ -401,15 +401,77 @@ async def test_send_with_retry_stream_interruption_retries() -> None:
             _resp("done"),
         ],
     )
+    notes: list[str] = []
     resp = await send_with_retry(
         model,
         _request(),
         on_text=_silent,
         max_attempts=3,
         persistent_retry=False,
-        publish_recoverable=_silent,
+        publish_recoverable=notes.append,
     )
     assert resp.message.text == "done"
+    assert notes[0].startswith("stream interrupted (attempt 1,")
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_stream_interruption_retries_count_attempts() -> None:
+    first = StreamInterruptedError(_resp("first"))
+    second = StreamInterruptedError(_resp("second"))
+    model = _ScriptedModel(stream_responses=[first, second, _resp("done")])
+    notes: list[str] = []
+
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=notes.append,
+    )
+
+    assert resp.message.text == "done"
+    assert notes[0].startswith("stream interrupted (attempt 1,")
+    assert notes[1].startswith("stream interrupted (attempt 2,")
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_corrects_divergent_retry_output() -> None:
+    @dataclass(slots=True, kw_only=True)
+    class DivergentRetryModel(_ScriptedModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            del request, on_thinking
+            self.stream_calls += 1
+            if self.stream_calls == 1:
+                if on_text is not None:
+                    on_text("abc")
+                raise StreamInterruptedError(_resp("abc"))
+            if on_text is not None:
+                on_text("xyz")
+            return _resp("xyz")
+
+    chunks: list[str] = []
+    model = DivergentRetryModel(stream_responses=[])
+
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=chunks.append,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+
+    assert resp.message.text == "xyz"
+    assert (
+        "".join(chunks) == "abc\n[retry response diverged; final response follows]\nxyz"
+    )
 
 
 @pytest.mark.asyncio

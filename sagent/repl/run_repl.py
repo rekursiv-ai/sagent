@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import inspect
 import logging
 import shlex
 import sys
@@ -47,6 +48,7 @@ from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
+from sagent.thinking import ThinkingState, resolve_thinking_command
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.history import ToolResult, UserMessage
@@ -103,7 +105,9 @@ async def run_repl(
             style=style,
         )
         printer = ConsolePrinter(console)
-        agent.runtime.observers.append(make_render_observer(printer))
+        agent.runtime.observers.append(
+            make_render_observer(printer, show_thinking=lambda: agent.show_thinking)
+        )
         agent.runtime.observers.append(
             make_queued_input_committer(agent.runtime, queued_input)
         )
@@ -271,6 +275,115 @@ def do_switch_model(
     _write(printer, f"[/model] {label}{queued}")
 
 
+def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> None:
+    """Render a ``/thinking`` slash command against agent/provider state.
+
+    Args:
+      agent: Agent to mutate.
+      command: Full thinking state or partial command.
+      printer: Optional sink for status messages.
+
+    """
+    current = agent.thinking_state or _infer_thinking_state(agent)
+    try:
+        state = resolve_thinking_command(command, current)
+    except ValueError as exc:
+        _write(printer, f"[/thinking] {exc}")
+        return
+    if state != "off-hide" and not agent.model.supports_thinking:
+        _write(
+            printer,
+            f"[/thinking] model {agent.model.model_id!r} does not support thinking",
+        )
+        return
+    supports_redact = _provider_accepts_arg(agent, "redact_thinking")
+    if state == "redact-hide" and not supports_redact:
+        _write(
+            printer, "[/thinking] current provider does not support redacted thinking"
+        )
+        return
+    if agent.thinking_state == state and (
+        supports_redact or "redact_thinking" not in agent.provider_args
+    ):
+        _write(printer, f"[/thinking] {state}")
+        return
+    old_state = agent.thinking_state
+    old_thinking = agent.thinking
+    old_show = agent.show_thinking
+    old_redact = agent.provider_args.get("redact_thinking", None)
+    agent.set_thinking_state(state)
+    if not supports_redact:
+        agent.clear_provider_arg("redact_thinking")
+    if supports_redact and not _rebuild_current_model(agent, printer):
+        _restore_thinking_state(agent, old_state, old_thinking, old_show)
+        if old_redact is None:
+            agent.clear_provider_arg("redact_thinking")
+        else:
+            agent.set_provider_arg("redact_thinking", old_redact)
+        return
+    _write(printer, f"[/thinking] {state}")
+
+
+def _restore_thinking_state(
+    agent: Agent,
+    state: ThinkingState | None,
+    thinking: str | None,
+    show_thinking: bool,
+) -> None:
+    """Restore thinking fields after a failed provider rebuild."""
+    if hasattr(agent, "_thinking_state"):
+        agent._thinking_state = state  # noqa: SLF001 -- transactional rollback
+        agent._thinking = thinking  # noqa: SLF001 -- transactional rollback
+        agent._show_thinking = show_thinking  # noqa: SLF001 -- transactional rollback
+        return
+    object.__setattr__(agent, "thinking_state", state)
+    object.__setattr__(agent, "thinking", thinking)
+    object.__setattr__(agent, "show_thinking", show_thinking)
+
+
+def _infer_thinking_state(agent: Agent) -> ThinkingState:
+    """Infer a canonical current state from legacy thinking/display fields."""
+    if agent.thinking is None:
+        return "off-hide"
+    if agent.thinking == "enabled":
+        return "on-show" if agent.show_thinking else "on-hide"
+    return "adaptive-show" if agent.show_thinking else "adaptive-hide"
+
+
+def _provider_accepts_arg(agent: Agent, key: str) -> bool:
+    """Return whether the current provider factory accepts ``key``."""
+    spec = agent.model_spec
+    if spec is None:
+        return False
+    providers_mod = sys.modules["sagent.providers"]
+    cls = getattr(providers_mod, spec.provider, None)
+    if cls is None:
+        return False
+    factory = getattr(cls, f"from_{spec.auth}", None)
+    if factory is None:
+        return False
+    try:
+        return key in inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _rebuild_current_model(agent: Agent, printer: Printer | None) -> bool:
+    """Queue a rebuild of the current provider/model with stored provider args."""
+    spec = agent.model_spec
+    if spec is None:
+        _write(printer, "[/thinking] agent has no model spec; cannot rebuild model")
+        return False
+    try:
+        target = agent.change_model()
+    except (ValueError, RuntimeError) as exc:
+        _write(printer, f"[/thinking] {exc}")
+        return False
+    queued = " (queued)" if agent.work is not None else ""
+    _write(printer, f"[/thinking] provider args updated for {target.model_id}{queued}")
+    return True
+
+
 async def do_login(agent: Agent, printer: Printer | None) -> None:
     """Render a ``/login`` slash command against :meth:`Agent.relogin`.
 
@@ -406,7 +519,7 @@ def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
             elif key == "auth":
                 auth = value
             elif key == "account":
-                account = None if value in ("", "default") else value
+                account = value
                 account_set = True
             else:
                 model_id = value

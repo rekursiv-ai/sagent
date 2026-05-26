@@ -213,6 +213,13 @@ def test_model_response_thinking_routes_to_printer() -> None:
     assert p.thinkings == ["hmm"]
 
 
+def test_model_response_thinking_can_be_hidden() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p, show_thinking=lambda: False)
+    obs(ModelResponseThinking(text="hmm"))
+    assert p.thinkings == []
+
+
 def test_tool_label_flushes_stream() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)
@@ -488,6 +495,13 @@ def test_help_text_contains_core_commands() -> None:
     assert "/quit" in HELP_TEXT
     assert "/exit" in HELP_TEXT
     assert "/clear" in HELP_TEXT
+
+
+def test_help_text_documents_recompact_as_compact_alias() -> None:
+    line = next(line for line in HELP_TEXT.splitlines() if "/recompact" in line)
+    assert "alias" in line
+    assert "/compact" in line
+    assert "reload" not in line.lower()
 
 
 if __name__ == "__main__":

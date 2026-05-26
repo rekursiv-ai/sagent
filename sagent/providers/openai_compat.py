@@ -61,7 +61,10 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.exceptions import PromptTooLongError
+from sagent.types.exceptions import (
+    PromptTooLongError,
+    StreamInterruptedError,
+)
 from sagent.types.history import (
     AssistantMessage,
     BytesMessage,
@@ -173,6 +176,19 @@ class OpenAICompat:
         return self.model(mid)
 
 
+def _is_context_overflow_text(msg: str) -> bool:
+    """True if the error body text describes a context-window overflow."""
+    lower = msg.lower()
+    return (
+        "context_length_exceeded" in lower
+        or "maximum context length" in lower
+        or "prompt too long" in lower
+        or "context window" in lower
+        or "model context" in lower
+        or "input too large" in lower
+    )
+
+
 class OpenAICompatModel:
     """Chat-completions model backend.
 
@@ -208,6 +224,12 @@ class OpenAICompatModel:
             if self._client is None:
                 self._client = httpx.AsyncClient()
             return self._client
+
+    async def close(self) -> None:
+        """Close the reusable HTTP client."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     @property
     def max_request_tokens(self) -> int:
@@ -355,8 +377,7 @@ class OpenAICompatModel:
           overflow: True when ``error`` indicates context overflow.
 
         """
-        msg = str(error).lower()
-        return "context_length_exceeded" in msg or "maximum context length" in msg
+        return _is_context_overflow_text(str(error))
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """No provider-specific transient cases beyond status codes.
@@ -460,7 +481,7 @@ class OpenAICompatModel:
         Args:
           request: Fully-built model request.
           on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Ignored (no thinking stream in chat-completions).
+          on_thinking: Called per reasoning chunk when the provider exposes one.
 
         Returns:
           response: Parsed ``ModelResponse``.
@@ -469,7 +490,6 @@ class OpenAICompatModel:
           PromptTooLongError: Server reports context overflow.
 
         """
-        del on_thinking  # OpenAI-compat APIs don't expose a thinking stream
         body = self._build_body(request, stream=True)
         client = await self._get_client()
         async with client.stream(
@@ -481,13 +501,13 @@ class OpenAICompatModel:
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
-                msg = err_body.lower()
-                if "context_length_exceeded" in msg or "too long" in msg:
+                if _is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
             r.raise_for_status()
             return await consume_stream(
                 r,
                 on_text=on_text,
+                on_thinking=on_thinking,
                 pricing=self._profile.pricing,
                 reasoning_field=self._reasoning_field,
             )
@@ -749,6 +769,7 @@ async def consume_stream(
     r: httpx.Response,
     *,
     on_text: Callable[[str], None] | None,
+    on_thinking: Callable[[str], None] | None,
     pricing: Pricing,
     reasoning_field: str | None,
 ) -> ModelResponse:
@@ -756,12 +777,12 @@ async def consume_stream(
 
     Tool-call arguments are streamed as sparse per-index deltas; we
     accumulate then json.loads at the end. ``reasoning_field`` (when
-    set) captures the provider's reasoning/thinking delta as a string
-    — not surfaced live via ``on_text``.
+    set) captures the provider's reasoning/thinking delta as a string.
 
     Args:
       r: Open streaming response from the provider.
       on_text: Called per text chunk; ``None`` disables text streaming.
+      on_thinking: Called per reasoning chunk; ``None`` disables live thinking.
       pricing: Per-token price schedule for cost computation.
       reasoning_field: Provider-specific reasoning-text field name,
           or ``None`` when the provider does not surface reasoning.
@@ -781,6 +802,7 @@ async def consume_stream(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
+    saw_done = False
     async with asyncio.timeout_at(deadline) as watchdog:
         async for raw_line in r.aiter_lines():
             watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
@@ -789,6 +811,7 @@ async def consume_stream(
                 continue
             data_str = line[len("data:") :].strip()
             if data_str == "[DONE]":
+                saw_done = True
                 break
             try:
                 event = cast(MutableJSON, json.loads(data_str))
@@ -816,6 +839,8 @@ async def consume_stream(
                 think_chunk = delta.get(reasoning_field)
                 if isinstance(think_chunk, str) and think_chunk:
                     thinking_parts.append(think_chunk)
+                    if on_thinking is not None:
+                        on_thinking(think_chunk)
             for tc in cast(list[MutableJSON], delta.get("tool_calls") or []):
                 idx_raw = tc.get("index")
                 idx = idx_raw if isinstance(idx_raw, int) else 0
@@ -862,7 +887,7 @@ async def consume_stream(
         output_tokens,
         cache_read=cache_read,
     )
-    return ModelResponse(
+    response = ModelResponse(
         message=asst,
         tokens=TokenCount(
             input_tokens=input_tokens,
@@ -880,6 +905,9 @@ async def consume_stream(
         output_cost=out_cost,
         total_cost=total_cost,
     )
+    if not saw_done:
+        raise StreamInterruptedError(response)
+    return response
 
 
 def _parse_tool_arguments(

@@ -30,7 +30,7 @@ from sagent.types.history import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import Model, ModelRequest
+from sagent.types.model import Model, ModelRequest, ModelResponse
 from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
@@ -248,23 +248,7 @@ class SummaryCompactor:
         summary_text: str | None = None
         entries: list[HistoryEntry] = []
         for attempt in range(self._max_attempts):
-            entries = [e for g in groups for e in g]
-            # Drop orphan ``ToolResult`` entries before sending. Resolved
-            # contexts can carry them when an override suppresses an
-            # ``AssistantMessage`` whose ``ToolResult`` survives, or when
-            # legacy load passed through malformed history. Providers
-            # reject ``function_call_output`` blocks whose ``call_id``
-            # has no matching ``function_call`` earlier in the request
-            # (OpenAI 400 ``No tool call found for function call output``).
-            entries = _drop_orphan_tool_results(entries)
-            # Anthropic requires the first message role to be ``user``;
-            # dropping groups can leave ``entries[0]`` as an
-            # ``AssistantMessage``. Prepend a synthetic user bridge.
-            if entries and not isinstance(entries[0], UserMessage):
-                entries = [
-                    UserMessage(text="[earlier messages elided]"),
-                    *entries,
-                ]
+            entries = _request_entries(groups)
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=prompt)],
                 system=_SYSTEM,
@@ -391,24 +375,49 @@ class SummaryCompactor:
             " accurate, emit exactly the token IDENTICAL on a single"
             " line and nothing else."
         )
-        request = ModelRequest(
-            messages=[*original_entries, UserMessage(text=probe)],
-            system=_SYSTEM,
-            tools=None,
-        )
-        response = await send_with_retry(
-            compact_model,
-            request,
-            max_attempts=self._max_attempts,
-            persistent_retry=False,
-            publish_recoverable=lambda text: logger.info(
-                "verifier recoverable: %s", text
-            ),
-        )
+        groups = _group_history_by_round(original_entries)
+        response: ModelResponse | None = None
+        for attempt in range(self._max_attempts):
+            request = ModelRequest(
+                messages=[*_request_entries(groups), UserMessage(text=probe)],
+                system=_SYSTEM,
+                tools=None,
+            )
+            try:
+                response = await send_with_retry(
+                    compact_model,
+                    request,
+                    max_attempts=self._max_attempts,
+                    persistent_retry=False,
+                    publish_recoverable=lambda text: logger.info(
+                        "verifier recoverable: %s", text
+                    ),
+                )
+                break
+            except PromptTooLongError as exc:
+                drop = _groups_to_drop(groups, exc, self._chars_per_token)
+                logger.warning(
+                    "Verifier prompt too long (attempt %d/%d), dropping %d groups.",
+                    attempt + 1,
+                    self._max_attempts,
+                    drop,
+                )
+                groups = groups[drop:]
+        if response is None:
+            raise PromptTooLongError("summary verification prompt too long")
         improved = response.message.text.strip()
         if not improved or improved.upper() == "IDENTICAL":
             return raw_summary
         return improved
+
+
+def _request_entries(groups: list[list[HistoryEntry]]) -> list[HistoryEntry]:
+    """Flatten request groups and normalize provider-facing shape."""
+    entries = [entry for group in groups for entry in group]
+    entries = _drop_orphan_tool_results(entries)
+    if entries and not isinstance(entries[0], UserMessage):
+        return [UserMessage(text="[earlier messages elided]"), *entries]
+    return entries
 
 
 def _drop_orphan_tool_results(
@@ -549,27 +558,26 @@ def _safe_split(
     n = len(history)
     idx = n - keep_recent if direction == "from" else keep_recent
     idx = max(0, min(idx, n))
-    while idx > 0 and _prefix_has_unresolved_tool_use(history, idx):
+    safe = _safe_split_boundaries(history)
+    while idx > 0 and not safe[idx]:
         idx -= 1
     if idx == 0:
         return history, []
     return history[:idx], history[idx:]
 
 
-def _prefix_has_unresolved_tool_use(
-    history: list[HistoryEntry], split_idx: int
-) -> bool:
-    """True if ``history[:split_idx]`` contains any unresolved tool_use."""
-    if split_idx <= 0:
-        return False
-    prefix = history[:split_idx]
-    resolved: set[str] = {e.call_id for e in prefix if isinstance(e, ToolResult)}
-    for entry in prefix:
+def _safe_split_boundaries(history: list[HistoryEntry]) -> list[bool]:
+    """Return whether each prefix boundary has no unresolved tool calls."""
+    unresolved: set[str] = set()
+    safe = [True]
+    for entry in history:
         if isinstance(entry, AssistantMessage):
             for tc in entry.tool_calls:
-                if tc.id not in resolved:
-                    return True
-    return False
+                unresolved.add(tc.id)
+        elif isinstance(entry, ToolResult):
+            unresolved.discard(entry.call_id)
+        safe.append(not unresolved)
+    return safe
 
 
 def _strip_attachments(

@@ -349,6 +349,7 @@ class PaperSearch:
 
     name: str = "PaperSearch"
     tool_id: str = "application/x-tool-papersearch"
+    clearable_results: bool = True
     description: str = load_tool_description("PaperSearch")
     directive_schema: JSON = json_freeze(
         {

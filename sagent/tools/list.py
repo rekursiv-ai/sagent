@@ -40,6 +40,7 @@ class List:
 
     name: str = "List"
     tool_id: str = "application/x-tool-list"
+    clearable_results: bool = True
     description: str = load_tool_description("List")
     directive_schema: JSON = json_freeze(
         {
