@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import override
 
 import asyncio
 import contextlib
+import json
 import time
 
 import pytest
 
+from sagent.agent.agent import Agent
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
 )
 from sagent.agent.state import agent_registry
 from sagent.lib.json import json_freeze
-from sagent.testing import FakeAgent, with_fake_agent
+from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import current_agent_var
+from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 from sagent.types.runtime import (
     AssistantMessage,
     DetachedResult,
@@ -32,6 +36,43 @@ from sagent.types.runtime import (
 class _PersistentChild(FakeAgent):
     def __init__(self) -> None:
         super().__init__()
+        self.shutdown_calls: list[bool] = []
+
+    @override
+    def shutdown(self, *, force: bool = False) -> None:
+        self.shutdown_calls.append(force)
+
+
+class _StubModel(MockModelCaps):
+    model_id: str = "stub"
+    max_request_tokens: int = 100_000
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        return ModelResponse(message=AssistantMessage(text="ok"))
+
+
+class _RecordingAgent(Agent):
+    def __init__(self, *, session_dir: Path | None = None) -> None:
+        super().__init__(
+            model=_StubModel(),
+            model_spec=ModelSpec(
+                provider="OpenAISubscription",
+                auth="credentials",
+                model_id="stub",
+                account="default",
+            ),
+            tools=[],
+            session_dir=session_dir,
+        )
         self.shutdown_calls: list[bool] = []
 
     @override
@@ -345,6 +386,52 @@ async def test_cancel_persistent_subagent_uses_shutdown_lifecycle() -> None:
     assert child.shutdown_calls == [True]
     assert not task.cancelled()
     assert "persistent:child" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_cancel_persistent_subagent_writes_cancelled_lifecycle(
+    tmp_path: Path,
+) -> None:
+    t = BackgroundTask()
+    parent = _RecordingAgent(session_dir=tmp_path)
+    child = _RecordingAgent()
+    task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+    agent_registry["child"] = child
+    token = current_agent_var.set(parent)
+    try:
+        parent.register_background(
+            "persistent:child",
+            BackgroundTaskEntry(
+                task=task,
+                tool_name="persistent-agent",
+                queue_id="child",
+                started=0.0,
+                kind="persistent_subagent",
+                persistent_run_id="run-1",
+                notify_on_asleep=False,
+            ),
+        )
+        result = await t.run({"operation": "cancel", "id": "persistent:child"})
+    finally:
+        current_agent_var.reset(token)
+        agent_registry.pop("child", None)
+        _ = task.cancel()
+
+    assert "Cancelled" in result.content
+    assert child.shutdown_calls == [True]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "session.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if "persistent_agent" in line
+    ]
+    assert len(records) == 1
+    assert records[0]["label"] == "child"
+    assert records[0]["run_id"] == "run-1"
+    assert records[0]["state"] == "cancelled"
+    assert records[0]["notify_on_asleep"] is False
+    assert "persistent:child" not in parent.background
 
 
 @pytest.mark.asyncio

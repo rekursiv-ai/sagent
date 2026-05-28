@@ -17,15 +17,17 @@ to load before ``agent/`` is fully initialized.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import dataclasses
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.session_io import append_persistent_agent_lifecycle
 from sagent.agent.state import agent_registry
 from sagent.lib.json import JSON, json_freeze
+from sagent.lib.lazy_import import lazy_import
 from sagent.tools.core import current_agent_var, load_tool_description
 from sagent.types.runtime import (
     AssistantMessage,
@@ -39,10 +41,17 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from sagent.agent import Agent
     from sagent.tools.core import AgentLike
     from sagent.types.tape import TapeRef
 
-__all__ = ["BackgroundTask", "BackgroundTaskEntry"]
+agent_lib = lazy_import("sagent.agent")
+
+__all__ = [
+    "BackgroundTask",
+    "BackgroundTaskEntry",
+    "shutdown_persistent_subagent",
+]
 
 
 class BackgroundTask:
@@ -186,7 +195,7 @@ class BackgroundTask:
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
         if job.kind == "persistent_subagent":
-            _shutdown_persistent(job)
+            shutdown_persistent_subagent(agent, job)
         else:
             _ = job.task.cancel()
         # Explicit-bg entries live in the agent's bg registry; cohort-
@@ -234,10 +243,11 @@ class BackgroundTask:
                 is_error=True,
             )
         completed = False
+        call_id = job.call_id or job.queue_id
         try:
-            spliced = _find_history_result(agent, job_id)
+            spliced = _find_history_result(agent, call_id)
             if spliced is None:
-                spliced = await _await_detached(agent, job_id, job)
+                spliced = await _await_detached(agent, call_id, job)
             completed = True
             return ToolResult(
                 call_id="", content=spliced.content, is_error=spliced.is_error
@@ -247,11 +257,28 @@ class BackgroundTask:
                 agent.cancel_background(job_id)
 
 
-def _shutdown_persistent(job: BackgroundTaskEntry) -> None:
+def shutdown_persistent_subagent(agent: AgentLike, job: BackgroundTaskEntry) -> None:
     """Shut down a persistent child through its public lifecycle hook."""
     child = agent_registry.get(job.queue_id)
-    if child is not None:
-        child.shutdown(force=True)
+    if child is None:
+        return
+    parent_agent = agent if isinstance(agent, _get_agent_class()) else None
+    child_agent = child if isinstance(child, _get_agent_class()) else None
+    if job.persistent_run_id and parent_agent is not None and child_agent is not None:
+        append_persistent_agent_lifecycle(
+            parent_agent,
+            child_agent,
+            job.queue_id,
+            job.persistent_run_id,
+            state="cancelled",
+            notify_on_asleep=job.notify_on_asleep,
+        )
+    child.shutdown(force=True)
+
+
+def _get_agent_class() -> type[Agent]:
+    """Resolve the concrete ``Agent`` class lazily."""
+    return cast(type["Agent"], agent_lib.Agent)
 
 
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
@@ -292,6 +319,9 @@ async def _await_detached(
         except asyncio.CancelledError:
             if fut.done():
                 return fut.result()
+            event = _drain_queued_detached(agent, call_id)
+            if event is not None:
+                return event
             if job.task.cancelled():
                 return ToolResult(call_id=call_id, content="[cancelled]", is_error=True)
             raise
@@ -318,7 +348,24 @@ async def _await_detached(
 
 async def _drain_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
     """Drain one inbox batch and return a matching detached result if present."""
-    items = await agent.runtime.inbox.drain()
+    return _splice_from_inbox_items(agent, call_id, await agent.runtime.inbox.drain())
+
+
+def _drain_queued_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
+    """Drain already-queued inbox items without blocking for new input."""
+    return _splice_from_inbox_items(
+        agent,
+        call_id,
+        agent.runtime.inbox.drain_nowait(),
+    )
+
+
+def _splice_from_inbox_items(
+    agent: AgentLike,
+    call_id: str,
+    items: list[RuntimeEvent],
+) -> ToolResult | None:
+    """Splice one detached result from ``items`` and restore the rest."""
     keep: list[RuntimeEvent] = []
     result: ToolResult | None = None
     for item in items:

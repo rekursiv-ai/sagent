@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
+import dataclasses
 import json
 
 import pytest
@@ -18,9 +19,11 @@ from sagent.agent import (
 from sagent.agent.agent import Agent
 from sagent.agent.context import resolve_context, validate_context
 from sagent.agent.session_io import (
+    PersistentAgentRecord,
     SessionMeta,
     append_context_repair,
     append_session,
+    load_persistent_agents,
     load_session,
     rebuild_content_cache,
     repair_dangling_tool_calls,
@@ -34,7 +37,9 @@ from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
     ModelContextEvent,
+    ModelServiceSuspended,
     SaveSession,
+    ServiceErrorSnapshot,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -780,6 +785,117 @@ def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:
     parsed = [json.loads(line) for line in lines]
     kinds = [r["kind"] for r in parsed]
     assert kinds == ["meta", "history"]
+
+
+def test_append_session_writes_model_service_suspended_event(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    append_session(
+        session_file,
+        runtime_events=[
+            ModelServiceSuspended(
+                provider="OpenAISubscription",
+                auth="credentials",
+                account="default",
+                model_id="gpt-5.5",
+                retry_at=1_800_000_000.0,
+                delay_sec=14_868.0,
+                server_supplied=True,
+                error=ServiceErrorSnapshot(
+                    type_name="RateLimitError",
+                    message="limited",
+                    status=429,
+                    headers={"retry-after": "14868"},
+                    body='{"error":"rate_limit"}',
+                ),
+            )
+        ],
+    )
+
+    record = json.loads(session_file.read_text(encoding="utf-8"))
+    assert record == {
+        "kind": "runtime_event",
+        "type": "model_service_suspended",
+        "timestamp": record["timestamp"],
+        "provider": "OpenAISubscription",
+        "auth": "credentials",
+        "account": "default",
+        "model_id": "gpt-5.5",
+        "retry_at": 1_800_000_000.0,
+        "delay_sec": 14_868.0,
+        "server_supplied": True,
+        "error": {
+            "type_name": "RateLimitError",
+            "message": "limited",
+            "status": 429,
+            "headers": {"retry-after": "14868"},
+            "body": '{"error":"rate_limit"}',
+        },
+    }
+
+
+def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    append_session(
+        session_file,
+        persistent_agents=[
+            PersistentAgentRecord(
+                label="fix-tools",
+                run_id="run-1",
+                session_dir=str(tmp_path / "session" / "fix-tools"),
+                state="running",
+                provider="OpenAISubscription",
+                auth="credentials",
+                account="default",
+                model_id="gpt-5.5",
+                tools=("Read", "Edit"),
+                system="system text",
+                notify_on_asleep=True,
+            )
+        ],
+    )
+
+    record = json.loads(session_file.read_text(encoding="utf-8"))
+    assert record == {
+        "kind": "persistent_agent",
+        "label": "fix-tools",
+        "run_id": "run-1",
+        "session_dir": str(tmp_path / "session" / "fix-tools"),
+        "state": "running",
+        "provider": "OpenAISubscription",
+        "auth": "credentials",
+        "account": "default",
+        "model_id": "gpt-5.5",
+        "tools": ["Read", "Edit"],
+        "system": "system text",
+        "notify_on_asleep": True,
+        "timestamp": record["timestamp"],
+    }
+
+
+def test_load_persistent_agents_returns_latest_running_records(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    running = PersistentAgentRecord(
+        label="fix-tools",
+        run_id="run-1",
+        session_dir=str(tmp_path / "children" / "run-1"),
+        state="running",
+        provider="OpenAISubscription",
+        auth="credentials",
+        account="default",
+        model_id="gpt-5.5",
+        tools=("Read",),
+        system="system text",
+        notify_on_asleep=True,
+    )
+    append_session(session_file, persistent_agents=[running])
+    append_session(
+        session_file,
+        persistent_agents=[dataclasses.replace(running, state="cancelled")],
+    )
+    still_running = dataclasses.replace(running, run_id="run-2", label="fix-compact")
+    append_session(session_file, persistent_agents=[still_running])
+
+    assert load_persistent_agents(tmp_path) == [still_running]
 
 
 def test_session_meta_round_trip() -> None:

@@ -292,6 +292,40 @@ def test_agent_register_and_cancel_background() -> None:
         loop.close()
 
 
+def test_agent_assigns_stable_job_ids_to_detached_call_ids() -> None:
+    a = _build_agent()
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(asyncio.sleep(0))
+    try:
+        a.runtime.detached["call-provider"] = task
+        a._tool_registry["call-provider"] = ("Bash", 123.0)
+        first = a.background
+        second = a.background
+        assert list(first) == ["job-1"]
+        assert list(second) == ["job-1"]
+        assert first["job-1"].queue_id == "job-1"
+        assert first["job-1"].call_id == "call-provider"
+    finally:
+        _ = task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_public_cancel_background_accepts_job_id_for_detached_task() -> None:
+    a = _build_agent()
+    task = asyncio.create_task(asyncio.sleep(60))
+    a.runtime.detached["call-provider"] = task
+    a._tool_registry["call-provider"] = ("Bash", 0.0)
+    job_id = next(iter(a.background))
+    assert job_id == "job-1"
+    a.cancel_background(job_id)
+    assert "call-provider" not in a.runtime.detached
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
 @pytest.mark.asyncio
 async def test_public_cancel_background_actually_cancels_task() -> None:
     """The public ``cancel_background`` must cancel the underlying task.
@@ -649,9 +683,20 @@ def test_status_setter_round_trip() -> None:
     assert a.status == "busy"
 
 
-def test_session_id_is_hex_string() -> None:
+def test_ephemeral_session_id_is_hex_string() -> None:
     a = _build_agent()
     assert len(a.session_id) == 8
+    assert a.runtime.session_id == a.session_id
+
+
+def test_persisted_session_uses_session_directory_name(tmp_path: Path) -> None:
+    session_dir = tmp_path / "d940b751c9fe"
+    a = _build_agent(session_dir=session_dir)
+    a.runtime.append_history(types.runtime.UserMessage(text="hello"))
+
+    assert a.session_id == "d940b751c9fe"
+    assert a.runtime.session_id == "d940b751c9fe"
+    assert a.runtime.tape[0].ref.session_id == "d940b751c9fe"
 
 
 def test_inbox_and_work_properties_reflect_runtime() -> None:
@@ -690,15 +735,16 @@ def test_background_merges_detached_and_explicit() -> None:
         # Register an explicit job too.
         ex_task = loop.create_task(asyncio.sleep(0))
         a.register_background(
-            "job-1",
+            "job-2",
             BackgroundTaskEntry(
-                task=ex_task, tool_name="X", queue_id="job-1", started=0.0
+                task=ex_task, tool_name="X", queue_id="job-2", started=0.0
             ),
         )
         merged = a.background
-        assert "det-1" in merged
         assert "job-1" in merged
-        assert merged["det-1"].kind == "detached"
+        assert "job-2" in merged
+        assert merged["job-1"].kind == "detached"
+        assert merged["job-1"].call_id == "det-1"
         _ = det_task.cancel()
         _ = ex_task.cancel()
         loop.run_until_complete(
@@ -1168,7 +1214,7 @@ async def test_shutdown_force_cancels_explicit_jobs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_force_uses_persistent_subagent_lifecycle() -> None:
+async def test_shutdown_force_preserves_persistent_subagent() -> None:
     @dataclass(slots=True, kw_only=True)
     class _Child:
         shutdown_calls: list[bool] = field(default_factory=list)
@@ -1198,8 +1244,9 @@ async def test_shutdown_force_uses_persistent_subagent_lifecycle() -> None:
     try:
         a.shutdown(force=True)
         await asyncio.sleep(0)
-        assert child.shutdown_calls == [True]
+        assert child.shutdown_calls == []
         assert not task.cancelled()
+        assert "child" in a.background
     finally:
         _ = agent_registry.pop("child", None)
         _ = task.cancel()
@@ -1208,7 +1255,7 @@ async def test_shutdown_force_uses_persistent_subagent_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shutdown_force_cancels_missing_registry_persistent_subagent() -> None:
+async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -> None:
     a = _build_agent()
 
     async def hang() -> None:
@@ -1228,14 +1275,13 @@ async def test_shutdown_force_cancels_missing_registry_persistent_subagent() -> 
     )
     try:
         a.shutdown(force=True)
+        await asyncio.sleep(0)
+        assert not task.cancelled()
+        assert "child" in a.background
+    finally:
+        _ = task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        assert task.cancelled()
-    finally:
-        if not task.done():
-            _ = task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
 
 
 @pytest.mark.asyncio
@@ -3030,7 +3076,7 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
         )
     )
     a.runtime.append_history(placeholder)
-    task = a.background["bg-1"].task
+    task = a.background["job-1"].task
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     task.cancel()

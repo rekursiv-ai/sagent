@@ -460,6 +460,10 @@ class AgentLike(Protocol):
         """
         ...
 
+    def kill_tool(self, qid: str) -> None:
+        """Cancel one outstanding tool task by human job id or call id."""
+        ...
+
     def shutdown(self, *, force: bool = False) -> None:
         """End the agent serve loop.
 

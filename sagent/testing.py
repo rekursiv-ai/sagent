@@ -18,10 +18,11 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+import itertools
 import time
 
 from sagent.agent import runtime as agent_runtime
@@ -134,6 +135,15 @@ class FakeAgent:
     _tool_registry: dict[str, tuple[str, float]] = field(default_factory=dict)
     """Detached runtime tool metadata (mirrors ``Agent._tool_registry``)."""
 
+    _job_counter: Iterator[int] = field(default_factory=lambda: itertools.count(1))
+    """Human job id counter (mirrors ``Agent._job_counter``)."""
+
+    _job_ids_by_call_id: dict[str, str] = field(default_factory=dict)
+    """Provider call id to human job id mapping."""
+
+    _call_ids_by_job_id: dict[str, str] = field(default_factory=dict)
+    """Human job id to provider call id mapping."""
+
     cost_tracker: CostTracker = field(default_factory=CostTracker)
     """Token + cost ledger (mirrors ``Agent.cost_tracker``)."""
 
@@ -147,12 +157,14 @@ class FakeAgent:
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
         """Read view of explicit and detached background entries."""
         merged: dict[str, BackgroundTaskEntry] = {}
-        for qid, task in self.runtime.detached.items():
-            name, started = self._tool_registry.get(qid, ("?", time.time()))
-            merged[qid] = BackgroundTaskEntry(
+        for call_id, task in self.runtime.detached.items():
+            name, started = self._tool_registry.get(call_id, ("?", time.time()))
+            job_id = self._job_id_for_call(call_id)
+            merged[job_id] = BackgroundTaskEntry(
                 task=task,
                 tool_name=name,
-                queue_id=qid,
+                queue_id=job_id,
+                call_id=call_id,
                 started=started,
                 kind="detached",
             )
@@ -160,8 +172,18 @@ class FakeAgent:
         return merged
 
     def cancel_background(self, job_id: str) -> None:
-        """Remove ``job_id`` from the explicit-bg registry, if present."""
-        self._bg.pop(job_id, None)
+        """Cancel and forget a visible background job, if present."""
+        job = self._bg.pop(job_id, None)
+        if job is None:
+            job = self.background.get(job_id)
+        if job is None:
+            return
+        if job.kind == "detached":
+            call_id = job.call_id or job.queue_id
+            self.runtime.detached.pop(call_id, None)
+            self._forget_job_id(call_id)
+        if not job.task.done():
+            job.task.cancel()
 
     def register_background(self, job_id: str, entry: BackgroundTaskEntry) -> None:
         """Add ``entry`` to the explicit-bg registry under ``job_id``."""
@@ -170,6 +192,12 @@ class FakeAgent:
     def halt(self) -> None:
         """Stub for ``AgentLike.halt``; published as a ``Halt`` runtime event."""
         self.runtime.publish(Halt())
+
+    def kill_tool(self, qid: str) -> None:
+        """Cancel one outstanding tool task by human job id or call id."""
+        call_id = self._call_id_for_job(qid)
+        self.cancel_background(qid)
+        self.runtime.inbox.push_back(Kill(call_id=call_id))
 
     def kill_all_tools(self) -> None:
         """Cancel every visible explicit background tool job."""
@@ -180,9 +208,27 @@ class FakeAgent:
 
     def _cancel_background(self, job_id: str) -> None:
         """Cancel and forget one explicit background job."""
-        job = self._bg.pop(job_id, None)
-        if job is not None and not job.task.done():
-            job.task.cancel()
+        self.cancel_background(job_id)
+
+    def _job_id_for_call(self, call_id: str) -> str:
+        """Return the stable human job id for a provider call id."""
+        job_id = self._job_ids_by_call_id.get(call_id)
+        if job_id is not None:
+            return job_id
+        job_id = f"job-{next(self._job_counter)}"
+        self._job_ids_by_call_id[call_id] = job_id
+        self._call_ids_by_job_id[job_id] = call_id
+        return job_id
+
+    def _call_id_for_job(self, job_or_call_id: str) -> str:
+        """Resolve a human job id to its provider call id when known."""
+        return self._call_ids_by_job_id.get(job_or_call_id, job_or_call_id)
+
+    def _forget_job_id(self, call_id: str) -> None:
+        """Forget a completed or cancelled provider call's human job id."""
+        job_id = self._job_ids_by_call_id.pop(call_id, None)
+        if job_id is not None:
+            self._call_ids_by_job_id.pop(job_id, None)
 
     def shutdown(self, *, force: bool = False) -> None:
         """Stub for ``AgentLike.shutdown``; queue a quit event."""

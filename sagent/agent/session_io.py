@@ -47,8 +47,10 @@ from sagent.types.runtime import (
     CompactFailed,
     CompactStarted,
     ModelContextEvent,
+    ModelServiceSuspended,
     RuntimeEvent,
     SaveSession,
+    ServiceErrorSnapshot,
     StatusChanged,
     ToolCall,
     ToolResult,
@@ -70,6 +72,23 @@ if TYPE_CHECKING:
 providers_lib = lazy_import("sagent.providers")
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class PersistentAgentRecord:
+    """Parent-side lifecycle record for one persistent subagent run."""
+
+    label: str
+    run_id: str
+    session_dir: str
+    state: str
+    provider: str
+    auth: str
+    account: str
+    model_id: str
+    tools: tuple[str, ...]
+    system: str
+    notify_on_asleep: bool
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -739,12 +758,127 @@ def append_context_repair(
     return repair
 
 
+def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
+    """Encode persisted runtime metadata events."""
+    if isinstance(event, ModelServiceSuspended):
+        return {
+            "kind": "runtime_event",
+            "type": "model_service_suspended",
+            "timestamp": time.time(),
+            "provider": event.provider,
+            "auth": event.auth,
+            "account": event.account,
+            "model_id": event.model_id,
+            "retry_at": event.retry_at,
+            "delay_sec": event.delay_sec,
+            "server_supplied": event.server_supplied,
+            "error": _service_error_snapshot_to_json(event.error),
+        }
+    raise TypeError(
+        f"unsupported runtime event for persistence: {type(event).__name__}"
+    )
+
+
+def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, object]:
+    """Encode ``ServiceErrorSnapshot`` as JSON-ready primitives."""
+    return {
+        "type_name": error.type_name,
+        "message": error.message,
+        "status": error.status,
+        "headers": dict(error.headers),
+        "body": error.body,
+    }
+
+
+def _persistent_agent_from_json(
+    record: Mapping[str, object],
+) -> PersistentAgentRecord | None:
+    """Decode one persistent-subagent lifecycle record."""
+    if record.get("kind") != "persistent_agent":
+        return None
+    raw_tools = record.get("tools")
+    tools = (
+        tuple(
+            str(tool) for tool in cast(list[object], raw_tools) if isinstance(tool, str)
+        )
+        if isinstance(raw_tools, list)
+        else ()
+    )
+    return PersistentAgentRecord(
+        label=str(record.get("label") or ""),
+        run_id=str(record.get("run_id") or ""),
+        session_dir=str(record.get("session_dir") or ""),
+        state=str(record.get("state") or ""),
+        provider=str(record.get("provider") or ""),
+        auth=str(record.get("auth") or ""),
+        account=str(record.get("account") or ""),
+        model_id=str(record.get("model_id") or ""),
+        tools=tools,
+        system=str(record.get("system") or ""),
+        notify_on_asleep=bool(record.get("notify_on_asleep")),
+    )
+
+
+def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object]:
+    """Encode a persistent-subagent lifecycle record."""
+    return {
+        "kind": "persistent_agent",
+        "label": record.label,
+        "run_id": record.run_id,
+        "session_dir": record.session_dir,
+        "state": record.state,
+        "provider": record.provider,
+        "auth": record.auth,
+        "account": record.account,
+        "model_id": record.model_id,
+        "tools": list(record.tools),
+        "system": record.system,
+        "notify_on_asleep": record.notify_on_asleep,
+        "timestamp": time.time(),
+    }
+
+
+def append_persistent_agent_lifecycle(
+    parent_agent: Agent,
+    child: Agent,
+    label: str,
+    run_id: str,
+    *,
+    state: str,
+    notify_on_asleep: bool,
+) -> None:
+    """Append one parent-side persistent-agent lifecycle record."""
+    if parent_agent.session_dir is None:
+        return
+    spec = child.model_spec
+    append_session(
+        parent_agent.session_dir / "session.jsonl",
+        persistent_agents=[
+            PersistentAgentRecord(
+                label=label,
+                run_id=run_id,
+                session_dir=str(child.session_dir or ""),
+                state=state,
+                provider=spec.provider if spec else type(child.model).__name__,
+                auth=spec.auth if spec else "",
+                account=(spec.account or "default") if spec else "default",
+                model_id=child.model.model_id,
+                tools=tuple(tool.name for tool in child.tools),
+                system=child.system,
+                notify_on_asleep=notify_on_asleep,
+            )
+        ],
+    )
+
+
 def append_session(
     path: Path,
     *,
     meta: Mapping[str, object] | None = None,
     tool_state_snapshot: Mapping[str, object] | None = None,
     tape_delta: Sequence[TapeRecord] | None = None,
+    runtime_events: Sequence[RuntimeEvent] | None = None,
+    persistent_agents: Sequence[PersistentAgentRecord] | None = None,
 ) -> None:
     """Append records to ``session.jsonl``.
 
@@ -757,12 +891,18 @@ def append_session(
       meta: Optional session metadata dict (latest meta wins on load).
       tool_state_snapshot: Optional persistable ToolState fields.
       tape_delta: New tape records to append.
+      runtime_events: Runtime events to persist outside model context.
+      persistent_agents: Persistent subagent lifecycle records.
 
     """
     parts: list[str] = []
     if meta is not None:
         parts.append(json.dumps({"kind": "meta", **meta}))
     parts.extend(json.dumps(_tape_record_to_json(r)) for r in tape_delta or ())
+    parts.extend(json.dumps(_runtime_event_to_json(e)) for e in runtime_events or ())
+    parts.extend(
+        json.dumps(_persistent_agent_to_json(r)) for r in persistent_agents or ()
+    )
     if tool_state_snapshot is not None:
         parts.append(json.dumps({"kind": "tool_state", **tool_state_snapshot}))
     if not parts:
@@ -808,7 +948,7 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
 
     def _on_event(event: RuntimeEvent) -> None:
         nonlocal meta_written, last_status, last_tool_state
-        if not isinstance(event, (SaveSession, StatusChanged)):
+        if not isinstance(event, (SaveSession, StatusChanged, ModelServiceSuspended)):
             return
         tape_delta = [
             record for record in agent.runtime.tape if record.ref not in persisted_refs
@@ -837,6 +977,9 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
             session_dir / "session.jsonl",
             meta=meta.serialize() if write_meta else None,
             tape_delta=tape_delta or None,
+            runtime_events=(event,)
+            if isinstance(event, ModelServiceSuspended)
+            else None,
             tool_state_snapshot=tool_state if write_tool_state else None,
         )
         persisted_refs.update(record.ref for record in tape_delta)
@@ -872,6 +1015,32 @@ def _persisted_refs(path: Path) -> set[TapeRef]:
     except OSError:
         return set()
     return refs
+
+
+def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
+    """Return the latest lifecycle record for each persistent-agent run."""
+    session_file = session_dir / "session.jsonl"
+    if not session_file.exists():
+        return []
+    by_run: dict[str, PersistentAgentRecord] = {}
+    try:
+        with session_file.open(encoding="utf-8") as f:
+            for raw_line in f:
+                try:
+                    record = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                decoded = _persistent_agent_from_json(
+                    cast(Mapping[str, object], record)
+                )
+                if decoded is None or not decoded.run_id:
+                    continue
+                by_run[decoded.run_id] = decoded
+    except OSError:
+        return []
+    return [record for record in by_run.values() if record.state == "running"]
 
 
 def load_session(

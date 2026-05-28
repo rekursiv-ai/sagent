@@ -24,6 +24,7 @@ from sagent.agent.retry import (
     extract_retry_after,
     is_retryable,
     send_with_retry,
+    service_error_snapshot,
 )
 from sagent.testing import MockModelCaps
 from sagent.types.model import (
@@ -400,6 +401,44 @@ async def test_send_with_retry_persistent_loops_on_429() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_with_retry_service_suspension_callback_replaces_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "60"}))
+    model = _PersistentModel(stream_responses=[err, _resp("ok")])
+    chunks: list[str] = []
+    suspensions: list[tuple[float, float, bool, Exception]] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=chunks.append,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+        on_service_suspended=lambda retry_at, delay_sec, server_supplied, error: (
+            suspensions.append((retry_at, delay_sec, server_supplied, error))
+        ),
+    )
+
+    assert resp.message.text == "ok"
+    assert "retrying" not in "".join(chunks)
+    assert "resumes at" not in "".join(chunks)
+    assert len(suspensions) == 1
+    retry_at, delay_sec, server_supplied, error = suspensions[0]
+    assert retry_at > time.time()
+    assert delay_sec == pytest.approx(60.0)
+    assert server_supplied is True
+    assert error is err
+    assert sleeps == [pytest.approx(60.0)]
+
+
+@pytest.mark.asyncio
 async def test_send_with_retry_stream_interruption_retries() -> None:
     partial = _resp("partial")
     model = _ScriptedModel(
@@ -538,6 +577,35 @@ def test_error_diagnostics_includes_status_headers_body() -> None:
     assert "anthropic-ratelimit-unified-reset" in diag
     assert "x-other" not in diag
     assert "rate_limit_error" in diag
+
+
+def test_service_error_snapshot_allowlists_forensic_fields() -> None:
+    err = _HTTPError(
+        _FakeResponse(
+            429,
+            {
+                "authorization": "secret",
+                "cookie": "secret",
+                "request-id": "req-1",
+                "retry-after": "14868",
+                "x-ratelimit-reset": "soon",
+            },
+            text="bucket details" + "x" * 10_000,
+        )
+    )
+
+    snapshot = service_error_snapshot(err)
+
+    assert snapshot.type_name == "_HTTPError"
+    assert snapshot.message == "HTTP 429"
+    assert snapshot.status == 429
+    assert dict(snapshot.headers) == {
+        "request-id": "req-1",
+        "retry-after": "14868",
+        "x-ratelimit-reset": "soon",
+    }
+    assert snapshot.body.startswith("bucket details")
+    assert len(snapshot.body) == 500
 
 
 def test_error_diagnostics_no_response_returns_empty() -> None:

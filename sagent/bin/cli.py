@@ -54,6 +54,7 @@ import logging
 import os
 import signal
 import sys
+import time
 
 from sagent import (
     providers,
@@ -62,10 +63,14 @@ from sagent import (
     types,
 )
 from sagent.agent import Agent
+from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import (
+    PersistentAgentRecord,
     SessionMeta,
+    load_persistent_agents,
     load_session,
 )
+from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.compactor import SummaryCompactor
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.prompt import build_system
@@ -82,6 +87,10 @@ from sagent.thinking import (
     should_redact_thinking,
 )
 from sagent.tools.advisor import Advisor
+from sagent.tools.agent_spawn import (
+    _augment_system_for_persistent,
+    _build_forwarder,
+)
 from sagent.tools.core import set_recipe
 
 
@@ -492,6 +501,19 @@ def _parse_cli_args(
         help="Resume the most recent session across all projects.",
     )
     parser.add_argument(
+        "--resume-persistent",
+        dest="resume_persistent",
+        action="store_true",
+        default=True,
+        help="Resume live persistent subagents recorded in the session (default).",
+    )
+    parser.add_argument(
+        "--no-resume-persistent",
+        dest="resume_persistent",
+        action="store_false",
+        help="Do not restart persistent subagents when resuming a session.",
+    )
+    parser.add_argument(
         "--name",
         default="Agent",
         help="Agent name (default: Agent).",
@@ -667,6 +689,135 @@ def _provider_knows_model(provider_name: str, model_id: str) -> bool:
     return isinstance(known, dict) and model_id in known
 
 
+async def _resume_persistent_agents(
+    parent: Agent,
+    session_dir: Path,
+    *,
+    allow_providers: tuple[str, ...],
+    parent_label: str,
+) -> None:
+    """Restart persistent subagents recorded as running in ``session_dir``."""
+    records = load_persistent_agents(session_dir)
+    for record in records:
+        if record.provider not in allow_providers:
+            sys.stderr.write(
+                f"[resume-persistent] skipping {record.label!r}:"
+                f" provider {record.provider!r} is not allowed.\n"
+            )
+            continue
+        try:
+            child = _build_persistent_child(
+                record,
+                allow_providers=allow_providers,
+                parent_label=parent_label,
+            )
+        except (RuntimeError, ValueError) as e:
+            sys.stderr.write(f"[resume-persistent] skipping {record.label!r}: {e}\n")
+            continue
+        loaded_child = load_session(Path(record.session_dir), {})
+        if loaded_child is not None:
+            child.resume(*loaded_child)
+        label = _resume_label(record.label)
+        if label != record.label:
+            sys.stderr.write(
+                f"[resume-persistent] label {record.label!r} already active;"
+                f" restored as {label!r}.\n"
+            )
+        _start_resumed_persistent(parent, child, record, label)
+
+
+def _build_persistent_child(
+    record: PersistentAgentRecord,
+    *,
+    allow_providers: tuple[str, ...],
+    parent_label: str,
+) -> Agent:
+    """Construct a persistent child from its lifecycle record."""
+    provider = build_provider(
+        record.provider,
+        record.auth,
+        account=record.account or None,
+    )
+    model = provider.model(record.model_id)
+    return Agent(
+        name=record.label,
+        model=model,
+        model_spec=types.model.ModelSpec(
+            provider=record.provider,
+            auth=record.auth,
+            model_id=model.model_id,
+            account=record.account or None,
+        ),
+        system=_augment_system_for_persistent(record.system, parent_label=parent_label),
+        tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
+        session_dir=record.session_dir or None,
+    )
+
+
+def _resume_label(label: str) -> str:
+    """Return a live registry label for a resumed persistent subagent."""
+    return label if label not in agent_registry else unique_registry_label(label)
+
+
+def _start_resumed_persistent(
+    parent: Agent,
+    child: Agent,
+    record: PersistentAgentRecord,
+    label: str,
+) -> None:
+    """Register and launch a resumed persistent subagent."""
+    child._persistent = True  # noqa: SLF001 -- resume restores the persistent runtime mode
+    child.name = label
+    agent_registry[label] = child
+    forwarder = _build_forwarder(
+        label,
+        1,
+        parent,
+        child=child,
+        notify_on_asleep=record.notify_on_asleep,
+    )
+    if forwarder is not None:
+        child.runtime.observers.append(forwarder)
+    task = asyncio.create_task(
+        _serve_resumed_persistent(parent, child, label, forwarder)
+    )
+    parent.register_background(
+        f"persistent:{label}",
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="persistent-agent",
+            queue_id=label,
+            started=time.time(),
+            hidden=False,
+            kind="persistent_subagent",
+            persistent_run_id=record.run_id,
+            notify_on_asleep=record.notify_on_asleep,
+        ),
+    )
+
+
+async def _serve_resumed_persistent(
+    parent: Agent,
+    child: Agent,
+    label: str,
+    forwarder: Callable[[types.runtime.RuntimeEvent], None] | None,
+) -> None:
+    """Run a resumed persistent child and clean parent indexes on exit."""
+    bg_key = f"persistent:{label}"
+    try:
+        await child.serve_forever()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "persistent agent %r crashed after resume",
+            label,
+        )
+    finally:
+        if forwarder is not None and forwarder in child.runtime.observers:
+            child.runtime.observers.remove(forwarder)
+        agent_registry.pop(label, None)
+        parent.forget_background(bg_key)
+
+
 def _configure_logging(level: str | None) -> None:
     """Configure CLI logging from flag or environment (headless / pre-mode)."""
     raw = level or os.environ.get("SAGENT_LOG_LEVEL")
@@ -743,6 +894,25 @@ def _install_repl_logging(
     root.addHandler(file_handler)
     logging.getLogger("sagent").setLevel(value)
     logging.getLogger("sagent").setLevel(value)
+
+
+async def _with_resumed_persistent(
+    agent: Agent,
+    coro: Coroutine[object, object, None],
+    *,
+    session_dir: str | Path | None,
+    resume_persistent: bool,
+    allow_providers: tuple[str, ...],
+) -> None:
+    """Resume persistent children before running ``coro``."""
+    if resume_persistent and session_dir is not None:
+        await _resume_persistent_agents(
+            agent,
+            Path(session_dir),
+            allow_providers=allow_providers,
+            parent_label=agent.name,
+        )
+    await coro
 
 
 async def _with_signals(
@@ -1036,17 +1206,29 @@ def main() -> None:
         asyncio.run(
             _with_signals(
                 agent,
-                run_repl(agent, history=args.history),
+                _with_resumed_persistent(
+                    agent,
+                    run_repl(agent, history=args.history),
+                    session_dir=session_dir,
+                    resume_persistent=args.resume_persistent,
+                    allow_providers=allow_providers,
+                ),
             ),
         )
     else:
         asyncio.run(
             _with_signals(
                 agent,
-                _run_headless(
+                _with_resumed_persistent(
                     agent,
-                    input_format=args.input_format,
-                    output_format=args.output_format,
+                    _run_headless(
+                        agent,
+                        input_format=args.input_format,
+                        output_format=args.output_format,
+                    ),
+                    session_dir=session_dir,
+                    resume_persistent=args.resume_persistent,
+                    allow_providers=allow_providers,
                 ),
             )
         )

@@ -36,8 +36,6 @@ Before creating new directories or files, confirm the parent path with the dedic
 
 Keep any necessary sleep durations minimal to avoid stalling the session.
 
-`run_in_background` is fire-and-forget: it returns a PID, discards output, and does not send a completion notification.
-
 Do not insert sleeps between commands that are ready to execute immediately — invoke them directly.
 
 When monitoring an external process, query its status (e.g., `gh run view`) rather than sleeping before checking.

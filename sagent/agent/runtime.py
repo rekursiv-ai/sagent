@@ -494,6 +494,16 @@ class GatedDeque[T]:
         """
         self._queue.put_nowait(item)
 
+    def drain_nowait(self) -> list[T]:
+        """Return all currently queued items without waiting."""
+        items: list[T] = []
+        while not self._queue.empty():
+            try:
+                items.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return items
+
     def push_front(self, *items: T | Await) -> None:
         """Add to front of queue. Await sets the drain gate.
 

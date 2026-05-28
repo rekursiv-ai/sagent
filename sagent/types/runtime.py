@@ -19,6 +19,10 @@ import time
 _id_counter: itertools.count[int] = itertools.count()
 
 
+def _empty_headers() -> dict[str, str]:
+    return {}
+
+
 __all__ = [
     "AgentIdle",
     "AssistantMessage",
@@ -45,12 +49,14 @@ __all__ = [
     "ModelResponseError",
     "ModelResponsePartial",
     "ModelResponseThinking",
+    "ModelServiceSuspended",
     "ModelSwitch",
     "ModelSwitchRejected",
     "Quit",
     "Recompact",
     "RuntimeEvent",
     "SaveSession",
+    "ServiceErrorSnapshot",
     "SessionMessage",
     "StatusChanged",
     "ToolCall",
@@ -354,6 +360,55 @@ class ModelResponseError:
     """The raised exception surfaced to observers."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ServiceErrorSnapshot:
+    """Serializable provider error details safe for session logs."""
+
+    type_name: str
+    """Provider exception class name."""
+
+    message: str
+    """Human-readable exception message."""
+
+    status: int | None = None
+    """HTTP status code, when known."""
+
+    headers: Mapping[str, str] = dataclasses.field(default_factory=_empty_headers)
+    """Allowlisted diagnostic response headers."""
+
+    body: str = ""
+    """Truncated response body excerpt."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelServiceSuspended:
+    """External model service temporarily rejected work; retry is scheduled."""
+
+    provider: str
+    """Provider class/key backing the model call."""
+
+    auth: str
+    """Provider auth flavor."""
+
+    account: str
+    """Provider account slot."""
+
+    model_id: str
+    """Concrete provider model id."""
+
+    retry_at: float
+    """Unix wall-clock seconds when the retry may resume."""
+
+    delay_sec: float
+    """Sleep duration selected for this retry."""
+
+    server_supplied: bool
+    """True when provider response supplied the retry delay."""
+
+    error: ServiceErrorSnapshot
+    """Sanitized provider error snapshot."""
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class ModelIdle:
     """Model finished with no tool calls."""
@@ -494,6 +549,7 @@ type RuntimeEvent = (
     | ModelResponseComplete
     | ModelResponseCancelled
     | ModelResponseError
+    | ModelServiceSuspended
     | ModelIdle
     | AgentIdle
     | CohortStarted

@@ -15,6 +15,7 @@ from sagent.repl.slash import (
     ModelSwitch,
     Quit,
     Recompact,
+    Send,
     Tasks,
     Text,
     Thinking,
@@ -161,6 +162,33 @@ def test_parse_slash_kill_all() -> None:
 
 def test_parse_slash_kill_no_target_is_unknown() -> None:
     action = parse_slash("/kill")
+    assert isinstance(action, Unknown)
+    assert "requires" in action.text
+
+
+def test_parse_slash_send_with_message() -> None:
+    action = parse_slash("/send fix-tools continue please")
+    assert isinstance(action, Send)
+    assert action.target == "fix-tools"
+    assert action.content == "continue please"
+
+
+def test_parse_slash_send_accepts_brace_target() -> None:
+    action = parse_slash("/send {fix-tools,fix-compact} continue")
+    assert isinstance(action, Send)
+    assert action.target == "{fix-tools,fix-compact}"
+    assert action.content == "continue"
+
+
+def test_parse_slash_send_accepts_regex_target() -> None:
+    action = parse_slash("/send /fix-.*/ continue")
+    assert isinstance(action, Send)
+    assert action.target == "/fix-.*/"
+    assert action.content == "continue"
+
+
+def test_parse_slash_send_missing_message_is_unknown() -> None:
+    action = parse_slash("/send fix-tools")
     assert isinstance(action, Unknown)
     assert "requires" in action.text
 

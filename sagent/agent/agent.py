@@ -60,7 +60,7 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.result_storage import post_process_result
-from sagent.agent.retry import send_with_retry
+from sagent.agent.retry import send_with_retry, service_error_snapshot
 from sagent.agent.session_io import (
     SessionMeta,
     install_session_persistence,
@@ -210,10 +210,17 @@ class Agent:
         # so ``background`` can synthesize ``BackgroundTaskEntry`` rows
         # for detached cohort members.
         self._tool_registry: dict[str, tuple[str, float]] = {}
+        self._job_counter = itertools.count(1)
+        self._job_ids_by_call_id: dict[str, str] = {}
+        self._call_ids_by_job_id: dict[str, str] = {}
         self.session_dir: Path | None = (
             Path(session_dir) if session_dir is not None else None
         )
-        self._session_id = uuid.uuid4().hex[:8]
+        self._session_id = (
+            self.session_dir.name
+            if self.session_dir is not None
+            else uuid.uuid4().hex[:8]
+        )
         self._status: str = ""
         self._persistent: bool = False
         self._shutting_down: bool = False
@@ -239,6 +246,7 @@ class Agent:
             tools=agent_tools,
             compactor=self._agent_compactor,
             system=self._build_system(),
+            session_id=self._session_id,
         )
 
         self.runtime.before_tool_spawn = self._before_tool_spawn
@@ -551,12 +559,14 @@ class Agent:
     def background(self) -> dict[str, BackgroundTaskEntry]:
         """Merged view: cohort-detached tools + explicit-bg + persistent + REPL pump."""
         merged: dict[str, BackgroundTaskEntry] = {}
-        for qid, task in self.runtime.detached.items():
-            name, started = self._tool_registry.get(qid, ("?", time.time()))
-            merged[qid] = BackgroundTaskEntry(
+        for call_id, task in self.runtime.detached.items():
+            name, started = self._tool_registry.get(call_id, ("?", time.time()))
+            job_id = self._job_id_for_call(call_id)
+            merged[job_id] = BackgroundTaskEntry(
                 task=task,
                 tool_name=name,
-                queue_id=qid,
+                queue_id=job_id,
+                call_id=call_id,
                 started=started,
                 kind="detached",
             )
@@ -831,16 +841,39 @@ class Agent:
         """Cancel one outstanding tool task.
 
         Args:
-          qid: Cohort call id of the task to cancel.
+          qid: Human job id or provider call id of the task to cancel.
 
         """
+        call_id = self._call_id_for_job(qid)
         self._cancel_background(qid)
-        self.runtime.inbox.push_back(types.runtime.Kill(call_id=qid))
+        self.runtime.inbox.push_back(types.runtime.Kill(call_id=call_id))
 
     def kill_all_tools(self) -> None:
         """Cancel every outstanding tool task."""
         self._cancel_all_background()
         self.runtime.inbox.push_back(types.runtime.Kill())
+
+    def publish_service_suspended(
+        self,
+        retry_at: float,
+        delay_sec: float,
+        server_supplied: bool,
+        error: Exception,
+    ) -> None:
+        """Publish a durable event for a recoverable model-service block."""
+        spec = self.model_spec
+        self.runtime.publish(
+            types.runtime.ModelServiceSuspended(
+                provider=spec.provider if spec else type(self.model).__name__,
+                auth=spec.auth if spec else "",
+                account=(spec.account or "default") if spec else "default",
+                model_id=self.model.model_id,
+                retry_at=retry_at,
+                delay_sec=delay_sec,
+                server_supplied=server_supplied,
+                error=service_error_snapshot(error),
+            )
+        )
 
     def shutdown(self, *, force: bool = False) -> None:
         """End ``serve_forever`` cleanly.
@@ -855,15 +888,12 @@ class Agent:
         if force:
             self.kill_all_tools()
             for job in list(self._bg.values()):
-                if not job.hidden and not job.task.done():
-                    if job.kind == "persistent_subagent":
-                        child = agent_registry.get(job.queue_id)
-                        if child is not None:
-                            child.shutdown(force=True)
-                        else:
-                            _ = job.task.cancel()
-                    else:
-                        _ = job.task.cancel()
+                if (
+                    not job.hidden
+                    and not job.task.done()
+                    and job.kind != "persistent_subagent"
+                ):
+                    _ = job.task.cancel()
         self.runtime.inbox.push_back(types.runtime.Quit())
 
     # -- Strategy methods ---------------------------------------------
@@ -1184,16 +1214,46 @@ class Agent:
 
         """
         job = self._bg.pop(job_id, None)
-        if job is not None and not job.task.done():
+        if job is None:
+            job = self.background.get(job_id)
+        if job is None:
+            return
+        if job.kind == "detached":
+            call_id = job.call_id or job.queue_id
+            self.runtime.detached.pop(call_id, None)
+            self._forget_job_id(call_id)
+        if not job.task.done():
             job.task.cancel()
 
     def forget_background(self, job_id: str) -> None:
         """Remove one background job without cancelling its task."""
-        self._bg.pop(job_id, None)
+        job = self._bg.pop(job_id, None)
+        if job is not None and job.kind == "tool":
+            self._forget_job_id(job.call_id or job.queue_id)
 
     def _cancel_background(self, job_id: str) -> None:
         """Cancel and forget one explicit background job."""
         self.cancel_background(job_id)
+
+    def _job_id_for_call(self, call_id: str) -> str:
+        """Return the stable human job id for a provider call id."""
+        job_id = self._job_ids_by_call_id.get(call_id)
+        if job_id is not None:
+            return job_id
+        job_id = f"job-{next(self._job_counter)}"
+        self._job_ids_by_call_id[call_id] = job_id
+        self._call_ids_by_job_id[job_id] = call_id
+        return job_id
+
+    def _call_id_for_job(self, job_or_call_id: str) -> str:
+        """Resolve a human job id to its provider call id when known."""
+        return self._call_ids_by_job_id.get(job_or_call_id, job_or_call_id)
+
+    def _forget_job_id(self, call_id: str) -> None:
+        """Forget a completed or cancelled provider call's human job id."""
+        job_id = self._job_ids_by_call_id.pop(call_id, None)
+        if job_id is not None:
+            self._call_ids_by_job_id.pop(job_id, None)
 
     def _cancel_all_background(self) -> None:
         """Cancel and forget every explicit background tool job."""
@@ -1607,6 +1667,7 @@ class _AgentModel:
                         "recoverable: %s", text
                     ),
                     on_discarded_response=self._agent.record_response,
+                    on_service_suspended=self._agent.publish_service_suspended,
                 )
             except Exception as exc:
                 # Catch any exception the provider classifies as
@@ -1721,8 +1782,9 @@ class _AgentTool:
                 is_error=True,
             )
         if bg_requested or delay_sec > 0:
+            job_id = self._agent._job_id_for_call(call_id)  # noqa: SLF001 -- wrapper owns agent background ids
             task = asyncio.create_task(
-                self._run_bg(call_id, clean_args, delay_sec),
+                self._run_bg(call_id, job_id, clean_args, delay_sec),
             )
             task.add_done_callback(
                 types.exceptions.log_task_exception(
@@ -1730,11 +1792,12 @@ class _AgentTool:
                 ),
             )
             self._agent.register_background(
-                call_id,
+                job_id,
                 BackgroundTaskEntry(
                     task=task,
                     tool_name=self._inner.name,
-                    queue_id=call_id,
+                    queue_id=job_id,
+                    call_id=call_id,
                     started=time.time(),
                     delay_sec=delay_sec,
                     kind="tool",
@@ -1759,6 +1822,7 @@ class _AgentTool:
     async def _run_bg(
         self,
         call_id: str,
+        job_id: str,
         args: Mapping[str, object],
         delay_sec: float,
     ) -> None:
@@ -1778,7 +1842,7 @@ class _AgentTool:
                 used_message_chars=self._agent.live_tool_result_chars(),
             )
         except asyncio.CancelledError:
-            if call_id not in self._agent.background:
+            if job_id not in self._agent.background:
                 return
             processed = types.runtime.ToolResult(
                 call_id=call_id,
@@ -1795,7 +1859,7 @@ class _AgentTool:
         self._agent.runtime.inbox.push_back(
             types.runtime.DetachedResult(result=processed),
         )
-        self._agent.forget_background(call_id)
+        self._agent.forget_background(job_id)
 
 
 class _AgentCompactor:

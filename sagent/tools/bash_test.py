@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -116,11 +116,10 @@ def test_description_renders_timeouts() -> None:
     assert str(BASH_MAX_TIMEOUT_MS) in out
 
 
-def test_description_matches_fire_and_forget_background_contract() -> None:
-    assert "wait for the completion notification" not in Bash.description
-    assert "instead of polling" not in Bash.description
-    assert "does not send a completion notification" in Bash.description
-    assert "fire-and-forget" in Bash.description
+def test_description_does_not_advertise_unmanaged_detach() -> None:
+    assert "run_in_background" not in Bash.description
+    assert "run_as_fully_detached" not in Bash.description
+    assert "fire-and-forget" not in Bash.description
 
 
 def test_description_does_not_recommend_ls_for_directory_inspection() -> None:
@@ -132,6 +131,14 @@ def test_schema_required_command() -> None:
     schema = b.directive_schema
     assert isinstance(schema, dict) or hasattr(schema, "__getitem__")
     assert schema["required"] == ("command",)
+
+
+def test_schema_hides_fully_detached_escape_hatch() -> None:
+    b = Bash()
+    properties = b.directive_schema["properties"]
+    assert isinstance(properties, Mapping)
+    assert "run_in_background" not in properties
+    assert "run_as_fully_detached" not in properties
 
 
 def test_trim_bash_output_short_unchanged() -> None:
@@ -226,11 +233,11 @@ async def test_run_captures_stderr(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_run_background_returns_pid(tmp_path: Path) -> None:
+async def test_run_as_fully_detached_returns_pid(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
-        result = await b.run({"command": "sleep 0.01", "run_in_background": True})
+        result = await b.run({"command": "sleep 0.01", "run_as_fully_detached": True})
     assert "background" in result.content
     assert "pid=" in result.content
 

@@ -453,7 +453,7 @@ def format_tasks(agent: Agent) -> str:
                 )
             )
             lines.append(
-                f"    bg: {job.queue_id:<10s}  {job.tool_name:<16s}  "
+                f"    bg: {label}/{job.queue_id:<10s}  {job.tool_name:<16s}  "
                 f"{phase:<10s}  {now - job.started:.0f}s"
             )
     header = (

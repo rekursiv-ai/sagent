@@ -27,8 +27,10 @@ from sagent.types.runtime import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
+    ModelServiceSuspended,
     ModelSwitchRejected,
     RuntimeEvent,
+    ServiceErrorSnapshot,
     ToolCall,
     ToolLabel,
     ToolResult,
@@ -197,6 +199,35 @@ def test_model_response_thinking_can_be_hidden() -> None:
     obs = make_render_observer(p, show_thinking=lambda: False)
     obs(ModelResponseThinking(text="hmm"))
     assert p.thinkings == []
+
+
+def test_model_service_suspended_flushes_stream_and_renders_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponsePartial(text="pending"))
+
+    obs(
+        ModelServiceSuspended(
+            provider="OpenAISubscription",
+            auth="credentials",
+            account="default",
+            model_id="gpt-5.5",
+            retry_at=1_800_000_000.0,
+            delay_sec=120.0,
+            server_supplied=True,
+            error=ServiceErrorSnapshot(
+                type_name="RateLimitError",
+                message="limited",
+                status=429,
+            ),
+        )
+    )
+
+    assert p.markdowns == ["pending"]
+    assert len(p.dim_lines) == 1
+    assert "model service suspended" in p.dim_lines[0]
+    assert "rate-limited" in p.dim_lines[0]
+    assert "resumes at" in p.dim_lines[0]
 
 
 def test_tool_label_flushes_stream() -> None:
@@ -408,6 +439,31 @@ def test_child_event_thinking_emits_block() -> None:
     assert any(isinstance(i, ModelResponseThinking) for i in items)
 
 
+def test_child_event_model_service_suspended_emits_block() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    suspended = ModelServiceSuspended(
+        provider="OpenAISubscription",
+        auth="credentials",
+        account="default",
+        model_id="gpt-5.5",
+        retry_at=1_800_000_000.0,
+        delay_sec=120.0,
+        server_supplied=True,
+        error=ServiceErrorSnapshot(
+            type_name="RateLimitError",
+            message="limited",
+            status=429,
+        ),
+    )
+
+    obs(ChildEvent(label="Agent_0", inner=suspended))
+
+    label, items = p.child_blocks[0]
+    assert label == "Agent_0"
+    assert items == [suspended]
+
+
 def test_child_event_user_message_emits_block() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)
@@ -474,6 +530,8 @@ def test_help_text_contains_core_commands() -> None:
     assert "/quit" in HELP_TEXT
     assert "/exit" in HELP_TEXT
     assert "/clear" in HELP_TEXT
+    assert "/send" in HELP_TEXT
+    assert "glob" in HELP_TEXT
 
 
 def test_help_text_documents_recompact_as_compact_alias() -> None:

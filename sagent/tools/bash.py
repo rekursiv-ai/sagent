@@ -122,10 +122,6 @@ class Bash:
                         " in active voice."
                     ),
                 },
-                "run_in_background": {
-                    "type": "boolean",
-                    "description": "Set to true to run this command in the background.",
-                },
             },
             "required": ["command"],
         }
@@ -214,11 +210,14 @@ class Bash:
         """
         command = str(args.get("command", ""))
         timeout = int_val(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
-        run_in_background = bool_val(args.get("run_in_background"), False)
+        run_as_fully_detached = bool_val(
+            args.get("run_as_fully_detached"),
+            False,
+        )
         state = get_tool_state()
         _ensure_valid_cwd(state)
-        if run_in_background:
-            text = _run_background(command, state=state)
+        if run_as_fully_detached:
+            text = _run_as_fully_detached(command, state=state)
         else:
             timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
             text = await _run_foreground(command, state=state, timeout_s=timeout_s)
@@ -259,8 +258,8 @@ def _ensure_valid_cwd(state: ToolState) -> None:
         )
 
 
-def _run_background(command: str, *, state: ToolState) -> str:
-    """Spawn a detached background process."""
+def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
+    """Spawn an unmanaged detached background process."""
     proc = subprocess.Popen(  # noqa: S603 -- trusted fixed argv, not user input
         ["/bin/bash", "-c", command],
         cwd=state.bash_cwd,
@@ -273,7 +272,7 @@ def _run_background(command: str, *, state: ToolState) -> str:
     )
     _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
     _BACKGROUND_PROCESSES.append(proc)
-    logger.info("Background process started: pid=%d", proc.pid)
+    logger.info("Fully detached process started: pid=%d", proc.pid)
     return f"(running in background, pid={proc.pid})"
 
 

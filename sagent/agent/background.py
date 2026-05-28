@@ -65,7 +65,10 @@ class BackgroundTaskEntry:
     """Display name surfaced by ``BackgroundTask list``."""
 
     queue_id: str
-    """Stable identifier for cancel / foreground operations."""
+    """Human-facing identifier for cancel / foreground operations."""
+
+    call_id: str = ""
+    """Provider/runtime call id, when distinct from ``queue_id``."""
 
     started: float
     """Wall-clock seconds when the task began."""
@@ -78,6 +81,12 @@ class BackgroundTaskEntry:
 
     kind: Literal["tool", "persistent_subagent", "detached"] = "tool"
     """Dispatch hint for shutdown semantics."""
+
+    persistent_run_id: str = ""
+    """Lifecycle run id for persistent subagents."""
+
+    notify_on_asleep: bool = True
+    """Whether persistent subagent idle pings are enabled."""
 
 
 _BG_FIELDS: JSON = json_freeze(
