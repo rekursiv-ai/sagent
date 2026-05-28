@@ -63,6 +63,7 @@ from sagent.types.tape import (
     TapeEvent,
     TapeRecord,
     TapeRef,
+    full_tape_mask,
 )
 
 
@@ -768,7 +769,7 @@ def append_context_repair(
         raise ValueError("cannot repair an empty tape")
     repair = ContextSplice(
         ref=_next_tape_ref(tape),
-        mask=((tape[0].ref, tape[-1].ref),),
+        mask=full_tape_mask(tape),
         insert_after=None,
         payload=tuple(payload),
         strategy=strategy,
@@ -1446,7 +1447,7 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
         *tape,
         ContextSplice(
             ref=TapeRef(session_id=session_id, ordinal=next_ordinal),
-            mask=((tape[0].ref, tape[-1].ref),),
+            mask=full_tape_mask(tape),
             insert_after=None,
             payload=_coalesce_adjacent_users(repaired),
             strategy="orphan_tool_result_repair",

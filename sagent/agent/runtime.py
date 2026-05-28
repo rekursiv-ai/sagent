@@ -278,6 +278,7 @@ from sagent.types.tape import (
     TapeEvent,
     TapeRecord,
     TapeRef,
+    full_tape_mask,
     mask_contains_ref,
     mask_ranges_overlap,
 )
@@ -1030,14 +1031,8 @@ class AgentRuntime:
             self._tape_by_ref[ref] = record
             self._clear_detached_anchors()
             return ref
-        refs = [record.ref for record in self.tape]
         ref = self.append_splice(
-            mask=(
-                (
-                    min(refs, key=lambda tape_ref: tape_ref.ordinal),
-                    max(refs, key=lambda tape_ref: tape_ref.ordinal),
-                ),
-            ),
+            mask=full_tape_mask(self.tape),
             insert_after=None,
             payload=(),
             strategy="clear",
@@ -1934,24 +1929,8 @@ class AgentRuntime:
         )
         if not self.tape:
             return
-        # Mask covers every record on the tape so far, partitioned by
-        # session_id. A resumed session can carry tape refs from a
-        # different namespace (legacy ``""``, an earlier persisted
-        # ``session_id``, and the current one). The mask validator
-        # rejects single ranges that span session_ids, so emit one
-        # disjoint range per session_id that actually appears.
-        per_session: dict[str, list[TapeRef]] = {}
-        for record in self.tape:
-            per_session.setdefault(record.ref.session_id, []).append(record.ref)
-        mask = tuple(
-            (
-                min(refs, key=lambda r: r.ordinal),
-                max(refs, key=lambda r: r.ordinal),
-            )
-            for refs in per_session.values()
-        )
         self.append_splice(
-            mask=mask,
+            mask=full_tape_mask(self.tape),
             insert_after=None,
             payload=tuple(sanitized),
             strategy="context_rescue",

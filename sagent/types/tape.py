@@ -53,6 +53,7 @@ records.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 
 from sagent.types.runtime import (
@@ -75,6 +76,7 @@ __all__ = [
     "TapeEvent",
     "TapeRecord",
     "TapeRef",
+    "full_tape_mask",
     "mask_contains_ref",
     "mask_ranges_overlap",
 ]
@@ -247,6 +249,38 @@ class ContextSplice:
 def mask_contains_ref(mask: tuple[tuple[TapeRef, TapeRef], ...], ref: TapeRef) -> bool:
     """Return true iff ``mask`` covers ``ref``'s full tape identity."""
     return any(_range_contains_ref(r_from, r_to, ref) for r_from, r_to in mask)
+
+
+def full_tape_mask(
+    records: Sequence[ReferrableTapeEvent | ContextSplice],
+) -> tuple[tuple[TapeRef, TapeRef], ...]:
+    """Build a mask covering every record on ``records``, partitioned by session.
+
+    A barrier splice that absorbs the entire current tape needs one
+    ``(from, to)`` range per ``session_id`` that appears. A single
+    range spanning two session namespaces fails
+    :func:`_validate_mask_disjoint`, which is what wedges resumed
+    sessions whose tape carries refs from a legacy ``""`` namespace
+    plus a later persisted id.
+
+    Args:
+      records: Tape records to fully cover.
+
+    Returns:
+      mask: One disjoint range per distinct ``session_id``; empty when
+          ``records`` is empty.
+
+    """
+    per_session: dict[str, list[TapeRef]] = {}
+    for record in records:
+        per_session.setdefault(record.ref.session_id, []).append(record.ref)
+    return tuple(
+        (
+            min(refs, key=lambda r: r.ordinal),
+            max(refs, key=lambda r: r.ordinal),
+        )
+        for refs in per_session.values()
+    )
 
 
 def mask_ranges_overlap(
