@@ -455,6 +455,87 @@ async def test_halt_cancels_model_waits_for_user() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -> None:
+    """Halt consumes already-buffered mid-stream input instead of waiting again."""
+    model_started = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class BlockingModel:
+        responses: list[AssistantMessage] = field(default_factory=list)
+        _i: int = field(default=0, init=False)
+
+        async def stream(
+            self,
+            history: list[ModelContextEvent],
+            system: str,
+            tools: list[agent_runtime.Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_thinking
+            idx = self._i
+            self._i += 1
+            if idx == 0:
+                model_started.set()
+                await asyncio.sleep(10.0)
+            msg = self.responses[idx]
+            if msg.text:
+                for ch in msg.text:
+                    on_text(ch)
+            return msg
+
+    model = BlockingModel(
+        responses=[
+            AssistantMessage(text="cancelled"),
+            AssistantMessage(text="answered redirect"),
+        ]
+    )
+    agent = agent_runtime.AgentRuntime(model=model)
+    collector = EventCollector()
+    agent.observers.append(collector)
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def redirect_then_halt() -> None:
+        await model_started.wait()
+        agent.inbox.push_back(UserMessage(text="what is happening?"))
+        await wait_until(lambda: len(agent.pending_mid_stream()) == 1)
+        agent.inbox.push_back(Halt())
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        redirect_then_halt(),
+    )
+
+    user_texts = [
+        m.text for m in agent.context().messages if isinstance(m, UserMessage)
+    ]
+    assert user_texts == ["go\n\nwhat is happening?"]
+    assert _assistant_texts(agent) == ["answered redirect"]
+    assert collector.has(ModelResponseCancelled)
+
+
+@pytest.mark.asyncio
+async def test_model_error_with_pending_midstream_input_does_not_wait_again() -> None:
+    agent, collector = make_agent(
+        [],
+        fail_on_call=0,
+    )
+    agent._mid_stream_queue.append(UserMessage(text="what happened?"))
+    agent.inbox.push_back(UserMessage(text="start"))
+
+    await run_with_quit(agent, timeout_sec=1.0)
+
+    user_texts = [
+        m.text for m in agent.context().messages if isinstance(m, UserMessage)
+    ]
+    assert user_texts == [
+        "start\n\n[Error: RuntimeError: model exploded]\n\nwhat happened?",
+    ]
+    assert collector.has(ModelResponseError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_halt_publishes_model_response_cancelled_immediately() -> None:
     """``ModelResponseCancelled`` must fire on Halt, BEFORE next UserMessage.
 

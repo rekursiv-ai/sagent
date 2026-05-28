@@ -26,6 +26,7 @@ from sagent.repl.input_pane import (
     render_input_pane,
     spawn_repl_pump,
 )
+from sagent.repl.input_queues import InputQueues
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.slash import (
     Clear as SlashClear,
@@ -600,7 +601,7 @@ def _as_real_agent(a: _FakeAgent) -> _RealAgent:
 
 def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
     """Empty ``queued_input`` renders only the ``> `` prompt token."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), [])
+    fp = render_input_pane(_as_real_agent(_FakeAgent()), InputQueues())
     assert isinstance(fp, FormattedText)
     assert list(fp) == [("class:input_pane", "> ")]
 
@@ -624,7 +625,7 @@ def test_render_input_pane_shows_mid_stream_queue() -> None:
         UserMessage(text="tuttle"),
         UserMessage(text="lawnmower"),
     ]
-    fp = render_input_pane(_as_real_agent(fake), [])
+    fp = render_input_pane(_as_real_agent(fake), InputQueues())
     # ``FormattedText`` entries are 2- or 3-tuples (the 3rd is an
     # optional mouse handler). Index-access to stay shape-agnostic.
     rendered = "".join(t[1] for t in fp)
@@ -645,27 +646,45 @@ def test_render_input_pane_shows_mid_stream_queue() -> None:
 
 def test_render_input_pane_single_block_renders_full_text() -> None:
     """Single staged block renders verbatim above the prompt."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["hello world"])
+    fp = render_input_pane(
+        _as_real_agent(_FakeAgent()), InputQueues(deferred=["hello world"])
+    )
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "hello world")
+    assert parts[0] == ("class:queued_input_pane", "deferred: hello world")
     assert parts[1] == ("", "\n")
     assert parts[2] == ("class:input_pane", "> ")
 
 
+def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
+    fake = _FakeAgent()
+    fake.runtime._mid_stream_queue = [UserMessage(text="already sent")]
+    fp = render_input_pane(_as_real_agent(fake), InputQueues(deferred=["tab staged"]))
+    rendered = "".join(t[1] for t in fp)
+    assert "deferred: tab staged" in rendered
+    assert "pending: already sent" in rendered
+
+
 def test_render_input_pane_multiple_blocks_join_with_double_newline() -> None:
     r"""Multiple staged blocks render joined by ``\\n\\n``."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["a", "b", "c"])
+    fp = render_input_pane(
+        _as_real_agent(_FakeAgent()), InputQueues(deferred=["a", "b", "c"])
+    )
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "a\n\nb\n\nc")
+    assert parts[0] == (
+        "class:queued_input_pane",
+        "deferred: a\n\ndeferred: b\n\ndeferred: c",
+    )
     assert parts[1] == ("", "\n")
     assert parts[2] == ("class:input_pane", "> ")
 
 
 def test_render_input_pane_preserves_multi_line_block_content() -> None:
     """Internal newlines in a block are preserved verbatim (no collapse)."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), ["line1\nline2"])
+    fp = render_input_pane(
+        _as_real_agent(_FakeAgent()), InputQueues(deferred=["line1\nline2"])
+    )
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "line1\nline2")
+    assert parts[0] == ("class:queued_input_pane", "deferred: line1\nline2")
 
 
 def test_next_line_returns_typed_text() -> None:
@@ -676,7 +695,7 @@ def test_next_line_returns_typed_text() -> None:
         return "hello"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queued_input=[])
+    src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
     assert line == "hello"
 
@@ -690,7 +709,7 @@ def test_next_line_disables_prompt_toolkit_exception_pause() -> None:
         return "hello"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queued_input=[])
+    src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
 
     assert line == "hello"
@@ -705,7 +724,7 @@ def test_next_line_quit_returns_none() -> None:
         return "/quit"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queued_input=[])
+    src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
     assert line is None
 
@@ -718,7 +737,7 @@ def test_next_line_eof_returns_none() -> None:
         raise EOFError
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queued_input=[])
+    src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
     assert line is None
 
@@ -731,7 +750,7 @@ def test_next_line_keyboard_interrupt_returns_none() -> None:
         raise KeyboardInterrupt
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queued_input=[])
+    src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
     assert line is None
 
@@ -745,12 +764,12 @@ def test_quit_surfaces_queued_input_preview() -> None:
 
     session.prompt_async = _prompt_async
     console = MagicMock()
-    queued_input = ["queued line"]
-    src = PromptToolkitInputSource(session, queued_input=queued_input, console=console)
+    queues = InputQueues(deferred=["queued line"])
+    src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line is None
     console.print.assert_called_once()
-    assert queued_input == []
+    assert not queues.has_any()
 
 
 def test_quit_without_console_swallows_preview() -> None:
@@ -761,12 +780,12 @@ def test_quit_without_console_swallows_preview() -> None:
         return "/quit"
 
     session.prompt_async = _prompt_async
-    queued_input = ["queued"]
-    src = PromptToolkitInputSource(session, queued_input=queued_input, console=None)
+    queues = InputQueues(deferred=["queued"])
+    src = PromptToolkitInputSource(session, queues=queues, console=None)
     line = asyncio.run(src.next_line())
     assert line is None
     # buffer left alone when there's no console to surface to.
-    assert queued_input == ["queued"]
+    assert queues.deferred == ["queued"]
 
 
 if __name__ == "__main__":

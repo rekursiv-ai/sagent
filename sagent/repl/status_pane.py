@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_WAIT_REASON_THRESHOLD_SEC = 15.0
 
 
 def render_status_pane(agent: Agent) -> str:
@@ -54,20 +55,45 @@ def render_status_pane(agent: Agent) -> str:
     elapsed = activity.elapsed_seconds
     if activity.active:
         elapsed += asyncio.get_running_loop().time() - activity.current_call_start
-    bracket = (
-        f"[{format_elapsed(elapsed)}"
+    metrics = (
+        f"{format_elapsed(elapsed)}"
         f" {format_count(tokens.input_tokens)}↑"
         f" {format_count(output_tokens)}↓"
         f" {format_count(tokens.cache_creation_tokens)}↟"
         f" {format_count(tokens.cache_read_tokens)}↡"
-        f" ${cost:.2f}]"
+        f" ${cost:.2f}"
     )
+    reason = _wait_reason(agent, elapsed) if _has_live_activity(agent) else ""
+    bracket = f"[{metrics}{f'; {reason}' if reason else ''}]"
     if activity.current_compact_start > 0.0:
         live_delta = asyncio.get_running_loop().time() - activity.current_compact_start
         frame = _SPINNER[int(live_delta * 5) % len(_SPINNER)]
-        return f"{frame} [compacting] {bracket}"
+        return f"{frame} {bracket}"
     if activity.active:
         live_delta = asyncio.get_running_loop().time() - activity.current_call_start
         frame = _SPINNER[int(live_delta * 5) % len(_SPINNER)]
         return f"{frame} {bracket}"
     return bracket
+
+
+def _has_live_activity(agent: Agent) -> bool:
+    return agent.activity.active or agent.activity.current_compact_start > 0.0
+
+
+def _wait_reason(agent: Agent, elapsed: float) -> str:
+    runtime = agent.runtime
+    now = asyncio.get_running_loop().time()
+    suspended_until = getattr(runtime, "service_suspended_until", None)
+    if isinstance(suspended_until, float) and suspended_until > now:
+        return f"retrying in {format_elapsed(suspended_until - now)}."
+    if getattr(runtime.inbox, "gate_armed", False):
+        return "waiting for input."
+    if agent.activity.current_compact_start > 0.0:
+        return "compacting."
+    if not agent.activity.active:
+        return ""
+    if elapsed < _WAIT_REASON_THRESHOLD_SEC:
+        return ""
+    if runtime.running_tools or runtime.cohort:
+        return "waiting on tools."
+    return "waiting on model."

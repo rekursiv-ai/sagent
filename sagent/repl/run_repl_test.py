@@ -18,6 +18,7 @@ from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.lib import last_models
 from sagent.providers import Google
+from sagent.repl.input_queues import InputQueues
 from sagent.repl.render import (
     RecordingPrinter,
     make_render_observer,
@@ -30,7 +31,7 @@ from sagent.repl.run_repl import (
     do_switch_model,
     do_switch_thinking,
     format_tasks,
-    make_queued_input_committer,
+    make_input_queue_committer,
     run_repl,
 )
 from sagent.types.model import ModelSpec
@@ -225,6 +226,11 @@ class _FakeInbox:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
+
+
+@dataclass(slots=True, kw_only=True)
+class _RuntimeHolder:
+    runtime: agent_runtime.AgentRuntime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -726,13 +732,14 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 
 
 @pytest.mark.asyncio
-async def test_make_queued_input_committer_pushes_user_queued_on_model_idle() -> None:
+async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> None:
     """``ModelIdle`` with non-empty queue → coalesced ``UserQueuedMessage`` pushed; queue cleared."""
-    queued_input = ["elephant", "banana", "chair"]
+    queues = InputQueues(deferred=["elephant", "banana", "chair"])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
-    observer = make_queued_input_committer(runtime, queued_input)
+    holder = _RuntimeHolder(runtime=runtime)
+    observer = make_input_queue_committer(cast(Agent, holder), queues)
     observer(ModelIdle())
-    assert queued_input == []
+    assert not queues.has_any()
     pushed = await runtime.inbox.drain()
     assert len(pushed) == 1
     item = pushed[0]
@@ -740,22 +747,24 @@ async def test_make_queued_input_committer_pushes_user_queued_on_model_idle() ->
     assert item.text == "elephant\n\nbanana\n\nchair"
 
 
-def test_make_queued_input_committer_ignores_non_idle_events() -> None:
+def test_make_input_queue_committer_ignores_non_idle_events() -> None:
     """Non-``ModelIdle`` events leave ``queued_input`` and the inbox untouched."""
-    queued_input = ["elephant"]
+    queues = InputQueues(deferred=["elephant"])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
-    observer = make_queued_input_committer(runtime, queued_input)
+    holder = _RuntimeHolder(runtime=runtime)
+    observer = make_input_queue_committer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
-    assert queued_input == ["elephant"]
+    assert queues.deferred == ["elephant"]
     assert runtime.inbox._queue.empty()
 
 
-def test_make_queued_input_committer_ignores_idle_when_queue_empty() -> None:
+def test_make_input_queue_committer_ignores_idle_when_empty() -> None:
     """``ModelIdle`` with an empty queue is a no-op (no spurious push)."""
-    queued_input: list[str] = []
+    queues = InputQueues()
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
-    observer = make_queued_input_committer(runtime, queued_input)
+    holder = _RuntimeHolder(runtime=runtime)
+    observer = make_input_queue_committer(cast(Agent, holder), queues)
     observer(ModelIdle())
     assert runtime.inbox._queue.empty()
 
@@ -763,13 +772,14 @@ def test_make_queued_input_committer_ignores_idle_when_queue_empty() -> None:
 @pytest.mark.asyncio
 async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
     """Resume starts already idle, so emit one idle edge for queue flushers."""
-    queued_input = ["were we implementing issue 25?"]
+    queues = InputQueues(deferred=["were we implementing issue 25?"])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
-    runtime.observers.append(make_queued_input_committer(runtime, queued_input))
+    holder = _RuntimeHolder(runtime=runtime)
+    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
 
     _publish_startup_idle_if_settled(runtime)
 
-    assert queued_input == []
+    assert not queues.has_any()
     pushed = await runtime.inbox.drain()
     assert len(pushed) == 1
     assert isinstance(pushed[0], UserQueuedMessage)
@@ -778,14 +788,15 @@ async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
 
 def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
     """Startup idle pulse must not mask a pending model-triggering turn."""
-    queued_input = ["for later"]
+    queues = InputQueues(deferred=["for later"])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    holder = _RuntimeHolder(runtime=runtime)
     runtime.append_history(UserMessage(text="answer this first"))
-    runtime.observers.append(make_queued_input_committer(runtime, queued_input))
+    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
 
     _publish_startup_idle_if_settled(runtime)
 
-    assert queued_input == ["for later"]
+    assert queues.deferred == ["for later"]
     assert runtime.inbox._queue.empty()
 
 
@@ -821,9 +832,13 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     queue back as ``UserQueuedMessage``. The runtime then drains it
     at the next gate-section pass and fires a fresh round.
     """
-    queued_input = ["elephant", "banana", "chair"]
+    queues = InputQueues(deferred=["elephant", "banana", "chair"])
     agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="committed"))
-    agent.observers.append(make_queued_input_committer(agent, queued_input))
+
+    class _Holder:
+        runtime = agent
+
+    agent.observers.append(make_input_queue_committer(cast(Agent, _Holder()), queues))
 
     second_round = asyncio.Event()
     rounds = 0
@@ -843,7 +858,7 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     agent.inbox.push_back(Quit())
     await task
 
-    assert queued_input == [], f"expected queued_input cleared, got {queued_input}"
+    assert not queues.has_any()
     queued_texts = [
         m.text for m in agent.context().messages if isinstance(m, UserMessage)
     ]

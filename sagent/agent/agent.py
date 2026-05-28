@@ -909,6 +909,7 @@ class Agent:
     ) -> None:
         """Publish a durable event for a recoverable model-service block."""
         spec = self.model_spec
+        self.runtime.service_suspended_until = retry_at
         self.runtime.publish(
             types.runtime.ModelServiceSuspended(
                 provider=spec.provider if spec else type(self.model).__name__,

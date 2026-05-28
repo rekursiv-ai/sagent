@@ -119,6 +119,7 @@ from rich.text import Text
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.lib.lazy_import import lazy_import
+from sagent.repl.input_queues import InputQueues
 from sagent.repl.slash import (
     QUIT_WORDS,
     Clear as SlashClear,
@@ -471,20 +472,18 @@ class PromptToolkitInputSource(InputSource):
     :func:`render_input_pane` shows the tail and ``Up`` lifts it back.
     """
 
-    queued_input: list[str]
-    """List of texts the user typed while the agent was busy. New input
-    appends; ``Up`` pops the latest; :func:`render_input_pane` previews
-    the tail."""
+    queues: InputQueues
+    """REPL-local urgent/deferred queues."""
 
     def __init__(
         self,
         session: PromptSession[str],
         *,
-        queued_input: list[str],
+        queues: InputQueues,
         console: Console | None = None,
     ) -> None:
         self._session = session
-        self.queued_input = queued_input
+        self.queues = queues
         self._console = console
 
     @override
@@ -503,41 +502,40 @@ class PromptToolkitInputSource(InputSource):
 
     def _surface_queued_input_on_quit(self) -> None:
         """Surface the tail of ``queued_input`` before the loop ends."""
-        if not self.queued_input or self._console is None:
+        if not self.queues.has_any() or self._console is None:
             return
-        tail = self.queued_input[-1]
-        preview = tail.replace("\n", " ")[:80]
+        preview = self.queues.pop_tail_preview().replace("\n", " ")[:80]
         self._console.print(
             Text(f"[discarding queued message: {preview}]", style="dim yellow"),
         )
-        self.queued_input.clear()
+        self.queues.clear()
 
 
-def render_input_pane(agent: Agent, queued_input: list[str]) -> FormattedText:
+def render_input_pane(agent: Agent, queues: InputQueues) -> FormattedText:
     r"""Build the input-pane ``FormattedText``: full queue + prompt sigil.
 
     Renders all pending user content above the ``> `` prompt sigil
     (blocks joined by ``\n\n``). Two buffers contribute:
 
-    - ``queued_input`` -- Tab-staged blocks, REPL-local. Up-arrow can
-      lift these back into the input buffer for editing.
-    - ``agent.runtime._mid_stream_queue`` -- Enter-mid-stream blocks,
-      already committed to the runtime. Shown for visibility ("is my
-      message queued?") but not retractable.
+    - ``queues`` -- REPL-local urgent/deferred blocks. Up-arrow can lift
+      these back into the input buffer for editing.
+    - ``agent.runtime._mid_stream_queue`` -- externally submitted
+      mid-stream blocks, already committed to the runtime. Shown for
+      visibility when present.
 
     Both are pending model consumption; rendering them together gives
     the user one canonical "what's queued" surface.
 
     Args:
       agent: Agent whose runtime ``_mid_stream_queue`` is consulted.
-      queued_input: REPL-local Tab-staging buffer; each entry is one block.
+      queues: REPL-local urgent/deferred input queues.
 
     Returns:
       formatted: The input pane's formatted text.
 
     """
-    blocks: list[str] = list(queued_input)
-    blocks.extend(m.text for m in agent.runtime.pending_mid_stream())
+    blocks = queues.render_blocks()
+    blocks.extend(f"pending: {m.text}" for m in agent.runtime.pending_mid_stream())
     parts: list[tuple[str, str]] = []
     if blocks:
         parts.append(("class:queued_input_pane", "\n\n".join(blocks)))

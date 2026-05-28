@@ -10,8 +10,9 @@ from unittest.mock import MagicMock
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 
 from sagent.agent.agent import Agent
+from sagent.repl.input_queues import InputQueues
 from sagent.repl.keybindings import NavState, build_key_bindings
-from sagent.types.runtime import UserMessage, UserQueuedMessage
+from sagent.types.runtime import UserMessage
 
 
 @dataclass(slots=True, kw_only=True)
@@ -100,13 +101,13 @@ def _fake_event(
 
 def _build(
     agent: _FakeAgent,
-    queued_input: list[str] | None = None,
+    queues: InputQueues | None = None,
     nav: NavState | None = None,
 ) -> KeyBindings:
     """Bind the keybindings against a fake agent; ``Agent`` cast is structural."""
     return build_key_bindings(
         cast(Agent, agent),
-        queued_input if queued_input is not None else [],
+        queues if queues is not None else InputQueues(),
         nav,
     )
 
@@ -118,11 +119,11 @@ def test_enter_text_pushes_user_message_does_not_touch_queued_input() -> None:
     Enter is a direct-dispatch path that bypasses the queue entirely.
     """
     agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("hello")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == [], "Enter must not touch the Tab-staging queue"
+    assert not queues.has_any(), "Enter must not touch the Tab-staging queue"
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
     assert isinstance(pushed, UserMessage)
@@ -130,29 +131,25 @@ def test_enter_text_pushes_user_message_does_not_touch_queued_input() -> None:
     buf.reset.assert_called_once()
 
 
-def test_enter_text_during_model_call_does_not_touch_queued_input() -> None:
-    """Busy-state Enter: dispatch ``UserMessage``, queue still belongs to Tab."""
+def test_enter_text_during_model_call_stages_urgent_input() -> None:
     agent = _busy_agent()
-    queued_input: list[str] = ["staged-by-tab"]
-    kb = _build(agent, queued_input)
+    queues = InputQueues(deferred=["staged-by-tab"])
+    kb = _build(agent, queues)
     buf = _fake_buf("first msg")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    # Tab-staged content untouched.
-    assert queued_input == ["staged-by-tab"]
-    assert len(agent.runtime.inbox.items) == 1
-    pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserMessage)
-    assert pushed.text == "first msg"
+    assert queues.urgent == ["first msg"]
+    assert queues.deferred == ["staged-by-tab"]
+    assert agent.runtime.inbox.items == []
 
 
 def test_enter_text_during_tool_cohort_pushes_user_message_immediately() -> None:
     """Cohort-active: text Enter pushes ``UserMessage`` to preempt."""
     agent = _cohort_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("during tools")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
+    assert not queues.has_any()
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
     assert isinstance(pushed, UserMessage)
@@ -165,34 +162,34 @@ def test_enter_on_empty_buf_is_noop() -> None:
     queue to commit on empty Enter.
     """
     agent = _idle_agent()
-    queued_input: list[str] = ["leftover"]
-    kb = _build(agent, queued_input)
+    queues = InputQueues(deferred=["leftover"])
+    kb = _build(agent, queues)
     buf = _fake_buf("")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["leftover"]
+    assert queues.deferred == ["leftover"]
     assert agent.runtime.inbox.items == []
 
 
 def test_enter_routes_slash_command_through_pump_when_busy() -> None:
     """Slash always routes through PT so the pump's dispatcher sees it."""
     agent = _busy_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("/model")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     buf.validate_and_handle.assert_called_once()
     assert agent.runtime.inbox.items == []
-    assert queued_input == []
+    assert not queues.has_any()
 
 
 def test_enter_whitespace_discards_buffer() -> None:
     """Whitespace-only Enter resets the buffer; nothing dispatches."""
     agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("   ")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
+    assert not queues.has_any()
     assert agent.runtime.inbox.items == []
     buf.reset.assert_called_once()
 
@@ -205,54 +202,74 @@ def test_enter_with_trailing_backslash_inserts_newline_no_dispatch() -> None:
     the new buffer so subsequent typing continues on the new line.
     """
     agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("first line\\")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "first line\n"
     assert buf.cursor_position == len("first line\n")
-    assert queued_input == []
+    assert not queues.has_any()
     assert agent.runtime.inbox.items == []
 
 
-def test_tab_idle_dispatches_queued_message() -> None:
-    """Tab on an idle agent dispatches immediately; no future idle edge exists."""
+def test_tab_idle_stages_deferred_input_until_model_idle_edge() -> None:
     agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("for later")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
-    assert len(agent.runtime.inbox.items) == 1
-    pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserQueuedMessage)
-    assert pushed.text == "for later"
+    assert queues.deferred == ["for later"]
+    assert agent.runtime.inbox.items == []
 
 
 def test_tab_busy_stages_locally_does_not_dispatch() -> None:
     """Tab during active work stays local so Up-arrow can retract it."""
     agent = _busy_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("for later")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["for later"]
+    assert queues.deferred == ["for later"]
     assert agent.runtime.inbox.items == []
 
 
-def test_tab_awaiting_user_dispatches_user_message() -> None:
-    """Tab after an interrupt satisfies the runtime's fresh-user gate."""
+def test_tab_awaiting_user_still_stages_deferred_input() -> None:
     agent = _idle_agent()
     agent.runtime.inbox.gate_armed = True
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("after interrupt")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
+    assert queues.deferred == ["after interrupt"]
+    assert agent.runtime.inbox.items == []
+
+
+def test_enter_awaiting_user_dispatches_without_deferred_queue() -> None:
+    agent = _idle_agent()
+    agent.runtime.inbox.gate_armed = True
+    queues = InputQueues(deferred=["visible staged"])
+    kb = _build(agent, queues)
+    buf = _fake_buf("resume")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert queues.deferred == ["visible staged"]
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
     assert isinstance(pushed, UserMessage)
-    assert pushed.text == "after interrupt"
+    assert pushed.text == "resume"
+
+
+def test_enter_awaiting_user_dispatches_even_if_work_is_stale() -> None:
+    agent = _busy_agent()
+    agent.runtime.inbox.gate_armed = True
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    buf = _fake_buf("resume")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert not queues.has_any()
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "resume"
 
 
 def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
@@ -265,21 +282,21 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
     walked through navigation without losing anything.
     """
     agent = _busy_agent()
-    queued_input: list[str] = []
+    queues = InputQueues()
     nav = NavState()
-    kb = _build(agent, queued_input, nav)
+    kb = _build(agent, queues, nav)
 
     # Share one buffer across keystrokes; the handlers mutate buf.text.
     buf = _fake_buf("hello")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["hello"]
+    assert queues.deferred == ["hello"]
     assert agent.runtime.inbox.items == []
     # Tab clears the buffer in the no-nav path.
     buf.text = ""
 
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "hello"
-    assert queued_input == []  # dequeued into buffer
+    assert not queues.has_any()  # dequeued into buffer
     assert nav.cursor == 1
     assert nav.snapshot_queue == ("hello",)
     assert nav.snapshot_input == ""
@@ -288,7 +305,7 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
     # Enter at cursor==1 (Case 1, edit-mode): the lifted queue content
     # is replacing the original queue. No doubling. Snapshot input
     # (empty) is restored to the buffer. No runtime push.
-    assert queued_input == ["hello"]
+    assert queues.deferred == ["hello"]
     assert buf.text == ""
     assert nav.cursor == 0
     assert agent.runtime.inbox.items == []
@@ -297,11 +314,11 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
 def test_tab_on_empty_buf_is_noop() -> None:
     """Tab with empty buffer does nothing; queue untouched."""
     agent = _busy_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == []
+    assert not queues.has_any()
     assert agent.runtime.inbox.items == []
 
 
@@ -314,24 +331,24 @@ def test_down_on_non_empty_buf_clears_input_without_staging() -> None:
     the "Up into history, then Down dispatches it" regression.
     """
     agent = _idle_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("hello")
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
     buf.reset.assert_called_once()
-    assert queued_input == []
+    assert not queues.has_any()
     assert agent.runtime.inbox.items == []
 
 
 def test_down_on_empty_buf_is_noop_reserved_for_future_submenu() -> None:
     """Down with empty input does nothing; queue untouched."""
     agent = _idle_agent()
-    queued_input: list[str] = ["staged"]
-    kb = _build(agent, queued_input)
+    queues = InputQueues(deferred=["staged"])
+    kb = _build(agent, queues)
     buf = _fake_buf("")
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
     buf.reset.assert_not_called()
-    assert queued_input == ["staged"]
+    assert queues.deferred == ["staged"]
     assert agent.runtime.inbox.items == []
 
 
@@ -349,13 +366,13 @@ def test_up_lifts_entire_queue_into_buffer() -> None:
     buffer gets the joined text, snapshot captures the original
     ``(queue, buffer)`` so a final Down can restore.
     """
-    queued_input = ["a", "b", "c"]
+    queues = InputQueues(deferred=["a", "b", "c"])
     nav = NavState()
-    kb = _build(_busy_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("typed")
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "a\n\nb\n\nc"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 1
     assert nav.snapshot_queue == ("a", "b", "c")
     assert nav.snapshot_input == "typed"
@@ -368,7 +385,7 @@ def test_up_walks_history_when_queue_empty() -> None:
     ``history[-1]``; snapshot captures the original input.
     """
     nav = NavState()
-    kb = _build(_idle_agent(), [], nav)
+    kb = _build(_idle_agent(), InputQueues(), nav)
     buf = _fake_buf("typed", history=["old", "newer", "latest"])
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "latest"
@@ -380,7 +397,7 @@ def test_up_walks_history_when_queue_empty() -> None:
 def test_up_with_no_queue_no_history_is_noop() -> None:
     """Up with empty queue + empty history leaves state untouched."""
     nav = NavState()
-    kb = _build(_idle_agent(), [], nav)
+    kb = _build(_idle_agent(), InputQueues(), nav)
     buf = _fake_buf("typed", history=[])
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "typed"
@@ -398,20 +415,20 @@ def test_figure_case_1_round_trip() -> None:
     state at each step.
     """
     nav = NavState()
-    queued_input = ["f"]
+    queues = InputQueues(deferred=["f"])
     history = ["a", "b", "c", "d", "e"]  # oldest-first; history[-1] = "e"
-    kb = _build(_busy_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=history)
 
     # t=0: starting state
     assert buf.text == "g"
-    assert queued_input == ["f"]
+    assert queues.deferred == ["f"]
     assert nav.cursor == 0
 
     # t=1: UP -> dequeue
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "f"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 1
     assert nav.snapshot_queue == ("f",)
     assert nav.snapshot_input == "g"
@@ -419,19 +436,19 @@ def test_figure_case_1_round_trip() -> None:
     # t=2: UP -> walk history[-1] = "e"
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "e"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 2
 
     # t=3: DN -> back to "edit queue" position
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "f"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 1
 
     # t=4: DN -> final restore (queue and buffer back to t=0)
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "g"
-    assert queued_input == ["f"]
+    assert queues.deferred == ["f"]
     assert nav.cursor == 0
     assert nav.snapshot_queue == ()
 
@@ -443,14 +460,14 @@ def test_figure_case_2_round_trip() -> None:
     Round-trip lands exactly on t=0 (per user confirmation).
     """
     nav = NavState()
-    queued_input: list[str] = []
+    queues = InputQueues()
     history = ["a", "b", "c", "d", "e", "f"]  # history[-1] = "f"
-    kb = _build(_idle_agent(), queued_input, nav)
+    kb = _build(_idle_agent(), queues, nav)
     buf = _fake_buf("g", history=history)
 
     # t=0
     assert buf.text == "g"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 0
 
     # t=1: UP -> history[-1] = "f"
@@ -473,7 +490,7 @@ def test_figure_case_2_round_trip() -> None:
     # t=4: DN -> final restore
     _handler(kb, ("down",))(cast(KeyPressEvent, _fake_event(buf)))
     assert buf.text == "g"
-    assert queued_input == []
+    assert not queues.has_any()
     assert nav.cursor == 0
 
 
@@ -487,9 +504,9 @@ def test_enter_after_navigation_commits_buffer_and_restores() -> None:
     "scrolled past" rather than edited the queue.
     """
     nav = NavState()
-    queued_input = ["original"]
+    queues = InputQueues(deferred=["original"])
     history = ["older", "older2", "latest"]
-    kb = _build(_busy_agent(), queued_input, nav)
+    kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("typed-before-up", history=history)
 
     # Up x2: dequeue then walk to history[-1].
@@ -500,7 +517,7 @@ def test_enter_after_navigation_commits_buffer_and_restores() -> None:
 
     # Enter: commit "latest" as queued block, restore "typed-before-up".
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["original", "latest"]
+    assert queues.deferred == ["original", "latest"]
     assert buf.text == "typed-before-up"
     assert nav.cursor == 0
 
@@ -509,7 +526,7 @@ def test_enter_at_cursor_zero_still_preempt_dispatches() -> None:
     """No navigation active: Enter pushes ``UserMessage`` (today's behavior)."""
     agent = _idle_agent()
     nav = NavState()
-    kb = _build(agent, [], nav)
+    kb = _build(agent, InputQueues(), nav)
     buf = _fake_buf("hello")
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     assert len(agent.runtime.inbox.items) == 1
@@ -526,9 +543,9 @@ def test_tab_during_navigation_commits_via_navigation_path() -> None:
     """
     agent = _busy_agent()
     nav = NavState()
-    queued_input = ["existing"]
+    queues = InputQueues(deferred=["existing"])
     history = ["latest"]
-    kb = _build(agent, queued_input, nav)
+    kb = _build(agent, queues, nav)
     buf = _fake_buf("draft", history=history)
 
     # Up x2: dequeue queue, then walk to history[-1].
@@ -538,7 +555,7 @@ def test_tab_during_navigation_commits_via_navigation_path() -> None:
 
     # Tab commits + restores draft.
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["existing", "latest"]
+    assert queues.deferred == ["existing", "latest"]
     assert buf.text == "draft"
     assert nav.cursor == 0
     assert agent.runtime.inbox.items == []
@@ -621,6 +638,17 @@ def test_ctrl_c_halts_during_model_call() -> None:
     buf.reset.assert_not_called()
 
 
+def test_ctrl_c_pulls_urgent_queue_into_editor() -> None:
+    agent = _busy_agent()
+    queues = InputQueues(urgent=["what is happening?"])
+    kb = _build(agent, queues)
+    buf = _fake_buf("")
+    _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert agent.halt_calls == 1
+    assert buf.text == "what is happening?"
+    assert not queues.urgent
+
+
 def test_ctrl_c_halts_during_cohort() -> None:
     agent = _cohort_agent()
     kb = _build(agent)
@@ -641,18 +669,18 @@ def test_ctrl_c_idle_clears_buffer() -> None:
 def test_up_arrow_on_tab_staging_lifts_back_truly_retracts() -> None:
     """Up-arrow lifts Tab-staged content back to buffer; runtime untouched."""
     agent = _busy_agent()
-    queued_input: list[str] = []
-    kb = _build(agent, queued_input)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     # Tab "draft" -> stage locally; runtime untouched.
     buf = _fake_buf("draft")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert queued_input == ["draft"]
+    assert queues.deferred == ["draft"]
     assert agent.runtime.inbox.items == []
     # Up-arrow lifts back -- true retract.
     buf2 = _fake_buf("")
     _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf2)))
     assert buf2.text == "draft"
-    assert queued_input == []
+    assert not queues.has_any()
     assert agent.runtime.inbox.items == []
 
 

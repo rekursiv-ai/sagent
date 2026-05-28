@@ -37,7 +37,8 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.types.runtime import UserMessage, UserQueuedMessage
+from sagent.repl.input_queues import InputQueues
+from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
@@ -78,13 +79,13 @@ class NavState:
 
 
 def build_key_bindings(
-    agent: Agent, queued_input: list[str], nav: NavState | None = None
+    agent: Agent, queues: InputQueues, nav: NavState | None = None
 ) -> KeyBindings:
-    """Build the REPL keybindings bound to ``agent``, ``queued_input``, and ``nav``.
+    """Build the REPL keybindings bound to ``agent``, ``queues``, and ``nav``.
 
     Args:
       agent: Agent these key handlers will mutate.
-      queued_input: REPL-local staging buffer for queued blocks.
+      queues: REPL-local urgent/deferred input queues.
       nav: Up/Down navigation state. Created fresh if omitted (for
           callers that don't share state across binding builds).
 
@@ -96,16 +97,16 @@ def build_key_bindings(
         nav = NavState()
     kb = KeyBindings()
     kb.add("enter", filter=~is_done)(
-        functools.partial(_kb_submit, agent, queued_input, nav),
+        functools.partial(_kb_submit, agent, queues, nav),
     )
-    kb.add("tab")(functools.partial(_kb_defer, agent, queued_input, nav))
-    kb.add("down")(functools.partial(_kb_down, queued_input, nav))
+    kb.add("tab")(functools.partial(_kb_defer, agent, queues, nav))
+    kb.add("down")(functools.partial(_kb_down, queues, nav))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("up")(functools.partial(_kb_up, queued_input, nav))
+    kb.add("up")(functools.partial(_kb_up, queues, nav))
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
-    kb.add("c-c")(functools.partial(_kb_ctrl_c, agent))
+    kb.add("c-c")(functools.partial(_kb_ctrl_c, agent, queues))
     kb.add("c-z")(_kb_suspend)
     kb.add("c-_")(_kb_undo)
     kb.add("escape", "z")(_kb_undo)
@@ -113,7 +114,7 @@ def build_key_bindings(
 
 
 def _commit_queued_and_restore(
-    queued_input: list[str], nav: NavState, buf_text: str
+    queues: InputQueues, nav: NavState, buf_text: str
 ) -> str:
     """Commit ``buf_text`` to queue + restore snapshot; return restored buffer.
 
@@ -134,36 +135,19 @@ def _commit_queued_and_restore(
     The snapshot is cleared and the snapshot-input is returned so the
     caller can restore the buffer to the user's pre-navigation typing.
     """
-    queued_input.clear()
-    if nav.cursor == 1 and nav.snapshot_queue:
-        # Case 1, edit-mode: replace queue with the (possibly edited)
-        # lifted content.
-        queued_input.append(buf_text)
-    else:
-        queued_input.extend(nav.snapshot_queue)
-        queued_input.append(buf_text)
+    queues.replace_from_navigation(
+        nav.snapshot_queue,
+        buf_text,
+        edit_mode=nav.cursor == 1 and bool(nav.snapshot_queue),
+    )
     restored = nav.snapshot_input
     nav.end()
     return restored
 
 
-def _flush_deferred_if_ready(agent: Agent, queued_input: list[str]) -> None:
-    """Dispatch deferred input when no active round can produce an idle edge."""
-    if not queued_input:
-        return
-    if agent.runtime.inbox.gate_armed:
-        item = UserMessage(text="\n\n".join(queued_input))
-    elif agent.work is None and not agent.runtime.cohort:
-        item = UserQueuedMessage(text="\n\n".join(queued_input))
-    else:
-        return
-    queued_input.clear()
-    agent.runtime.inbox.push_back(item)
-
-
 def _kb_submit(
     agent: Agent,
-    queued_input: list[str],
+    queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
@@ -198,19 +182,25 @@ def _kb_submit(
         buf.reset()
         return
     if nav.cursor > 0:
-        restored = _commit_queued_and_restore(queued_input, nav, text)
-        _flush_deferred_if_ready(agent, queued_input)
+        restored = _commit_queued_and_restore(queues, nav, text)
         buf.text = restored
         buf.cursor_position = len(buf.text)
         return
+    if (
+        agent.work is not None
+        and not agent.runtime.cohort
+        and not agent.runtime.inbox.gate_armed
+    ):
+        queues.stage_urgent(text)
+    else:
+        agent.runtime.inbox.push_back(UserMessage(text=text))
     buf.append_to_history()
     buf.reset()
-    agent.runtime.inbox.push_back(UserMessage(text=text))
 
 
 def _kb_defer(
     agent: Agent,
-    queued_input: list[str],
+    queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
@@ -231,19 +221,19 @@ def _kb_defer(
     if not text.strip():
         return
     if nav.cursor > 0:
-        restored = _commit_queued_and_restore(queued_input, nav, text)
-        _flush_deferred_if_ready(agent, queued_input)
+        restored = _commit_queued_and_restore(queues, nav, text)
         buf.text = restored
         buf.cursor_position = len(buf.text)
         return
-    queued_input.append(text)
-    _flush_deferred_if_ready(agent, queued_input)
+    queues.stage_deferred(text)
+    if agent.runtime.inbox.gate_armed:
+        queues.commit_urgent(agent)
     buf.append_to_history()
     buf.reset()
 
 
 def _kb_down(
-    queued_input: list[str],
+    queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
@@ -267,8 +257,7 @@ def _kb_down(
     if nav.cursor == 1:
         # Final Down: restore snapshot atomically.
         snapshot_input = nav.snapshot_input
-        queued_input.clear()
-        queued_input.extend(nav.snapshot_queue)
+        queues.restore_from_snapshot(nav.snapshot_queue)
         buf.text = snapshot_input
         buf.cursor_position = len(buf.text)
         nav.end()
@@ -308,7 +297,7 @@ def _history_strings(buf: object) -> list[str]:
 
 
 def _kb_up(
-    queued_input: list[str],
+    queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
@@ -322,14 +311,15 @@ def _kb_up(
     buf = event.current_buffer
     history_strings = _history_strings(buf)
     if nav.cursor == 0:
-        if queued_input:
-            # Case 1: lift queue.
-            nav.begin(queued_input, buf.text)
-            buf.text = "\n\n".join(queued_input)
-            queued_input.clear()
+        restore_blocks = queues.restore_blocks()
+        if restore_blocks:
+            # Case 1: lift queued input.
+            nav.begin(restore_blocks, buf.text)
+            buf.text = "\n\n".join(restore_blocks)
+            queues.clear()
         elif history_strings:
             # Case 2: walk history[-1] in.
-            nav.begin(queued_input, buf.text)
+            nav.begin(restore_blocks, buf.text)
             buf.text = history_strings[-1]
         else:
             # No queue, no history -- nothing to do.
@@ -379,7 +369,7 @@ def _kb_open_editor(event: KeyPressEvent) -> None:
     event.current_buffer.open_in_editor()
 
 
-def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
+def _kb_ctrl_c(agent: Agent, queues: InputQueues, event: KeyPressEvent) -> None:
     """Halt the active turn; never exit the REPL.
 
     Idle path clears the input buffer (standard terminal convention --
@@ -388,6 +378,10 @@ def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
     """
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()
+        if queues.urgent:
+            event.current_buffer.text = "\n\n".join(queues.urgent)
+            event.current_buffer.cursor_position = len(event.current_buffer.text)
+            queues.urgent.clear()
         return
     event.current_buffer.reset()
 

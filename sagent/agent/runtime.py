@@ -787,6 +787,7 @@ class AgentRuntime:
         # use live backoff. Populated by ``Agent.resume`` from the
         # latest persisted suspension event.
         self.resume_retry_at: float | None = None
+        self.service_suspended_until: float | None = None
 
     def _fully_drained(self) -> bool:
         """True iff the agent has no work to do and no gate is armed.
@@ -1249,12 +1250,13 @@ class AgentRuntime:
                             coalesced = self._drain_mid_stream_queue()
                             if coalesced is not None:
                                 self.publish(coalesced)
-                            self.inbox.push_front(
-                                AWAIT_USER,
-                                *items[item_idx + 1 :],
-                            )
-                            awaiting_user = True
-                            break
+                            else:
+                                self.inbox.push_front(
+                                    AWAIT_USER,
+                                    *items[item_idx + 1 :],
+                                )
+                                awaiting_user = True
+                                break
 
                         case Clear():
                             if self.model_call:
@@ -1324,12 +1326,13 @@ class AgentRuntime:
                             if coalesced is not None:
                                 self.publish(coalesced)
                             self.publish(item)
-                            self.inbox.push_front(
-                                AWAIT_USER,
-                                *items[item_idx + 1 :],
-                            )
-                            awaiting_user = True
-                            break
+                            if coalesced is None:
+                                self.inbox.push_front(
+                                    AWAIT_USER,
+                                    *items[item_idx + 1 :],
+                                )
+                                awaiting_user = True
+                                break
 
                         case Kill(call_id=cid):
                             if cid is None:
@@ -1855,6 +1858,12 @@ class AgentRuntime:
 
         """
         return tuple(self._mid_stream_queue)
+
+    def pop_pending_mid_stream(self) -> tuple[UserMessage, ...]:
+        """Remove and return mid-stream user messages awaiting drain."""
+        pending = tuple(self._mid_stream_queue)
+        self._mid_stream_queue.clear()
+        return pending
 
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""
