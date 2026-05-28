@@ -227,9 +227,16 @@ async def test_dispatch_kill_persistent_subagent() -> None:
     child = _persistent_agent()
     child_stub = cast(_StubAgent, child)
     p = RecordingPrinter()
-    with patch(
-        "sagent.repl.input_pane.agent_registry",
-        new={"fix-tools": child},
+    registry = {"fix-tools": child}
+    with (
+        patch(
+            "sagent.repl.input_pane.agent_registry",
+            new=registry,
+        ),
+        patch(
+            "sagent.tools.background_task.agent_registry",
+            new=registry,
+        ),
     ):
         _ = await _dispatch(a, SlashKill(target="fix-tools"), p)
     assert child_stub.shutdown_calls == [True]

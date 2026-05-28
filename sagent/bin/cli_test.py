@@ -39,6 +39,8 @@ from sagent.types.runtime import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
+    ModelServiceSuspended,
+    ServiceErrorSnapshot,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -289,6 +291,38 @@ def test_event_to_json_record_model_error() -> None:
     assert rec == {
         "descriptor": "application/x-error",
         "content": "RuntimeError: creds",
+    }
+
+
+def test_event_to_json_record_model_service_suspended() -> None:
+    rec = _event_to_json_record(
+        ModelServiceSuspended(
+            provider="anthropic",
+            auth="key",
+            account="default",
+            model_id="claude-test",
+            retry_at=12345.0,
+            delay_sec=60.0,
+            server_supplied=True,
+            error=ServiceErrorSnapshot(
+                type_name="RateLimitError", message="429", status=429
+            ),
+        )
+    )
+    assert rec == {
+        "descriptor": "application/x-model-service-suspended",
+        "provider": "anthropic",
+        "auth": "key",
+        "account": "default",
+        "model_id": "claude-test",
+        "retry_at": 12345.0,
+        "delay_sec": 60.0,
+        "server_supplied": True,
+        "error": {
+            "type_name": "RateLimitError",
+            "message": "429",
+            "status": 429,
+        },
     }
 
 

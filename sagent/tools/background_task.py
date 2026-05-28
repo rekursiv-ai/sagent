@@ -50,6 +50,7 @@ agent_lib = lazy_import("sagent.agent")
 __all__ = [
     "BackgroundTask",
     "BackgroundTaskEntry",
+    "cancel_persistent_subagent",
     "shutdown_persistent_subagent",
 ]
 
@@ -195,13 +196,17 @@ class BackgroundTask:
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
         if job.kind == "persistent_subagent":
-            shutdown_persistent_subagent(agent, job)
+            # Strip the ``persistent:`` prefix to recover the child's label;
+            # ``cancel_persistent_subagent`` owns the full graceful path
+            # (lifecycle write + child shutdown + cancel_background).
+            label = job.queue_id.removeprefix("persistent:")
+            _ = cancel_persistent_subagent(agent, label)
         else:
             _ = job.task.cancel()
-        # Explicit-bg entries live in the agent's bg registry; cohort-
-        # detached entries land in ``runtime.detached`` and clean
-        # themselves up when the task completes.
-        agent.cancel_background(job_id)
+            # Explicit-bg entries live in the agent's bg registry; cohort-
+            # detached entries land in ``runtime.detached`` and clean
+            # themselves up when the task completes.
+            agent.cancel_background(job_id)
         return ToolResult(
             call_id="",
             content=f"Cancelled: {job.tool_name} ({job_id})",
@@ -274,6 +279,39 @@ def shutdown_persistent_subagent(agent: AgentLike, job: BackgroundTaskEntry) -> 
             notify_on_asleep=job.notify_on_asleep,
         )
     child.shutdown(force=True)
+
+
+def cancel_persistent_subagent(agent: AgentLike, label: str) -> bool:
+    """Gracefully cancel a persistent subagent and clear parent bookkeeping.
+
+    Single helper used by every cancel path (``BackgroundTask cancel``,
+    ``/kill <label>``). Writes the terminal ``cancelled`` lifecycle
+    record when the parent owns a matching ``BackgroundTaskEntry``,
+    then forces the child to shut down and unregisters the parent
+    bookkeeping. Falls back to a registry-only shutdown when the parent
+    has no matching bg entry -- the child still stops, but no lifecycle
+    record is written because the parent never owned the run id.
+
+    Args:
+      agent: Parent agent.
+      label: Persistent child's registry label.
+
+    Returns:
+      cancelled: True when a child was found and shut down; False when
+          no child matched ``label``.
+
+    """
+    queue_id = f"persistent:{label}"
+    job = agent.background.get(queue_id)
+    if job is not None and job.kind == "persistent_subagent":
+        shutdown_persistent_subagent(agent, job)
+        agent.cancel_background(queue_id)
+        return True
+    child = agent_registry.get(label)
+    if child is None:
+        return False
+    child.shutdown(force=True)
+    return True
 
 
 def _get_agent_class() -> type[Agent]:

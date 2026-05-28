@@ -714,6 +714,11 @@ async def _resume_persistent_agents(
         except (RuntimeError, ValueError) as e:
             sys.stderr.write(f"[resume-persistent] skipping {record.label!r}: {e}\n")
             continue
+        if not record.session_dir:
+            sys.stderr.write(
+                f"[resume-persistent] skipping {record.label!r}: missing session_dir.\n"
+            )
+            continue
         loaded_child = load_session(Path(record.session_dir), {})
         if loaded_child is not None:
             child.resume(*loaded_child)
@@ -739,19 +744,33 @@ def _build_persistent_child(
         account=record.account or None,
     )
     model = provider.model(record.model_id)
-    return Agent(
+    agent = Agent(
         name=record.label,
         model=model,
         model_spec=types.model.ModelSpec(
             provider=record.provider,
             auth=record.auth,
             model_id=model.model_id,
-            account=record.account or None,
+            account=record.account,
         ),
         system=_augment_system_for_persistent(record.system, parent_label=parent_label),
         tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
-        session_dir=record.session_dir or None,
+        session_dir=record.session_dir,
+        max_tool_call_rounds=record.max_tool_call_rounds,
+        thinking=record.thinking,
+        effort=record.effort,
+        max_budget_usd=record.max_budget_usd,
+        persistent_retry=record.persistent_retry,
+        provider_args=record.provider_args,
     )
+    if record.max_request_tokens is not None:
+        agent.max_request_tokens = record.max_request_tokens
+    if record.max_response_tokens is not None:
+        agent.max_response_tokens = record.max_response_tokens
+    if record.service_tier is not None:
+        agent.service_tier = record.service_tier
+    agent.cache_ttl = record.cache_ttl
+    return agent
 
 
 def _resume_label(label: str) -> str:
@@ -981,6 +1000,22 @@ def _event_to_json_record(event: types.runtime.RuntimeEvent) -> MutableJSON | No
         return {
             "descriptor": "application/x-error",
             "content": f"{type(exc).__name__}: {exc}",
+        }
+    if isinstance(event, types.runtime.ModelServiceSuspended):
+        return {
+            "descriptor": "application/x-model-service-suspended",
+            "provider": event.provider,
+            "auth": event.auth,
+            "account": event.account,
+            "model_id": event.model_id,
+            "retry_at": event.retry_at,
+            "delay_sec": event.delay_sec,
+            "server_supplied": event.server_supplied,
+            "error": {
+                "type_name": event.error.type_name,
+                "message": event.error.message,
+                "status": event.error.status,
+            },
         }
     return None
 

@@ -117,7 +117,15 @@ sagent --ephemeral
 | `--resume` | Open an interactive picker for sessions from the current working directory. |
 | `--continue-all` | Resume the newest session across all projects. |
 | `--resume-all` | Open an interactive picker across all projects. |
+| `--resume-persistent` | Restart live persistent subagents recorded in the session (default). |
+| `--no-resume-persistent` | Skip persistent-subagent restart when resuming a session. |
 | `--ephemeral` | Keep conversation state in memory and disable auto-memory. |
+
+When resuming, Sagent re-reads the parent session's persistent-subagent
+lifecycle records and restarts every child whose latest durable state is
+``running``. Cancelled, completed, or stopped children stay archived.
+Pass ``--no-resume-persistent`` to suppress restart -- the archived
+lifecycle metadata is left intact for later inspection.
 
 Default sessions live under a project-scoped directory derived from the current working directory. See [Sessions](sessions.md).
 
@@ -167,6 +175,57 @@ REPL keys:
 - `Up`: move queued input back into the buffer.
 - `Ctrl+X Ctrl+E`: edit in `$EDITOR`.
 - `Ctrl+C`: cancel current input or operation.
+
+### Steering subagents
+
+`/send`, `/halt`, and `/kill` accept a shared target syntax for live
+persistent subagents:
+
+| Syntax | Matches |
+| --- | --- |
+| `label` | Exact agent label. |
+| `fix-*` | Glob-style match against agent labels. |
+| `{a,b,c}` | Explicit comma-separated list. |
+| `/regex/` | Regex search over labels. |
+
+```text
+/send fix-tools continue from the last failing test
+/send fix-* /model claude-sonnet-4-7
+/send {fix-tools,fix-compact} continue
+/halt /fix-.*/
+/kill fix-tools
+```
+
+`/send <target> <text>` delivers a plain message to each matched
+subagent's inbox; if the body starts with `/`, the supported
+subagent-control verbs are `/model`, `/thinking`, `/halt`, and `/quit`.
+`/halt <target>` halts the matched subagents (bare `/halt` halts the
+local agent). `/kill <qid|all>` keeps its tool-task meaning, and
+`/kill <target>` cancels matched persistent subagents through the same
+graceful path as `BackgroundTask cancel persistent:<label>` -- a
+terminal `cancelled` lifecycle record is written before the child shuts
+down. Zero matches surface a visible error.
+
+### Service suspensions
+
+When a model provider returns a recoverable backoff response (HTTP 429,
+529, or `retry-after`), Sagent publishes a `ModelServiceSuspended`
+runtime event rather than streaming a retry banner into the assistant
+text. The REPL renders a single dim line:
+
+```
+[model service suspended: rate-limited; resumes at 11:40:00 (in 32m 18s)]
+```
+
+Short waits (under a minute) show ``resumes in Ns`` instead. The event
+is durable: the resume path reads the latest `retry_at` from the
+session log and sleeps the remaining time before the next provider
+call. Activity accounting pauses while suspended so per-agent
+elapsed-seconds reflects real work, not retry sleep.
+
+The `stream-json` output channel forwards the suspension as a
+`application/x-model-service-suspended` record carrying provider,
+model, retry timestamps, and a sanitized error snapshot.
 
 ## Slack service
 

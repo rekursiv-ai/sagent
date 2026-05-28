@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import asyncio
 import dataclasses
@@ -28,7 +28,10 @@ import time
 import uuid
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.session_io import append_persistent_agent_lifecycle
+from sagent.agent.session_io import (
+    PersistentAgentState,
+    append_persistent_agent_lifecycle,
+)
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.providers import (
@@ -600,14 +603,23 @@ class AgentSpawn:
         parent_label = agent_label_var.get("") or (
             parent_agent.name if parent_agent is not None else "parent"
         )
-        child._persistent = True  # noqa: SLF001 -- cross-layer flag
-        child.name = label
-        child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the persistent IPC rule
-            child._system_spec,  # noqa: SLF001 -- see above
-            parent_label=parent_label,
-        )
         if self._session_root_dir is not None:
-            child.session_dir = self._session_root_dir / label
+            child = child.rebuild(
+                name=label,
+                system=_augment_system_for_persistent(
+                    child.base_system_spec,
+                    parent_label=parent_label,
+                ),
+                session_dir=self._session_root_dir / label,
+                persistent=True,
+            )
+        else:
+            child._persistent = True  # noqa: SLF001 -- cross-layer flag
+            child.name = label
+            child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the persistent IPC rule
+                child._system_spec,  # noqa: SLF001 -- see above
+                parent_label=parent_label,
+            )
         run_id = uuid.uuid4().hex
         self._persist_lifecycle(
             child,
@@ -632,14 +644,26 @@ class AgentSpawn:
         )
 
         async def _run() -> None:
+            state: Literal["completed", "failed", "cancelled"] = "completed"
             try:
                 await child.serve_forever()
+            except asyncio.CancelledError:
+                state = "cancelled"
+                raise
             except Exception:
+                state = "failed"
                 _logger.exception(
                     "persistent agent %r crashed in serve_forever",
                     label,
                 )
             finally:
+                self._persist_lifecycle(
+                    child,
+                    label,
+                    run_id,
+                    state=state,
+                    notify_on_asleep=notify_on_asleep,
+                )
                 if forwarder is not None and forwarder in child.runtime.observers:
                     child.runtime.observers.remove(forwarder)
                 if forwarder is not None:
@@ -698,7 +722,7 @@ class AgentSpawn:
         label: str,
         run_id: str,
         *,
-        state: str,
+        state: PersistentAgentState,
         notify_on_asleep: bool,
     ) -> None:
         """Append a parent-side persistent-agent lifecycle record."""

@@ -559,6 +559,88 @@ async def test_clear_wipes_history() -> None:
     )
 
 
+def test_rescue_context_partitions_mask_by_session_id() -> None:
+    """Rescue must build per-session mask ranges, not a single cross-session range.
+
+    Bug repro: resuming an old session loads a tape whose records carry
+    a mix of session_ids (legacy ``""`` and an earlier persisted id).
+    The original rescue path masked ``tape[0].ref`` to ``tape[-1].ref``,
+    crossing session_ids; ``_validate_mask_disjoint`` rejected it, the
+    dispatch loop raised, and the REPL wedged so even ``/model`` could
+    not dispatch.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    # Seed tape with refs from two different session namespaces, then
+    # an orphan AssistantMessage (no matching ToolResult) so the
+    # alternation invariant breaks and rescue fires.
+    agent.tape.append(
+        ReferrableTapeEvent(
+            ref=TapeRef(session_id="", ordinal=0),
+            event=UserMessage(text="legacy"),
+        )
+    )
+    agent.tape.append(
+        ReferrableTapeEvent(
+            ref=TapeRef(session_id="99edb2d0", ordinal=1),
+            event=AssistantMessage(
+                text="orphan",
+                tool_calls=(ToolCall(id="missing", name="x", args={}),),
+            ),
+        )
+    )
+    # Should not raise InvalidPayloadError; the mask is now per-session.
+    agent._rescue_context()
+    splices = [r for r in agent.tape if isinstance(r, ContextSplice)]
+    rescue = next(s for s in splices if s.strategy == "context_rescue")
+    sessions_in_mask = {r_from.session_id for r_from, _ in rescue.mask}
+    assert sessions_in_mask == {"", "99edb2d0"}
+    assert all(r_from.session_id == r_to.session_id for r_from, r_to in rescue.mask)
+
+
+@pytest.mark.asyncio
+async def test_discard_detached_removes_registry_entry() -> None:
+    """``discard_detached`` pops a task and returns it."""
+    agent, _ = make_agent([AssistantMessage(text="x")])
+
+    async def _noop() -> None:
+        await asyncio.sleep(0.0)
+
+    task = asyncio.create_task(_noop())
+    try:
+        agent.detached["call-1"] = task
+        popped = agent.discard_detached("call-1")
+        assert popped is task
+        assert "call-1" not in agent.detached
+        assert agent.discard_detached("call-1") is None
+    finally:
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_kill_call_id_cancels_already_detached_tool() -> None:
+    """``Kill(call_id=...)`` also clears already-detached tools.
+
+    Before fix: ``Kill`` only addressed running tools, so a tool the
+    user explicitly detached lived on in ``runtime.detached`` and the
+    late-splice path could still fire.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+
+    async def _slow() -> None:
+        await asyncio.sleep(10.0)
+
+    task = asyncio.create_task(_slow())
+    agent.detached["call-x"] = task
+    agent.inbox.push_back(Kill(call_id="call-x"))
+    agent.inbox.push_back(Quit())
+    await asyncio.wait_for(agent.run_forever(), timeout=2.0)
+    assert "call-x" not in agent.detached
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_kill_one_tool() -> None:

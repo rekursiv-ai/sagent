@@ -33,6 +33,7 @@ else:
 
     httpx = lazy_import("httpx")  # 168ms
 
+from sagent.lib.durations import humanize_duration
 from sagent.types import runtime as runtime_types
 from sagent.types.model import (
     Model,
@@ -81,7 +82,7 @@ class RateLimitError(Exception):
         if reset_time is not None and reset_time > time.time():
             clock = time.strftime("%H:%M:%S", time.localtime(reset_time))
             delta = reset_time - time.time()
-            msg = f"Rate limited. Resumes at {clock} (~{_humanize_duration(delta)})."
+            msg = f"Rate limited. Resumes at {clock} (~{humanize_duration(delta)})."
         else:
             msg = "Rate limited. Try again shortly."
         super().__init__(msg)
@@ -212,6 +213,7 @@ async def send_with_retry(
     publish_recoverable: Callable[[str], None],
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
     on_service_suspended: Callable[[float, float, bool, Exception], None] | None = None,
+    resume_retry_at: float | None = None,
 ) -> ModelResponse:
     """Send with backoff and error classification.
 
@@ -241,6 +243,8 @@ async def send_with_retry(
       on_service_suspended: Called when a recoverable provider error
           schedules a retry sleep. Arguments are retry_at, delay_sec,
           server_supplied, and the original exception.
+      resume_retry_at: Optional wall-clock timestamp loaded from a prior
+          service suspension; sleeps remaining time before the first send.
 
     Returns:
       response: Completed model response.
@@ -250,6 +254,10 @@ async def send_with_retry(
       RateLimitError: On 429 in non-persistent mode.
 
     """
+    if resume_retry_at is not None:
+        delay = max(0.0, resume_retry_at - time.time())
+        if delay > 0:
+            await asyncio.sleep(delay)
     last_error: Exception | None = None
     prior_emitted = ""
     attempt = -1
@@ -314,10 +322,19 @@ async def send_with_retry(
             if live is not None:
                 prior_emitted = "".join(chunks)
             status = error_status(e)
+            # ``httpx.RemoteProtocolError`` ("peer closed connection without
+            # sending complete message body") shows up when an upstream edge
+            # cuts a streamed request body mid-flight -- typical on very
+            # large compaction payloads. These carry no HTTP status, so the
+            # normal 32s-cap loop bails after a handful of attempts. When
+            # the caller opted into ``persistent_retry`` (compactor, batch
+            # jobs), promote protocol errors into the long-backoff branch
+            # so transient connection cuts don't fail the operation.
+            is_protocol_flake = isinstance(e, httpx.RemoteProtocolError)
             persistent = (
                 persistent_retry
                 and model.supports_persistent_retry
-                and status in (429, 529)
+                and (status in (429, 529) or is_protocol_flake)
             )
             server_delay = extract_retry_after(e)
             if status == 429 and not persistent:
@@ -362,8 +379,6 @@ async def send_with_retry(
             retry_at = time.time() + delay
             if on_service_suspended is not None:
                 on_service_suspended(retry_at, delay, server_delay is not None, e)
-            elif on_text is not None:
-                on_text(_format_retry_banner(delay, server_delay is not None))
             await asyncio.sleep(delay)
     raise RetriesExhaustedError(
         f"Failed after {max_attempts} attempts: {last_error}",
@@ -446,39 +461,3 @@ def _response_body_excerpt(response: object) -> str:
         except (AttributeError, ValueError):
             return ""
     return ""
-
-
-def _format_retry_banner(delay_sec: float, server_supplied: bool) -> str:
-    """Render the REPL banner shown while a retry is pending.
-
-    Short waits (under a minute) get a relative seconds display.
-    Longer waits show the absolute resume clock - the only stable
-    representation across long parked intervals.
-
-    Args:
-      delay_sec: Sleep duration before the next attempt.
-      server_supplied: True when the delay came from a ``retry-after``
-          header rather than local backoff; long server-supplied delays
-          are flagged as rate-limit waits.
-
-    Returns:
-      banner: One-line ``[...]`` string ready for ``on_text``.
-
-    """
-    if delay_sec < 60.0:
-        return f"\n[error, retrying in {delay_sec:.0f}s]\n"
-    resume = time.strftime("%H:%M:%S", time.localtime(time.time() + delay_sec))
-    label = "rate-limited" if server_supplied else "error"
-    return f"\n[{label}; resumes at {resume} (in {_humanize_duration(delay_sec)})]\n"
-
-
-def _humanize_duration(seconds: float) -> str:
-    """Format ``seconds`` as ``Xh Ym`` / ``Ym Zs`` / ``Zs``."""
-    total = int(seconds)
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"

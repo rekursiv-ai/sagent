@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import base64
 import dataclasses
@@ -74,6 +74,9 @@ providers_lib = lazy_import("sagent.providers")
 logger = logging.getLogger(__name__)
 
 
+PersistentAgentState = Literal["running", "completed", "failed", "cancelled"]
+
+
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class PersistentAgentRecord:
     """Parent-side lifecycle record for one persistent subagent run."""
@@ -81,14 +84,27 @@ class PersistentAgentRecord:
     label: str
     run_id: str
     session_dir: str
-    state: str
+    state: PersistentAgentState
     provider: str
     auth: str
-    account: str
+    account: str | None
     model_id: str
     tools: tuple[str, ...]
     system: str
     notify_on_asleep: bool
+    max_tool_call_rounds: int | None = None
+    max_request_tokens: int | None = None
+    max_response_tokens: int | None = None
+    thinking: str | None = None
+    thinking_state: str | None = None
+    effort: str | None = None
+    cache_ttl: str = "5m"
+    service_tier: str | None = None
+    max_budget_usd: float | None = None
+    persistent_retry: bool = False
+    provider_args: Mapping[str, object] = dataclasses.field(
+        default_factory=lambda: cast(Mapping[str, object], {})
+    )
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -654,6 +670,9 @@ class SessionMeta:
     total_active_elapsed_seconds: float = 0.0
     """Cumulative wall-clock the session was active."""
 
+    runtime_events: tuple[RuntimeEvent, ...] = ()
+    """Durable runtime metadata events loaded from the session log."""
+
     def serialize(self) -> dict[str, object]:
         """Materialize fields as a JSON-ready dict for a ``kind: meta`` record.
 
@@ -779,6 +798,27 @@ def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
     )
 
 
+def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | None:
+    """Decode persisted runtime metadata events."""
+    if record.get("kind") != "runtime_event":
+        return None
+    if record.get("type") == "model_service_suspended":
+        error = _service_error_snapshot_from_json(record.get("error"))
+        if error is None:
+            return None
+        return ModelServiceSuspended(
+            provider=str(record.get("provider") or ""),
+            auth=str(record.get("auth") or ""),
+            account=_optional_str(record.get("account")),
+            model_id=str(record.get("model_id") or ""),
+            retry_at=float_val(record.get("retry_at"), 0.0),
+            delay_sec=float_val(record.get("delay_sec"), 0.0),
+            server_supplied=bool(record.get("server_supplied")),
+            error=error,
+        )
+    return None
+
+
 def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, object]:
     """Encode ``ServiceErrorSnapshot`` as JSON-ready primitives."""
     return {
@@ -790,11 +830,37 @@ def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, ob
     }
 
 
+def _service_error_snapshot_from_json(raw: object) -> ServiceErrorSnapshot | None:
+    """Decode ``ServiceErrorSnapshot`` from JSON-ready primitives."""
+    if not isinstance(raw, Mapping):
+        return None
+    record = cast(Mapping[str, object], raw)
+    headers_raw = record.get("headers")
+    headers = (
+        {
+            str(key): str(value)
+            for key, value in cast(Mapping[object, object], headers_raw).items()
+        }
+        if isinstance(headers_raw, Mapping)
+        else {}
+    )
+    return ServiceErrorSnapshot(
+        type_name=str(record.get("type_name") or ""),
+        message=str(record.get("message") or ""),
+        status=_optional_int(record.get("status")),
+        headers=headers,
+        body=str(record.get("body") or ""),
+    )
+
+
 def _persistent_agent_from_json(
     record: Mapping[str, object],
 ) -> PersistentAgentRecord | None:
     """Decode one persistent-subagent lifecycle record."""
     if record.get("kind") != "persistent_agent":
+        return None
+    state = _persistent_state(record.get("state"))
+    if state is None:
         return None
     raw_tools = record.get("tools")
     tools = (
@@ -804,19 +870,59 @@ def _persistent_agent_from_json(
         if isinstance(raw_tools, list)
         else ()
     )
+    raw_provider_args = record.get("provider_args")
+    provider_args: Mapping[str, object] = (
+        cast(Mapping[str, object], raw_provider_args)
+        if isinstance(raw_provider_args, Mapping)
+        else {}
+    )
+    notify_raw = record.get("notify_on_asleep")
     return PersistentAgentRecord(
         label=str(record.get("label") or ""),
         run_id=str(record.get("run_id") or ""),
         session_dir=str(record.get("session_dir") or ""),
-        state=str(record.get("state") or ""),
+        state=state,
         provider=str(record.get("provider") or ""),
         auth=str(record.get("auth") or ""),
-        account=str(record.get("account") or ""),
+        account=_optional_str(record.get("account")),
         model_id=str(record.get("model_id") or ""),
         tools=tools,
         system=str(record.get("system") or ""),
-        notify_on_asleep=bool(record.get("notify_on_asleep")),
+        notify_on_asleep=notify_raw if isinstance(notify_raw, bool) else True,
+        max_tool_call_rounds=_optional_int(record.get("max_tool_call_rounds")),
+        max_request_tokens=_optional_int(record.get("max_request_tokens")),
+        max_response_tokens=_optional_int(record.get("max_response_tokens")),
+        thinking=_optional_str(record.get("thinking")),
+        thinking_state=_optional_str(record.get("thinking_state")),
+        effort=_optional_str(record.get("effort")),
+        cache_ttl=str(record.get("cache_ttl") or "5m"),
+        service_tier=_optional_str(record.get("service_tier")),
+        max_budget_usd=_optional_float(record.get("max_budget_usd")),
+        persistent_retry=bool(record.get("persistent_retry")),
+        provider_args=dict(provider_args),
     )
+
+
+def _persistent_state(raw: object) -> PersistentAgentState | None:
+    """Decode a persistent-agent state string."""
+    if raw in get_args(PersistentAgentState):
+        return cast("PersistentAgentState", raw)
+    return None
+
+
+def _optional_str(raw: object) -> str | None:
+    """Decode an optional string field."""
+    return raw if isinstance(raw, str) else None
+
+
+def _optional_int(raw: object) -> int | None:
+    """Decode an optional integer field."""
+    return raw if isinstance(raw, int) else None
+
+
+def _optional_float(raw: object) -> float | None:
+    """Decode an optional float field."""
+    return raw if isinstance(raw, (float, int)) else None
 
 
 def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object]:
@@ -834,6 +940,17 @@ def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object
         "tools": list(record.tools),
         "system": record.system,
         "notify_on_asleep": record.notify_on_asleep,
+        "max_tool_call_rounds": record.max_tool_call_rounds,
+        "max_request_tokens": record.max_request_tokens,
+        "max_response_tokens": record.max_response_tokens,
+        "thinking": record.thinking,
+        "thinking_state": record.thinking_state,
+        "effort": record.effort,
+        "cache_ttl": record.cache_ttl,
+        "service_tier": record.service_tier,
+        "max_budget_usd": record.max_budget_usd,
+        "persistent_retry": record.persistent_retry,
+        "provider_args": dict(record.provider_args),
         "timestamp": time.time(),
     }
 
@@ -844,7 +961,7 @@ def append_persistent_agent_lifecycle(
     label: str,
     run_id: str,
     *,
-    state: str,
+    state: PersistentAgentState,
     notify_on_asleep: bool,
 ) -> None:
     """Append one parent-side persistent-agent lifecycle record."""
@@ -861,11 +978,22 @@ def append_persistent_agent_lifecycle(
                 state=state,
                 provider=spec.provider if spec else type(child.model).__name__,
                 auth=spec.auth if spec else "",
-                account=(spec.account or "default") if spec else "default",
+                account=spec.account if spec else None,
                 model_id=child.model.model_id,
                 tools=tuple(tool.name for tool in child.tools),
-                system=child.system,
+                system=child.base_system_spec,
                 notify_on_asleep=notify_on_asleep,
+                max_tool_call_rounds=child.max_tool_call_rounds,
+                max_request_tokens=child.max_request_tokens,
+                max_response_tokens=child.max_response_tokens,
+                thinking=child.thinking,
+                thinking_state=child.thinking_state,
+                effort=child.effort,
+                cache_ttl=child.cache_ttl,
+                service_tier=child.service_tier,
+                max_budget_usd=child.max_budget_usd,
+                persistent_retry=child.persistent_retry,
+                provider_args=child.provider_args,
             )
         ],
     )
@@ -1040,7 +1168,11 @@ def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
                 by_run[decoded.run_id] = decoded
     except OSError:
         return []
-    return [record for record in by_run.values() if record.state == "running"]
+    return [
+        record
+        for record in by_run.values()
+        if record.state == "running" and record.session_dir
+    ]
 
 
 def load_session(
@@ -1082,6 +1214,7 @@ def load_session(
     snapshot: dict[str, object] | None = None
     snapshot_line = 0
     barrier_candidates: list[tuple[ContextSplice, int]] = []
+    runtime_events: list[RuntimeEvent] = []
     corrupt_preserved = False
     ordinal_cursor = 0
 
@@ -1140,6 +1273,10 @@ def load_session(
                     if splice is not None:
                         tape.append(splice)
                         barrier_candidates.append((splice, line_num))
+                elif kind == "runtime_event":
+                    event = _runtime_event_from_json(rec)
+                    if event is not None:
+                        runtime_events.append(event)
                 elif kind == "context_override":
                     # Legacy: convert to ContextSplice on read.
                     ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
@@ -1169,7 +1306,10 @@ def load_session(
         snapshot_line=snapshot_line,
     ):
         snapshot = None
-    meta = SessionMeta.deserialize(meta_raw or {})
+    meta = dataclasses.replace(
+        SessionMeta.deserialize(meta_raw or {}),
+        runtime_events=tuple(runtime_events),
+    )
     tape, repaired = _repair_dangling_tape(tape)
     state = ToolState()
     if snapshot is not None and not repaired:

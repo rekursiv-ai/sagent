@@ -262,7 +262,7 @@ class SummaryCompactor:
                     compact_model,
                     request,
                     max_attempts=self._max_attempts,
-                    persistent_retry=False,
+                    persistent_retry=True,
                     publish_recoverable=lambda text: logger.info(
                         "compactor recoverable: %s", text
                     ),

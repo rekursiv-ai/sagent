@@ -32,7 +32,7 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.agent.context import validate_context
-from sagent.agent.session_io import load_session
+from sagent.agent.session_io import append_session, load_session
 from sagent.agent.state import ToolState, agent_registry
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
@@ -1570,6 +1570,52 @@ async def test_activity_active_clears_on_model_response_error() -> None:
     assert a.activity.current_call_start == 0.0, (
         f"current_call_start must reset; got {a.activity.current_call_start}"
     )
+
+
+@pytest.mark.asyncio
+async def test_activity_pauses_during_model_service_suspended() -> None:
+    """Suspension banks elapsed-so-far and pauses the timer until the next chunk."""
+    a = _build_agent()
+    loop = asyncio.get_running_loop()
+
+    a.publish(types.runtime.ModelCallStarted())
+    start = a.activity.current_call_start
+    assert start > 0
+    # Tick the loop's notion of time forward to accrue some elapsed.
+    await asyncio.sleep(0.01)
+    a.publish(
+        types.runtime.ModelServiceSuspended(
+            provider="anthropic",
+            auth="key",
+            account="default",
+            model_id="claude-test",
+            retry_at=loop.time() + 0.05,
+            delay_sec=0.05,
+            server_supplied=True,
+            error=types.runtime.ServiceErrorSnapshot(
+                type_name="RateLimitError", message="429", status=429
+            ),
+        )
+    )
+    banked = a.activity.elapsed_seconds
+    assert banked > 0
+    assert a.activity.current_call_start == 0.0
+    assert a.activity.active is True
+
+    await asyncio.sleep(0.05)
+    a.publish(types.runtime.ModelResponsePartial(text="x"))
+    assert a.activity.current_call_start > 0
+    # No further banking yet; live timer has just resumed.
+    assert a.activity.elapsed_seconds == banked
+
+    await asyncio.sleep(0.01)
+    a.publish(
+        types.runtime.ModelResponseComplete(
+            message=types.runtime.AssistantMessage(text="done")
+        )
+    )
+    # Total elapsed should exclude the ~0.05s suspension sleep.
+    assert a.activity.elapsed_seconds < 0.05
 
 
 @pytest.mark.asyncio
@@ -4100,6 +4146,32 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
         f"resume rebaseline broken: file grew from {size_after_phase1}"
         f" to {size_after_resume} after resume+save"
     )
+
+
+def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
+    """``resume()`` populates ``runtime.resume_retry_at`` from the latest event."""
+    a1 = _build_agent(session_dir=tmp_path)
+    later = types.runtime.ModelServiceSuspended(
+        provider="anthropic",
+        auth="key",
+        account="default",
+        model_id="claude-test",
+        retry_at=2_000.0,
+        delay_sec=120.0,
+        server_supplied=True,
+        error=types.runtime.ServiceErrorSnapshot(
+            type_name="RateLimitError", message="429"
+        ),
+    )
+    earlier = replace(later, retry_at=1_000.0)
+    a1.runtime.publish(types.runtime.SaveSession())
+    append_session(tmp_path / "session.jsonl", runtime_events=[earlier, later])
+
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    a2 = _build_agent(session_dir=tmp_path)
+    a2.resume(*loaded)
+    assert a2.runtime.resume_retry_at == 2_000.0
 
 
 if __name__ == "__main__":

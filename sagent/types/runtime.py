@@ -390,8 +390,8 @@ class ModelServiceSuspended:
     auth: str
     """Provider auth flavor."""
 
-    account: str
-    """Provider account slot."""
+    account: str | None
+    """Provider account slot, or ``None`` for the provider default."""
 
     model_id: str
     """Concrete provider model id."""

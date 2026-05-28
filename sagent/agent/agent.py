@@ -177,6 +177,7 @@ class Agent:
         self.model_spec = model_spec
         if model_spec is not None:
             last_models.record(model_spec.provider, model_spec.model_id)
+        self._base_system_spec: SystemPromptArg = system
         self._system_spec: SystemPromptArg = system
         self._tools_list: list[types.tools.Tool] = list(tools or [])
         self.compactor = compactor
@@ -477,7 +478,7 @@ class Agent:
 
     @property
     def session_id(self) -> str:
-        """Short hex id assigned at agent construction."""
+        """Session directory name, or a generated id for ephemeral agents."""
         return self._session_id
 
     @property
@@ -541,6 +542,17 @@ class Agent:
         return self._build_system()
 
     @property
+    def base_system_spec(self) -> str:
+        """Base system prompt before tool or persistent IPC augmentation."""
+        spec = self._base_system_spec
+        return spec if isinstance(spec, str) else spec()
+
+    @property
+    def max_budget_usd(self) -> float | None:
+        """Maximum budget in USD, or ``None`` when uncapped."""
+        return self._max_budget_usd
+
+    @property
     def total_cost_usd(self) -> float:
         """Cumulative USD cost across all recorded responses."""
         return self.cost_tracker.total_cost_usd
@@ -595,6 +607,40 @@ class Agent:
         self.runtime.publish(event)
 
     # -- Mutation methods ---------------------------------------------
+
+    def rebuild(
+        self,
+        *,
+        name: str,
+        system: SystemPromptArg,
+        session_dir: str | Path | None,
+        persistent: bool,
+    ) -> Agent:
+        """Recreate this agent with construction-time identity fields changed."""
+        rebuilt = Agent(
+            model=self.model,
+            model_spec=self.model_spec,
+            system=system,
+            tools=self.tools,
+            compactor=self.compactor,
+            session_dir=session_dir,
+            budget=self.budget,
+            max_attempts=self.max_attempts,
+            name=name,
+            description=self.description,
+            max_tool_call_rounds=self.max_tool_call_rounds,
+            thinking=self.thinking,
+            thinking_state=self.thinking_state,
+            effort=self.effort,
+            max_budget_usd=self.max_budget_usd,
+            persistent_retry=self.persistent_retry,
+            provider_args=self.provider_args,
+            show_thinking=self.show_thinking,
+        )
+        rebuilt.cache_ttl = self.cache_ttl
+        rebuilt.service_tier = self.service_tier
+        rebuilt._persistent = persistent
+        return rebuilt
 
     def swap_model(
         self, model: types.model.Model, *, spec: types.model.ModelSpec | None = None
@@ -820,6 +866,7 @@ class Agent:
         self.activity.num_tool_call_rounds = meta.num_tool_call_rounds
         self.activity.elapsed_seconds = meta.total_active_elapsed_seconds
         self.compaction_state.compact_count = meta.compact_count
+        self.runtime.resume_retry_at = _latest_service_retry_at(meta.runtime_events)
         if meta.provider and meta.model_id and meta.model_id != self.model.model_id:
             restored = restore_model(meta)
             if restored is not None:
@@ -866,7 +913,7 @@ class Agent:
             types.runtime.ModelServiceSuspended(
                 provider=spec.provider if spec else type(self.model).__name__,
                 auth=spec.auth if spec else "",
-                account=(spec.account or "default") if spec else "default",
+                account=spec.account if spec else None,
                 model_id=self.model.model_id,
                 retry_at=retry_at,
                 delay_sec=delay_sec,
@@ -1123,7 +1170,21 @@ class Agent:
                 self.activity.current_call_start = asyncio.get_running_loop().time()
             self.activity.live_response_chars = 0
         elif isinstance(event, types.runtime.ModelResponsePartial):
+            # Resume timing if the prior chunk arrived after a suspension.
+            if self.activity.active and self.activity.current_call_start == 0.0:
+                self.activity.current_call_start = asyncio.get_running_loop().time()
             self.activity.live_response_chars += len(event.text)
+        elif isinstance(event, types.runtime.ModelResponseThinking):
+            if self.activity.active and self.activity.current_call_start == 0.0:
+                self.activity.current_call_start = asyncio.get_running_loop().time()
+        elif isinstance(event, types.runtime.ModelServiceSuspended):
+            # Bank active time so the suspension sleep doesn't count.
+            if self.activity.active and self.activity.current_call_start > 0:
+                elapsed = (
+                    asyncio.get_running_loop().time() - self.activity.current_call_start
+                )
+                self.activity.elapsed_seconds += max(0.0, elapsed)
+                self.activity.current_call_start = 0.0
         elif (
             isinstance(event, types.runtime.ModelResponseComplete)
             and event.message.tool_calls
@@ -1140,10 +1201,12 @@ class Agent:
             ),
         ):
             if self.activity.active:
-                elapsed = (
-                    asyncio.get_running_loop().time() - self.activity.current_call_start
-                )
-                self.activity.elapsed_seconds += max(0.0, elapsed)
+                if self.activity.current_call_start > 0:
+                    elapsed = (
+                        asyncio.get_running_loop().time()
+                        - self.activity.current_call_start
+                    )
+                    self.activity.elapsed_seconds += max(0.0, elapsed)
                 self.activity.active = False
                 self.activity.current_call_start = 0.0
         elif isinstance(event, types.runtime.CompactStarted):
@@ -1220,7 +1283,7 @@ class Agent:
             return
         if job.kind == "detached":
             call_id = job.call_id or job.queue_id
-            self.runtime.detached.pop(call_id, None)
+            _ = self.runtime.discard_detached(call_id)
             self._forget_job_id(call_id)
         if not job.task.done():
             job.task.cancel()
@@ -1396,6 +1459,26 @@ class Agent:
         self.last_compact_error = None
         self.compaction_state.compact_failures = 0
         return True
+
+
+def _latest_service_retry_at(
+    events: Sequence[types.runtime.RuntimeEvent],
+) -> float | None:
+    """Return the latest ``ModelServiceSuspended.retry_at`` in ``events``.
+
+    Args:
+      events: Persisted runtime metadata events as returned by
+          ``load_session``.
+
+    Returns:
+      retry_at: Wall-clock timestamp of the most recent suspension, or
+          ``None`` when no suspension event is present.
+
+    """
+    for event in reversed(events):
+        if isinstance(event, types.runtime.ModelServiceSuspended):
+            return event.retry_at
+    return None
 
 
 def _context_overflow_error() -> types.exceptions.ContextOverflowError:
@@ -1655,6 +1738,8 @@ class _AgentModel:
                 ),
                 tool_result_budget_chars=self._agent.budget.message_budget_chars,
             )
+            resume_retry_at = self._agent.runtime.resume_retry_at
+            self._agent.runtime.resume_retry_at = None
             try:
                 response = await send_with_retry(
                     self._inner,
@@ -1668,6 +1753,7 @@ class _AgentModel:
                     ),
                     on_discarded_response=self._agent.record_response,
                     on_service_suspended=self._agent.publish_service_suspended,
+                    resume_retry_at=resume_retry_at,
                 )
             except Exception as exc:
                 # Catch any exception the provider classifies as

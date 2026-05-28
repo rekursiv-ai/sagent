@@ -21,6 +21,7 @@ from typing import Protocol
 import logging
 import time
 
+from sagent.lib.durations import humanize_duration
 from sagent.repl.render_diff import find_stable_boundary
 from sagent.types.exceptions import (
     AuthRefreshError,
@@ -63,10 +64,31 @@ HALT_MESSAGE_CONTEXT = (
 
 
 def service_suspended_text(event: ModelServiceSuspended) -> str:
-    """Render concise service-suspension text for parent and child panes."""
+    """Render concise service-suspension text for parent and child panes.
+
+    Short waits (under a minute) get a relative-seconds display; longer
+    waits show an absolute resume clock plus a humanized duration --
+    the only stable representation across long parked intervals. The
+    label distinguishes provider-advertised (``rate-limited``) from
+    locally-chosen (``temporarily blocked``) waits.
+
+    Args:
+      event: Suspension event published by the runtime.
+
+    Returns:
+      text: ``[model service suspended: ...]`` single-line banner.
+
+    """
+    label = "rate-limited" if event.server_supplied else "temporarily blocked"
+    remaining = event.retry_at - time.time()
+    if remaining < 60.0:
+        seconds = max(0, round(remaining))
+        return f"[model service suspended: {label}; resumes in {seconds}s]"
     clock = time.strftime("%H:%M:%S", time.localtime(event.retry_at))
-    reason = "rate-limited" if event.error.status == 429 else "temporarily blocked"
-    return f"[model service suspended: {reason}; resumes at {clock}]"
+    return (
+        f"[model service suspended: {label}; "
+        f"resumes at {clock} (in {humanize_duration(remaining)})]"
+    )
 
 
 type ChildItem = ToolResult | UserMessage | AssistantMessage | ModelServiceSuspended

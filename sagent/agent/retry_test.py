@@ -401,6 +401,42 @@ async def test_send_with_retry_persistent_loops_on_429() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_with_retry_persistent_loops_through_remote_protocol_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent mode treats ``httpx.RemoteProtocolError`` as long-backoff.
+
+    Bug repro: large compaction payloads cause OpenAI to close the
+    streamed request body mid-flight. The error has no HTTP status, so
+    the normal 32s-cap loop bails out after a handful of attempts and
+    the compactor fails. With ``persistent_retry=True`` these protocol
+    flakes should now stay in the persistent-attempt branch indefinitely.
+    """
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = httpx.RemoteProtocolError("peer closed connection")
+    model = _PersistentModel(
+        stream_responses=[err, err, err, _resp("ok")],
+    )
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    # 3 persistent attempts means 3 sleeps; without the fix the
+    # short-backoff loop would have raised RetriesExhaustedError.
+    assert len(sleeps) == 3
+
+
+@pytest.mark.asyncio
 async def test_send_with_retry_service_suspension_callback_replaces_banner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -628,10 +664,47 @@ def test_rate_limit_error_carries_diagnostics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_short_wait_banner_uses_seconds() -> None:
+async def test_send_with_retry_honors_resume_retry_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _ScriptedModel(stream_responses=[_resp("ok")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    response = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+        resume_retry_at=112.5,
+    )
+
+    assert response.message.text == "ok"
+    assert sleeps == [12.5]
+    assert model.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_does_not_emit_banner_into_on_text() -> None:
+    """Retry waits no longer pollute ``on_text``; suspensions go through callbacks."""
     err = _HTTPError(_FakeResponse(503))
     model = _ScriptedModel(stream_responses=[err, _resp("ok")])
     chunks: list[str] = []
+    suspensions: list[float] = []
+
+    def _record(
+        retry_at: float, delay_sec: float, server_supplied: bool, error: Exception
+    ) -> None:
+        del delay_sec, server_supplied, error
+        suspensions.append(retry_at)
+
     _ = await send_with_retry(
         model,
         _request(),
@@ -639,39 +712,11 @@ async def test_send_with_retry_short_wait_banner_uses_seconds() -> None:
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
+        on_service_suspended=_record,
     )
-    banner = "".join(c for c in chunks if c.startswith(("\n[", "[")))
-    assert "retrying in" in banner
-    assert "resumes at" not in banner
-
-
-@pytest.mark.asyncio
-async def test_send_with_retry_long_server_wait_banner_shows_resume_clock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``retry-after`` exceeds 60s, banner switches to wall-clock format."""
-    err = _HTTPError(_FakeResponse(503, {"retry-after": "3600"}))
-    model = _PersistentModel(stream_responses=[err, _resp("ok")])
-    chunks: list[str] = []
-    sleeps: list[float] = []
-
-    async def fake_sleep(d: float) -> None:
-        sleeps.append(d)
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    _ = await send_with_retry(
-        model,
-        _request(),
-        on_text=chunks.append,
-        max_attempts=3,
-        persistent_retry=True,
-        publish_recoverable=_silent,
-    )
-    banner = "".join(c for c in chunks if "[" in c)
-    assert "rate-limited" in banner
-    assert "resumes at" in banner
-    assert sleeps
-    assert sleeps[0] >= 3600.0
+    assert "retrying" not in "".join(chunks)
+    assert "resumes at" not in "".join(chunks)
+    assert len(suspensions) == 1
 
 
 @pytest.mark.asyncio
