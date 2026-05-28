@@ -1,9 +1,8 @@
-Invoke a user-authored skill by name.
+Invoke a user-authored skill; returns its full `SKILL.md` body for the next model request to follow.
 
-The available skills are listed in the system prompt under `# Skills`. Each skill has a trigger description. When a skill matches the user's request or the current direction of work, call this tool before answering or taking other actions.
+Skills are listed in the system prompt under `# Skills`, each with a trigger description.
 
-Arguments:
-- `skill` — the skill name from the system prompt.
-- `args` — optional text forwarded to the skill.
+- `skill` -- name from the `# Skills` list.
+- `args` -- optional text forwarded to the skill.
 
-The tool returns the full `SKILL.md` body so the next model request can follow those instructions. Do not invoke a skill again if its instructions are already active in the conversation.
+When a skill matches the request or current direction of work, invoke it before answering or taking other actions. Don't re-invoke a skill whose instructions are already active in the conversation.
