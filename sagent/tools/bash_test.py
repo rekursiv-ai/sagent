@@ -22,7 +22,7 @@ from sagent.tools.bash import (
 )
 from sagent.tools.core import ToolState
 from sagent.tools.lib.bash import Node
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 class _FakePeer:
@@ -114,6 +114,17 @@ def test_description_renders_timeouts() -> None:
     out = _render_bash_description(raw)
     assert str(BASH_DEFAULT_TIMEOUT_MS // 60_000) in out
     assert str(BASH_MAX_TIMEOUT_MS) in out
+
+
+def test_description_matches_fire_and_forget_background_contract() -> None:
+    assert "wait for the completion notification" not in Bash.description
+    assert "instead of polling" not in Bash.description
+    assert "does not send a completion notification" in Bash.description
+    assert "fire-and-forget" in Bash.description
+
+
+def test_description_does_not_recommend_ls_for_directory_inspection() -> None:
+    assert "Before creating new directories or files, run `ls`" not in Bash.description
 
 
 def test_schema_required_command() -> None:

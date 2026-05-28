@@ -26,12 +26,8 @@ from sagent.types.exceptions import (
     ContextOverflowError,
     UserFacingError,
 )
-from sagent.types.history import (
-    AssistantMessage,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.runtime import (
+    AssistantMessage,
     BudgetReset,
     ChildDoneEvent,
     ChildEvent,
@@ -47,7 +43,9 @@ from sagent.types.runtime import (
     RuntimeEvent,
     StatusChanged,
     ToolLabel,
+    ToolResult,
     ToolResultPartial,
+    UserMessage,
 )
 
 
@@ -340,14 +338,13 @@ class RenderObserver:
                 self._flush_stream()
                 self._printer.write_dim_line("[compacting history…]")
             case CompactComplete(
-                records=records,
+                token_before=tokens_before,
+                token_after=tokens_after,
+                payload_entries=payload_entries,
                 fallback_reason=reason,
                 preserved_tail_count=count,
             ):
                 self._flush_stream()
-                payload_entries = sum(len(r.payload) for r in records)
-                tokens_before = sum(r.token_before for r in records)
-                tokens_after = sum(r.token_after for r in records)
                 if reason:
                     entry = "entry" if count == 1 else "entries"
                     self._printer.write_dim_line(

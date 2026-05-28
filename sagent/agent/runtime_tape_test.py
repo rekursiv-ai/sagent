@@ -18,17 +18,17 @@ from sagent.agent.context import (
     validate_context,
 )
 from sagent.agent.runtime import AgentRuntime, Model, Tool
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
     InvalidSpliceError,
+    ReferrableTapeEvent,
     TapeRef,
 )
 
@@ -38,7 +38,7 @@ class _NoopModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[Tool],
         on_text: Callable[[str], None],
@@ -100,15 +100,15 @@ def test_append_history_ordinals_monotonically_increase() -> None:
 
 
 def test_append_history_records_history_record_on_tape() -> None:
-    """Appended entries land as ``HistoryRecord`` tape records."""
+    """Appended entries land as ``ReferrableTapeEvent`` tape records."""
     runtime = _runtime()
     entry = UserMessage(text="hi")
     ref = runtime.append_history(entry)
     assert len(runtime.tape) == 1
     record = runtime.tape[0]
-    assert isinstance(record, HistoryRecord)
+    assert isinstance(record, ReferrableTapeEvent)
     assert record.ref == ref
-    assert record.entry is entry
+    assert record.event is entry
 
 
 def test_append_history_updates_context_messages() -> None:
@@ -122,7 +122,7 @@ def test_append_history_updates_context_messages() -> None:
 
 
 def test_append_history_preserves_entry_object_identity() -> None:
-    """Resolved messages reuse the exact ``HistoryEntry`` instances appended."""
+    """Resolved messages reuse the exact ``TapeEvent`` instances appended."""
     runtime = _runtime()
     u = UserMessage(text="hi")
     runtime.append_history(u)
@@ -362,13 +362,13 @@ def test_replay_tape_loads_records_verbatim() -> None:
     """Replay stores the supplied records on the tape."""
     runtime = _runtime()
     records = [
-        HistoryRecord(
+        ReferrableTapeEvent(
             ref=TapeRef(session_id="other", ordinal=0),
-            entry=UserMessage(text="hi"),
+            event=UserMessage(text="hi"),
         ),
-        HistoryRecord(
+        ReferrableTapeEvent(
             ref=TapeRef(session_id="other", ordinal=1),
-            entry=AssistantMessage(text="hello"),
+            event=AssistantMessage(text="hello"),
         ),
     ]
     runtime.replay_tape(records)
@@ -380,13 +380,13 @@ def test_replay_tape_advances_ordinal_cursor() -> None:
     runtime = _runtime(session_id="new")
     runtime.replay_tape(
         [
-            HistoryRecord(
+            ReferrableTapeEvent(
                 ref=TapeRef(session_id="old", ordinal=0),
-                entry=UserMessage(text="a"),
+                event=UserMessage(text="a"),
             ),
-            HistoryRecord(
+            ReferrableTapeEvent(
                 ref=TapeRef(session_id="old", ordinal=5),
-                entry=AssistantMessage(text="b"),
+                event=AssistantMessage(text="b"),
             ),
         ],
     )
@@ -402,20 +402,20 @@ def test_replay_tape_resolves_loaded_history_in_order() -> None:
     a = AssistantMessage(text="loaded assistant")
     runtime.replay_tape(
         [
-            HistoryRecord(ref=TapeRef(session_id="x", ordinal=0), entry=u),
-            HistoryRecord(ref=TapeRef(session_id="x", ordinal=1), entry=a),
+            ReferrableTapeEvent(ref=TapeRef(session_id="x", ordinal=0), event=u),
+            ReferrableTapeEvent(ref=TapeRef(session_id="x", ordinal=1), event=a),
         ],
     )
     assert runtime.context().messages == [u, a]
 
 
 def test_replay_tape_accepts_mixed_record_types() -> None:
-    """Replay handles ``HistoryRecord`` + ``ContextSplice`` together."""
+    """Replay handles ``ReferrableTapeEvent`` + ``ContextSplice`` together."""
     runtime = _runtime()
     u_ref = TapeRef(session_id="x", ordinal=0)
     runtime.replay_tape(
         [
-            HistoryRecord(ref=u_ref, entry=UserMessage(text="hi")),
+            ReferrableTapeEvent(ref=u_ref, event=UserMessage(text="hi")),
             ContextSplice(
                 ref=TapeRef(session_id="x", ordinal=1),
                 mask=((u_ref, u_ref),),
@@ -423,9 +423,9 @@ def test_replay_tape_accepts_mixed_record_types() -> None:
                 payload=(UserMessage(text="[summary]"),),
                 strategy="summary",
             ),
-            HistoryRecord(
+            ReferrableTapeEvent(
                 ref=TapeRef(session_id="x", ordinal=2),
-                entry=UserMessage(text="post"),
+                event=UserMessage(text="post"),
             ),
         ],
     )
@@ -511,10 +511,13 @@ def test_compaction_splice_via_append_validates() -> None:
         payload=(UserMessage(text="[summary]"),),
         strategy="summary",
     )
-    runtime.append_history(UserMessage(text="follow up"))
+    runtime._append_or_coalesce_user(UserMessage(text="follow up"))
     messages = runtime.context().messages
     validate_context(messages)
-    assert [type(m).__name__ for m in messages] == ["UserMessage", "UserMessage"]
+    assert [type(m).__name__ for m in messages] == ["UserMessage"]
+    summary = messages[0]
+    assert isinstance(summary, UserMessage)
+    assert summary.text == "[summary]\n\nfollow up"
 
 
 def test_resolve_context_called_directly_matches_runtime_context() -> None:

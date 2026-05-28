@@ -31,7 +31,11 @@ from sagent.tools.core import (
     load_tool_description,
 )
 from sagent.tools.prompt_text import escape_prompt_text
-from sagent.types.history import HistoryEntry, ToolResult, UserMessage
+from sagent.types.runtime import (
+    ModelContextEvent,
+    ToolResult,
+    UserMessage,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -219,7 +223,7 @@ class Skill:
 
     async def post_compact_restore(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         tool_state: ToolState,
         *,
         budget_chars: int = 100_000,
@@ -306,7 +310,7 @@ class Skill:
         return ToolResult(call_id="", content=f"{preface}{body}\n</skill>")
 
 
-def _prepend_to_first_user(history: list[HistoryEntry], text: str) -> None:
+def _prepend_to_first_user(history: list[ModelContextEvent], text: str) -> None:
     """Prepend ``text`` to the first ``UserMessage`` in history."""
     for i, entry in enumerate(history):
         if isinstance(entry, UserMessage):

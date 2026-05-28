@@ -23,7 +23,7 @@ from sagent.tools.core import (
     resolve_tool_path,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 # Simple ``s/OLD/NEW/[g]`` - no escaped delimiters, no alternate

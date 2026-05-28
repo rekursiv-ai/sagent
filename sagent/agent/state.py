@@ -163,13 +163,18 @@ class ToolState:
         """Re-stamp after a successful write.
 
         Clears offset/limit/last_lines to break read dedup (forces
-        re-fetch on next Read) and updates mtime.
+        re-fetch on next Read), updates mtime, and stamps
+        ``_read_order`` so subsequent writes to a freshly-created file
+        satisfy the read gate (a successful write counts as having
+        observed the file's current content).
 
         Args:
           path: File path (resolved internally).
 
         """
         resolved = str(Path(path).resolve())
+        self._read_order.pop(resolved, None)
+        self._read_order[resolved] = path
         try:
             mtime = Path(path).stat().st_mtime
         except OSError:

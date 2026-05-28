@@ -33,9 +33,15 @@ from sagent.tools.core import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.types.history import AssistantMessage, HistoryEntry
 from sagent.types.model import ModelRequest, Pricing
-from sagent.types.runtime import Halt, Kill, Quit, RuntimeEvent
+from sagent.types.runtime import (
+    AssistantMessage,
+    Halt,
+    Kill,
+    ModelContextEvent,
+    Quit,
+    RuntimeEvent,
+)
 
 
 class MockModelCaps:
@@ -96,7 +102,7 @@ class _NullModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],

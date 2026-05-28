@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from sagent.providers.openai import OpenAI
-from sagent.types.history import UserMessage
 from sagent.types.model import ModelRequest
+from sagent.types.runtime import UserMessage
 
 
 def test_openai_from_key_constructs() -> None:

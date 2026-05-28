@@ -15,7 +15,7 @@ from sagent.tools.core import (
     load_tool_description,
     opt_int,
 )
-from sagent.types.history import ToolResult, UserMessage
+from sagent.types.runtime import ToolResult, UserMessage
 
 
 logger = logging.getLogger(__name__)

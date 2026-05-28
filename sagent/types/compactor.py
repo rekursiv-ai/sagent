@@ -10,8 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.types.history import HistoryEntry
 from sagent.types.model import Model
+from sagent.types.runtime import ModelContextEvent
 from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
@@ -63,7 +63,7 @@ class Compactor(Protocol):
     async def compact(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[HistoryEntry],
+        context: Sequence[ModelContextEvent],
         model: Model,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
@@ -93,13 +93,13 @@ class CompactRestorable(Protocol):
     Tools opt in by implementing ``post_compact_restore``; the
     compactor wrapper invokes it on every tool that satisfies the
     protocol against the payload-under-construction (a plain mutable
-    ``list[HistoryEntry]``) before the override is frozen and appended
+    ``list[ModelContextEvent]``) before the override is frozen and appended
     to the tape.
     """
 
     async def post_compact_restore(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         tool_state: ToolState,
         *,
         budget_chars: int = 100_000,

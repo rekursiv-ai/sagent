@@ -29,7 +29,7 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, cached_parse_bash
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)

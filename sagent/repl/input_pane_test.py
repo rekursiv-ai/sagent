@@ -41,12 +41,12 @@ from sagent.repl.slash import (
     Text as SlashText,
     Unknown as SlashUnknown,
 )
-from sagent.types.history import UserMessage
 from sagent.types.runtime import (
     Clear,
     Compact,
     Recompact,
     RuntimeEvent,
+    UserMessage,
     UserQueuedMessage,
 )
 

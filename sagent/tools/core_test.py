@@ -38,7 +38,7 @@ from sagent.tools.core import (
     tool_state_context,
     truncate,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 def _schema_property(schema: object, name: str) -> Mapping[str, object]:

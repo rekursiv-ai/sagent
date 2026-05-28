@@ -8,7 +8,7 @@ import asyncio
 
 from sagent.lib.web.search import CaptchaError, SearchResult
 from sagent.tools.web_search import WebSearch, _build_query
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 def test_websearch_metadata() -> None:

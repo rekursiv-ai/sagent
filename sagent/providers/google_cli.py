@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
 
 import asyncio
 import base64
@@ -33,7 +33,8 @@ import shutil
 import tempfile
 
 from sagent.lib import token_count
-from sagent.lib.json import MutableJSON
+from sagent.lib.atomic_file import atomic_write_bytes
+from sagent.lib.json import JSON, MutableJSON, validate_json_schema
 from sagent.providers.google import Google
 from sagent.providers.lib.cost import (
     ModelProfile,
@@ -48,13 +49,13 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
@@ -72,10 +73,26 @@ _GEMINI_DIR = Path.home() / ".gemini"
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
 _TURN_RESPAWN_THRESHOLD = 100
 _CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
-# Module-level mutable. Lazily-bound to the running loop's lock so a
-# late-import session doesn't pin the asyncio.Lock to an event loop
-# that doesn't exist yet.
-_writeback_lock: asyncio.Lock | None = None
+_CREDENTIALS_SCHEMA: JSON = {
+    "type": "object",
+    "required": ["access_token", "refresh_token", "expiry_date"],
+    "properties": {
+        "access_token": {"type": "string"},
+        "refresh_token": {"type": "string"},
+        "expiry_date": {"type": "number"},
+    },
+}
+
+
+class GoogleCLICredentials(TypedDict):
+    """OAuth credentials from the Gemini CLI credentials file."""
+
+    access_token: str
+    refresh_token: str
+    expiry_date: float
+    project_id: NotRequired[str]
+    scope: NotRequired[str]
+    token_type: NotRequired[str]
 
 
 class GoogleCLI(Google):
@@ -135,6 +152,8 @@ class GoogleCLI(Google):
             raise FileNotFoundError(
                 f"GoogleCLI: no credentials at {path}; run `gemini` and authenticate.",
             )
+        if _load_cli_credentials_file(path) is None:
+            raise ValueError(f"Invalid credentials file: {path}")
         if shutil.which("gemini") is None:
             raise RuntimeError(
                 "GoogleCLI: `gemini` is not on PATH; install the Gemini CLI.",
@@ -235,8 +254,9 @@ class _GoogleCLIModel:
             self._spawn_initialized_proc,
             close_partial=self._close_warming_proc,
         )
+        self._writeback_lock = asyncio.Lock()
         self._pending_system: str = ""
-        self._sent_history_head: HistoryEntry | None = None
+        self._sent_history_head: TapeEvent | None = None
 
     @property
     def max_request_tokens(self) -> int:
@@ -706,10 +726,7 @@ class _GoogleCLIModel:
         """
         if self._tmpdir is None:
             return
-        global _writeback_lock  # noqa: PLW0603 -- lazy-init the lock at the running loop
-        if _writeback_lock is None:
-            _writeback_lock = asyncio.Lock()
-        async with _writeback_lock:
+        async with self._writeback_lock:
             src = self._tmpdir / ".gemini" / "oauth_creds.json"
             if not src.exists():
                 return
@@ -718,14 +735,60 @@ class _GoogleCLIModel:
             user_expiry = _read_expiry(target) if target.exists() else 0.0
             if tmpdir_expiry <= user_expiry:
                 return
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, target)
-            target.chmod(0o600)
+            atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
 
 
 def _hash_system(system: str | None) -> str:
     """Hash for cheap equality checks between system prompts."""
     return hashlib.sha256((system or "").encode()).hexdigest()
+
+
+def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:
+    """Extract access/refresh/expiry from Gemini CLI credential JSON."""
+    creds = GoogleCLICredentials(
+        access_token=cast(str, raw["access_token"]),
+        refresh_token=cast(str, raw["refresh_token"]),
+        expiry_date=float(cast(float, raw["expiry_date"])),
+    )
+    for opt_key in ("project_id", "scope", "token_type"):
+        value = raw.get(opt_key)
+        if isinstance(value, str) and value:
+            creds[opt_key] = value  # type: ignore[literal-required]
+    return creds
+
+
+def _load_cli_credentials_file(path: Path) -> GoogleCLICredentials | None:
+    """Read credentials from a Gemini CLI-format JSON file."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = cast(MutableJSON, data)
+    if validate_json_schema(_CREDENTIALS_SCHEMA, raw):
+        return None
+    return _parse_cli_credentials(raw)
+
+
+def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
+    """Persist credentials in Gemini CLI-compatible format."""
+    existing: MutableJSON = {}
+    if path.exists():
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                existing = cast(MutableJSON, raw)
+    existing["access_token"] = creds["access_token"]
+    existing["refresh_token"] = creds["refresh_token"]
+    existing["expiry_date"] = creds["expiry_date"]
+    for opt_key in ("project_id", "scope", "token_type"):
+        value = creds.get(opt_key)  # type: ignore[literal-required]
+        if isinstance(value, str) and value:
+            existing[opt_key] = value
+    atomic_write_bytes(path, json.dumps(existing).encode(), file_mode=0o600)
 
 
 def _read_expiry(path: Path) -> float:
@@ -746,6 +809,8 @@ def _populate_google_tmpdir(
     dot_gemini.mkdir(parents=True, exist_ok=True)
     workdir.mkdir(parents=True, exist_ok=True)
     creds_src = credentials_path(_CREDS_PATH, account)
+    if _load_cli_credentials_file(creds_src) is None:
+        raise ValueError(f"Invalid credentials file: {creds_src}")
     creds_dst = dot_gemini / "oauth_creds.json"
     shutil.copyfile(creds_src, creds_dst)
     creds_dst.chmod(0o600)
@@ -878,10 +943,10 @@ async def _rpc_send(
 
 
 def _serialize_prompt_blocks(
-    entry: HistoryEntry,
+    entry: TapeEvent,
     max_image_dim: int,
 ) -> list[MutableJSON]:
-    """Translate one non-assistant ``HistoryEntry`` into ACP prompt blocks."""
+    """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
     if isinstance(entry, UserMessage):
         return _user_prompt_blocks(entry, max_image_dim)
     assert isinstance(entry, ToolResult)

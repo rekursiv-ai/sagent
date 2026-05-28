@@ -12,7 +12,7 @@ import pytest
 
 from sagent.testing import with_fake_agent
 from sagent.tools.write import Write
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 write = Write()
@@ -74,6 +74,18 @@ async def test_write_stale_file_errors(tmp_path: Path) -> None:
         result = await write.run({"file_path": str(f), "content": "v1\n"})
     assert result.is_error
     assert "modified since read" in result.content
+
+
+@pytest.mark.asyncio
+async def test_write_then_write_to_new_file_succeeds(tmp_path: Path) -> None:
+    f = tmp_path / "new.txt"
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        r1 = await write.run({"file_path": str(f), "content": "v1"})
+        assert not r1.is_error, r1.content
+        r2 = await write.run({"file_path": str(f), "content": "v2"})
+        assert not r2.is_error, r2.content
+    assert f.read_text() == "v2"
 
 
 @pytest.mark.asyncio

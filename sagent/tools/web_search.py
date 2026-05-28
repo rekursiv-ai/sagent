@@ -9,13 +9,13 @@ import asyncio
 
 from sagent.lib.json import JSON, JSONValue, json_freeze
 from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
-from sagent.lib.web.search import CaptchaError
+from sagent.lib.web.search import CaptchaError, SearchError
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
     truncate,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 class WebSearch:
@@ -131,7 +131,7 @@ class WebSearch:
         )
         try:
             results = await asyncio.to_thread(search, q, backend=backend)
-        except (CaptchaError, RuntimeError, ValueError) as err:
+        except (CaptchaError, RuntimeError, SearchError, ValueError) as err:
             return ToolResult(call_id="", content=str(err), is_error=True)
         if not results:
             text = "(no results)"

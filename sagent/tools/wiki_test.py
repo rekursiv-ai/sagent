@@ -9,7 +9,7 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools import wiki as wm
 from sagent.tools.wiki import Wiki
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 def _make_wiki(root: Path, pages: dict[str, str] | None = None) -> Path:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast, override
 from unittest.mock import MagicMock, Mock, patch
@@ -31,6 +31,7 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
     split_bg_args,
 )
+from sagent.agent.context import validate_context
 from sagent.agent.session_io import load_session
 from sagent.agent.state import ToolState, agent_registry
 from sagent.lib import last_models, token_count
@@ -40,7 +41,7 @@ from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 def _summary_override(
-    summary: list[types.history.HistoryEntry],
+    summary: list[types.runtime.ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
     *,
     tape: Sequence[TapeRecord] | None = None,
@@ -87,7 +88,7 @@ class StubModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
-    responses: list[types.history.AssistantMessage] = field(default_factory=list)
+    responses: list[types.runtime.AssistantMessage] = field(default_factory=list)
     received: list[types.model.ModelRequest] = field(default_factory=list)
 
     @property
@@ -137,7 +138,7 @@ class StubModel:
         msg = (
             self.responses.pop(0)
             if self.responses
-            else types.history.AssistantMessage(text="ok")
+            else types.runtime.AssistantMessage(text="ok")
         )
         return types.model.ModelResponse(message=msg)
 
@@ -154,22 +155,26 @@ class StubTool:
     description: str = "Echo tool."
     directive_schema: JSON = _STUB_SCHEMA
     clearable_results: bool = False
+    response: str | None = None
     calls: list[Mapping[str, object]] = field(default_factory=list)
 
     def summary(self, args: Mapping[str, object]) -> str:
         del args
         return "echo"
 
-    def summary_result(self, result: types.history.ToolResult) -> str | None:
+    def summary_result(self, result: types.runtime.ToolResult) -> str | None:
         del result
         return None
 
     def prompt(self) -> str:
         return ""
 
-    async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+    async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
         self.calls.append(args)
-        return types.history.ToolResult(call_id="", content=str(args.get("msg", "")))
+        content = (
+            self.response if self.response is not None else str(args.get("msg", ""))
+        )
+        return types.runtime.ToolResult(call_id="", content=content)
 
 
 def _build_agent(
@@ -208,7 +213,7 @@ def test_agent_budget_defaults_from_model() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_model_stream_materializes_request() -> None:
-    call = types.history.ToolCall(id="call_1", name="Bash", args={})
+    call = types.runtime.ToolCall(id="call_1", name="Bash", args={})
     model = StubModel()
     budget = types.model.ContextBudget(
         max_request_tokens=100_000,
@@ -217,10 +222,10 @@ async def test_agent_model_stream_materializes_request() -> None:
     )
     agent = Agent(model=model, budget=budget)
 
-    agent.runtime.append_history(types.history.UserMessage(text="start"))
-    agent.runtime.append_history(types.history.AssistantMessage(tool_calls=(call,)))
+    agent.runtime.append_history(types.runtime.UserMessage(text="start"))
+    agent.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
     agent.runtime.append_history(
-        types.history.ToolResult(call_id="call_1", content="x" * 1_000)
+        types.runtime.ToolResult(call_id="call_1", content="x" * 1_000)
     )
     _ = await agent._agent_model.stream(
         agent.runtime.context().messages,
@@ -230,7 +235,7 @@ async def test_agent_model_stream_materializes_request() -> None:
         lambda _: None,
     )
     result = model.received[-1].messages[2]
-    assert isinstance(result, types.history.ToolResult)
+    assert isinstance(result, types.runtime.ToolResult)
     assert "<elided>" in result.content
 
 
@@ -238,6 +243,30 @@ def test_agent_budget_override_respected() -> None:
     b = types.model.ContextBudget.from_model(StubModel())
     a = _build_agent(budget=b)
     assert a.budget is b
+
+
+def test_live_tool_result_chars_counts_read_results() -> None:
+    """Read tool-result chars belong in the wire-budget tally.
+
+    ``live_tool_result_chars`` previously skipped Read results (likely
+    copy-pasted from ``PERSIST_EXEMPT_TOOLS``), but Read content still
+    crosses the wire and consumes the message budget. Skipping it lets
+    Read-heavy contexts evade message-budget compaction.
+    """
+    a = _build_agent()
+    read_call = types.runtime.ToolCall(id="read-1", name="Read", args={})
+    bash_call = types.runtime.ToolCall(id="bash-1", name="Bash", args={})
+    a.runtime.append_history(types.runtime.UserMessage(text="go"))
+    a.runtime.append_history(
+        types.runtime.AssistantMessage(tool_calls=(read_call, bash_call))
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="read-1", content="r" * 200)
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="bash-1", content="b" * 50)
+    )
+    assert a.live_tool_result_chars() == 250
 
 
 def test_agent_register_and_cancel_background() -> None:
@@ -261,6 +290,26 @@ def test_agent_register_and_cancel_background() -> None:
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:
         loop.close()
+
+
+@pytest.mark.asyncio
+async def test_public_cancel_background_actually_cancels_task() -> None:
+    """The public ``cancel_background`` must cancel the underlying task.
+
+    Pre-fix, ``cancel_background`` only popped the registry entry while
+    the private ``_cancel_background`` carried the actual ``task.cancel()``.
+    Two near-identical names with opposite behavior; callers reading the
+    public API expected cancellation and got registry removal.
+    """
+    a = _build_agent()
+    task = asyncio.create_task(asyncio.sleep(10))
+    a.register_background(
+        "j",
+        BackgroundTaskEntry(task=task, tool_name="x", queue_id="j", started=0.0),
+    )
+    a.cancel_background("j")
+    assert task.cancelling() > 0
+    assert "j" not in a.background
 
 
 def test_agent_system_string_to_factory() -> None:
@@ -311,7 +360,7 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
         ),
     )
     a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert model.received
     req = model.received[-1]
@@ -326,11 +375,34 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
 async def test_agent_run_yields_idle_at_end() -> None:
     a = _build_agent()
     events: list[str] = [
-        type(ev).__name__ async for ev in a.run(types.history.UserMessage(text="ping"))
+        type(ev).__name__ async for ev in a.run(types.runtime.UserMessage(text="ping"))
     ]
     assert "ModelIdle" in events
     assert len(a.history) >= 2
-    assert isinstance(a.history[0], types.history.UserMessage)
+    assert isinstance(a.history[0], types.runtime.UserMessage)
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
+    call = types.runtime.ToolCall(id="tool_call_1", name="Echo", args={})
+    model = StubModel(
+        responses=[
+            types.runtime.AssistantMessage(tool_calls=(call,)),
+            types.runtime.AssistantMessage(text="done"),
+        ]
+    )
+    budget = replace(
+        types.model.ContextBudget.from_model(model),
+        persist_threshold=1_000,
+    )
+    tool = StubTool(response="X" * 5_000)
+    a = _build_agent(model=model, tools=[tool], budget=budget, session_dir=tmp_path)
+
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+        pass
+
+    assert (tmp_path / "tool-results" / "tool_call_1.txt").read_text() == "X" * 5_000
+    assert not (tmp_path / "tool-results" / "id_e3b0c44298fc1c14.txt").exists()
 
 
 @pytest.mark.asyncio
@@ -344,7 +416,7 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
     model = StubModel()
     tool: types.tools.Tool = StubTool()
     a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert model.received, "model.stream must have been invoked"
     req = model.received[-1]
@@ -364,7 +436,7 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
 async def test_agent_records_response_into_cost_tracker() -> None:
     model = StubModel()
     a = _build_agent(model=model)
-    async for _ in a.run(types.history.UserMessage(text="ping")):
+    async for _ in a.run(types.runtime.UserMessage(text="ping")):
         pass
     # StubModel emits empty types.model.TokenCount, but ``calls_by_model`` records
     # one entry per model invocation.
@@ -375,13 +447,13 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     a = _build_agent(max_budget_usd=1.0)
     # First response below the cap: clean.
     a.record_response(
-        types.model.ModelResponse(message=types.history.AssistantMessage(text="x"))
+        types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
     )
     # Force an over-budget total and verify the next call raises.
     a.cost_tracker.total_cost_usd = 2.0
     with pytest.raises(RuntimeError, match="Budget exhausted"):
         a.record_response(
-            types.model.ModelResponse(message=types.history.AssistantMessage(text="x"))
+            types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
         )
 
 
@@ -504,7 +576,7 @@ def test_change_model_derives_redact_thinking_from_state(
 async def test_agent_default_omits_thinking_from_request() -> None:
     model = StubModel(supports_thinking=True)
     a = _build_agent(model=model)
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert model.received[-1].thinking is None
 
@@ -513,7 +585,7 @@ async def test_agent_default_omits_thinking_from_request() -> None:
 async def test_agent_thinking_state_sets_request_thinking() -> None:
     model = StubModel(supports_thinking=True)
     a = Agent(model=model, tools=[], thinking_state="adaptive-hide")
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert model.received[-1].thinking == "adaptive"
 
@@ -657,6 +729,34 @@ def test_swap_model_replaces_model_and_inner_wrapper() -> None:
     assert a.model is new
     # The wrapper's inner reference was updated too.
     assert a._agent_model._inner is new
+
+
+@pytest.mark.asyncio
+async def test_swap_model_noop_does_not_close_active_model() -> None:
+    """Swapping in the *current* model must not tear it down.
+
+    Pre-fix, ``swap_model(self.model)`` captured ``old = self.model`` then
+    assigned ``self.model = model`` (same object), then unconditionally
+    scheduled ``close(old)`` -- so the now-active model got torn down,
+    leaving subsequent requests to fail against a dead SDK client.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class ClosableStubModel(StubModel):
+        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+        async def close(self) -> None:
+            self.closed_event.set()
+
+    m = ClosableStubModel()
+    a = _build_agent(model=m)
+    a.swap_model(m)
+    # Give any scheduled close a chance to run; under the bug the
+    # Event would be set after the next loop step.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not m.closed_event.is_set()
+    assert a.model is m
 
 
 def test_swap_model_clears_unsupported_service_tier() -> None:
@@ -1154,7 +1254,7 @@ async def test_compact_awaits_compact_complete_event() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1162,13 +1262,13 @@ async def test_compact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1189,7 +1289,7 @@ async def test_compact_awaits_compact_complete_event() -> None:
             await drive_task
 
     assert any(
-        isinstance(e, types.history.UserMessage) and e.text == "[summary]"
+        isinstance(e, types.runtime.UserMessage) and e.text == "[summary]"
         for e in a.history
     )
 
@@ -1212,7 +1312,7 @@ async def test_public_compact_returns_when_halt_cancels_compaction() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1253,7 +1353,7 @@ async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1292,7 +1392,7 @@ async def test_recompact_awaits_compact_complete_event() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1300,13 +1400,13 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[recompacted]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[recompacted]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1323,7 +1423,7 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             await drive_task
 
     assert any(
-        isinstance(e, types.history.UserMessage) and e.text == "[recompacted]"
+        isinstance(e, types.runtime.UserMessage) and e.text == "[recompacted]"
         for e in a.history
     )
 
@@ -1370,8 +1470,8 @@ async def test_activity_active_spans_tool_execution() -> None:
     (``types.runtime.ModelIdle`` / cancel / error).
     """
     a = _build_agent()
-    tc = types.history.ToolCall(id="c1", name="Echo", args={})
-    msg_with_tools = types.history.AssistantMessage(text="", tool_calls=(tc,))
+    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
+    msg_with_tools = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
 
     a.publish(types.runtime.ModelCallStarted())
     assert a.activity.active is True
@@ -1383,7 +1483,7 @@ async def test_activity_active_spans_tool_execution() -> None:
     )
 
     # Tool result arrives.
-    a.publish(types.history.ToolResult(call_id="c1", content="ok"))
+    a.publish(types.runtime.ToolResult(call_id="c1", content="ok"))
     assert a.activity.active is True
 
     # Round 2 model call fires.
@@ -1393,7 +1493,7 @@ async def test_activity_active_spans_tool_execution() -> None:
     # Round 2 has no tool calls; model truly idles.
     a.publish(
         types.runtime.ModelResponseComplete(
-            message=types.history.AssistantMessage(text="done")
+            message=types.runtime.AssistantMessage(text="done")
         )
     )
     a.publish(types.runtime.ModelIdle())
@@ -1452,8 +1552,8 @@ async def test_streaming_chars_recorded_in_activity() -> None:
 def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
     """``_track_tool_registry`` records cohort id → tool name and bumps rounds."""
     a = _build_agent()
-    tc = types.history.ToolCall(id="c1", name="Echo", args={})
-    msg = types.history.AssistantMessage(text="", tool_calls=(tc,))
+    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
+    msg = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
     a.publish(types.runtime.ModelResponseComplete(message=msg))
     assert a._tool_registry["c1"][0] == "Echo"
     assert a.activity.num_tool_call_rounds == 1
@@ -1462,8 +1562,8 @@ def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
 def test_enforce_caps_pushes_error_when_limit_reached() -> None:
     """``_enforce_caps`` posts a types.runtime.ModelResponseError when rounds cap is hit."""
     a = Agent(model=StubModel(), tools=[], max_tool_call_rounds=1)
-    tc = types.history.ToolCall(id="c1", name="Echo", args={})
-    msg = types.history.AssistantMessage(text="", tool_calls=(tc,))
+    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
+    msg = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
     a.publish(types.runtime.ModelResponseComplete(message=msg))
 
     # Round count is now 1 == cap; the next observation triggers the
@@ -1476,7 +1576,7 @@ def test_enforce_caps_pushes_error_when_limit_reached() -> None:
 @pytest.mark.asyncio
 async def test_compact_now_no_compactor_is_noop() -> None:
     a = _build_agent()
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
     await a.compact_now()
     # History untouched: no compactor wired.
     assert len(a.runtime.context().messages) == 1
@@ -1498,7 +1598,7 @@ async def test_compact_now_replaces_history_in_place() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1506,13 +1606,13 @@ async def test_compact_now_replaces_history_in_place() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1520,11 +1620,11 @@ async def test_compact_now_replaces_history_in_place() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_ReplaceCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.runtime.UserMessage(text="old"))
     await a.compact_now()
     assert len(a.runtime.context().messages) == 1
     entry = a.runtime.context().messages[0]
-    assert isinstance(entry, types.history.UserMessage)
+    assert isinstance(entry, types.runtime.UserMessage)
     assert entry.text == "[summary]"
 
 
@@ -1548,7 +1648,7 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1563,14 +1663,14 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
                 ref=mint_ref(),
                 mask=mask,
                 insert_after=None,
-                payload=(types.history.UserMessage(text="[summary]"),),
+                payload=(types.runtime.UserMessage(text="[summary]"),),
                 strategy="summary",
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1578,18 +1678,20 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BlockingCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="please run a tool"))
-    tc = types.history.ToolCall(id="tc-1", name="echo", args={})
-    a.runtime.append_history(types.history.AssistantMessage(text="", tool_calls=(tc,)))
+    a.runtime.append_history(types.runtime.UserMessage(text="please run a tool"))
+    tc = types.runtime.ToolCall(id="tc-1", name="echo", args={})
+    a.runtime.append_history(types.runtime.AssistantMessage(text="", tool_calls=(tc,)))
     a.runtime.append_history(
-        types.history.ToolResult(call_id="tc-1", content="[Running in background]"),
+        types.runtime.ToolResult(call_id="tc-1", content="[Running in background]"),
     )
-    a.runtime.append_history(types.history.UserMessage(text="[worker is idle] ping"))
+    a.runtime.append_history(types.runtime.UserMessage(text="[worker is idle] ping"))
 
     compact_task = asyncio.create_task(a.compact_now())
     try:
         await asyncio.wait_for(compact_started.wait(), timeout=1.0)
-        spliced = a.runtime._splice_detached_result("tc-1", "real output", False)
+        spliced = a.runtime._splice_detached_result(
+            types.runtime.ToolResult(call_id="tc-1", content="real output")
+        )
         assert spliced is not None
         release_compact.set()
         await asyncio.wait_for(compact_task, timeout=1.0)
@@ -1601,7 +1703,7 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
 
     messages = a.runtime.context().messages
     assert len(messages) == 1
-    assert isinstance(messages[0], types.history.UserMessage)
+    assert isinstance(messages[0], types.runtime.UserMessage)
     assert messages[0].text == "[summary]"
 
 
@@ -1621,14 +1723,14 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -1638,7 +1740,7 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
     f.write_text("x")
     a.tool_state.mark_read(str(f), content="x")
     a.tool_state.invoked_skills.update({"alpha", "beta"})
-    a.runtime.append_history(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.runtime.UserMessage(text="old"))
 
     override = await agent_compactor.compact(
         a.runtime.tape,
@@ -1674,14 +1776,14 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -1692,7 +1794,7 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     assert a.tool_state.read_cache
     assert a.tool_state.invoked_skills == {"alpha", "beta"}
 
-    a.runtime.append_history(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.runtime.UserMessage(text="old"))
     await a.compact_now()
 
     assert a.tool_state.read_cache == {}
@@ -1724,7 +1826,7 @@ async def test_compact_now_returns_true_on_success() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1732,13 +1834,13 @@ async def test_compact_now_returns_true_on_success() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1746,7 +1848,7 @@ async def test_compact_now_returns_true_on_success() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="old"))
+    a.runtime.append_history(types.runtime.UserMessage(text="old"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -1776,7 +1878,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1788,7 +1890,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1796,7 +1898,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is False
 
@@ -1811,7 +1913,7 @@ async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
     "no compactor" path is intentional configuration, not a failure.
     """
     a = _build_agent()
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -1828,7 +1930,9 @@ async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
     "tried to compact and the inner compactor raised".
     """
     a = _build_agent()
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
 
@@ -1856,7 +1960,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1868,7 +1972,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1876,7 +1980,9 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_NeverCompactor())
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
 
@@ -1904,7 +2010,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1916,7 +2022,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1924,7 +2030,9 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_CompactBrokenButGatedTrue())
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is False
 
@@ -1949,7 +2057,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -1961,7 +2069,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1970,7 +2078,9 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
 
     compactor = _AlwaysBroken()
     a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
 
     # First 3 calls invoke the compactor and fail.
     for _ in range(3):
@@ -2005,20 +2115,20 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2028,7 +2138,9 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
     a = Agent(model=StubModel(), tools=[], compactor=_SuccessfulCompactor())
     # Pre-populate failure count -- simulating prior auto-failures.
     a.compaction_state.compact_failures = 2
-    history: list[types.history.HistoryEntry] = [types.history.UserMessage(text="x")]
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
     assert a.compaction_state.compact_failures == 0
@@ -2050,7 +2162,7 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2062,7 +2174,7 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2070,19 +2182,19 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
     await a.compact_now()
     err = [
         e
         for e in a.runtime.context().messages
-        if isinstance(e, types.history.UserMessage) and "[Compaction error:" in e.text
+        if isinstance(e, types.runtime.UserMessage) and "[Compaction error:" in e.text
     ]
     assert len(err) == 1
 
 
 @dataclass(slots=True, kw_only=True)
 class _OverflowModel:
-    """Model that raises types.exceptions.PromptTooLongError on the first N calls."""
+    """Model that raises types.model.PromptTooLongError on the first N calls."""
 
     model_id: str = "ovf"
     max_request_tokens: int = 100_000
@@ -2124,7 +2236,7 @@ class _OverflowModel:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
-        return isinstance(error, types.exceptions.PromptTooLongError)
+        return isinstance(error, types.model.PromptTooLongError)
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
@@ -2145,20 +2257,20 @@ class _OverflowModel:
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
-            raise types.exceptions.PromptTooLongError("too long")
+            raise types.model.PromptTooLongError("too long")
         return types.model.ModelResponse(
-            message=types.history.AssistantMessage(text="recovered")
+            message=types.runtime.AssistantMessage(text="recovered")
         )
 
 
 @dataclass(slots=True, kw_only=True)
 class _RawOverflowModel:
-    """Model that raises a non-types.exceptions.PromptTooLongError but classifies it as overflow.
+    """Model that raises a non-types.model.PromptTooLongError but classifies it as overflow.
 
     Mirrors the production failure where ``anthropic.APIStatusError``
     propagated up un-normalized: the recovery loop's catch must rely
     on ``is_context_overflow``, not on ``isinstance(exc,
-    types.exceptions.PromptTooLongError)``, or compaction never engages.
+    types.model.PromptTooLongError)``, or compaction never engages.
     """
 
     model_id: str = "raw"
@@ -2224,7 +2336,7 @@ class _RawOverflowModel:
         if idx < self.overflow_count:
             raise RuntimeError("Request size exceeds model context window")
         return types.model.ModelResponse(
-            message=types.history.AssistantMessage(text="recovered")
+            message=types.runtime.AssistantMessage(text="recovered")
         )
 
 
@@ -2247,7 +2359,7 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2256,13 +2368,13 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2271,12 +2383,12 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
     model = _OverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert len(compact_calls) == 1
     # _OverflowModel emitted "recovered" on the second call.
     assert any(
-        isinstance(e, types.history.AssistantMessage) and e.text == "recovered"
+        isinstance(e, types.runtime.AssistantMessage) and e.text == "recovered"
         for e in a.history
     )
 
@@ -2318,7 +2430,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2327,13 +2439,13 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del custom_instructions
             order.append("compact")
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2402,12 +2514,12 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del request, on_text, on_thinking
             self.order_log.append("stream")
             return types.model.ModelResponse(
-                message=types.history.AssistantMessage(text="ok"),
+                message=types.runtime.AssistantMessage(text="ok"),
             )
 
     model = _RecordingModel(order_log=order)
     a = Agent(model=model, tools=[], compactor=_OneShotCompactor())
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert order == ["compact", "stream"], order
 
@@ -2430,7 +2542,7 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2438,13 +2550,13 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2453,7 +2565,7 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
     events: list[types.runtime.RuntimeEvent] = []
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="hi"))
+    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
     a.runtime.observers.append(events.append)
 
     assert await a.compact_now() is True
@@ -2465,7 +2577,9 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
     complete = events[-1]
     assert isinstance(complete, types.runtime.CompactComplete)
     assert len(complete.records) == 1
-    assert a.history == list(complete.records[0].payload)
+    record = complete.records[0]
+    assert isinstance(record, ContextSplice)
+    assert a.history == list(record.payload)
     assert a.activity.current_compact_start == 0.0
 
 
@@ -2503,7 +2617,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2516,7 +2630,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2529,7 +2643,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
 
     with pytest.raises(RuntimeError, match="compaction disconnected"):
         await a._agent_model.stream(
-            history=[types.history.UserMessage(text="hi")],
+            history=[types.runtime.UserMessage(text="hi")],
             system="",
             tools=[],
             on_text=lambda _t: None,
@@ -2567,19 +2681,19 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
-            raise types.exceptions.PromptTooLongError("compactor saw overflow")
+            raise types.model.PromptTooLongError("compactor saw overflow")
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2593,7 +2707,7 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
     )
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
-            history=[types.history.UserMessage(text="hi")],
+            history=[types.runtime.UserMessage(text="hi")],
             system="",
             tools=[],
             on_text=lambda _t: None,
@@ -2602,7 +2716,7 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
     msg = str(ei.value)
     assert "/clear" in msg
     assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, types.exceptions.PromptTooLongError)
+    assert isinstance(ei.value.__cause__, types.model.PromptTooLongError)
 
 
 @pytest.mark.asyncio
@@ -2631,7 +2745,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2640,13 +2754,13 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             del custom_instructions
             # Returns short summary; model keeps overflowing.
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2657,7 +2771,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
-            history=[types.history.UserMessage(text="x")],
+            history=[types.runtime.UserMessage(text="x")],
             system="",
             tools=[],
             on_text=lambda _t: None,
@@ -2666,7 +2780,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
     msg = str(ei.value)
     assert "/clear" in msg
     assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, types.exceptions.PromptTooLongError)
+    assert isinstance(ei.value.__cause__, types.model.PromptTooLongError)
     # The polished message should not embed the underlying exception
     # again -- ``__cause__`` already carries it. Duplicating the cause
     # in the message dilutes the actionable text with Python internals.
@@ -2708,7 +2822,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2721,7 +2835,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2733,7 +2847,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     a = Agent(model=model, tools=[], compactor=compactor)
     with pytest.raises(RuntimeError, match="compaction blew up"):
         await a._agent_model.stream(
-            history=[types.history.UserMessage(text="x")],
+            history=[types.runtime.UserMessage(text="x")],
             system="",
             tools=[],
             on_text=lambda _t: None,
@@ -2751,13 +2865,13 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
 
 @pytest.mark.asyncio
 async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> None:
-    """Recovery engages on any exception classified as overflow, not just ``types.exceptions.PromptTooLongError``.
+    """Recovery engages on any exception classified as overflow, not just ``types.model.PromptTooLongError``.
 
     When a provider's normalization slips and a raw provider exception
     propagates with the canonical ``is_context_overflow(exc)`` returning
     True, the recovery loop must still fire ``compact_now``. This is
     the bug that produced the production death-spiral: the recovery
-    catch was narrowed to ``types.exceptions.PromptTooLongError`` while the classifier
+    catch was narrowed to ``types.model.PromptTooLongError`` while the classifier
     knew the exception was overflow.
     """
     compact_calls: list[int] = []
@@ -2776,7 +2890,7 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2785,13 +2899,13 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.history.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2800,11 +2914,11 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
 
     model = _RawOverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert len(compact_calls) == 1
     assert any(
-        isinstance(e, types.history.AssistantMessage) and e.text == "recovered"
+        isinstance(e, types.runtime.AssistantMessage) and e.text == "recovered"
         for e in a.history
     )
 
@@ -2868,11 +2982,11 @@ async def test_clear_cancels_explicit_background_jobs() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.history.ToolResult(call_id="", content="done")
+            return types.runtime.ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -2893,11 +3007,11 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.history.ToolResult(call_id="", content="done")
+            return types.runtime.ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -2907,9 +3021,9 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     finally:
         agent_runtime.current_call_id_var.reset(token)
     a.runtime.append_history(
-        types.history.AssistantMessage(
+        types.runtime.AssistantMessage(
             tool_calls=(
-                types.history.ToolCall(
+                types.runtime.ToolCall(
                     id="bg-1", name="Echo", args={"background": True}
                 ),
             )
@@ -2927,17 +3041,13 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     ]
     assert len(detached) == 1
 
-    spliced = a.runtime._splice_detached_result(
-        detached[0].call_id,
-        detached[0].content,
-        detached[0].is_error,
-    )
+    spliced = a.runtime._splice_detached_result(detached[0].result)
 
     assert spliced is not None
     assert spliced.content == "[cancelled]"
     assert spliced.is_error
     assert not any(
-        isinstance(entry, types.history.ToolResult)
+        isinstance(entry, types.runtime.ToolResult)
         and entry.content.startswith("[Running in background")
         for entry in a.history
     )
@@ -2950,11 +3060,11 @@ async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.history.ToolResult(call_id="", content="done")
+            return types.runtime.ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -2976,11 +3086,11 @@ async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.history.ToolResult(call_id="", content="done")
+            return types.runtime.ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -3001,20 +3111,20 @@ async def test_tool_call_round_cap_blocks_tool_spawn() -> None:
     @dataclass(slots=True, kw_only=True)
     class SideEffectTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
-            return types.history.ToolResult(call_id="", content="side effect")
+            return types.runtime.ToolResult(call_id="", content="side effect")
 
     model = StubModel(
         responses=[
-            types.history.AssistantMessage(
-                tool_calls=(types.history.ToolCall(id="c1", name="Echo", args={}),)
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
             )
         ]
     )
     a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
-    events = [type(ev) async for ev in a.run(types.history.UserMessage(text="go"))]
+    events = [type(ev) async for ev in a.run(types.runtime.UserMessage(text="go"))]
 
     assert types.runtime.ModelResponseError in events
     assert not started.is_set()
@@ -3030,15 +3140,15 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.history.ToolResult(call_id="", content="done")
+            return types.runtime.ToolResult(call_id="", content="done")
 
     a = _build_agent(
         model=StubModel(
-            responses=[types.history.AssistantMessage(text="fresh response")]
+            responses=[types.runtime.AssistantMessage(text="fresh response")]
         ),
         tools=[SlowTool()],
     )
@@ -3055,7 +3165,7 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
     try:
         await a.clear()
         await asyncio.sleep(0)
-        a.runtime.inbox.push_back(types.history.UserMessage(text="fresh"))
+        a.runtime.inbox.push_back(types.runtime.UserMessage(text="fresh"))
         await asyncio.wait_for(idle.wait(), timeout=1.0)
     finally:
         a.shutdown(force=True)
@@ -3066,7 +3176,7 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
     user_texts = [
         entry.text
         for entry in a.history
-        if isinstance(entry, types.history.UserMessage)
+        if isinstance(entry, types.runtime.UserMessage)
     ]
     assert not any("[cancelled]" in text for text in user_texts)
     assert not any(text.startswith("[Tool ") for text in user_texts)
@@ -3079,7 +3189,7 @@ async def test_agent_tool_background_exception_is_logged(
     @dataclass(slots=True, kw_only=True)
     class FailingTool(StubTool):
         @override
-        async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             raise RuntimeError("boom")
 
@@ -3103,7 +3213,7 @@ async def test_agent_tool_background_exception_is_logged(
 async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
     tmp_path: Path,
 ) -> None:
-    """If summary ends with types.history.AssistantMessage, an inert types.history.UserMessage is appended."""
+    """If summary ends with types.runtime.AssistantMessage, an inert types.runtime.UserMessage is appended."""
 
     @dataclass(slots=True, kw_only=True)
     class _AssistantTerminatedCompactor:
@@ -3119,7 +3229,7 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3127,13 +3237,13 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.AssistantMessage(text="model said")], mint_ref, tape=tape
+                [types.runtime.AssistantMessage(text="model said")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3146,11 +3256,11 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
         compactor=_AssistantTerminatedCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
     await a.compact_now()
     # The continuation user-message terminator was appended.
     last = a.runtime.context().messages[-1]
-    assert isinstance(last, types.history.UserMessage)
+    assert isinstance(last, types.runtime.UserMessage)
     assert last.text == "[continuation]"
 
 
@@ -3174,7 +3284,7 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3182,13 +3292,13 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3205,14 +3315,14 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
         compactor=_OkCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
 
     monkeypatch.setattr("sagent.agent.agent.post_compact_enrich", _boom)
     await a.compact_now()
 
     # Summary still survived; the enrich failure was swallowed.
     assert any(
-        isinstance(e, types.history.UserMessage) and e.text == "[summary]"
+        isinstance(e, types.runtime.UserMessage) and e.text == "[summary]"
         for e in a.runtime.context().messages
     )
 
@@ -3261,7 +3371,7 @@ async def test_stream_rebuilds_system_per_request() -> None:
     model = StubModel()
     a = _build_agent(model=model, system=factory)
     pre_run_count = call_count
-    async for _ in a.run(types.history.UserMessage(text="hi")):
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
         pass
     assert call_count > pre_run_count
     assert model.received[-1].system == f"sys-v{call_count}"
@@ -3272,7 +3382,7 @@ def test_subagent_inherits_root_cost_tracker() -> None:
     root = _build_agent()
     child = _build_agent()
     response = types.model.ModelResponse(
-        message=types.history.AssistantMessage(text="ok"),
+        message=types.runtime.AssistantMessage(text="ok"),
         tokens=types.model.TokenCount(input_tokens=10, output_tokens=5),
         total_cost=0.02,
     )
@@ -3288,7 +3398,7 @@ def test_persistent_subagent_shadows_root_cost_tracker() -> None:
     child = _build_agent()
     child._persistent = True
     response = types.model.ModelResponse(
-        message=types.history.AssistantMessage(text="ok"),
+        message=types.runtime.AssistantMessage(text="ok"),
         tokens=types.model.TokenCount(),
         total_cost=0.02,
     )
@@ -3375,7 +3485,7 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
             stream_entered.set()
             await gate.wait()
             return types.model.ModelResponse(
-                message=types.history.AssistantMessage(text="from A"), total_cost=0.10
+                message=types.runtime.AssistantMessage(text="from A"), total_cost=0.10
             )
 
     model_a = GatedModel(model_id="model-A")
@@ -3383,7 +3493,7 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
     agent = _build_agent(model=model_a)
 
     async def consume() -> None:
-        async for _ in agent.run(types.history.UserMessage(text="hi")):
+        async for _ in agent.run(types.runtime.UserMessage(text="hi")):
             pass
 
     drive = asyncio.create_task(consume())
@@ -3448,7 +3558,7 @@ async def test_compact_if_needed_uses_agent_request_cap() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3461,7 +3571,7 @@ async def test_compact_if_needed_uses_agent_request_cap() -> None:
     a.max_request_tokens = 10_000
 
     progressed = await a.compact_if_needed(
-        [types.history.UserMessage(text="x")], a.model
+        [types.runtime.UserMessage(text="x")], a.model
     )
 
     assert progressed is True
@@ -3484,7 +3594,7 @@ async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3496,7 +3606,7 @@ async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
     a.compaction_state.compact_failures = 3
 
     progressed = await a.compact_if_needed(
-        [types.history.UserMessage(text="x")], a.model
+        [types.runtime.UserMessage(text="x")], a.model
     )
 
     assert progressed is True
@@ -3530,7 +3640,7 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3546,7 +3656,7 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
     )
     a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
 
-    progressed = await a.compact_if_needed([types.history.UserMessage(text="x")], model)
+    progressed = await a.compact_if_needed([types.runtime.UserMessage(text="x")], model)
 
     assert progressed is True
     tools_seen = model.estimated_tools[-1]
@@ -3556,7 +3666,7 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_compactor_receives_canonical_context() -> None:
-    seen_context: list[Sequence[types.history.HistoryEntry]] = []
+    seen_context: list[Sequence[types.runtime.ModelContextEvent]] = []
 
     @dataclass(slots=True, kw_only=True)
     class _RecordingCompactor:
@@ -3572,7 +3682,7 @@ async def test_agent_compactor_receives_canonical_context() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3580,25 +3690,25 @@ async def test_agent_compactor_receives_canonical_context() -> None:
             del model, custom_instructions
             seen_context.append(context)
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
-    call = types.history.ToolCall(id="call_1", name="Bash", args={})
+    call = types.runtime.ToolCall(id="call_1", name="Bash", args={})
     budget = types.model.ContextBudget(
         max_request_tokens=100_000,
         max_response_tokens=1_024,
         message_budget_chars=10,
     )
     a = Agent(model=StubModel(), compactor=_RecordingCompactor(), budget=budget)
-    a.runtime.append_history(types.history.UserMessage(text="start"))
-    a.runtime.append_history(types.history.AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(types.runtime.UserMessage(text="start"))
+    a.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
     a.runtime.append_history(
-        types.history.ToolResult(call_id="call_1", content="x" * 1_000)
+        types.runtime.ToolResult(call_id="call_1", content="x" * 1_000)
     )
 
     assert await a.compact_now() is True
     result = seen_context[-1][2]
-    assert isinstance(result, types.history.ToolResult)
+    assert isinstance(result, types.runtime.ToolResult)
     assert result.content == "x" * 1_000
 
 
@@ -3629,14 +3739,14 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     model = _RecordingModel()
@@ -3646,13 +3756,168 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
         )
     )
     a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
     for tools_seen in model.estimated_tools:
         assert tools_seen is not None
         assert isinstance(tools_seen[0], BackgroundAwareTool)
+
+
+@pytest.mark.asyncio
+async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -> None:
+    """Post-compact tail repair must preserve tool-call pairing."""
+
+    class _ToolCallCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: types.model.Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            call = types.runtime.ToolCall(id="call-1", name="Echo", args={})
+            del tape
+            return ContextSplice.replay(
+                ref=mint_ref(),
+                mask=(),
+                insert_after=None,
+                payload=(types.runtime.AssistantMessage(tool_calls=(call,)),),
+                strategy="legacy",
+                paired_externally=frozenset({"call-1"}),
+            )
+
+    a = Agent(model=StubModel(), compactor=_ToolCallCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+
+    assert await a.compact_now() is True
+
+    payload = a.runtime.context().messages
+    validate_context(payload)
+    assert isinstance(payload[-1], types.runtime.ToolResult)
+    assert payload[-1].call_id == "call-1"
+    assert payload[-1].is_error is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_compact_now_awaits_active_runtime_compact_task() -> None:
+    """Overflow compaction must not race an inbox-driven compaction."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    call_count = 0
+
+    class _SlowCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: types.model.Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            nonlocal call_count
+            del context, model, custom_instructions
+            call_count += 1
+            started.set()
+            await release.wait()
+            return _summary_override(
+                [types.runtime.UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
+            )
+
+    a = Agent(model=StubModel(), compactor=_SlowCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.compact_task = asyncio.create_task(a.runtime._compact_and_post(""))
+    await started.wait()
+
+    waiting = asyncio.create_task(a.compact_now())
+    await asyncio.sleep(0.05)
+    assert call_count == 1
+    assert not waiting.done()
+    release.set()
+
+    assert await waiting is True
+    await a.runtime.compact_task
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
+    """Post-compact retry prediction must match the live auto-compact gate."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _BudgetModel(StubModel):
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            return 90
+
+    class _SummaryCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: types.model.Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
+            )
+
+    budget = types.model.ContextBudget(
+        max_request_tokens=100,
+        max_response_tokens=10,
+        buffer_tokens=10,
+    )
+    a = Agent(
+        model=_BudgetModel(max_request_tokens=1_000, max_response_tokens=10),
+        compactor=_SummaryCompactor(),
+        budget=budget,
+    )
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+
+    assert await a.compact_now() is True
+
+    splices = [record for record in a.runtime.tape if isinstance(record, ContextSplice)]
+    assert len(splices) == 1
+    assert "re-trigger compaction" in splices[0].fallback_reason
+    assert "threshold (80 tok)" in splices[0].fallback_reason
 
 
 @pytest.mark.asyncio
@@ -3674,7 +3939,7 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
     class _RestorableTool(StubTool):
         async def post_compact_restore(
             self,
-            history: list[types.history.HistoryEntry],
+            history: list[types.runtime.ModelContextEvent],
             tool_state: ToolState,
             *,
             budget_chars: int = 100_000,
@@ -3696,14 +3961,14 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.history.HistoryEntry],
+            context: Sequence[types.runtime.ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.history.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     budget = types.model.ContextBudget(
@@ -3718,7 +3983,7 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
         compactor=_OkCompactor(),
         budget=budget,
     )
-    a.runtime.append_history(types.history.UserMessage(text="x"))
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
 
     assert await a.compact_now() is True
 

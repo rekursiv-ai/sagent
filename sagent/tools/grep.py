@@ -24,7 +24,7 @@ from sagent.tools.lib.bash import (
     match_pipeline,
     unwrap_cd_prefix,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -692,6 +692,7 @@ class _GrepState:
         "max_results",
         "offset",
         "output_mode",
+        "show_line_numbers",
         "skipped",
     )
 
@@ -703,12 +704,14 @@ class _GrepState:
         max_results: int,
         context_before: int,
         context_after: int,
+        show_line_numbers: bool,
     ) -> None:
         self.output_mode = output_mode
         self.offset = offset
         self.max_results = max_results
         self.context_before = context_before
         self.context_after = context_after
+        self.show_line_numbers = show_line_numbers
         self.matches: list[str] = []
         self.file_counts: dict[str, int] = {}
         self.skipped = 0
@@ -751,7 +754,10 @@ class _GrepState:
             matched_text = m.group()
             if len(matched_text) > 200:
                 matched_text = matched_text[:200] + "..."
-            self.matches.append(f"{filepath}:{line_num}:{matched_text}")
+            if self.show_line_numbers:
+                self.matches.append(f"{filepath}:{line_num}:{matched_text}")
+            else:
+                self.matches.append(f"{filepath}:{matched_text}")
             if self.full:
                 break
 
@@ -800,11 +806,16 @@ class _GrepState:
             start = max(0, i - self.context_before)
             end = min(len(all_lines), i + self.context_after + 1)
             for j in range(start, end):
-                prefix = ">" if j == i else " "
-                self.matches.append(f"{filepath}:{j + 1}:{prefix} {all_lines[j]}")
+                self._append_content_line(filepath, j, all_lines[j])
             self.matches.append("--")
         else:
+            self._append_content_line(filepath, i, line)
+
+    def _append_content_line(self, filepath: str, i: int, line: str) -> None:
+        if self.show_line_numbers:
             self.matches.append(f"{filepath}:{i + 1}:{line}")
+        else:
+            self.matches.append(f"{filepath}:{line}")
 
     def format(self, *, keep_last: int) -> str:
         """Return final output string.
@@ -846,7 +857,6 @@ def _grep_python(
     offset: int,
 ) -> str:
     """Grep using Python regex (fallback)."""
-    del show_line_numbers
     flags = 0
     if multiline:
         flags |= re.DOTALL
@@ -860,6 +870,7 @@ def _grep_python(
         max_results=max_results,
         context_before=context_before,
         context_after=context_after,
+        show_line_numbers=show_line_numbers,
     )
     for f in _collect_files(Path(path), glob_filter, file_type, exclude):
         if not f.is_file():
@@ -885,24 +896,33 @@ def _collect_files(
     exclude: str,
 ) -> list[Path]:
     """Walk *root* and return files matching the glob/type/exclude filters."""
-    if root.is_file():
-        return [root]
     globs = _TYPE_GLOBS.get(file_type, []) if file_type else []
     if glob_filter:
         globs = [glob_filter]
     if not globs:
         globs = ["*"]
+    if root.is_file():
+        return [root] if _path_matches(root.name, globs, exclude) else []
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root)
-        if exclude:
-            dirnames[:] = [d for d in dirnames if not (rel_dir / d).match(exclude)]
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in {".git", ".svn", ".hg"}
+            and not (exclude and (rel_dir / dirname).match(exclude))
+        ]
         dirnames.sort()
         for fname in sorted(filenames):
             fpath = Path(dirpath) / fname
             rel = fpath.relative_to(root)
-            if exclude and rel.match(exclude):
-                continue
-            if any(rel.match(g) for g in globs):
+            if _path_matches(str(rel), globs, exclude):
                 files.append(fpath)
     return files
+
+
+def _path_matches(path: str, globs: Sequence[str], exclude: str) -> bool:
+    rel = Path(path)
+    if exclude and rel.match(exclude):
+        return False
+    return any(rel.match(glob) for glob in globs)

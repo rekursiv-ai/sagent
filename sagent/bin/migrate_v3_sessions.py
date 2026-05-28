@@ -6,7 +6,7 @@ tree) and writes a sibling ``session.v4.jsonl`` alongside. The v3 files
 are left untouched.
 
 v3 records carry ``Message`` shapes (``descriptor`` + ``content``).
-The v4 schema is flat ``HistoryEntry`` dataclasses encoded with
+The v4 schema is flat ``TapeEvent`` dataclasses encoded with
 ``kind: history``; see ``docs/private/agent_v4_contract.md`` §6.
 
 Translation rules:
@@ -271,7 +271,7 @@ def iter_v4_records(lines: Iterable[str]) -> Iterable[dict[str, object]]:
       lines: Lines from a v3 ``session.jsonl``.
 
     Yields:
-      record: One v4 ``HistoryEntry`` / meta / clear dict per translatable input.
+      record: One v4 ``TapeEvent`` / meta / clear dict per translatable input.
 
     """
     for raw in lines:

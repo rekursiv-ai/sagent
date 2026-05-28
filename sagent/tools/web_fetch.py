@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 from urllib.parse import quote, urlparse
 from xml.etree.ElementTree import Element, ParseError
@@ -27,7 +28,7 @@ from sagent.tools.core import (
     truncate,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 trafilatura = lazy_import("trafilatura")
@@ -35,6 +36,7 @@ trafilatura = lazy_import("trafilatura")
 # Response kinds returned by ``_fetch_body``; controls extraction.
 _KIND_HTML = "html"  # raw HTML, needs trafilatura
 _KIND_REDDIT = "reddit_thread"  # Reddit JSON, needs comment formatter
+_KIND_REDDIT_LISTING = "reddit_listing"  # Reddit listing JSON, needs post formatter
 _KIND_MARKDOWN = "markdown"  # already-extracted markdown (reader proxy)
 _KIND_RSS = "rss"  # RSS 2.0 XML, needs feed formatter
 
@@ -242,7 +244,8 @@ async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
     """Extract tool result text from a response body.
 
     ``kind`` selects the post-processing path:
-      - ``_KIND_REDDIT``: parse as Reddit listing JSON.
+      - ``_KIND_REDDIT``: parse as Reddit thread JSON.
+      - ``_KIND_REDDIT_LISTING``: parse as Reddit post-listing JSON.
       - ``_KIND_RSS``: parse as RSS 2.0 XML and format as markdown.
       - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already
         rendered to markdown; running trafilatura on it would strip
@@ -257,6 +260,12 @@ async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
         except (ValueError, TypeError):
             return content[:TOOL_RESULT_MAX_CHARS]
         return _format_reddit_json(data)
+    if kind == _KIND_REDDIT_LISTING:
+        try:
+            data = json.loads(content)
+        except (ValueError, TypeError):
+            return content[:TOOL_RESULT_MAX_CHARS]
+        return _format_reddit_listing(data)
     if kind == _KIND_RSS:
         return _format_rss(body)
     if kind == _KIND_MARKDOWN:
@@ -380,7 +389,7 @@ def _reader_proxy_fetch(url: str) -> bytes:
     treats it as a soft failure instead of handing the agent text
     that looks like an article but is actually a proxy diagnostic.
     """
-    proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/?#&=%"))
+    proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/"))
     body = _safe_fetch(proxy_url)
     if _READER_PROXY_SOFT_FAIL_RE.search(body):
         raise FetchError(
@@ -429,7 +438,11 @@ def _validated_host(netloc: str) -> ValidatedHost:
     if err is not None:
         raise ValueError(err)
     infos = socket.getaddrinfo(host, None)
-    return ValidatedHost(host=netloc, ip=str(infos[0][4][0]))
+    ip = str(infos[0][4][0])
+    err = _ip_is_safe(host, ip)
+    if err is not None:
+        raise ValueError(err)
+    return ValidatedHost(host=netloc, ip=ip)
 
 
 def _url_is_safe(url: str) -> str | None:
@@ -448,19 +461,27 @@ def _url_is_safe(url: str) -> str | None:
     except (socket.gaierror, UnicodeError) as e:
         return f"DNS resolution failed for {host!r}: {e}"
     for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            continue
-        if (
-            ip.is_loopback
-            or ip.is_link_local
-            or ip.is_private
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            return f"Refusing to fetch {host!r} (resolves to non-public address {ip})."
+        err = _ip_is_safe(host, str(info[4][0]))
+        if err is not None:
+            return err
+    return None
+
+
+def _ip_is_safe(host: str, raw_ip: str) -> str | None:
+    """Return an error string if ``raw_ip`` is unsafe to fetch, else None."""
+    try:
+        ip = ipaddress.ip_address(raw_ip)
+    except ValueError:
+        return None
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        return f"Refusing to fetch {host!r} (resolves to non-public address {ip})."
     return None
 
 
@@ -501,6 +522,9 @@ class _RedditAdapter:
     _THREAD_RE = re.compile(
         r"^https?://(?:\w+\.)?reddit\.com/r/\w+/comments/\w+",
     )
+    _LISTING_RE = re.compile(
+        r"^https?://(?:\w+\.)?reddit\.com/r/[^/?#]+/(?:new|hot|top|rising|controversial)?/?\.json(?:[?#].*)?$",
+    )
 
     def matches(self, url: str) -> bool:
         """Match ``reddit.com`` and any subdomain (``old``, ``np``, ``new``)."""
@@ -519,6 +543,9 @@ class _RedditAdapter:
                 json_url += ".json"
             body = await asyncio.to_thread(_safe_fetch, json_url)
             return body, _KIND_REDDIT
+        if self._LISTING_RE.search(url):
+            body = await asyncio.to_thread(_safe_fetch, url)
+            return body, _KIND_REDDIT_LISTING
 
         try:
             body = await asyncio.to_thread(_safe_fetch, url)
@@ -653,6 +680,58 @@ def _format_reddit_json(data: list[Any] | dict[str, Any]) -> str:
         comments = listings[1].get("data", {}).get("children", [])
         _format_reddit_comments(comments, lines, depth=0)
     return "\n".join(lines)
+
+
+def _format_reddit_listing(data: list[Any] | dict[str, Any]) -> str:
+    """Extract readable text from Reddit listing JSON."""
+    listing_obj: object = data[0] if isinstance(data, list) and data else data
+    if not isinstance(listing_obj, dict):
+        return ""
+    listing = cast(dict[str, object], listing_obj)
+    listing_data_obj = listing.get("data", {})
+    if not isinstance(listing_data_obj, dict):
+        return ""
+    listing_data = cast(dict[str, object], listing_data_obj)
+    children_obj = listing_data.get("children", [])
+    if not isinstance(children_obj, list):
+        return ""
+    children = cast(list[object], children_obj)
+    lines = ["# Reddit listing", ""]
+    for idx, child_obj in enumerate(children, start=1):
+        if not isinstance(child_obj, dict):
+            continue
+        child = cast(dict[str, object], child_obj)
+        if child.get("kind") != "t3":
+            continue
+        post_obj = child.get("data", {})
+        if not isinstance(post_obj, dict):
+            continue
+        post = cast(dict[str, object], post_obj)
+        created_raw = post.get("created_utc", 0)
+        if not isinstance(created_raw, (int, float, str)):
+            created_raw = 0
+        created = datetime.fromtimestamp(float(created_raw), UTC)
+        permalink = str(post.get("permalink", ""))
+        reddit_url = f"https://www.reddit.com{permalink}" if permalink else ""
+        lines.append(f"{idx}. {post.get('title', '')}")
+        lines.append(
+            f"   - u/{post.get('author', '[deleted]')} | "
+            f"{post.get('score', 0)} points | "
+            f"{post.get('num_comments', 0)} comments | {created.isoformat()}"
+        )
+        flair = post.get("link_flair_text")
+        if flair:
+            lines.append(f"   - flair: {flair}")
+        if reddit_url:
+            lines.append(f"   - reddit: {reddit_url}")
+        outbound = str(post.get("url", ""))
+        if outbound and outbound != reddit_url:
+            lines.append(f"   - link: {outbound}")
+        selftext = " ".join(str(post.get("selftext", "")).split())
+        if selftext:
+            lines.append(f"   - excerpt: {selftext[:500]}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _format_reddit_comments(children: list[Any], lines: list[str], depth: int) -> None:

@@ -107,15 +107,19 @@ from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
 from sagent.types.exceptions import (
     AuthRefreshError,
-    PromptTooLongError,
 )
-from sagent.types.history import (
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    PromptTooLongError,
+    TokenCount,
+)
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 from sagent.types.tools import Tool
 
 

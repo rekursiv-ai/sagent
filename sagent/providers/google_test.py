@@ -16,15 +16,18 @@ from sagent.providers.google import (
     _build_response,
     _strip_additional_properties,
 )
-from sagent.types.exceptions import PromptTooLongError
-from sagent.types.history import (
+from sagent.types.model import (
+    ModelRequest,
+    Pricing,
+    PromptTooLongError,
+)
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, Pricing
 from sagent.types.tools import Tool
 
 
@@ -63,7 +66,7 @@ def test_strip_additional_properties_scalar_passthrough() -> None:
     assert _strip_additional_properties(cast(MutableJSONValue, "x")) == "x"
 
 
-def _make_request(messages: list[HistoryEntry], **kw: object) -> ModelRequest:
+def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelRequest:
     # Use explicit kwargs to keep the type checker happy.
     if "system" in kw:
         return ModelRequest(messages=messages, system=cast(str, kw["system"]))

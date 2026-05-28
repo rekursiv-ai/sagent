@@ -16,7 +16,7 @@ from sagent.testing import with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.lib.pdf import MAX_PDF_BYTES
 from sagent.tools.read import Read
-from sagent.types.history import BytesMessage, ToolResult
+from sagent.types.runtime import BytesMessage, ToolResult
 
 
 read = Read()

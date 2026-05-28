@@ -37,13 +37,14 @@ from sagent.tools.core import (
     max_depth_var,
     tool_state_var,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
+from sagent.types.runtime import (
+    AgentIdle,
     AssistantMessage,
+    ModelIdle,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
-from sagent.types.runtime import AgentIdle, ModelIdle
 
 
 _AGENT_SPAWN_LOGGER = _agent_spawn_mod.__name__
@@ -208,6 +209,38 @@ async def test_run_basic_child_returns_last_assistant() -> None:
         result = await t.run({"prompt": "do it"})
     assert not result.is_error
     assert result.content == "child-said"
+
+
+@pytest.mark.asyncio
+async def test_non_persistent_child_has_single_registry_label() -> None:
+    """Non-persistent AgentSpawn leaves registry ownership to Agent.run."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _RegistryInspectingModel(StubProviderModel):
+        label_count: int | None = None
+
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            on_text: Callable[[str], None] | None = None,
+            on_thinking: Callable[[str], None] | None = None,
+        ) -> ModelResponse:
+            child = current_agent_var.get()
+            self.label_count = sum(
+                1 for agent in agent_registry.values() if agent is child
+            )
+            return await StubProviderModel.stream(self, request, on_text, on_thinking)
+
+    parent_model = _RegistryInspectingModel(
+        responses=[AssistantMessage(text="child-said")]
+    )
+    parent = _make_parent(parent_model)
+    with _parent_context(parent):
+        result = await AgentSpawn().run({"prompt": "do it"})
+
+    assert not result.is_error
+    assert parent_model.label_count == 1
 
 
 @pytest.mark.asyncio

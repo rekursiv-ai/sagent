@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from itertools import pairwise
 
 from sagent.agent.context import validate_context
 from sagent.request_materialization import (
@@ -10,13 +11,13 @@ from sagent.request_materialization import (
     materialize_messages,
     materialize_request,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest
 
 
 def test_materialize_messages_bounds_tool_results_and_preserves_pairs() -> None:
@@ -78,6 +79,32 @@ def test_materialize_messages_drops_excess_turns_before_emptying_results() -> No
     validate_context(materialized)
 
 
+def test_materialize_messages_drops_head_assistant_when_result_drops() -> None:
+    call = ToolCall(id="call_1", name="Bash", args={})
+    messages = [
+        AssistantMessage(text="I checked", tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+
+    assert materialized == []
+    validate_context(materialized)
+
+
+def test_materialize_messages_drops_empty_assistant_when_result_drops() -> None:
+    call = ToolCall(id="call_1", name="Bash", args={})
+    messages = [
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+
+    assert materialized == []
+    validate_context(materialized)
+
+
 def test_materialize_messages_preserves_assistant_text_when_result_drops() -> None:
     call = ToolCall(id="call_1", name="Bash", args={})
     messages = [
@@ -94,6 +121,26 @@ def test_materialize_messages_preserves_assistant_text_when_result_drops() -> No
     assert assistant.text == "I checked the file"
     assert assistant.tool_calls == ()
     assert _visible_tool_result_chars(materialized) == 0
+    validate_context(materialized)
+
+
+def test_materialize_messages_drops_text_assistant_between_users_when_result_drops() -> (
+    None
+):
+    call = ToolCall(id="call_1", name="Bash", args={})
+    messages = [
+        UserMessage(text="start"),
+        AssistantMessage(text="I checked the file", tool_calls=(call,)),
+        ToolResult(call_id="call_1", content="x" * 1_000),
+        UserMessage(text="continue"),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+
+    assert len(materialized) == 1
+    user = materialized[0]
+    assert isinstance(user, UserMessage)
+    assert user.text == "start\n\ncontinue"
     validate_context(materialized)
 
 
@@ -115,6 +162,40 @@ def test_materialize_messages_preserves_thinking_when_result_drops() -> None:
     assert assistant.thinking_blocks == thinking
     assert assistant.tool_calls == ()
     assert _visible_tool_result_chars(materialized) == 0
+    validate_context(materialized)
+
+
+def test_materialize_messages_drops_orphaned_tool_use_text_before_assistant() -> None:
+    call = ToolCall(id="call_1", name="Bash", args={})
+    messages = [
+        UserMessage(text="start"),
+        AssistantMessage(text="I checked", tool_calls=(call,)),
+        ToolResult(call_id=call.id, content="x" * 1_000),
+        AssistantMessage(text="next answer"),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+
+    assert materialized == [messages[0], messages[3]]
+    assert all(
+        not isinstance(prev, AssistantMessage) or not isinstance(curr, AssistantMessage)
+        for prev, curr in pairwise(materialized)
+    )
+    validate_context(materialized)
+
+
+def test_materialize_messages_drops_multi_tool_turn_instead_of_shrinking() -> None:
+    first = ToolCall(id="call_1", name="Bash", args={})
+    second = ToolCall(id="call_2", name="Bash", args={})
+    messages = [
+        AssistantMessage(tool_calls=(first, second)),
+        ToolResult(call_id="call_1", content="x" * 1_000),
+        ToolResult(call_id="call_2", content="ok"),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_chars=5)
+
+    assert materialized == []
     validate_context(materialized)
 
 

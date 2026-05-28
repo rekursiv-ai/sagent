@@ -51,10 +51,11 @@ from sagent.repl.status_pane import render_status_pane
 from sagent.thinking import ThinkingState, resolve_thinking_command
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
-from sagent.types.history import ToolResult, UserMessage
 from sagent.types.runtime import (
     ModelIdle,
     RuntimeEvent,
+    ToolResult,
+    UserMessage,
     UserQueuedMessage,
 )
 

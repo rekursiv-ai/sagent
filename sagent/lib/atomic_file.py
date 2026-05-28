@@ -105,13 +105,23 @@ def atomic_write_bytes(
         else:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
             try:
-                _ = os.write(fd, data)
+                os.fchmod(fd, file_mode)
+                _write_all(fd, data)
             finally:
                 os.close(fd)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written == 0:
+            raise OSError("Failed to write bytes to temporary file.")
+        view = view[written:]
 
 
 def _tmp_for(path: Path) -> Path:

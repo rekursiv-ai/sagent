@@ -33,8 +33,12 @@ else:
 
     httpx = lazy_import("httpx")  # 168ms
 
-from sagent.types.exceptions import StreamInterruptedError
-from sagent.types.model import Model, ModelRequest, ModelResponse
+from sagent.types.model import (
+    Model,
+    ModelRequest,
+    ModelResponse,
+    StreamInterruptedError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -72,13 +76,16 @@ class RateLimitError(Exception):
     def __init__(self, reset_time: float | None, original: Exception) -> None:
         self.reset_time = reset_time
         self.original = original
+        self.diagnostics = error_diagnostics(original)
         if reset_time is not None and reset_time > time.time():
             clock = time.strftime("%H:%M:%S", time.localtime(reset_time))
             delta = reset_time - time.time()
-            msg = f"Rate limited. Resumes at {clock} (~{delta:.0f}s)."
+            msg = f"Rate limited. Resumes at {clock} (~{_humanize_duration(delta)})."
         else:
             msg = "Rate limited. Try again shortly."
         super().__init__(msg)
+        if self.diagnostics:
+            logger.info("RateLimitError diagnostics: %s", self.diagnostics)
 
 
 def is_retryable(error: Exception, model: Model) -> bool:
@@ -148,6 +155,42 @@ def extract_retry_after(error: Exception) -> float | None:
         except (ValueError, TypeError):
             pass
     return None
+
+
+def error_diagnostics(error: Exception) -> str:
+    """Render a one-line forensic summary of an HTTP error.
+
+    Captures status code, rate-limit-relevant response headers, and a
+    truncated response body. Designed for ``publish_recoverable`` /
+    debug-log payloads so post-mortem analysis can distinguish
+    e.g. weekly-vs-5h-window rate limits without re-triggering the
+    error.
+
+    Args:
+      error: Exception to inspect, typically carrying ``.response``.
+
+    Returns:
+      summary: ``status=... headers={...} body=...`` or empty when
+          there is nothing useful to surface.
+
+    """
+    parts: list[str] = []
+    status = error_status(error)
+    if status is not None:
+        parts.append(f"status={status}")
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    rate_headers = {
+        k: v
+        for k, v in headers.items()
+        if k.lower().startswith(("retry-after", "anthropic-ratelimit", "x-ratelimit"))
+    }
+    if rate_headers:
+        parts.append(f"headers={rate_headers}")
+    body = _response_body_excerpt(response)
+    if body:
+        parts.append(f"body={body!r}")
+    return " ".join(parts)
 
 
 async def send_with_retry(
@@ -288,21 +331,24 @@ async def send_with_retry(
                 )
                 if server_delay is not None:
                     delay = max(delay, server_delay)
+            diagnostics = error_diagnostics(e)
             publish_recoverable(
                 f"retry attempt {attempt}, waiting {delay:.1f}s:"
                 f" {type(e).__name__}: {e}"
+                + (f" [{diagnostics}]" if diagnostics else "")
             )
             logger.warning(
-                "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.",
+                "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.%s",
                 attempt + 1,
                 max_attempts,
                 type(e).__name__,
                 f" {status}" if status is not None else "",
                 e,
                 delay,
+                f" {diagnostics}" if diagnostics else "",
             )
             if on_text is not None:
-                on_text(f"\n[error, retrying in {delay:.0f}s...]\n")
+                on_text(_format_retry_banner(delay, server_delay is not None))
             await asyncio.sleep(delay)
     raise RetriesExhaustedError(
         f"Failed after {max_attempts} attempts: {last_error}",
@@ -350,3 +396,58 @@ def _make_stream_callback(
         live_fn(c)
 
     return _cb
+
+
+_BODY_EXCERPT_CHARS = 500
+
+
+def _response_body_excerpt(response: object) -> str:
+    """Return up to ``_BODY_EXCERPT_CHARS`` of a response body, never raising."""
+    if response is None:
+        return ""
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return text[:_BODY_EXCERPT_CHARS]
+    raw = getattr(response, "content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return raw[:_BODY_EXCERPT_CHARS].decode("utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            return ""
+    return ""
+
+
+def _format_retry_banner(delay_sec: float, server_supplied: bool) -> str:
+    """Render the REPL banner shown while a retry is pending.
+
+    Short waits (under a minute) get a relative seconds display.
+    Longer waits show the absolute resume clock - the only stable
+    representation across long parked intervals.
+
+    Args:
+      delay_sec: Sleep duration before the next attempt.
+      server_supplied: True when the delay came from a ``retry-after``
+          header rather than local backoff; long server-supplied delays
+          are flagged as rate-limit waits.
+
+    Returns:
+      banner: One-line ``[...]`` string ready for ``on_text``.
+
+    """
+    if delay_sec < 60.0:
+        return f"\n[error, retrying in {delay_sec:.0f}s]\n"
+    resume = time.strftime("%H:%M:%S", time.localtime(time.time() + delay_sec))
+    label = "rate-limited" if server_supplied else "error"
+    return f"\n[{label}; resumes at {resume} (in {_humanize_duration(delay_sec)})]\n"
+
+
+def _humanize_duration(seconds: float) -> str:
+    """Format ``seconds`` as ``Xh Ym`` / ``Ym Zs`` / ``Zs``."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"

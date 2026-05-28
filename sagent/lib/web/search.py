@@ -7,13 +7,16 @@ configured and scraped backends.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import hashlib
 import json
 import logging
 import os
 import re
+import urllib.error
 
 from sagent.lib.lazy_import import lazy_import
 from sagent.lib.web.fetch import fetch
@@ -52,6 +55,10 @@ class CaptchaError(Exception):
     """Raised when a backend returns a CAPTCHA/sorry page."""
 
 
+class SearchError(RuntimeError):
+    """Raised when a search backend fails before returning results."""
+
+
 _CLEAN_SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
 
 
@@ -64,6 +71,28 @@ def _strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
 def _clean_text(text: str) -> str:
     """Collapse whitespace runs and drop spaces before punctuation."""
     return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
+
+
+_GSA_USERAGENTS_PATH = Path(__file__).with_name("gsa_useragents.txt")
+_gsa_useragents_cache: list[tuple[str, ...]] = []
+
+
+def _get_gsa_useragents() -> tuple[str, ...]:
+    """Return cached GSA user-agent strings, loading on first call."""
+    if not _gsa_useragents_cache:
+        _gsa_useragents_cache.append(
+            tuple(
+                line for line in _GSA_USERAGENTS_PATH.read_text().splitlines() if line
+            )
+        )
+    return _gsa_useragents_cache[0]
+
+
+def _gsa_headers_for_query(query: str) -> dict[str, str]:
+    """Build request headers with a query-stable GSA mobile UA."""
+    useragents = _get_gsa_useragents()
+    idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(useragents)
+    return {"User-Agent": f"{useragents[idx]} NSTNWV"}
 
 
 # ---------------------------------------------------------------------------
@@ -119,18 +148,6 @@ def searxng(
 # ---------------------------------------------------------------------------
 
 _DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
-_DUCKDUCKGO_HEADERS = {
-    "Accept": "*/*",
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-    "Accept-Language": "all,all-ALL;q=0.7",
-    "Content-Type": "application/x-www-form-urlencoded",
-    "Referer": _DUCKDUCKGO_URL,
-}
-_DUCKDUCKGO_COOKIES = {"kl": "wt-wt"}
 _DUCKDUCKGO_MAX_QUERY_CHARS = 499
 
 
@@ -155,7 +172,15 @@ def duckduckgo(
     """
     if len(query) > _DUCKDUCKGO_MAX_QUERY_CHARS:
         return []
-    request_headers = dict(_DUCKDUCKGO_HEADERS)
+    request_headers = _gsa_headers_for_query(query) | {
+        "Accept": "*/*",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Accept-Language": "all,all-ALL;q=0.7",
+        "Referer": _DUCKDUCKGO_URL,
+    }
     if headers:
         request_headers.update(headers)
     body = fetch(
@@ -163,8 +188,7 @@ def duckduckgo(
         method="POST",
         data={"q": _duckduckgo_quote_bangs(query), "b": "", "kl": "wt-wt"},
         headers=request_headers,
-        cookies=_DUCKDUCKGO_COOKIES,
-        raw_headers=True,
+        retries=2,
     )
     html = body.decode("utf-8")
     _duckduckgo_check_captcha(html)
@@ -264,9 +288,12 @@ def search(
     """
     if backend is None:
         backend = DEFAULT_SEARCH_BACKEND
-    if backend == "duckduckgo":
-        return duckduckgo(query, num_results, headers)
-    if backend == "searxng":
-        return searxng(query, num_results, headers)
+    try:
+        if backend == "duckduckgo":
+            return duckduckgo(query, num_results, headers)
+        if backend == "searxng":
+            return searxng(query, num_results, headers)
 
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as e:
+        raise SearchError(f"{backend} search failed: {e}") from e
     raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime

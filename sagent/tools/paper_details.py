@@ -32,7 +32,7 @@ from sagent.tools.paper_common import (
     short_id,
     truncation_notice,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 _CACHE_TTL_SEC = 15 * 60

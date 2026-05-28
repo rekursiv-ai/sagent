@@ -33,19 +33,17 @@ from sagent.repl.run_repl import (
     make_queued_input_committer,
     run_repl,
 )
-from sagent.types.history import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.model import ModelSpec
 from sagent.types.runtime import (
+    AssistantMessage,
+    ModelContextEvent,
     ModelIdle,
     ModelResponseError,
     Quit,
     RuntimeEvent,
+    ToolCall,
+    ToolResult,
+    UserMessage,
     UserQueuedMessage,
 )
 
@@ -771,7 +769,7 @@ class _TextOnlyModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
@@ -898,12 +896,12 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class _TwoRoundModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],

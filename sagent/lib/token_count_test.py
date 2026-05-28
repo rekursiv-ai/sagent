@@ -9,15 +9,15 @@ from typing import override
 from sagent.lib.json import JSON
 from sagent.lib.token_count import approx_request_tokens
 from sagent.testing import MockModelCaps
-from sagent.types.history import (
+from sagent.types.model import ModelRequest
+from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest
 
 
 @dataclass(slots=True, kw_only=True)
@@ -59,7 +59,7 @@ class _StubTool:
         return ToolResult(call_id="", content="")
 
 
-def _req(messages: list[HistoryEntry], **kwargs: object) -> ModelRequest:
+def _req(messages: list[ModelContextEvent], **kwargs: object) -> ModelRequest:
     return ModelRequest(messages=messages, **kwargs)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- test helper
 
 

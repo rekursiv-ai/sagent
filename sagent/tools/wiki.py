@@ -28,7 +28,7 @@ from sagent.tools.core import (
     run_sync,
 )
 from sagent.tools.prompt_text import escape_prompt_text
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)

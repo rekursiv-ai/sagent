@@ -12,11 +12,11 @@ from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import ToolState
 from sagent.lib.compaction import reattach_files
 from sagent.types.compactor import CompactRestorable
-from sagent.types.history import (
-    HistoryEntry,
+from sagent.types.model import ContextBudget
+from sagent.types.runtime import (
+    ModelContextEvent,
     UserMessage,
 )
-from sagent.types.model import ContextBudget
 from sagent.types.tools import Tool
 
 
@@ -46,7 +46,7 @@ class CompactionState:
     """True while a compaction is in flight; gates re-entry."""
 
 
-def append_to_first_user(history: list[HistoryEntry], text: str) -> None:
+def append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
     """Append ``text`` to the first ``UserMessage`` in ``history``, or insert one.
 
     The compactor and its post-enrich steps inject context (reattached
@@ -69,7 +69,7 @@ def append_to_first_user(history: list[HistoryEntry], text: str) -> None:
 
 
 def inject_background_status(
-    history: list[HistoryEntry],
+    history: list[ModelContextEvent],
     background_tasks: Mapping[str, BackgroundTaskEntry],
 ) -> None:
     """Re-surface running background jobs after compaction.
@@ -96,7 +96,7 @@ def inject_background_status(
 
 async def post_compact_enrich(
     *,
-    history: list[HistoryEntry],
+    history: list[ModelContextEvent],
     tool_state: ToolState,
     budget: ContextBudget,
     tools: Mapping[str, Tool],

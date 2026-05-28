@@ -34,7 +34,7 @@ from sagent.lib.json import (
     int_val,
     json_freeze,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 from sagent.types.tools import Tool
 
 

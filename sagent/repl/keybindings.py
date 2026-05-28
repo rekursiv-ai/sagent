@@ -37,8 +37,7 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.types.history import UserMessage
-from sagent.types.runtime import UserQueuedMessage
+from sagent.types.runtime import UserMessage, UserQueuedMessage
 
 
 if TYPE_CHECKING:

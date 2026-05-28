@@ -20,13 +20,13 @@ from collections.abc import Callable, Mapping
 from sagent.agent import runtime as agent_runtime
 from sagent.lib import debug_log
 from sagent.lib.json import JSON, json_freeze
-from sagent.types.history import (
+from sagent.types.model import Model, ModelRequest
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import Model, ModelRequest
 
 
 _SYSTEM = (
@@ -74,7 +74,7 @@ class _AdvisorModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],

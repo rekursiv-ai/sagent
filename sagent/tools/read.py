@@ -36,7 +36,7 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
-from sagent.types.history import BytesMessage, ToolResult
+from sagent.types.runtime import BytesMessage, ToolResult
 
 
 _IMAGE_EXTS = {

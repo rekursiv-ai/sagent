@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from sagent.agent.cost_tracker import CostTracker
-from sagent.types.history import AssistantMessage
 from sagent.types.model import ModelResponse, TokenCount
+from sagent.types.runtime import AssistantMessage
 
 
 def _make_response(*, total_cost: float = 0.0, **tokens: int) -> ModelResponse:

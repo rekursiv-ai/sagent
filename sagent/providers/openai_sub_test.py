@@ -35,13 +35,13 @@ from sagent.providers.openai_sub import (
     _subscription_profile,
 )
 from sagent.types.exceptions import AuthRefreshError
-from sagent.types.history import (
+from sagent.types.model import ModelRequest
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest
 
 
 # Minimal ``Tool``-shaped stub for the builders (Protocol consumers).

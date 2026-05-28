@@ -3,8 +3,10 @@ Manage background tasks, analogous to bash job control (`&`,
 
 Any tool call can be backgrounded by setting `background: true` in
 its parameters. The tool returns immediately with a task id; the
-actual work runs asynchronously. An optional `delay: N` (seconds)
-makes the task sleep before executing (implies `background: true`).
+actual work runs asynchronously. When a detached tool finishes, you
+receive a later message with its result. Wait for that message instead
+of polling for completion. An optional `delay: N` (seconds) makes the
+task sleep before executing (implies `background: true`).
 
 Operations:
 - `list` -- show all background tasks with id, tool name, phase

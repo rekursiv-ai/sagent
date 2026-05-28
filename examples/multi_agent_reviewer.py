@@ -8,7 +8,7 @@ import sys
 from sagent.agent import Agent
 from sagent.providers import Google
 from sagent.tools import AgentSpawn
-from sagent.types.history import AssistantMessage, UserMessage
+from sagent.types.runtime import AssistantMessage, UserMessage
 
 
 async def main() -> None:

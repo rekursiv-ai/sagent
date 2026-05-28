@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import cast
 
 import asyncio
+import inspect
 import json
 
 import pytest
 
 from sagent.lib.json import MutableJSON
+from sagent.providers import anthropic_cli
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.anthropic_cli import (
     AnthropicCLI,
@@ -28,14 +30,14 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest, ModelResponse
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse
+from sagent.types.tape import TapeEvent
 
 
 _CRED_PAYLOAD: dict[str, object] = {
@@ -56,6 +58,11 @@ def _write_creds(tmp_path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
     return path
+
+
+def test_anthropic_cli_does_not_import_subscription_provider() -> None:
+    source = inspect.getsource(anthropic_cli)
+    assert "providers.anthropic_sub" not in source
 
 
 def test_from_cli_requires_credentials(
@@ -97,6 +104,50 @@ def test_from_key_delegates_to_anthropic() -> None:
     fallback = AnthropicCLI.from_key("sk-ant-test")
     assert isinstance(fallback, Anthropic)
     assert not isinstance(fallback, AnthropicCLI)
+
+
+def test_from_cli_rejects_malformed_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    creds = tmp_path / ".credentials.json"
+    creds.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        creds,
+    )
+
+    def _which_claude(name: str) -> str | None:
+        del name
+        return "/usr/bin/claude"
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude,
+    )
+    with pytest.raises(ValueError, match="Invalid credentials"):
+        AnthropicCLI.from_credentials()
+
+
+def test_from_cli_rejects_credentials_missing_oauth_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    creds = tmp_path / ".credentials.json"
+    creds.write_text(json.dumps({"claudeAiOauth": {}}), encoding="utf-8")
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        creds,
+    )
+
+    def _which_claude(name: str) -> str | None:
+        del name
+        return "/usr/bin/claude"
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude,
+    )
+    with pytest.raises(ValueError, match="Invalid credentials"):
+        AnthropicCLI.from_credentials()
 
 
 def test_from_cli_rejects_missing_executable(
@@ -619,7 +670,7 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
         def record_success(self) -> None:
             pass
 
-    async def _send_entry(proc: Subproc, entry: HistoryEntry) -> None:
+    async def _send_entry(proc: Subproc, entry: TapeEvent) -> None:
         del proc, entry
 
     async def _drain_until_result(
@@ -664,7 +715,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
             warmed.set()
         return cast(Subproc, _Proc(model._pending_system))
 
-    async def send_entry(proc: Subproc, entry: HistoryEntry) -> None:
+    async def send_entry(proc: Subproc, entry: TapeEvent) -> None:
         del entry
         used_systems.append(cast(_Proc, proc).system)
 
@@ -749,7 +800,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         def record_success(self) -> None:
             pass
 
-    async def _send_entry(proc: Subproc, history: HistoryEntry) -> None:
+    async def _send_entry(proc: Subproc, history: TapeEvent) -> None:
         del proc, history
 
     async def _drain_until_result(

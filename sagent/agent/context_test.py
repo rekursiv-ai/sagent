@@ -20,16 +20,17 @@ from sagent.agent.context import (
     resolve_context,
     validate_context,
 )
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
+    ReferrableTapeEvent,
+    TapeEvent,
     TapeRecord,
     TapeRef,
 )
@@ -39,8 +40,8 @@ def _ref(ordinal: int, session: str = "s") -> TapeRef:
     return TapeRef(session_id=session, ordinal=ordinal)
 
 
-def _hr(ordinal: int, entry: HistoryEntry, session: str = "s") -> HistoryRecord:
-    return HistoryRecord(ref=_ref(ordinal, session), entry=entry)
+def _hr(ordinal: int, entry: TapeEvent, session: str = "s") -> ReferrableTapeEvent:
+    return ReferrableTapeEvent(ref=_ref(ordinal, session), event=entry)
 
 
 def _splice(
@@ -48,7 +49,7 @@ def _splice(
     *,
     mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
     insert_after: TapeRef | None = None,
-    payload: tuple[HistoryEntry, ...] = (),
+    payload: tuple[ModelContextEvent, ...] = (),
     strategy: str = "test",
     paired_externally: frozenset[str] = frozenset(),
     session: str = "s",
@@ -82,8 +83,18 @@ def _tool_result(call_id: str, content: str = "ok") -> ToolResult:
     return ToolResult(call_id=call_id, content=content)
 
 
-def _resolve_messages(tape: Sequence[TapeRecord]) -> list[HistoryEntry]:
+def _resolve_messages(tape: Sequence[TapeRecord]) -> list[ModelContextEvent]:
     return resolve_context(tape).messages
+
+
+def test_validate_context_rejects_consecutive_users() -> None:
+    with pytest.raises(InvalidContextError, match="alternation"):
+        validate_context([_user("a"), _user("b")])
+
+
+def test_validate_context_rejects_consecutive_assistants() -> None:
+    with pytest.raises(InvalidContextError, match="alternation"):
+        validate_context([_assistant("a"), _assistant("b")])
 
 
 # --- Resolver: visibility and masking ----------------------------------
@@ -105,7 +116,7 @@ def test_history_only_tape_renders_in_tape_order() -> None:
 
 
 def test_history_entries_are_object_identical_across_calls() -> None:
-    """The resolver returns the same ``HistoryEntry`` instances."""
+    """The resolver returns the same ``TapeEvent`` instances."""
     hr = _hr(0, _user("x"))
     tape = [hr]
     first = resolve_context(tape)
@@ -134,6 +145,22 @@ def test_splice_masks_earlier_history_record() -> None:
     ]
     msgs = _resolve_messages(tape)
     assert [getattr(m, "text", None) for m in msgs] == ["a", "B"]
+
+
+def test_splice_mask_respects_session_id() -> None:
+    tape = [
+        _hr(0, _user("a0"), session="a"),
+        _hr(0, _user("b0"), session="b"),
+        _splice(
+            1,
+            mask=((_ref(0, "a"), _ref(0, "a")),),
+            insert_after=None,
+            payload=(_user("summary a"),),
+            session="a",
+        ),
+    ]
+    msgs = _resolve_messages(tape)
+    assert [getattr(m, "text", None) for m in msgs] == ["summary a", "b0"]
 
 
 def test_splice_with_no_anchor_inserts_at_head() -> None:
@@ -349,6 +376,21 @@ def test_masked_refs_by_alive_excludes_dead_splice_masking() -> None:
     assert _ref(1) not in masked
     # Splice 3 is alive; its mask of splice 2's ref applies.
     assert _ref(2) in masked
+
+
+def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
+    tape: list[TapeRecord] = []
+    for idx in range(2_000):
+        tape.append(_hr(idx * 2, _user(str(idx))))
+        tape.append(
+            _splice(
+                idx * 2 + 1,
+                mask=((_ref(idx * 2), _ref(idx * 2)),),
+                payload=(),
+            )
+        )
+    alive = alive_splices(tape)
+    assert len(alive) == 2_000
 
 
 # --- Version & discontinuity -------------------------------------------

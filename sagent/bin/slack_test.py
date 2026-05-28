@@ -43,18 +43,16 @@ from sagent.lib.json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
-from sagent.types.history import (
-    AssistantMessage,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.model import ModelSpec
 from sagent.types.runtime import (
+    AssistantMessage,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
     ToolLabel,
+    ToolResult,
+    UserMessage,
 )
 
 

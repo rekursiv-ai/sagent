@@ -11,9 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
 )
 
 
@@ -31,7 +31,10 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelSpec",
+    "ModelTerminationError",
     "Pricing",
+    "PromptTooLongError",
+    "StreamInterruptedError",
     "TokenCount",
 ]
 
@@ -92,7 +95,7 @@ class TokenCount:
 class ModelRequest:
     """Full conversation sent to an LLM backend."""
 
-    messages: list[HistoryEntry]
+    messages: list[ModelContextEvent]
     """Conversation history sent to the model."""
 
     system: str | None = None
@@ -159,6 +162,54 @@ class ModelResponse:
 
     total_cost: float = 0.0
     """Total USD cost of the request."""
+
+
+class PromptTooLongError(Exception):
+    """Raised by providers when the prompt exceeds model limits."""
+
+    def __init__(
+        self,
+        message: str = "prompt too long",
+        *,
+        actual_tokens: int | None = None,
+        limit_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.actual_tokens = actual_tokens
+        self.limit_tokens = limit_tokens
+
+    @property
+    def token_gap(self) -> int | None:
+        """Return the number of tokens over the limit, or None if unknown."""
+        if self.actual_tokens is not None and self.limit_tokens is not None:
+            gap = self.actual_tokens - self.limit_tokens
+            return gap if gap > 0 else None
+        return None
+
+
+class StreamInterruptedError(Exception):
+    """Stream indicated tool use but delivered no tool blocks."""
+
+    def __init__(self, response: ModelResponse) -> None:
+        super().__init__(
+            "Stream indicated tool_use but delivered no tool blocks",
+        )
+        self.response = response
+
+
+class ModelTerminationError(Exception):
+    """Model stopped with an unrecognized non-benign ``stop_reason``."""
+
+    def __init__(self, response: ModelResponse) -> None:
+        tool_count = len(response.message.tool_calls)
+        text_len = len(response.message.text)
+        super().__init__(
+            f"Model stopped with unrecognized stop_reason="
+            f"{response.stop_reason!r} (tool_calls={tool_count}, "
+            f"text_len={text_len}).",
+        )
+        self.response = response
+        self.stop_reason = response.stop_reason
 
 
 @runtime_checkable

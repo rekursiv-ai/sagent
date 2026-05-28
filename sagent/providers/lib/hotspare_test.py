@@ -115,6 +115,29 @@ async def test_concurrent_respawn_serialised_by_lock() -> None:
 
 
 @pytest.mark.asyncio
+async def test_respawn_factory_failure_closes_old_active() -> None:
+    procs: list[_FakeSubproc] = []
+
+    async def factory() -> Subproc:
+        if procs:
+            raise RuntimeError("spawn failed")
+        proc = _FakeSubproc()
+        procs.append(proc)
+        return proc
+
+    pool = HotSpare(factory)
+    active = await pool.acquire()
+    assert isinstance(active, _FakeSubproc)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        _ = await pool.respawn()
+
+    assert active.closed
+    assert pool.active is None
+    await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_transport_failure_budget_exhaustion_clears_poisoned_active() -> None:
     procs: list[_FakeSubproc] = []
 
@@ -133,6 +156,30 @@ async def test_transport_failure_budget_exhaustion_clears_poisoned_active() -> N
     assert not active.is_alive
     assert [proc.close_count for proc in procs] == [1]
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_budget_exhaustion_closes_warmed_spare() -> None:
+    procs: list[_FakeSubproc] = []
+
+    async def factory() -> Subproc:
+        proc = _FakeSubproc()
+        procs.append(proc)
+        return proc
+
+    pool = HotSpare(factory, max_consecutive_transport_failures=1)
+    _ = await pool.acquire()
+    if pool._spare_task is not None:
+        _ = await pool._spare_task
+
+    with pytest.raises(RuntimeError, match="transport failure budget exhausted"):
+        _ = await pool.respawn_after_transport_failure()
+
+    assert pool.active is None
+    assert pool._spare_task is None
+    assert pool._spare is None
+    assert [proc.close_count for proc in procs] == [1, 1]
+    assert all(not proc.is_alive for proc in procs)
 
 
 @pytest.mark.asyncio
@@ -211,31 +258,64 @@ async def test_normal_respawn_excluded_from_transport_failure_budget() -> None:
     await pool.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_close_cancels_warmup_without_leaking_subprocess() -> None:
-    """Closing during spare warm-up closes the partially-created subprocess."""
-    procs: list[Subproc] = []
-    warm_started = asyncio.Event()
+async def test_close_waits_for_in_flight_respawn_to_close_new_active() -> None:
+    procs: list[_FakeSubproc] = []
+    spare_started = asyncio.Event()
+    release_spare = asyncio.Event()
 
     async def factory() -> Subproc:
-        proc = _make_subproc()
-        await proc.start()
+        proc = _FakeSubproc()
         procs.append(proc)
         if len(procs) == 2:
-            warm_started.set()
-            await asyncio.sleep(60)
+            spare_started.set()
+            await release_spare.wait()
         return proc
 
-    async def close_partial() -> None:
-        for proc in procs:
-            await proc.close()
+    pool = HotSpare(factory, max_consecutive_transport_failures=2)
+    first = await pool.acquire()
+    await spare_started.wait()
 
-    pool = HotSpare(factory, close_partial=close_partial)
+    respawn_task = asyncio.create_task(pool.respawn_after_transport_failure())
+    await asyncio.sleep(0)
+    close_task = asyncio.create_task(pool.close())
+    await asyncio.sleep(0)
+    release_spare.set()
+    _ = await respawn_task
+    await close_task
+
+    assert first is procs[0]
+    assert pool.active is None
+    assert [proc.close_count for proc in procs] == [1, 1]
+    assert all(not proc.is_alive for proc in procs)
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_warmup_without_leaking_produced_spare() -> None:
+    procs: list[_FakeSubproc] = []
+    warm_spare_produced = asyncio.Event()
+    warm_spare_cancelled = asyncio.Event()
+
+    async def factory() -> Subproc:
+        proc = _FakeSubproc()
+        procs.append(proc)
+        if len(procs) == 2:
+            warm_spare_produced.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                warm_spare_cancelled.set()
+                return proc
+        return proc
+
+    pool = HotSpare(factory)
     active = await pool.acquire()
-    await warm_started.wait()
+    await warm_spare_produced.wait()
     await pool.close()
-    assert not active.is_alive
+
+    assert warm_spare_cancelled.is_set()
+    assert active is procs[0]
+    assert [proc.close_count for proc in procs] == [1, 1]
     assert all(not proc.is_alive for proc in procs)
 
 

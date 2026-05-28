@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
 
 import base64
 import hashlib
@@ -27,7 +27,7 @@ import shutil
 import tempfile
 
 from sagent.lib import token_count
-from sagent.lib.json import MutableJSON, int_val
+from sagent.lib.json import JSON, MutableJSON, int_val, validate_json_schema
 from sagent.providers.anthropic import Anthropic, _strip_context_tag
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.hotspare import HotSpare
@@ -38,13 +38,13 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
@@ -61,6 +61,39 @@ logger = logging.getLogger(__name__)
 _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 _TURN_RESPAWN_THRESHOLD = 100
 _CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
+_CREDENTIALS_SCHEMA: JSON = {
+    "type": "object",
+    "required": ["claudeAiOauth"],
+    "properties": {
+        "claudeAiOauth": {
+            "type": "object",
+            "required": ["accessToken", "refreshToken", "expiresAt"],
+            "properties": {
+                "accessToken": {"type": "string"},
+                "refreshToken": {"type": "string"},
+                "expiresAt": {"type": "number"},
+            },
+        },
+    },
+}
+
+
+class AnthropicCLICredentials(TypedDict):
+    """OAuth credentials from the Claude CLI credentials file."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: float
+    scopes: NotRequired[list[str]]
+    subscription_type: NotRequired[str | None]
+    rate_limit_tier: NotRequired[str | None]
+    account_uuid: NotRequired[str | None]
+    email: NotRequired[str | None]
+    organization_uuid: NotRequired[str | None]
+    billing_type: NotRequired[str | None]
+    account_created_at: NotRequired[str | None]
+    subscription_created_at: NotRequired[str | None]
+    has_extra_usage_enabled: NotRequired[bool | None]
 
 
 class AnthropicCLI(Anthropic):
@@ -128,6 +161,8 @@ class AnthropicCLI(Anthropic):
             raise FileNotFoundError(
                 f"AnthropicCLI: no credentials at {path}; run `claude login`.",
             )
+        if _load_cli_credentials_file(path) is None:
+            raise ValueError(f"Invalid credentials file: {path}")
         if shutil.which("claude") is None:
             raise RuntimeError(
                 "AnthropicCLI: `claude` is not on PATH; install the Claude CLI.",
@@ -224,7 +259,7 @@ class _AnthropicCLIModel:
         )
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
-        self._sent_history_head: HistoryEntry | None = None
+        self._sent_history_head: TapeEvent | None = None
 
     @property
     def max_request_tokens(self) -> int:
@@ -457,7 +492,7 @@ class _AnthropicCLIModel:
         await self._send_entry(proc, user_like_entries[-1])
         return await self._drain_until_result(proc, on_text, on_thinking)
 
-    async def _send_entry(self, proc: Subproc, entry: HistoryEntry) -> None:
+    async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
         """Write one history entry to stdin."""
         line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
         await proc.write_line(line)
@@ -571,11 +606,67 @@ def _hash_system(system: str | None) -> str:
     return hashlib.sha256((system or "").encode()).hexdigest()
 
 
+def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
+    """Extract access/refresh/expiry from Claude CLI credential JSON."""
+    oauth = cast(MutableJSON, raw["claudeAiOauth"])
+    creds = AnthropicCLICredentials(
+        access_token=cast(str, oauth["accessToken"]),
+        refresh_token=cast(str, oauth["refreshToken"]),
+        expires_at=cast(float, oauth["expiresAt"]) / 1000.0,
+    )
+    if "scopes" in oauth:
+        creds["scopes"] = cast(list[str], oauth["scopes"])
+    if "subscriptionType" in oauth:
+        creds["subscription_type"] = cast(str | None, oauth["subscriptionType"])
+    if "rateLimitTier" in oauth:
+        creds["rate_limit_tier"] = cast(str | None, oauth["rateLimitTier"])
+    token_account_raw = oauth.get("tokenAccount")
+    if isinstance(token_account_raw, dict):
+        token_account = cast(MutableJSON, token_account_raw)
+        if token_account.get("uuid"):
+            creds["account_uuid"] = cast(str, token_account["uuid"])
+        if token_account.get("emailAddress"):
+            creds["email"] = cast(str, token_account["emailAddress"])
+        if token_account.get("organizationUuid"):
+            creds["organization_uuid"] = cast(str, token_account["organizationUuid"])
+    if "billingType" in oauth:
+        creds["billing_type"] = cast(str | None, oauth["billingType"])
+    if "accountCreatedAt" in oauth:
+        creds["account_created_at"] = cast(str | None, oauth["accountCreatedAt"])
+    if "subscriptionCreatedAt" in oauth:
+        creds["subscription_created_at"] = cast(
+            str | None, oauth["subscriptionCreatedAt"]
+        )
+    if "hasExtraUsageEnabled" in oauth:
+        creds["has_extra_usage_enabled"] = cast(
+            bool | None, oauth["hasExtraUsageEnabled"]
+        )
+    return creds
+
+
+def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
+    """Read credentials from a Claude CLI-format JSON file."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw = cast(MutableJSON, data)
+    if validate_json_schema(_CREDENTIALS_SCHEMA, raw):
+        return None
+    return _parse_cli_credentials(raw)
+
+
 def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
     """Copy the user's credentials into a hermetic ``HOME`` for the CLI."""
     dot_claude = tmpdir / ".claude"
     dot_claude.mkdir(parents=True, exist_ok=True)
     source = credentials_path(_CREDS_PATH, account)
+    if _load_cli_credentials_file(source) is None:
+        raise ValueError(f"Invalid credentials file: {source}")
     target = dot_claude / _CREDS_PATH.name
     shutil.copyfile(source, target)
     target.chmod(0o600)
@@ -647,8 +738,8 @@ def _build_anthropic_argv(
     ]
 
 
-def _serialize_for_stdin(entry: HistoryEntry, max_image_dim: int) -> MutableJSON:
-    """Translate a non-assistant ``HistoryEntry`` into the CLI's user-line shape."""
+def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
+    """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
     if isinstance(entry, UserMessage):
         return _user_line(entry, max_image_dim)
     assert isinstance(entry, ToolResult)

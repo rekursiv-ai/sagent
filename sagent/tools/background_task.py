@@ -20,18 +20,27 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import asyncio
+import dataclasses
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import agent_registry
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import current_agent_var, load_tool_description
-from sagent.types.history import ToolResult
-from sagent.types.runtime import DetachedResult, RuntimeEvent
+from sagent.types.runtime import (
+    AssistantMessage,
+    DetachedResult,
+    ModelContextEvent,
+    RuntimeEvent,
+    ToolResult,
+)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sagent.tools.core import AgentLike
+    from sagent.types.tape import TapeRef
 
 __all__ = ["BackgroundTask", "BackgroundTaskEntry"]
 
@@ -224,15 +233,18 @@ class BackgroundTask:
                 ),
                 is_error=True,
             )
+        completed = False
         try:
             spliced = _find_history_result(agent, job_id)
             if spliced is None:
-                spliced = await _await_detached(agent, job_id)
+                spliced = await _await_detached(agent, job_id, job)
+            completed = True
             return ToolResult(
                 call_id="", content=spliced.content, is_error=spliced.is_error
             )
         finally:
-            agent.cancel_background(job_id)
+            if completed:
+                agent.cancel_background(job_id)
 
 
 def _shutdown_persistent(job: BackgroundTaskEntry) -> None:
@@ -243,14 +255,27 @@ def _shutdown_persistent(job: BackgroundTaskEntry) -> None:
 
 
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Return the most recent ``ToolResult`` matching ``call_id``, or ``None``."""
+    """Return the most recent non-placeholder result matching ``call_id``."""
     for entry in reversed(agent.runtime.context().messages):
-        if isinstance(entry, ToolResult) and entry.call_id == call_id:
+        if (
+            isinstance(entry, ToolResult)
+            and entry.call_id == call_id
+            and not _is_background_placeholder(entry.content)
+        ):
             return entry
     return None
 
 
-async def _await_detached(agent: AgentLike, call_id: str) -> ToolResult:
+def _is_background_placeholder(content: str) -> bool:
+    """Return true for background placeholders awaiting detached content."""
+    return content == "[detached]" or content.startswith("[Running in background:")
+
+
+async def _await_detached(
+    agent: AgentLike,
+    call_id: str,
+    job: BackgroundTaskEntry,
+) -> ToolResult:
     """Wait for a ``DetachedResult`` matching ``call_id`` and return it."""
     fut: asyncio.Future[ToolResult] = asyncio.get_running_loop().create_future()
 
@@ -258,15 +283,112 @@ async def _await_detached(agent: AgentLike, call_id: str) -> ToolResult:
         if fut.done():
             return
         if isinstance(event, DetachedResult) and event.call_id == call_id:
-            fut.set_result(
-                ToolResult(
-                    call_id=call_id, content=event.content, is_error=event.is_error
-                ),
-            )
+            fut.set_result(_tool_result_from_detached(event))
 
     agent.runtime.observers.append(on_event)
     try:
+        try:
+            await asyncio.shield(job.task)
+        except asyncio.CancelledError:
+            if fut.done():
+                return fut.result()
+            if job.task.cancelled():
+                return ToolResult(call_id=call_id, content="[cancelled]", is_error=True)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if fut.done():
+                return fut.result()
+            return ToolResult(
+                call_id=call_id,
+                content=f"{type(exc).__name__}: {exc}",
+                is_error=True,
+            )
+        if fut.done():
+            return fut.result()
+        event = await _drain_detached(agent, call_id)
+        if event is not None:
+            return event
         return await fut
     finally:
+        if not fut.done():
+            fut.cancel()
         if on_event in agent.runtime.observers:
             agent.runtime.observers.remove(on_event)
+
+
+async def _drain_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
+    """Drain one inbox batch and return a matching detached result if present."""
+    items = await agent.runtime.inbox.drain()
+    keep: list[RuntimeEvent] = []
+    result: ToolResult | None = None
+    for item in items:
+        if isinstance(item, DetachedResult) and item.call_id == call_id:
+            result = _splice_detached(agent, item)
+        else:
+            keep.append(item)
+    if keep:
+        agent.runtime.inbox.push_front(*keep)
+    return result
+
+
+def _splice_detached(agent: AgentLike, event: DetachedResult) -> ToolResult:
+    """Splice a detached event into history and return the foreground result."""
+    spliced = _replace_placeholder(agent, event)
+    if spliced is not None:
+        return spliced
+    return _tool_result_from_detached(event)
+
+
+def _replace_placeholder(agent: AgentLike, event: DetachedResult) -> ToolResult | None:
+    """Replace the latest visible placeholder for ``event.call_id``."""
+    resolved = agent.runtime.context()
+    parent_origin = _find_parent_origin(
+        resolved.messages, resolved.origins, event.call_id
+    )
+    if parent_origin is None:
+        return None
+    for entry, origin in reversed(
+        tuple(zip(resolved.messages, resolved.origins, strict=True))
+    ):
+        if (
+            isinstance(entry, ToolResult)
+            and entry.call_id == event.call_id
+            and _is_background_placeholder(entry.content)
+        ):
+            real = dataclasses.replace(
+                entry,
+                content=event.content,
+                is_error=event.is_error,
+            )
+            agent.runtime.append_splice(
+                mask=((origin, origin),),
+                insert_after=parent_origin,
+                payload=(real,),
+                strategy="foreground_detached_splice",
+                paired_externally=frozenset({event.call_id}),
+            )
+            return real
+    return None
+
+
+def _find_parent_origin(
+    messages: Sequence[ModelContextEvent],
+    origins: Sequence[TapeRef],
+    call_id: str,
+) -> TapeRef | None:
+    """Return the visible assistant origin for ``call_id``, if present."""
+    for entry, origin in reversed(tuple(zip(messages, origins, strict=True))):
+        if isinstance(entry, AssistantMessage) and any(
+            tool_call.id == call_id for tool_call in entry.tool_calls
+        ):
+            return origin
+    return None
+
+
+def _tool_result_from_detached(event: DetachedResult) -> ToolResult:
+    """Convert a detached runtime event into a foreground tool result."""
+    return ToolResult(
+        call_id=event.call_id,
+        content=event.content,
+        is_error=event.is_error,
+    )

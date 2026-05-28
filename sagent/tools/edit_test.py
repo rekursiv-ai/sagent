@@ -13,7 +13,7 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools.edit import Edit, make_diff
 from sagent.tools.lib.bash import parse_bash
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 edit = Edit()

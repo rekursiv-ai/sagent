@@ -10,7 +10,7 @@ import json
 
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.linear import Linear
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:

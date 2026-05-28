@@ -50,22 +50,20 @@ from sagent.tools.core import (
     provider_not_allowed_result,
 )
 from sagent.types.compactor import Compactor
-from sagent.types.history import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.model import Model, ModelSpec
 from sagent.types.runtime import (
     AgentIdle,
+    AssistantMessage,
     ChildDoneEvent,
     ChildEvent,
+    ModelContextEvent,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
     ToolLabel,
+    ToolResult,
+    UserMessage,
 )
 from sagent.types.tools import Tool
 
@@ -512,7 +510,6 @@ class AgentSpawn:
         path_token = agent_path_var.set(child_path)
         label_token = agent_label_var.set(label)
         agent_token = current_agent_var.set(child)
-        agent_registry[label] = child
         child_errors: list[BaseException] = []
 
         def _capture_error(event: RuntimeEvent) -> None:
@@ -547,7 +544,6 @@ class AgentSpawn:
                 )
             return _last_assistant_result(child.history)
         finally:
-            agent_registry.pop(label, None)
             current_agent_var.reset(agent_token)
             agent_label_var.reset(label_token)
             agent_path_var.reset(path_token)
@@ -635,7 +631,7 @@ class AgentSpawn:
                 agent_registry.pop(label, None)
                 _persistent_tasks.pop(label, None)
                 if parent_agent is not None:
-                    parent_agent.cancel_background(bg_key)
+                    parent_agent.forget_background(bg_key)
                 if external_queue is not None:
                     external_queue.put_nowait(None)
                 if self.on_persistent_stop is not None:
@@ -1087,7 +1083,7 @@ def _build_forwarder(
 
 
 def _last_assistant_result(
-    history: list[HistoryEntry],
+    history: list[ModelContextEvent],
 ) -> ToolResult:
     """Return the child's last assistant message as a ``ToolResult``."""
     for m in reversed(history):

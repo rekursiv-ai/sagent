@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Protocol
 import json
 
 from sagent.lib.json import json_unfreeze
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
     ToolResult,
     UserMessage,
 )
+from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
@@ -67,7 +67,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     return total
 
 
-def _entry_tokens(entry: HistoryEntry, model: TokenEstimator) -> int:
+def _entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
     """Approximate tokens for one history entry across every wire surface."""
     if isinstance(entry, UserMessage):
         total = model.approx_text_tokens(entry.text)

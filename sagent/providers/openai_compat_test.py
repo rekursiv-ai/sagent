@@ -14,26 +14,28 @@ from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
+    _is_context_overflow_text,
     build_messages,
     consume_stream,
     parse_response,
 )
-from sagent.types.exceptions import (
+from sagent.types.model import (
+    ModelRequest,
+    Pricing,
     PromptTooLongError,
     StreamInterruptedError,
 )
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, Pricing
 
 
 def _make_request(
-    *, messages: list[HistoryEntry], system: str | None = None
+    *, messages: list[ModelContextEvent], system: str | None = None
 ) -> ModelRequest:
     return ModelRequest(messages=messages, system=system)
 
@@ -536,6 +538,38 @@ def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> Non
     p = _DummyProvider.from_key("k")
     m = p.model()
     assert m.is_context_overflow(RuntimeError(message)) is False
+
+
+def test_is_context_overflow_text_false_positive_tools_schema_validation() -> None:
+    """Tool-schema validation errors mention 'model context' benignly."""
+    msg = "Provider rejected: 'model context' field missing in tools schema"
+    assert _is_context_overflow_text(msg) is False
+
+
+def test_is_context_overflow_text_structured_body_canonical_code() -> None:
+    """``error.code == 'context_length_exceeded'`` is the canonical signal."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "This model's maximum context length is 128000 tokens.",
+            }
+        }
+    )
+    assert _is_context_overflow_text(body) is True
+
+
+def test_is_context_overflow_text_structured_body_unrelated_code() -> None:
+    """Structured error with unrelated code must not classify as overflow."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": "invalid_request_error",
+                "message": "tools[0].function: 'model context' field missing",
+            }
+        }
+    )
+    assert _is_context_overflow_text(body) is False
 
 
 def test_model_max_request_tokens_override() -> None:

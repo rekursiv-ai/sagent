@@ -28,28 +28,26 @@ from sagent.providers.anthropic import (
     supports_native_context_management,
 )
 from sagent.providers.lib.id_remap import IdRemapper
-from sagent.types.exceptions import (
-    PromptTooLongError,
-    StreamInterruptedError,
-)
-from sagent.types.history import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     Pricing,
+    PromptTooLongError,
+    StreamInterruptedError,
     TokenCount,
+)
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelContextEvent,
+    ToolCall,
+    ToolResult,
+    UserMessage,
 )
 from sagent.types.tools import Tool
 
 
 def _make_request(
-    messages: list[HistoryEntry],
+    messages: list[ModelContextEvent],
 ) -> ModelRequest:
     return ModelRequest(messages=messages)
 
@@ -95,6 +93,40 @@ def test_is_prompt_too_long_text_positive(msg: str) -> None:
 
 def test_is_prompt_too_long_text_negative() -> None:
     assert _is_prompt_too_long_text("rate limited") is False
+
+
+def test_is_prompt_too_long_text_false_positive_tool_schema_validation() -> None:
+    """Tool-schema validation errors mention ``context window`` benignly."""
+    msg = (
+        "Invalid tool schema: parameter 'max_context_window' must be a positive integer"
+    )
+    assert _is_prompt_too_long_text(msg) is False
+
+
+def test_is_prompt_too_long_text_structured_body_overflow() -> None:
+    """Structured ``error.type`` + overflow ``message`` is the canonical signal."""
+    body: Mapping[str, object] = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: 250000 tokens > 200000 maximum",
+        },
+    }
+    assert _is_prompt_too_long_text("stringified blob", error_body=body) is True
+
+
+def test_is_prompt_too_long_text_structured_body_unrelated_invalid_request() -> None:
+    """Unrelated 400s under ``invalid_request_error`` must not classify as overflow."""
+    body: Mapping[str, object] = {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": (
+                "tools.0.input_schema: parameter 'context window' must be an object"
+            ),
+        },
+    }
+    assert _is_prompt_too_long_text(str(body), error_body=body) is False
 
 
 def test_build_messages_user_text_only() -> None:
@@ -587,6 +619,47 @@ def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text()
     m = p.model("claude-opus-4-7")
     err = _api_status_error(414, "Request size exceeds model context window")
     assert m.is_context_overflow(err) is True
+
+
+def test_anthropic_model_is_context_overflow_uses_structured_body() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _api_status_error(400, "Request size exceeds model context window")
+    err.args = ("unrelated invalid request",)
+
+    assert m.is_context_overflow(err) is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_uses_structured_overflow_body() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _api_status_error(400, "Request size exceeds model context window")
+    err.args = ("unrelated invalid request",)
+
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(PromptTooLongError),
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_model_close_closes_shared_sdk() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    fake_sdk = MagicMock()
+    fake_sdk.close = AsyncMock()
+    p._sdk = fake_sdk
+
+    await m.close()
+
+    fake_sdk.close.assert_awaited_once()
+    assert p._sdk is None
 
 
 def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:

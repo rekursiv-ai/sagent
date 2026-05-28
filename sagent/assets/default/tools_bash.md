@@ -32,11 +32,11 @@ For dependent commands that must execute in order, chain them with '&&' inside a
 
 Reserve ';' for sequential commands where a failure in an earlier step is acceptable.
 
-Before creating new directories or files, run `ls` first to confirm the parent path exists and is correct.
+Before creating new directories or files, confirm the parent path with the dedicated file-discovery tool.
 
 Keep any necessary sleep durations minimal to avoid stalling the session.
 
-After launching a task via `run_in_background`, wait for the completion notification instead of polling.
+`run_in_background` is fire-and-forget: it returns a PID, discards output, and does not send a completion notification.
 
 Do not insert sleeps between commands that are ready to execute immediately — invoke them directly.
 

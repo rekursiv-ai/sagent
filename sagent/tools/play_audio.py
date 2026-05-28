@@ -31,7 +31,7 @@ from sagent.tools.core import (
     load_tool_description,
     run_sync,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)

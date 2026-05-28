@@ -32,7 +32,7 @@ from sagent.tools.paper_common import (
     s2_wire_id,
     short_id,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)

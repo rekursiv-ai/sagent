@@ -18,13 +18,13 @@ from sagent.agent.compaction import (
 )
 from sagent.lib.json import JSON
 from sagent.tools.core import ToolState
-from sagent.types.history import (
+from sagent.types.model import ContextBudget
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ContextBudget
 from sagent.types.tools import Tool
 
 
@@ -88,7 +88,7 @@ def test_compaction_state_defaults() -> None:
 
 
 def test_append_to_first_user_concatenates_when_text_nonempty() -> None:
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="orig"),
         AssistantMessage(text="a"),
     ]
@@ -99,7 +99,7 @@ def test_append_to_first_user_concatenates_when_text_nonempty() -> None:
 
 
 def test_append_to_first_user_replaces_when_empty_text() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="")]
+    history: list[ModelContextEvent] = [UserMessage(text="")]
     append_to_first_user(history, "fresh")
     first = history[0]
     assert isinstance(first, UserMessage)
@@ -107,7 +107,7 @@ def test_append_to_first_user_replaces_when_empty_text() -> None:
 
 
 def test_append_to_first_user_inserts_when_no_user_message() -> None:
-    history: list[HistoryEntry] = [AssistantMessage(text="hi")]
+    history: list[ModelContextEvent] = [AssistantMessage(text="hi")]
     append_to_first_user(history, "context")
     assert isinstance(history[0], UserMessage)
     assert history[0].text == "context"
@@ -116,7 +116,7 @@ def test_append_to_first_user_inserts_when_no_user_message() -> None:
 
 def test_inject_background_status_no_jobs_is_noop() -> None:
     orig = UserMessage(text="hi")
-    history: list[HistoryEntry] = [orig]
+    history: list[ModelContextEvent] = [orig]
     inject_background_status(history, {})
     assert history[0] is orig
     after = history[0]
@@ -126,7 +126,7 @@ def test_inject_background_status_no_jobs_is_noop() -> None:
 
 @pytest.mark.asyncio
 async def test_inject_background_status_appends_to_first_user() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [UserMessage(text="orig")]
     bg = await _make_bg("Bash", "q1")
     inject_background_status(history, {"q1": bg})
     first = history[0]
@@ -146,7 +146,7 @@ async def test_post_compact_enrich_runs_restorable_tool_hook() -> None:
 
         async def post_compact_restore(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
             budget_chars: int = 100_000,
@@ -154,7 +154,7 @@ async def test_post_compact_enrich_runs_restorable_tool_hook() -> None:
             del history, tool_state
             calls.append(budget_chars)
 
-    history: list[HistoryEntry] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     tools_map: Mapping[str, Tool] = {"R": Restorable()}
     await post_compact_enrich(
         history=history,
@@ -179,7 +179,7 @@ async def test_post_compact_enrich_swallows_restorable_failures() -> None:
 
         async def post_compact_restore(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
             budget_chars: int = 100_000,
@@ -187,7 +187,7 @@ async def test_post_compact_enrich_swallows_restorable_failures() -> None:
             del history, tool_state, budget_chars
             raise RuntimeError("nope")
 
-    history: list[HistoryEntry] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     tools_map: Mapping[str, Tool] = {"B": BadRestorable()}
     await post_compact_enrich(
         history=history,
@@ -203,7 +203,7 @@ async def test_post_compact_enrich_swallows_restorable_failures() -> None:
 
 @pytest.mark.asyncio
 async def test_post_compact_enrich_injects_background_status() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [UserMessage(text="orig")]
     tools_map: Mapping[str, Tool] = {}
     bg = {"q9": await _make_bg("Bash", "q9")}
     await post_compact_enrich(

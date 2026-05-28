@@ -15,12 +15,19 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from sagent.lib.compaction import MICROCOMPACTED_ARGS_KEY
-from sagent.repl.render import render_tool_result
-from sagent.types.history import (
+from sagent.repl.render import (
+    make_render_observer,
+    render_tool_result,
+)
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
+)
+from sagent.types.tape import (
+    ContextSplice,
+    ReferrableTapeEvent,
 )
 
 
@@ -40,19 +47,30 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
       printer: Printer that receives all replayed output.
 
     """
-    history = agent.history
-    if not history:
+    tape = agent.runtime.tape
+    if not tape:
         return
     tools = agent.tools_map
-    for entry in history:
+    render_event = make_render_observer(
+        printer,
+        show_thinking=lambda: agent.show_thinking,
+    )
+    rendered_messages = 0
+    for record in tape:
+        if isinstance(record, ContextSplice):
+            continue
+        assert isinstance(record, ReferrableTapeEvent)
+        entry = record.event
         match entry:
             case UserMessage(text=text):
+                rendered_messages += 1
                 printer.write_user_bar(text)
             case AssistantMessage(
                 text=text,
                 thinking_blocks=blocks,
                 tool_calls=calls,
             ):
+                rendered_messages += 1
                 if agent.show_thinking:
                     for block in blocks:
                         body = str(block.get("thinking") or block.get("text") or "")
@@ -63,10 +81,13 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                 for tc in calls:
                     printer.write_tool_label(_label_for_call(tc, tools))
             case ToolResult():
+                rendered_messages += 1
                 render_tool_result(printer, entry)
+            case _:
+                render_event(entry)
     cost = float(agent.total_cost_usd)
     cost_str = f" · ${cost:.2f}" if cost > 0 else ""
-    printer.write_line(f"── resumed · {len(history)} messages{cost_str} ──")
+    printer.write_line(f"── resumed · {rendered_messages} messages{cost_str} ──")
 
 
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:

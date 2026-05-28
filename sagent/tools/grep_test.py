@@ -12,7 +12,7 @@ import pytest
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.grep import Grep
 from sagent.tools.lib.bash import parse_bash
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 grep = Grep()
@@ -291,6 +291,82 @@ async def test_grep_python_fallback_context(tmp_path: Path) -> None:
         tmp_path,
     )
     assert "MATCH" in result.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_skips_vcs_dirs(tmp_path: Path) -> None:
+    vcs_dir = tmp_path / ".git"
+    vcs_dir.mkdir()
+    (vcs_dir / "config").write_text("alpha\n")
+    (tmp_path / "x.txt").write_text("beta\n")
+
+    result = await _run_grep_py(
+        {"pattern": "alpha", "path": str(tmp_path)},
+        tmp_path,
+    )
+
+    assert "(no matches)" in result.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_single_file_honors_type(tmp_path: Path) -> None:
+    f = tmp_path / "x.md"
+    f.write_text("alpha\n")
+
+    result = await _run_grep_py(
+        {
+            "pattern": "alpha",
+            "path": str(f),
+            "type": "py",
+            "output_mode": "files_with_matches",
+        },
+        tmp_path,
+    )
+
+    assert "(no matches)" in result.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_honors_line_number_false(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "x.txt"
+    f.write_text("alpha\n")
+
+    result = await _run_grep_py(
+        {
+            "pattern": "alpha",
+            "path": str(f),
+            "output_mode": "content",
+            "-n": False,
+        },
+        tmp_path,
+    )
+
+    assert result.content == f"{f}:alpha"
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_context_matches_rg_format(tmp_path: Path) -> None:
+    f = tmp_path / "x.py"
+    f.write_text("a\nMATCH\nc\n")
+
+    result = await _run_grep_py(
+        {
+            "pattern": "MATCH",
+            "path": str(tmp_path),
+            "output_mode": "content",
+            "-B": 1,
+            "-A": 1,
+        },
+        tmp_path,
+    )
+
+    assert f"{f}:1:a" in result.content
+    assert f"{f}:2:MATCH" in result.content
+    assert f"{f}:3:c" in result.content
+    assert "> MATCH" not in result.content
+    assert ":  a" not in result.content
 
 
 @pytest.mark.asyncio

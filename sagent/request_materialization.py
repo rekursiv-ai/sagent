@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import dataclasses
 
-from sagent.types.history import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolResult,
-)
 from sagent.types.model import ModelRequest
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelContextEvent,
+    ToolResult,
+    UserMessage,
+)
 
 
 ELIDED_TOOL_RESULT_TAG = "<elided>"
@@ -43,10 +44,10 @@ def materialize_request(
 
 
 def materialize_messages(
-    messages: Sequence[HistoryEntry],
+    messages: Sequence[ModelContextEvent],
     *,
     tool_result_budget_chars: int = 0,
-) -> list[HistoryEntry]:
+) -> list[ModelContextEvent]:
     """Return provider-visible messages with full results under budget.
 
     Args:
@@ -63,8 +64,9 @@ def materialize_messages(
         return list(messages)
     used = 0
     keep_calls: set[str] = set()
-    out_reversed: list[HistoryEntry] = []
-    for entry in reversed(messages):
+    out_reversed: list[ModelContextEvent] = []
+    for idx in range(len(messages) - 1, -1, -1):
+        entry = messages[idx]
         if isinstance(entry, ToolResult):
             content = entry.content
             if used + len(content) <= tool_result_budget_chars:
@@ -78,9 +80,47 @@ def materialize_messages(
                     dataclasses.replace(entry, content=ELIDED_TOOL_RESULT_TAG)
                 )
         elif isinstance(entry, AssistantMessage) and entry.tool_calls:
-            calls = tuple(tc for tc in entry.tool_calls if tc.id in keep_calls)
-            if calls or entry.text or entry.thinking_blocks:
-                out_reversed.append(dataclasses.replace(entry, tool_calls=calls))
+            call_ids = {tc.id for tc in entry.tool_calls}
+            if call_ids <= keep_calls:
+                out_reversed.append(entry)
+            else:
+                out_reversed = [
+                    newer
+                    for newer in out_reversed
+                    if not (isinstance(newer, ToolResult) and newer.call_id in call_ids)
+                ]
+                kept_call_ids = call_ids & keep_calls
+                keep_calls.difference_update(call_ids)
+                materialized = dataclasses.replace(entry, tool_calls=())
+                next_newer = out_reversed[-1] if out_reversed else None
+                if (
+                    not kept_call_ids
+                    and idx > 0
+                    and _assistant_has_payload(materialized)
+                    and next_newer is None
+                ):
+                    out_reversed.append(materialized)
         else:
             out_reversed.append(entry)
-    return list(reversed(out_reversed))
+    return _coalesce_adjacent_users(reversed(out_reversed))
+
+
+def _coalesce_adjacent_users(
+    messages: Iterable[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    out: list[ModelContextEvent] = []
+    for entry in messages:
+        if isinstance(entry, UserMessage) and out and isinstance(out[-1], UserMessage):
+            prev = out[-1]
+            out[-1] = UserMessage(
+                text=f"{prev.text}\n\n{entry.text}",
+                attachments=(*prev.attachments, *entry.attachments),
+            )
+        else:
+            out.append(entry)
+    return out
+
+
+def _assistant_has_payload(entry: AssistantMessage) -> bool:
+    """Return whether an assistant turn has provider-visible payload."""
+    return bool(entry.text or entry.thinking_blocks or entry.tool_calls)

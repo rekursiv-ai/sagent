@@ -11,7 +11,7 @@ import sys
 from sagent.agent import Agent
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import OpenAICompat
-from sagent.types.history import AssistantMessage, UserMessage
+from sagent.types.runtime import AssistantMessage, UserMessage
 
 
 class LocalOpenAI(OpenAICompat):
