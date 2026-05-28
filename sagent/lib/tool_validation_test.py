@@ -95,6 +95,61 @@ def test_validate_tool_input_array_items_nested_required() -> None:
     assert "The required parameter `items[0].id` is missing." in err
 
 
+def test_validate_tool_input_rejects_wrong_scalar_type() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"n": {"type": "integer"}},
+            "required": ["n"],
+        }
+    )
+    err = validate_tool_input("Scalar", schema, {"n": "abc"})
+    assert err is not None
+    assert "InputValidationError" in err
+    assert "n" in err
+    assert "integer" in err
+
+
+def test_validate_tool_input_rejects_scalar_enum() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"mode": {"type": "string", "enum": ["read", "write"]}},
+        }
+    )
+    err = validate_tool_input("Scalar", schema, {"mode": "delete"})
+    assert err is not None
+    assert "mode" in err
+    assert "read" in err
+    assert "write" in err
+
+
+def test_validate_tool_input_rejects_numeric_range() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 3}},
+        }
+    )
+    err = validate_tool_input("Scalar", schema, {"count": 4})
+    assert err is not None
+    assert "count" in err
+    assert "<= 3" in err
+
+
+def test_validate_tool_input_rejects_additional_property_schema_type() -> None:
+    schema = json_freeze(
+        {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+        }
+    )
+    err = validate_tool_input("Dynamic", schema, {"ok": "x", "bad": {"nested": 1}})
+    assert err is not None
+    assert "bad" in err
+    assert "string" in err
+
+
 def test_validate_tool_input_valid_passes() -> None:
     """Well-formed args return ``None``."""
     schema = json_freeze(

@@ -17,7 +17,7 @@ import pytest
 
 from sagent.lib.json import JSON
 from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.types.history import BytesMessage, ToolResult
+from sagent.types.runtime import BytesMessage, ToolResult
 from sagent.types.tools import Tool
 
 

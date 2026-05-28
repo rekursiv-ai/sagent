@@ -28,7 +28,7 @@ import re
 
 from sagent.lib.json import MutableJSON
 from sagent.lib.web.fetch import FetchError, fetch
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 _LIMIT_MAX = 1000

@@ -30,23 +30,20 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
-from sagent.types.history import (
-    AssistantMessage,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.runtime import (
+    AssistantMessage,
+    ModelContextEvent,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
     ToolLabel,
+    ToolResult,
+    UserMessage,
 )
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from sagent.types.history import HistoryEntry
 
 
 def _parse(args: Sequence[str]) -> argparse.Namespace:
@@ -222,7 +219,7 @@ def test_last_assistant_text_empty() -> None:
 
 
 def test_last_assistant_text_returns_most_recent() -> None:
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         AssistantMessage(text="first"),
         UserMessage(text="user"),
         AssistantMessage(text="latest"),
@@ -231,7 +228,7 @@ def test_last_assistant_text_returns_most_recent() -> None:
 
 
 def test_last_assistant_text_no_assistant_returns_empty() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     assert _last_assistant_text(history) == ""
 
 

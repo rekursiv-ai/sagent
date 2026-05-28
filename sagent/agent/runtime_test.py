@@ -14,17 +14,10 @@ import pytest
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.runtime import Tool
 from sagent.types.exceptions import AuthRefreshError
-from sagent.types.history import (
-    AssistantMessage,
-    BytesMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-    reset_id_counter,
-)
 from sagent.types.runtime import (
     AgentIdle,
+    AssistantMessage,
+    BytesMessage,
     Clear,
     CohortComplete,
     CohortStarted,
@@ -36,6 +29,7 @@ from sagent.types.runtime import (
     DetachedResult,
     Halt,
     Kill,
+    ModelContextEvent,
     ModelIdle,
     ModelResponseCancelled,
     ModelResponseComplete,
@@ -47,20 +41,24 @@ from sagent.types.runtime import (
     Quit,
     Recompact,
     RuntimeEvent,
+    ToolCall,
+    ToolResult,
     ToolResultPartial,
     Undetach,
+    UserMessage,
     UserQueuedMessage,
+    reset_id_counter,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
+    ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
 )
 
 
 def _summary_override(
-    summary: list[HistoryEntry],
+    summary: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
     *,
     tape: Sequence[TapeRecord] | None = None,
@@ -138,7 +136,7 @@ class ScriptedModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
@@ -198,7 +196,7 @@ async def run_with_quit(
     agent: agent_runtime.AgentRuntime,
     timeout_sec: float = 2.0,
 ) -> None:
-    """Run run_forever, sending Quit after HistoryEntryComplete."""
+    """Run run_forever, sending Quit after TapeEventComplete."""
 
     def _auto_quit(event: RuntimeEvent) -> None:
         if isinstance(event, ModelIdle):
@@ -402,7 +400,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -478,7 +476,7 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
     class BlockingModel:
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -666,6 +664,75 @@ async def test_detach_and_result_arrives_later() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_detached_result_preserves_tool_result_metadata() -> None:
+    att = BytesMessage(data=b"png", descriptor="image/png")
+
+    @dataclass(kw_only=True, slots=True)
+    class _MetadataTool:
+        _name: str = "echo"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            await asyncio.sleep(0.1)
+            return ToolResult(
+                call_id="",
+                content="late result",
+                attachments=(att,),
+                diff="diff",
+                diff_file_path="file.txt",
+                hint="hint",
+                summary="summary",
+            )
+
+    slow = _MetadataTool()
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
+            AssistantMessage(text="detached"),
+        ],
+        tools=[slow],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+    detached_seen = asyncio.Event()
+
+    def _quit_when_done(event: RuntimeEvent) -> None:
+        if isinstance(event, DetachedResult):
+            detached_seen.set()
+
+    agent.observers.append(_quit_when_done)
+
+    async def detach_then_wait() -> None:
+        await asyncio.sleep(0.02)
+        agent.inbox.push_back(Detach(call_id="t1"))
+        await detached_seen.wait()
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        detach_then_wait(),
+    )
+
+    results = [
+        t
+        for t in agent.context().messages
+        if isinstance(t, ToolResult) and t.call_id == "t1"
+    ]
+    assert len(results) == 1
+    result = results[0]
+    assert result.attachments == (att,)
+    assert result.diff == "diff"
+    assert result.diff_file_path == "file.txt"
+    assert result.hint == "hint"
+    assert result.summary == "summary"
+
+
+@pytest.mark.asyncio
 async def test_detached_result_splices_when_parent_is_reemitted() -> None:
     agent, _ = make_agent([])
     call = ToolCall(id="t1", name="echo", args={})
@@ -682,7 +749,9 @@ async def test_detached_result_splices_when_parent_is_reemitted() -> None:
     )
     agent.adopt_record(parent_reemit)
     agent.inbox.push_back(
-        DetachedResult(call_id="t1", content="late result", is_error=False)
+        DetachedResult(
+            result=ToolResult(call_id="t1", content="late result", is_error=False)
+        )
     )
     agent.inbox.push_back(Quit())
 
@@ -713,7 +782,9 @@ async def test_detached_result_after_compaction_barrier_surfaces_fallback() -> N
     )
     agent.adopt_record(summary)
     agent.inbox.push_back(
-        DetachedResult(call_id="t1", content="late result", is_error=False)
+        DetachedResult(
+            result=ToolResult(call_id="t1", content="late result", is_error=False)
+        )
     )
     agent.inbox.push_back(Quit())
 
@@ -739,7 +810,7 @@ async def test_compaction_absorbs_detached_splices_landing_during_await() -> Non
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -778,13 +849,19 @@ async def test_compaction_absorbs_detached_splices_landing_during_await() -> Non
         agent.inbox.push_back(Compact(args=""))
         await asyncio.wait_for(compact_started.wait(), timeout=1.0)
         agent.inbox.push_back(
-            DetachedResult(call_id="t1", content="one", is_error=False)
+            DetachedResult(
+                result=ToolResult(call_id="t1", content="one", is_error=False)
+            )
         )
         agent.inbox.push_back(
-            DetachedResult(call_id="t2", content="two", is_error=False)
+            DetachedResult(
+                result=ToolResult(call_id="t2", content="two", is_error=False)
+            )
         )
         agent.inbox.push_back(
-            DetachedResult(call_id="t3", content="three", is_error=False)
+            DetachedResult(
+                result=ToolResult(call_id="t3", content="three", is_error=False)
+            )
         )
         await wait_until(
             lambda: (
@@ -828,7 +905,9 @@ def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
         ToolResult(call_id="t1", content="[detached]")
     )
     compact_ref = agent.mint_ref()
-    _ = agent._splice_detached_result("t1", "real", False)
+    _ = agent._splice_detached_result(
+        ToolResult(call_id="t1", content="real", is_error=False)
+    )
     summary = ContextSplice(
         ref=compact_ref,
         mask=((agent.tape[0].ref, agent.tape[-1].ref),),
@@ -851,7 +930,12 @@ def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
     agent.append_history(ToolResult(call_id="t1", content="[detached]"))
-    assert agent._splice_detached_result("t1", "old-real", False) is not None
+    assert (
+        agent._splice_detached_result(
+            ToolResult(call_id="t1", content="old-real", is_error=False)
+        )
+        is not None
+    )
     agent.append_clear()
     agent.append_history(UserMessage(text="second"))
     agent.append_history(
@@ -859,7 +943,9 @@ def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
     )
     agent.append_history(ToolResult(call_id="t1", content="[detached]"))
 
-    result = agent._splice_detached_result("t1", "new-real", False)
+    result = agent._splice_detached_result(
+        ToolResult(call_id="t1", content="new-real", is_error=False)
+    )
 
     assert result is not None
     texts = [
@@ -1239,7 +1325,7 @@ async def test_compact_rewrites_history() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -1250,7 +1336,7 @@ async def test_compact_rewrites_history() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -1298,7 +1384,8 @@ def test_widen_barrier_mask_preserves_mask_gaps() -> None:
     """Disjoint barrier masks stay disjoint when widened."""
     refs = tuple(TapeRef(session_id="s", ordinal=idx) for idx in range(4))
     tape: tuple[TapeRecord, ...] = tuple(
-        HistoryRecord(ref=ref, entry=UserMessage(text=str(ref.ordinal))) for ref in refs
+        ReferrableTapeEvent(ref=ref, event=UserMessage(text=str(ref.ordinal)))
+        for ref in refs
     )
     override = ContextSplice(
         ref=TapeRef(session_id="s", ordinal=4),
@@ -1323,7 +1410,7 @@ async def test_late_model_response_complete_during_compaction_is_ignored() -> No
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -1383,7 +1470,7 @@ async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> Non
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -1415,7 +1502,9 @@ async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> Non
         agent.inbox.push_back(Compact(args=""))
         await asyncio.wait_for(compact_started.wait(), timeout=1.0)
         agent.inbox.push_back(
-            DetachedResult(call_id="tc-1", content="real output", is_error=False)
+            DetachedResult(
+                result=ToolResult(call_id="tc-1", content="real output", is_error=False)
+            )
         )
         await wait_until(
             lambda: any(
@@ -1471,7 +1560,7 @@ async def test_user_facing_error_logged_without_traceback(
     class AuthFailingModel:
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -1525,7 +1614,7 @@ async def test_plain_exception_logged_with_traceback(
     class BoomModel:
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -1606,7 +1695,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -1689,6 +1778,68 @@ async def test_irrecoverable_error_gates_on_user() -> None:
     assert any("retry" in t for t in user_texts), (
         f"expected 'retry' content to reach history; got {user_texts!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_run_model_error_returns_and_removes_observer() -> None:
+    """AgentRuntime.run returns on model errors and removes its observer."""
+    agent, collector = make_agent(
+        [AssistantMessage(text="unused")],
+        fail_on_call=0,
+    )
+    starting_observers = tuple(agent.observers)
+
+    history = await asyncio.wait_for(
+        agent.run(UserMessage(text="go")),
+        timeout=1.0,
+    )
+
+    assert collector.has(ModelResponseError)
+    assert tuple(agent.observers) == starting_observers
+    assert len(history) == 1
+    user = history[0]
+    assert isinstance(user, UserMessage)
+    assert "[Error: RuntimeError: model exploded]" in user.text
+
+
+@pytest.mark.asyncio
+async def test_run_cancellation_removes_observer_and_stops_driver() -> None:
+    """AgentRuntime.run cleanup runs when the caller cancels the wrapper."""
+    model_started = asyncio.Event()
+    release_model = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class BlockingModel:
+        async def stream(
+            self,
+            history: list[ModelContextEvent],
+            system: str,
+            tools: list[agent_runtime.Tool],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, system, tools, on_text, on_thinking
+            model_started.set()
+            await release_model.wait()
+            return AssistantMessage(text="too late")
+
+    agent = agent_runtime.AgentRuntime(model=BlockingModel(), tools=[])
+    starting_observers = tuple(agent.observers)
+    run_task = asyncio.create_task(agent.run(UserMessage(text="go")))
+    await asyncio.wait_for(model_started.wait(), timeout=1.0)
+
+    run_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run_task
+
+    assert tuple(agent.observers) == starting_observers
+    run_forever_tasks: list[asyncio.Task[object]] = []
+    for task in asyncio.all_tasks():
+        coro = task.get_coro()
+        if coro is not None and coro.__qualname__ == "AgentRuntime.run_forever":
+            run_forever_tasks.append(task)
+    assert all(task.cancelled() or task.done() for task in run_forever_tasks)
+    release_model.set()
 
 
 @pytest.mark.asyncio
@@ -2136,7 +2287,7 @@ async def test_no_cohort_complete_on_halt() -> None:
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -2297,7 +2448,7 @@ async def test_compact_clears_queued_messages() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2308,7 +2459,7 @@ async def test_compact_clears_queued_messages() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2571,7 +2722,7 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2582,7 +2733,7 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2614,14 +2765,14 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
         ) -> ContextSplice:
             del tape, context, model, args
             return _summary_override(
-                [UserMessage(text="[fallback]"), UserMessage(text="continue")],
+                [UserMessage(text="[fallback]\n\ncontinue")],
                 mint_ref,
                 strategy="summary_fallback",
                 fallback_reason="summary failed after 3 attempts",
@@ -2631,7 +2782,7 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2666,7 +2817,7 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2677,7 +2828,7 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2717,7 +2868,7 @@ async def test_compact_while_compacting_is_dropped() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2731,7 +2882,7 @@ async def test_compact_while_compacting_is_dropped() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2780,6 +2931,48 @@ async def test_compact_while_compacting_is_dropped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_halt_after_compact_task_done_waits_for_compact_complete() -> None:
+    """Halt must not synthesize CompactFailed for completed compactions."""
+    agent, collector = make_agent([])
+
+    async def _done() -> None:
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    agent.compact_task = task
+    agent.inbox.push_back(Halt())
+    agent.inbox.push_back(CompactComplete(records=()))
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=2.0)
+
+    assert collector.has(CompactComplete)
+    assert not collector.has(CompactFailed)
+
+
+@pytest.mark.asyncio
+async def test_clear_after_compact_task_done_waits_for_compact_complete() -> None:
+    """Clear must not synthesize CompactFailed for completed compactions."""
+    agent, collector = make_agent([])
+
+    async def _done() -> None:
+        return None
+
+    task = asyncio.create_task(_done())
+    await task
+    agent.compact_task = task
+    agent.inbox.push_back(Clear())
+    agent.inbox.push_back(CompactComplete(records=()))
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=2.0)
+
+    assert collector.has(CompactComplete)
+    assert not collector.has(CompactFailed)
+
+
+@pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_compact_cancels_running_model_call() -> None:
     """A Compact event while the model is streaming cancels the model call."""
@@ -2793,7 +2986,7 @@ async def test_compact_cancels_running_model_call() -> None:
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -2815,7 +3008,7 @@ async def test_compact_cancels_running_model_call() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2826,7 +3019,7 @@ async def test_compact_cancels_running_model_call() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2911,7 +3104,7 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -2924,7 +3117,7 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2963,7 +3156,7 @@ async def test_thinking_chunk_published() -> None:
     class _ThinkingModel:
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3144,12 +3337,12 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3226,7 +3419,7 @@ class _LifecycleModel:
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
@@ -3280,6 +3473,53 @@ def _assert_exactly_one_surface(
         f"publish_count={publish_count}, states={states}"
     )
     return states[0]
+
+
+@pytest.mark.asyncio
+async def test_pending_detached_user_flush_publishes_coalesced_history_entry() -> None:
+    """Detached fallback flush publishes the committed coalesced entry."""
+    agent, collector = make_agent([AssistantMessage(text="unused")])
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t2", name="echo", args={}),))
+    )
+    agent.cohort.add("t2")
+    agent.running_tools["t2"] = asyncio.create_task(asyncio.sleep(10.0))
+    agent._cohort_seen = True
+    flushed = asyncio.Event()
+
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, UserMessage) and "[Tool t0 completed]" in event.text:
+            flushed.set()
+
+    agent.observers.append(_watch)
+    agent.inbox.push_back(
+        DetachedResult(result=ToolResult(call_id="t1", content="one", is_error=False))
+    )
+    agent.inbox.push_back(
+        DetachedResult(result=ToolResult(call_id="t0", content="zero", is_error=False))
+    )
+    agent.inbox.push_back(ToolResult(call_id="t2", content="two"))
+
+    async def quit_after_flush() -> None:
+        await asyncio.wait_for(flushed.wait(), timeout=1.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=2.0), quit_after_flush())
+
+    user_messages = [
+        entry for entry in agent.context().messages if isinstance(entry, UserMessage)
+    ]
+    assert user_messages[-1].text == (
+        "[Tool t1 completed]\none\n\n[Tool t0 completed]\nzero"
+    )
+    published = [
+        event.text for event in collector.events if isinstance(event, UserMessage)
+    ]
+    assert published[-2:] == [
+        "[Tool t1 completed]\none",
+        "[Tool t1 completed]\none\n\n[Tool t0 completed]\nzero",
+    ]
 
 
 @pytest.mark.asyncio
@@ -3579,11 +3819,11 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
 
     @dataclass(kw_only=True, slots=True)
     class CapturingModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3660,12 +3900,12 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3765,12 +4005,12 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
 
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3858,12 +4098,12 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -3955,12 +4195,12 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
 
     @dataclass(kw_only=True, slots=True)
     class ThreeRoundModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -4044,12 +4284,12 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class HaltableModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
         _i: int = field(default=0, init=False)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -4117,11 +4357,11 @@ async def test_halt_then_queued_message_fires_followup_round() -> None:
 
     @dataclass(kw_only=True, slots=True)
     class HaltableModel:
-        call_histories: list[list[HistoryEntry]] = field(default_factory=list)
+        call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -4504,7 +4744,7 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -4516,7 +4756,7 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             tools: dict[str, Tool],
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4588,7 +4828,7 @@ async def test_halt_cancels_running_compaction() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -4629,7 +4869,7 @@ async def test_clear_cancels_running_compaction_without_adopting_result() -> Non
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[HistoryEntry],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             args: str = "",
@@ -4682,7 +4922,7 @@ async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
     class BlockingModel:
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -4752,7 +4992,7 @@ async def test_agent_idle_suppressed_while_mid_stream_queue_nonempty() -> None:
 
         async def stream(
             self,
-            history: list[HistoryEntry],
+            history: list[ModelContextEvent],
             system: str,
             tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
@@ -4853,9 +5093,9 @@ class TestGateRepairsInvalidContext:
     payloads -- :meth:`ContextSplice.__post_init__` rejects them at
     construct (see ``types/tape_test.py``). What still reaches the
     gate is invalid context resolved across multiple records: orphan
-    ``tool_use`` from a ``HistoryRecord`` whose ``ToolResult`` never
+    ``tool_use`` from a ``ReferrableTapeEvent`` whose ``ToolResult`` never
     landed (tool task crashed silently, partial provider response
-    persisted), orphan ``ToolResult`` from a ``HistoryRecord`` whose
+    persisted), orphan ``ToolResult`` from a ``ReferrableTapeEvent`` whose
     ``AssistantMessage`` was suppressed. Phase 2 repair handles these.
     Cross-payload pathologies that previously required phase 1 repair
     are now impossible by construction -- those scenarios live in
@@ -4933,6 +5173,40 @@ class TestGateRepairsInvalidContext:
         )
         assistant_texts = [m.text for m in resolved if isinstance(m, AssistantMessage)]
         assert "acknowledged" in assistant_texts
+
+    @pytest.mark.asyncio
+    async def test_legacy_consecutive_users_rescued_at_gate(self) -> None:
+        """Legacy summary payloads with adjacent users still resume."""
+        model = ScriptedModel(
+            responses=[AssistantMessage(text="acknowledged")],
+        )
+        agent = agent_runtime.AgentRuntime(model=model)
+        legacy_override = ContextSplice.replay(
+            ref=agent.mint_ref(),
+            mask=(),
+            insert_after=None,
+            payload=(
+                UserMessage(text="handoff summary"),
+                UserMessage(text="question before compact"),
+                AssistantMessage(text="answer before compact"),
+            ),
+            strategy="legacy_summary",
+        )
+        agent.adopt_record(legacy_override)
+
+        agent.inbox.push_back(UserMessage(text="please retry"))
+        await run_with_quit(agent, timeout_sec=2.0)
+
+        resolved = agent.context().messages
+        assistant_texts = [
+            m.text for m in resolved if isinstance(m, AssistantMessage) and m.text
+        ]
+        assert "acknowledged" in assistant_texts
+        user_texts = [m.text for m in resolved if isinstance(m, UserMessage)]
+        assert any(
+            "handoff summary" in text and "question before compact" in text
+            for text in user_texts
+        )
 
     @pytest.mark.asyncio
     async def test_legacy_invalid_override_payload_rescued_at_gate(self) -> None:

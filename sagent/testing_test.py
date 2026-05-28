@@ -13,13 +13,15 @@ from sagent.tools.core import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.types.history import (
+from sagent.types.model import Pricing
+from sagent.types.runtime import (
     AssistantMessage,
+    Kill,
+    ModelResponseComplete,
+    Quit,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import Pricing
-from sagent.types.runtime import Kill, ModelResponseComplete, Quit
 
 
 def test_mock_model_caps_static_flags() -> None:

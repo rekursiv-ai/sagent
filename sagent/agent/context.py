@@ -1,7 +1,7 @@
 """Tape resolver and provider-context validator.
 
 ``resolve_context`` walks a tape and emits the provider-facing list of
-``HistoryEntry`` values. ``validate_context`` checks that the emitted
+``TapeEvent`` values. ``validate_context`` checks that the emitted
 list respects assistant tool-call / tool-result ordering.
 
 The resolver is the only sanctioned reader of tape semantics. Runtime,
@@ -23,7 +23,7 @@ Concretely, three passes:
 2. **Forward pass: masked-by-alive set.** Compute every tape ref
    covered by some alive splice's mask.
 3. **Forward pass: emit.** Each tape record contributes a segment:
-   - ``HistoryRecord``: its entry, or empty if its ref is in the
+   - ``ReferrableTapeEvent``: its entry, or empty if its ref is in the
      masked-by-alive set.
    - Alive ``ContextSplice``: its payload, ordered after
      ``insert_after`` in the tape-order list.
@@ -38,18 +38,21 @@ when the cut record itself is masked.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import bisect
 import logging
 
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolResult,
+    UserMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
+    ReferrableTapeEvent,
+    TapeEvent,
     TapeRecord,
     TapeRef,
 )
@@ -76,7 +79,7 @@ class InvalidContextError(ValueError):
 class ResolvedContext:
     """Provider-facing messages resolved from a tape."""
 
-    messages: list[HistoryEntry]
+    messages: list[ModelContextEvent]
     """Provider-message list rendered in tape-order segment concatenation."""
 
     origins: list[TapeRef]
@@ -104,21 +107,15 @@ def alive_splices(tape: Sequence[TapeRecord]) -> set[TapeRef]:
       alive: Set of refs of alive splices.
 
     """
-    tape_by_ref = {r.ref: r for r in tape}
+    masked = _MaskIndex()
     alive: set[TapeRef] = set()
     for record in reversed(tape):
         if not isinstance(record, ContextSplice):
             continue
-        masked = False
-        for alive_ref in alive:
-            other = tape_by_ref[alive_ref]
-            if not isinstance(other, ContextSplice):
-                continue
-            if _ref_in_mask(record.ref, other.mask):
-                masked = True
-                break
-        if not masked:
-            alive.add(record.ref)
+        if masked.contains(record.ref):
+            continue
+        alive.add(record.ref)
+        masked.add_mask(record.mask)
     return alive
 
 
@@ -135,17 +132,11 @@ def masked_refs_by_alive(
       masked: Set of tape refs covered by at least one alive splice.
 
     """
-    masked: set[TapeRef] = set()
-    all_refs = [r.ref for r in tape]
+    masked = _MaskIndex()
     for record in tape:
-        if not isinstance(record, ContextSplice):
-            continue
-        if record.ref not in alive:
-            continue
-        for r_from, r_to in record.mask:
-            lo, hi = r_from.ordinal, r_to.ordinal
-            masked.update(r for r in all_refs if lo <= r.ordinal <= hi)
-    return masked
+        if isinstance(record, ContextSplice) and record.ref in alive:
+            masked.add_mask(record.mask)
+    return {record.ref for record in tape if masked.contains(record.ref)}
 
 
 def resolve_context(
@@ -171,12 +162,18 @@ def resolve_context(
     alive = alive_splices(tape)
     masked = masked_refs_by_alive(tape, alive)
 
-    segments: dict[TapeRef, list[HistoryEntry]] = {}
+    segments: dict[TapeRef, list[ModelContextEvent]] = {}
     order: list[TapeRef] = []
 
     for record in tape:
-        if isinstance(record, HistoryRecord):
-            segments[record.ref] = [] if record.ref in masked else [record.entry]
+        if isinstance(record, ReferrableTapeEvent):
+            event = record.event
+            segments[record.ref] = (
+                []
+                if record.ref in masked
+                or not isinstance(event, (UserMessage, AssistantMessage, ToolResult))
+                else [event]
+            )
             order.append(record.ref)
             continue
         assert isinstance(record, ContextSplice)
@@ -200,7 +197,7 @@ def resolve_context(
         else:
             order.insert(anchor_idx + 1, record.ref)
 
-    messages: list[HistoryEntry] = []
+    messages: list[ModelContextEvent] = []
     origins: list[TapeRef] = []
     for ref in order:
         segment = segments[ref]
@@ -215,7 +212,7 @@ def resolve_context(
     )
 
 
-def validate_context(messages: Sequence[HistoryEntry]) -> None:
+def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     """Raise on invalid assistant tool-call / tool-result ordering.
 
     Rules:
@@ -235,13 +232,17 @@ def validate_context(messages: Sequence[HistoryEntry]) -> None:
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
+    prev_role: type[UserMessage | AssistantMessage] | None = None
     for entry in messages:
         if isinstance(entry, AssistantMessage):
             if pending:
                 raise InvalidContextError(
                     f"assistant turn with pending tool calls: {sorted(pending)}",
                 )
+            if prev_role is AssistantMessage:
+                raise InvalidContextError("provider context violates role alternation")
             pending = {tc.id for tc in entry.tool_calls}
+            prev_role = AssistantMessage
         elif isinstance(entry, ToolResult):
             if entry.call_id in seen_results:
                 raise InvalidContextError(
@@ -253,19 +254,51 @@ def validate_context(messages: Sequence[HistoryEntry]) -> None:
                 )
             pending.discard(entry.call_id)
             seen_results.add(entry.call_id)
-        elif pending:
-            raise InvalidContextError(
-                f"user message before tool results: pending {sorted(pending)}",
-            )
+            prev_role = None
+        else:
+            if pending:
+                raise InvalidContextError(
+                    f"user message before tool results: pending {sorted(pending)}",
+                )
+            if prev_role is UserMessage:
+                raise InvalidContextError("provider context violates role alternation")
+            prev_role = UserMessage
     if pending:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(pending)}",
         )
 
 
-def _ref_in_mask(ref: TapeRef, mask: tuple[tuple[TapeRef, TapeRef], ...]) -> bool:
-    """True iff ``ref.ordinal`` lies within any range in ``mask``."""
-    return any(r_from.ordinal <= ref.ordinal <= r_to.ordinal for r_from, r_to in mask)
+@dataclass(slots=True, kw_only=True)
+class _MaskIndex:
+    intervals_by_session: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+
+    def add_mask(self, mask: tuple[tuple[TapeRef, TapeRef], ...]) -> None:
+        for r_from, r_to in mask:
+            intervals = self.intervals_by_session.setdefault(r_from.session_id, [])
+            self._add_interval(intervals, r_from.ordinal, r_to.ordinal)
+
+    def contains(self, ref: TapeRef) -> bool:
+        intervals = self.intervals_by_session.get(ref.session_id)
+        if not intervals:
+            return False
+        idx = bisect.bisect_right(intervals, (ref.ordinal, float("inf"))) - 1
+        return idx >= 0 and intervals[idx][0] <= ref.ordinal <= intervals[idx][1]
+
+    @classmethod
+    def _add_interval(
+        cls, intervals: list[tuple[int, int]], start: int, stop: int
+    ) -> None:
+        idx = bisect.bisect_left(intervals, (start, stop))
+        if idx > 0 and intervals[idx - 1][1] + 1 >= start:
+            idx -= 1
+            start = min(start, intervals[idx][0])
+            stop = max(stop, intervals[idx][1])
+        while idx < len(intervals) and intervals[idx][0] <= stop + 1:
+            start = min(start, intervals[idx][0])
+            stop = max(stop, intervals[idx][1])
+            del intervals[idx]
+        intervals.insert(idx, (start, stop))
 
 
 def _index_of(order: list[TapeRef], ref: TapeRef) -> int | None:
@@ -277,7 +310,7 @@ def _index_of(order: list[TapeRef], ref: TapeRef) -> int | None:
 
 
 def _is_discontinuous(
-    messages: Sequence[HistoryEntry],
+    messages: Sequence[TapeEvent],
     prior: ResolvedContext | None,
 ) -> bool:
     """True iff ``messages`` is not a pure append over ``prior.messages``."""

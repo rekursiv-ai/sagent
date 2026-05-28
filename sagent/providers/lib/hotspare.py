@@ -115,6 +115,7 @@ class HotSpare:
                 self._active = None
                 if old is not None:
                     await old.close()
+                await self._discard_spare_locked()
                 raise RuntimeError(
                     "HotSpare: transport failure budget exhausted "
                     f"after {self._consecutive_transport_failures} consecutive failures",
@@ -129,32 +130,19 @@ class HotSpare:
 
     async def close(self) -> None:
         """Tear down active + spare; idempotent."""
-        if self._closed:
-            return
-        self._closed = True
-        task = self._spare_task
-        if task is not None and not task.done():
-            _ = task.cancel()
-            try:
-                spare = await task
-                await spare.close()
-            except asyncio.CancelledError:
-                await self._close_partial_spare()
-            except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
-                logger.debug("hot spare close: cancelled warm-up: %s", exc)
-        elif task is not None and task.done() and not task.cancelled():
-            try:
-                spare = task.result()
-                await spare.close()
-            except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
-                logger.debug("hot spare close: spare close raised: %s", exc)
-        self._spare_task = None
-        if self._spare is not None:
-            await self._spare.close()
-            self._spare = None
-        if self._active is not None:
-            await self._active.close()
-            self._active = None
+        async with self._respawn_lock:
+            if self._closed:
+                return
+            self._closed = True
+            task = self._spare_task
+            self._spare_task = None
+            await self._close_spare_task(task)
+            if self._spare is not None:
+                await self._spare.close()
+                self._spare = None
+            if self._active is not None:
+                await self._active.close()
+                self._active = None
 
     @property
     def active(self) -> Subproc | None:
@@ -172,7 +160,12 @@ class HotSpare:
         """Close the active subprocess and promote the spare under lock."""
         old = self._active
         self._active = None
-        active = await self._take_or_make_spare()
+        try:
+            active = await self._take_or_make_spare()
+        except Exception:
+            if old is not None:
+                await old.close()
+            raise
         self._active = active
         if old is not None:
             await old.close()
@@ -182,19 +175,24 @@ class HotSpare:
         """Close and forget the warmed spare under lock."""
         task = self._spare_task
         self._spare_task = None
-        if task is not None:
-            if not task.done():
-                _ = task.cancel()
-                try:
-                    spare = await task
-                    await spare.close()
-                except asyncio.CancelledError:
-                    await self._close_partial_spare()
-            elif not task.cancelled():
-                await task.result().close()
+        await self._close_spare_task(task)
         if self._spare is not None:
             await self._spare.close()
             self._spare = None
+
+    async def _close_spare_task(self, task: asyncio.Task[Subproc] | None) -> None:
+        """Close a warm-up task's subprocess if it produced one."""
+        if task is None:
+            return
+        if not task.done():
+            _ = task.cancel()
+        try:
+            spare = await task
+            await spare.close()
+        except asyncio.CancelledError:
+            await self._close_partial_spare()
+        except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
+            logger.debug("hot spare close: spare task cleanup raised: %s", exc)
 
     async def _take_or_make_spare(self) -> Subproc:
         """Consume the warmed spare; spawn synchronously if it isn't ready."""

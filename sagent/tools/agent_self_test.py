@@ -14,14 +14,18 @@ from sagent.agent.agent import Agent
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.core import current_agent_var, tool_state_var
-from sagent.types.history import AssistantMessage
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     ModelSpec,
     Pricing,
 )
-from sagent.types.runtime import Clear, Compact, Recompact
+from sagent.types.runtime import (
+    AssistantMessage,
+    Clear,
+    Compact,
+    Recompact,
+)
 
 
 @dataclass(slots=True, kw_only=True)

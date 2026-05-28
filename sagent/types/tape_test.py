@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -36,7 +36,7 @@ def _ref(ordinal: int) -> TapeRef:
 def _splice(
     *,
     mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
-    payload: tuple[HistoryEntry, ...] = (),
+    payload: tuple[ModelContextEvent, ...] = (),
     paired_externally: frozenset[str] = frozenset(),
 ) -> ContextSplice:
     """Build a splice with sensible defaults for terse tests."""
@@ -57,9 +57,14 @@ def test_empty_payload_is_valid() -> None:
 
 
 def test_text_only_payload_is_valid() -> None:
-    """Coalesce / summary payloads with no AM/TR pass trivially."""
-    splice = _splice(payload=(UserMessage(text="a"), UserMessage(text="b")))
+    """Coalesce / summary payloads with alternating roles pass trivially."""
+    splice = _splice(payload=(UserMessage(text="a"), AssistantMessage(text="b")))
     assert len(splice.payload) == 2
+
+
+def test_payload_rejects_consecutive_same_role_messages() -> None:
+    with pytest.raises(InvalidPayloadError, match="alternation"):
+        _splice(payload=(UserMessage(text="a"), UserMessage(text="b")))
 
 
 def test_paired_am_tr_block_is_valid() -> None:

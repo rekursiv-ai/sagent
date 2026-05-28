@@ -10,17 +10,17 @@ import sys
 from sagent.agent import Agent
 from sagent.lib import token_count
 from sagent.tools import tool
-from sagent.types.history import (
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     Pricing,
     TokenCount,
+)
+from sagent.types.runtime import (
+    AssistantMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
 )
 
 

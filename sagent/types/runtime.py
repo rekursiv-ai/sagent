@@ -1,31 +1,29 @@
-"""Dispatch protocol event vocabulary.
+"""Runtime event vocabulary.
 
-The data classes consumed by ``agent.runtime.AgentRuntime``'s inbox
-match block and published to observers. Pure data; no behaviour. Used
-by the engine, renderers, observers, persistence, and tests.
-
-Naming clash note: ``sagent.types.runtime`` (this
-module) holds the *event* types; ``sagent.agent.runtime``
-holds the *engine* that consumes them. Different packages, no Python
-conflict; the parallel naming signals the relationship.
+This module is the root type module for events that happen during an
+agent session. It defines provider-visible model context events and
+dispatch-only runtime events. It must stay leaf-only: do not import
+tape/model/tool modules here.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from sagent.types.history import (
-    AssistantMessage,
-    BytesMessage,
-    ToolResult,
-    UserMessage,
-)
-from sagent.types.tape import ContextSplice
+import dataclasses
+import itertools
+import time
+
+
+_id_counter: itertools.count[int] = itertools.count()
 
 
 __all__ = [
+    "AgentIdle",
+    "AssistantMessage",
     "BudgetReset",
+    "BytesMessage",
     "ChildDoneEvent",
     "ChildEvent",
     "Clear",
@@ -40,6 +38,7 @@ __all__ = [
     "Halt",
     "Kill",
     "ModelCallStarted",
+    "ModelContextEvent",
     "ModelIdle",
     "ModelResponseCancelled",
     "ModelResponseComplete",
@@ -52,12 +51,155 @@ __all__ = [
     "Recompact",
     "RuntimeEvent",
     "SaveSession",
+    "SessionMessage",
     "StatusChanged",
+    "ToolCall",
     "ToolLabel",
+    "ToolResult",
     "ToolResultPartial",
     "Undetach",
+    "UserMessage",
     "UserQueuedMessage",
+    "reset_id_counter",
 ]
+
+
+def reset_id_counter(start: int) -> None:
+    """Reset the ``SessionMessage`` id counter."""
+    global _id_counter  # noqa: PLW0603 -- module-level counter requires global statement
+    _id_counter = itertools.count(start)
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class BytesMessage:
+    """Binary payload (image, PDF)."""
+
+    data: bytes
+    """Raw bytes of the payload."""
+
+    descriptor: str
+    """MIME-style content type (e.g. ``image/png``)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionMessage:
+    """Common fields for provider-visible session messages."""
+
+    id: int = dataclasses.field(default_factory=lambda: next(_id_counter))
+    """Monotonically increasing per-session message id."""
+
+    parent_id: int = -1
+    """Id of the message this one responds to, or ``-1``."""
+
+    timestamp: float = dataclasses.field(default_factory=time.time)
+    """Unix wall-clock seconds when the message was created."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCall:
+    """One tool invocation requested by the model."""
+
+    id: str
+    """Provider-assigned call id (e.g. ``toolu_01...``)."""
+
+    name: str
+    """Tool name the model wants to invoke."""
+
+    args: Mapping[str, object]
+    """Parsed directive arguments."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserMessage(SessionMessage):
+    """User or system text the model should see."""
+
+    text: str
+    """Plain-text content."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads sent alongside the text."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AssistantMessage(SessionMessage):
+    """Model response: text and/or tool calls."""
+
+    text: str = ""
+    """User-visible response text."""
+
+    thinking_blocks: tuple[Mapping[str, object], ...] = ()
+    """Provider thinking blocks (opaque dicts)."""
+
+    tool_calls: tuple[ToolCall, ...] = ()
+    """Tool invocations requested by the model."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolResult(SessionMessage):
+    """Result of one tool invocation."""
+
+    call_id: str
+    """Id of the originating ``ToolCall``."""
+
+    content: str
+    """Result text shown to the model."""
+
+    is_error: bool = False
+    """True when the tool raised or signalled failure."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads produced by the tool."""
+
+    diff: str = ""
+    """Unified-diff fragment for renderers (e.g. Edit/Write)."""
+
+    diff_file_path: str = ""
+    """Absolute path the ``diff`` applies to."""
+
+    hint: str = ""
+    """Optional follow-up nudge surfaced to the model."""
+
+    summary: str = ""
+    """Optional short post-execution receipt line."""
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class CompactStarted:
+    """Compaction task has been spawned."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompactComplete:
+    """Compaction task finished."""
+
+    records: tuple[object, ...] = ()
+    """Runtime-only overrides appended by the compactor."""
+
+    token_before: int = 0
+    """Token count before compaction."""
+
+    token_after: int = 0
+    """Token count after compaction."""
+
+    payload_entries: int = 0
+    """Number of provider entries in the compacted payload."""
+
+    fallback_reason: str = ""
+    """Why fallback history was used instead of a summary."""
+
+    preserved_tail_count: int = 0
+    """Number of tail entries preserved verbatim in fallback mode."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompactFailed:
+    """Compaction task raised; runtime keeps the tape as-is."""
+
+    exception: BaseException
+    """The raised exception surfaced to observers."""
+
+    tape_len: int
+    """Tape length captured before compaction."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -99,7 +241,7 @@ class Detach:
     """Stub one or all tools, let them finish in background."""
 
     call_id: str | None = None
-    """Specific call to detach, or ``None`` to detach all."""
+    """Specific call to detach, or ``None`` for all."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -112,21 +254,13 @@ class Undetach:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelSwitch:
-    """Queue a model swap; the runtime applies it once safe.
-
-    The slash handler builds the new model synchronously and packages
-    the swap as ``apply``. The runtime defers the call until
-    ``model_call`` and ``compact_task`` are both ``None`` so the
-    in-flight response finishes against the OLD model (cost
-    attribution, retry state, etc. stay self-consistent) and only the
-    NEXT call uses the new model.
-    """
+    """Queue a model swap; the runtime applies it once safe."""
 
     apply: Callable[[], None]
-    """Closure that performs the swap (typically ``agent.swap_model``)."""
+    """Closure that performs the swap."""
 
     label: str = ""
-    """Optional human-readable label shown to renderers (e.g. ``old -> new``)."""
+    """Optional human-readable label shown to renderers."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -142,16 +276,7 @@ class ModelSwitchRejected:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BudgetReset:
-    """Agent ``ContextBudget`` was reset to fit the new model.
-
-    Published by ``Agent._apply_model_change`` when a queued model
-    swap would have overflowed the prior budget (typical case:
-    swapping from a 1M-context model to a 200K-context model). The
-    budget is replaced with ``ContextBudget.from_model(new)`` so the
-    derived fields (``buffer_tokens``, ``reattach_*``, etc.) cohere
-    with the new context window. Renderers surface this so a user
-    with customised budgets knows to re-apply them post-swap.
-    """
+    """Agent ``ContextBudget`` was reset to fit the new model."""
 
     model_id: str
     """Provider-specific model id the budget was sized for."""
@@ -163,10 +288,10 @@ class BudgetReset:
     """Pre-reset output cap."""
 
     new_max_request_tokens: int
-    """Post-reset input cap (matches the new model)."""
+    """Post-reset input cap."""
 
     new_max_response_tokens: int
-    """Post-reset output cap (matches the new model)."""
+    """Post-reset output cap."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -236,18 +361,7 @@ class ModelIdle:
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class AgentIdle:
-    """Agent has fully drained: about to block on inbox with no work.
-
-    Edge-triggered: fires once per transition into the blocked-on-inbox
-    state, suppressed until the next ``drain()`` returns work. Distinct
-    from :class:`ModelIdle`, which fires per-round when the model
-    produces no tool calls without considering inbox emptiness, cohort,
-    detached tools, compaction, mid-stream buffer, or inbox gate state.
-
-    Not published on cold start (the runtime initializes the
-    ``_was_idle`` flag so the first iteration suppresses publish until
-    the agent has consumed at least one batch of work).
-    """
+    """Agent has fully drained: about to block on inbox with no work."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -257,7 +371,7 @@ class CohortStarted:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolResultPartial:
-    """Streaming chunk from a tool (e.g. Bash long output)."""
+    """Streaming chunk from a tool."""
 
     call_id: str
     """Id of the originating ``ToolCall``."""
@@ -270,14 +384,20 @@ class ToolResultPartial:
 class DetachedResult:
     """A previously-detached tool completed."""
 
-    call_id: str
-    """Id of the originating ``ToolCall``."""
+    result: ToolResult
+    """Full result from the completed tool."""
 
-    content: str
-    """Result text from the completed tool."""
+    @property
+    def call_id(self) -> str:
+        return self.result.call_id
 
-    is_error: bool = False
-    """True when the tool raised or signalled failure."""
+    @property
+    def content(self) -> str:
+        return self.result.content
+
+    @property
+    def is_error(self) -> bool:
+        return self.result.is_error
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -302,59 +422,13 @@ class Recompact:
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
-class CompactStarted:
-    """Compaction task has been spawned."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CompactComplete:
-    """Compaction task finished; compactor's overrides are in the tape.
-
-    The compaction task appends one or more ``ContextSplice`` records
-    directly to the runtime tape. This event tells observers (renderers,
-    persistence) that compaction is done and exposes the appended
-    records plus fallback metadata.
-    """
-
-    records: tuple[ContextSplice, ...]
-    """Overrides appended by the compactor (typically one barrier)."""
-
-    fallback_reason: str = ""
-    """Why the compactor used fallback history instead of a summary."""
-
-    preserved_tail_count: int = 0
-    """Number of tail entries preserved verbatim in fallback mode."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CompactFailed:
-    """Compaction task raised; runtime keeps the tape as-is.
-
-    The dispatch loop's handler clears ``compact_task`` (so subsequent
-    ``ModelSwitch`` / model-call gates unblock) and appends a visible
-    ``[Compaction error: ...]`` ``UserMessage`` so the model can react.
-    """
-
-    exception: BaseException
-    """The compactor's raised exception."""
-
-    tape_len: int
-    """Tape length captured before compaction (for forensics)."""
-
-
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class SaveSession:
     """Signals observers to persist session state."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StatusChanged:
-    """Agent ``status`` field was updated.
-
-    Publish-only: emitted by ``Agent.status`` setter. Renderers update
-    the terminal title, persistence observers re-flush ``meta`` so the
-    new status survives a crash even without a history delta.
-    """
+    """Agent ``status`` field was updated."""
 
     text: str
     """New status string."""
@@ -362,27 +436,18 @@ class StatusChanged:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolLabel:
-    """Pre-execution label for a tool call (REPL rendering).
-
-    Publish-only: tool wrappers fan this out via ``runtime.publish``
-    before invoking the inner tool. Never enters the inbox, never
-    hits the match block.
-    """
+    """Pre-execution label for a tool call."""
 
     call_id: str
     """Id of the originating ``ToolCall``."""
 
     text: str
-    """Short label rendered above the call (e.g. ``Read(path)``)."""
+    """Short label rendered above the call."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildEvent:
-    """Wrapped event from a child agent (AgentSpawn forwarding).
-
-    Publish-only: AgentSpawn's observer wraps each child event and
-    fans it out on the parent's runtime. Never enters the inbox.
-    """
+    """Wrapped event from a child agent."""
 
     label: str
     """Child agent's display label."""
@@ -393,11 +458,7 @@ class ChildEvent:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChildDoneEvent:
-    """Child agent completed; carries totals for the gutter.
-
-    Publish-only: AgentSpawn emits one at completion. Never enters
-    the inbox.
-    """
+    """Child agent completed; carries totals for the gutter."""
 
     label: str
     """Child agent's display label."""
@@ -410,6 +471,9 @@ class ChildDoneEvent:
 
     cost: float
     """Total USD cost attributable to the child."""
+
+
+type ModelContextEvent = UserMessage | AssistantMessage | ToolResult
 
 
 type RuntimeEvent = (

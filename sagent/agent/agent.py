@@ -491,7 +491,7 @@ class Agent:
         self.runtime.publish(types.runtime.StatusChanged(text=value))
 
     @property
-    def history(self) -> list[types.history.HistoryEntry]:
+    def history(self) -> list[types.runtime.ModelContextEvent]:
         """Resolved provider-facing context (read-only snapshot).
 
         Returns a fresh list each call. Mutations are silently lost --
@@ -568,13 +568,10 @@ class Agent:
         tool_names: dict[str, str] = {}
         total = 0
         for entry in self.runtime.context().messages:
-            if isinstance(entry, types.history.AssistantMessage):
+            if isinstance(entry, types.runtime.AssistantMessage):
                 for tc in entry.tool_calls:
                     tool_names[tc.id] = tc.name
-            elif (
-                isinstance(entry, types.history.ToolResult)
-                and tool_names.get(entry.call_id) != "Read"
-            ):
+            elif isinstance(entry, types.runtime.ToolResult):
                 total += len(entry.content)
         return total
 
@@ -609,6 +606,8 @@ class Agent:
           ValueError: Explicit budget exceeds the new model's limits.
 
         """
+        if model is self.model:
+            return
         if self._budget.max_request_tokens > model.max_request_tokens:
             raise ValueError(
                 f"budget.max_request_tokens={self._budget.max_request_tokens:,}"
@@ -905,7 +904,7 @@ class Agent:
             await self.runtime.run_forever()
 
     async def run(
-        self, msg: types.history.UserMessage
+        self, msg: types.runtime.UserMessage
     ) -> AsyncGenerator[types.runtime.RuntimeEvent, None]:
         """Process one inbound message; drive rounds until idle.
 
@@ -1158,7 +1157,7 @@ class Agent:
 
     def _before_tool_spawn(
         self,
-        message: types.history.AssistantMessage,
+        message: types.runtime.AssistantMessage,
     ) -> types.runtime.RuntimeEvent | None:
         """Reject capped tool rounds before runtime spawns tool tasks."""
         if (
@@ -1178,19 +1177,23 @@ class Agent:
         )
 
     def cancel_background(self, job_id: str) -> None:
-        """Remove ``job_id`` from the background-task registry, if present.
+        """Cancel and forget a background task, if present.
 
         Args:
-          job_id: Queue id of the registered task to drop.
+          job_id: Queue id of the registered task to cancel.
 
         """
+        job = self._bg.pop(job_id, None)
+        if job is not None and not job.task.done():
+            job.task.cancel()
+
+    def forget_background(self, job_id: str) -> None:
+        """Remove one background job without cancelling its task."""
         self._bg.pop(job_id, None)
 
     def _cancel_background(self, job_id: str) -> None:
         """Cancel and forget one explicit background job."""
-        job = self._bg.pop(job_id, None)
-        if job is not None and not job.task.done():
-            job.task.cancel()
+        self.cancel_background(job_id)
 
     def _cancel_all_background(self) -> None:
         """Cancel and forget every explicit background tool job."""
@@ -1210,7 +1213,7 @@ class Agent:
 
     async def compact_if_needed(
         self,
-        history: list[types.history.HistoryEntry],
+        history: list[types.runtime.ModelContextEvent],
         model: types.model.Model,
     ) -> bool:
         """Proactively compact when the compactor says headroom is gone.
@@ -1288,6 +1291,12 @@ class Agent:
         if self._agent_compactor is None:
             self.last_compact_error = None
             return True
+        active_compact = self.runtime.compact_task
+        if active_compact is not None and not active_compact.done():
+            await active_compact
+            self.last_compact_error = None
+            self.compaction_state.compact_failures = 0
+            return True
         tape_len = len(self.runtime.tape)
         self.publish(types.runtime.CompactStarted())
         try:
@@ -1306,7 +1315,7 @@ class Agent:
             )
             self.compaction_state.compact_failures += 1
             self.runtime.append_history(
-                types.history.UserMessage(
+                types.runtime.UserMessage(
                     text=f"[Compaction error: {type(exc).__name__}: {exc}]",
                 ),
             )
@@ -1506,12 +1515,12 @@ class _AgentModel:
 
     async def stream(
         self,
-        history: list[types.history.HistoryEntry],
+        history: list[types.runtime.ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
-    ) -> types.history.AssistantMessage:
+    ) -> types.runtime.AssistantMessage:
         """Stream a response with retry + context-overflow recovery.
 
         Builds a ``types.model.ModelRequest`` from agent state, runs
@@ -1526,7 +1535,7 @@ class _AgentModel:
           on_thinking: Callback for each streamed thinking chunk.
 
         Returns:
-          message: Final ``types.history.AssistantMessage`` from the provider.
+          message: Final ``types.runtime.AssistantMessage`` from the provider.
 
         Raises:
           RuntimeError: Overflow recovery failed after the retry cap.
@@ -1650,7 +1659,7 @@ class _AgentTool:
     - Pre-validate ``args`` against the raw tool's
       ``directive_schema`` (required fields, ``additionalProperties``
       bound). Validation errors surface as
-      ``types.history.ToolResult(is_error=True)`` with an ``InputValidationError:``
+      ``types.runtime.ToolResult(is_error=True)`` with an ``InputValidationError:``
       header carrying the recovery hint so the model can self-correct
       without looping.
     - Publish ``types.runtime.ToolLabel`` for the REPL renderer.
@@ -1680,7 +1689,7 @@ class _AgentTool:
         """Forward to the wrapped tool's name."""
         return self._inner.name
 
-    async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+    async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
         """Validate, publish ``types.runtime.ToolLabel``, dispatch, post-process.
 
         Args:
@@ -1706,7 +1715,7 @@ class _AgentTool:
             self._inner.name, self._inner.directive_schema, clean_args
         )
         if validation_error is not None:
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id=call_id,
                 content=validation_error,
                 is_error=True,
@@ -1731,11 +1740,13 @@ class _AgentTool:
                     kind="tool",
                 ),
             )
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id=call_id,
                 content=f"[Running in background: {self._inner.name}]",
             )
         result = await self._inner.run(clean_args)
+        if not result.call_id:
+            result = dataclasses.replace(result, call_id=call_id)
         return post_process_result(
             result,
             self._inner.name,
@@ -1756,6 +1767,8 @@ class _AgentTool:
             await asyncio.sleep(delay_sec)
         try:
             result = await self._inner.run(args)
+            if not result.call_id:
+                result = dataclasses.replace(result, call_id=call_id)
             processed = post_process_result(
                 result,
                 self._inner.name,
@@ -1764,22 +1777,25 @@ class _AgentTool:
                 message_budget_chars=self._agent.budget.message_budget_chars,
                 used_message_chars=self._agent.live_tool_result_chars(),
             )
-            content, is_error = processed.content, processed.is_error
         except asyncio.CancelledError:
             if call_id not in self._agent.background:
                 return
-            content = "[cancelled]"
-            is_error = True
+            processed = types.runtime.ToolResult(
+                call_id=call_id,
+                content="[cancelled]",
+                is_error=True,
+            )
         except Exception as exc:
             logger.exception("background tool %r failed", self._inner.name)
-            content = f"{type(exc).__name__}: {exc}"
-            is_error = True
+            processed = types.runtime.ToolResult(
+                call_id=call_id,
+                content=f"{type(exc).__name__}: {exc}",
+                is_error=True,
+            )
         self._agent.runtime.inbox.push_back(
-            types.runtime.DetachedResult(
-                call_id=call_id, content=content, is_error=is_error
-            ),
+            types.runtime.DetachedResult(result=processed),
         )
-        self._agent.cancel_background(call_id)
+        self._agent.forget_background(call_id)
 
 
 class _AgentCompactor:
@@ -1823,7 +1839,7 @@ class _AgentCompactor:
     async def compact(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[types.history.HistoryEntry],
+        context: Sequence[types.runtime.ModelContextEvent],
         model: agent_runtime.Model,
         mint_ref: Callable[[], TapeRef],
         args: str = "",
@@ -1850,7 +1866,7 @@ class _AgentCompactor:
             mint_ref=mint_ref,
             custom_instructions=args or None,
         )
-        payload: list[types.history.HistoryEntry] = list(override.payload)
+        payload: list[types.runtime.ModelContextEvent] = list(override.payload)
 
         # Post-compact enrich operates on the override's mutable payload
         # before the runtime freezes and appends.
@@ -1881,15 +1897,9 @@ class _AgentCompactor:
             types.exceptions.log_exception_or_warning(
                 logger, "post_compact_enrich failed; continuing", exc
             )
-        # The runtime's gate needs the last entry to be UserMessage or
-        # ToolResult so the next iteration calls the model. If the
-        # compactor produced an empty payload or ended elsewhere,
-        # append a continuation user message.
-        if not payload or not isinstance(
-            payload[-1],
-            (types.history.UserMessage, types.history.ToolResult),
-        ):
-            payload.append(types.history.UserMessage(text="[continuation]"))
+        payload = _repair_compact_payload(payload)
+        if not payload or isinstance(payload[-1], types.runtime.AssistantMessage):
+            payload.append(types.runtime.UserMessage(text="[continuation]"))
 
         # ``willRetriggerNextTurn`` prediction: estimate whether the new
         # payload already exceeds the auto-compact threshold. If it does,
@@ -1908,10 +1918,11 @@ class _AgentCompactor:
                     tool_result_budget_chars=self._agent.budget.message_budget_chars,
                 ),
             )
-            threshold = (
-                self._agent.model.max_request_tokens
+            threshold = max(
+                0,
+                self._agent.max_request_tokens
                 - self._agent.budget.buffer_tokens
-                - self._agent.max_response_tokens
+                - self._agent.max_response_tokens,
             )
             if payload_tokens >= threshold:
                 msg = (
@@ -1935,4 +1946,39 @@ class _AgentCompactor:
             override,
             payload=tuple(payload),
             fallback_reason=fallback_reason,
+        )
+
+
+def _repair_compact_payload(
+    payload: Sequence[types.runtime.ModelContextEvent],
+) -> list[types.runtime.ModelContextEvent]:
+    repaired: list[types.runtime.ModelContextEvent] = []
+    pending: list[str] = []
+    for entry in payload:
+        if isinstance(entry, types.runtime.AssistantMessage):
+            _append_interrupted_results(repaired, pending)
+            repaired.append(entry)
+            pending.extend(tc.id for tc in entry.tool_calls)
+        elif isinstance(entry, types.runtime.ToolResult):
+            if entry.call_id in pending:
+                repaired.append(entry)
+                pending.remove(entry.call_id)
+        else:
+            _append_interrupted_results(repaired, pending)
+            repaired.append(entry)
+    _append_interrupted_results(repaired, pending)
+    return repaired
+
+
+def _append_interrupted_results(
+    payload: list[types.runtime.ModelContextEvent],
+    pending: list[str],
+) -> None:
+    while pending:
+        payload.append(
+            types.runtime.ToolResult(
+                call_id=pending.pop(0),
+                content="[interrupted]",
+                is_error=True,
+            ),
         )

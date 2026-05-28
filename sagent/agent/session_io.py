@@ -6,7 +6,7 @@ The session file is append-only JSONL. Each record carries a ``kind``:
 - ``{"kind": "tool_state", ...}`` — ToolState snapshot. Last record
   after the most recent structural barrier splice wins.
 - ``{"kind": "history", "ref": {...}, "type": "user|assistant|tool_result",
-  ...}`` — one ``HistoryRecord`` (entry + ref). Legacy records without
+  ...}`` — one ``ReferrableTapeEvent`` (entry + ref). Legacy records without
   ``ref`` get a synthetic ref on load.
 - ``{"kind": "context_splice", "ref": {...}, "mask": [[from, to], ...],
   "insert_after": ref | null, "payload": [...], ...}`` —
@@ -19,7 +19,7 @@ Legacy formats (read-only; converter promotes them to ``ContextSplice``):
 - ``{"kind": "context_clear", "ref": {...}}``
 - ``{"kind": "clear"}`` (legacy barrier shape from before the splice model)
 - ``{"kind": "update", "id": N, "content": "...", "is_error": false}`` —
-  legacy splice patch; applied to the matching ``HistoryRecord.entry``
+  legacy splice patch; applied to the matching ``ReferrableTapeEvent.event``
   during load only.
 """
 
@@ -39,24 +39,26 @@ from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
-from sagent.types.history import (
+from sagent.types.model import Model, ModelSpec, TokenCount
+from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
-    HistoryEntry,
+    CompactComplete,
+    CompactFailed,
+    CompactStarted,
+    ModelContextEvent,
+    RuntimeEvent,
+    SaveSession,
+    StatusChanged,
     ToolCall,
     ToolResult,
     UserMessage,
     reset_id_counter,
 )
-from sagent.types.model import Model, ModelSpec, TokenCount
-from sagent.types.runtime import (
-    RuntimeEvent,
-    SaveSession,
-    StatusChanged,
-)
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
+    ReferrableTapeEvent,
+    TapeEvent,
     TapeRecord,
     TapeRef,
 )
@@ -128,8 +130,26 @@ def _thinking_from_json(raw: object) -> tuple[Mapping[str, object], ...]:
     )
 
 
-def _entry_to_json(entry: HistoryEntry) -> dict[str, object]:
-    """Encode one ``HistoryEntry`` body (no ``kind`` / ``ref`` wrapping)."""
+def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
+    """Encode one ``TapeEvent`` body (no ``kind`` / ``ref`` wrapping)."""
+    if isinstance(entry, CompactStarted):
+        return {"type": "compact_started"}
+    if isinstance(entry, CompactComplete):
+        return {
+            "type": "compact_complete",
+            "token_before": entry.token_before,
+            "token_after": entry.token_after,
+            "payload_entries": entry.payload_entries,
+            "fallback_reason": entry.fallback_reason,
+            "preserved_tail_count": entry.preserved_tail_count,
+        }
+    if isinstance(entry, CompactFailed):
+        return {
+            "type": "compact_failed",
+            "error_type": type(entry.exception).__name__,
+            "message": str(entry.exception),
+            "tape_len": entry.tape_len,
+        }
     if isinstance(entry, UserMessage):
         return {
             "type": "user",
@@ -185,12 +205,12 @@ def _ref_from_json(raw: object) -> TapeRef | None:
     return TapeRef(session_id=session_id, ordinal=ordinal)
 
 
-def _history_record_to_json(record: HistoryRecord) -> dict[str, object]:
-    """Encode a ``HistoryRecord`` as a ``kind=history`` JSON record."""
+def _history_record_to_json(record: ReferrableTapeEvent) -> dict[str, object]:
+    """Encode a ``ReferrableTapeEvent`` as a ``kind=history`` JSON record."""
     return {
         "kind": "history",
         "ref": _ref_to_json(record.ref),
-        **_entry_to_json(record.entry),
+        **_entry_to_json(record.event),
     }
 
 
@@ -219,7 +239,7 @@ def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
 
 def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
     """Dispatch by record type to the appropriate JSON encoder."""
-    if isinstance(record, HistoryRecord):
+    if isinstance(record, ReferrableTapeEvent):
         return _history_record_to_json(record)
     return _splice_to_json(record)
 
@@ -243,12 +263,12 @@ def _splice_from_json(
     raw_insert = rec.get("insert_after")
     insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
     raw_payload = rec.get("payload")
-    payload: list[HistoryEntry] = []
+    payload: list[ModelContextEvent] = []
     if isinstance(raw_payload, list):
         for item in cast(list[object], raw_payload):
             if isinstance(item, dict):
                 entry = _entry_from_json(cast(Mapping[str, object], item))
-                if entry is not None:
+                if isinstance(entry, (UserMessage, AssistantMessage, ToolResult)):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
     paired: frozenset[str] = frozenset()
@@ -282,11 +302,7 @@ def _legacy_override_to_splice(
     """Convert legacy ``kind=context_override`` to ``ContextSplice``.
 
     The conversion:
-      - ``suppresses`` set → single ``mask`` range from min to max ordinal.
-        Non-contiguous suppression is approximated; intervening refs
-        get masked too. Acceptable for legacy data because the affected
-        sessions are already in an indeterminate state (the producer
-        was microcompact, now deleted).
+      - ``suppresses`` set → one mask range per contiguous ordinal run.
       - ``inject_after`` → ``insert_after``.
       - ``barrier=True`` with empty ``suppresses`` → mask range from
         tape head up to (and including) ``inject_after``, or empty
@@ -312,12 +328,7 @@ def _legacy_override_to_splice(
     inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
     barrier = bool(rec.get("barrier", False))
     if suppresses:
-        lo = min(r.ordinal for r in suppresses)
-        hi = max(r.ordinal for r in suppresses)
-        sid = suppresses[0].session_id
-        mask = (
-            (TapeRef(session_id=sid, ordinal=lo), TapeRef(session_id=sid, ordinal=hi)),
-        )
+        mask = _mask_runs(suppresses)
     elif barrier and inject_after is not None:
         sid = inject_after.session_id
         mask = ((TapeRef(session_id=sid, ordinal=0), inject_after),)
@@ -333,12 +344,12 @@ def _legacy_override_to_splice(
     else:
         mask = ()
     raw_payload = rec.get("payload")
-    payload: list[HistoryEntry] = []
+    payload: list[ModelContextEvent] = []
     if isinstance(raw_payload, list):
         for item in cast(list[object], raw_payload):
             if isinstance(item, dict):
                 entry = _entry_from_json(cast(Mapping[str, object], item))
-                if entry is not None:
+                if isinstance(entry, (UserMessage, AssistantMessage, ToolResult)):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
     paired: frozenset[str] = frozenset()
@@ -360,6 +371,22 @@ def _legacy_override_to_splice(
         preserved_tail_count=int_val(rec.get("preserved_tail_count"), 0),
         paired_externally=paired,
     )
+
+
+def _mask_runs(refs: Sequence[TapeRef]) -> tuple[tuple[TapeRef, TapeRef], ...]:
+    ordered = sorted(refs, key=lambda item: (item.session_id, item.ordinal))
+    runs: list[tuple[TapeRef, TapeRef]] = []
+    start = ordered[0]
+    prev = ordered[0]
+    for ref in ordered[1:]:
+        if ref.session_id == prev.session_id and ref.ordinal == prev.ordinal + 1:
+            prev = ref
+            continue
+        runs.append((start, prev))
+        start = ref
+        prev = ref
+    runs.append((start, prev))
+    return tuple(runs)
 
 
 def _legacy_clear_to_splice(ref: TapeRef, last_visible_ord: int) -> ContextSplice:
@@ -405,9 +432,24 @@ def _common_kwargs(d: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _entry_from_json(d: Mapping[str, object]) -> HistoryEntry | None:
-    """Decode one ``kind: history`` record into a ``HistoryEntry`` (or ``None``)."""
+def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
+    """Decode one ``kind: history`` record into a ``TapeEvent`` (or ``None``)."""
     t = d.get("type")
+    if t == "compact_started":
+        return CompactStarted()
+    if t == "compact_complete":
+        return CompactComplete(
+            token_before=int_val(d.get("token_before"), 0),
+            token_after=int_val(d.get("token_after"), 0),
+            payload_entries=int_val(d.get("payload_entries"), 0),
+            fallback_reason=str(d.get("fallback_reason") or ""),
+            preserved_tail_count=int_val(d.get("preserved_tail_count"), 0),
+        )
+    if t == "compact_failed":
+        return CompactFailed(
+            exception=RuntimeError(str(d.get("message") or "")),
+            tape_len=int_val(d.get("tape_len"), 0),
+        )
     common = _common_kwargs(d)
     if t == "user":
         return UserMessage(
@@ -666,7 +708,7 @@ def append_context_repair(
     path: Path,
     tape: Sequence[TapeRecord],
     *,
-    payload: Sequence[HistoryEntry],
+    payload: Sequence[ModelContextEvent],
     strategy: str = "manual_repair",
 ) -> ContextSplice:
     """Append a barrier ``ContextSplice`` replacing the current tape view.
@@ -759,17 +801,22 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
           to the same file, duplicating them.
 
     """
-    persisted_tape_len = len(agent.runtime.tape)
+    persisted_refs = _persisted_refs(session_dir / "session.jsonl")
     meta_written = False
     last_status = agent.status
+    last_tool_state: dict[str, object] | None = None
 
     def _on_event(event: RuntimeEvent) -> None:
-        nonlocal persisted_tape_len, meta_written, last_status
+        nonlocal meta_written, last_status, last_tool_state
         if not isinstance(event, (SaveSession, StatusChanged)):
             return
-        tape_delta = list(agent.runtime.tape[persisted_tape_len:])
+        tape_delta = [
+            record for record in agent.runtime.tape if record.ref not in persisted_refs
+        ]
         status_changed = agent.status != last_status
         write_meta = tape_delta or status_changed or not meta_written
+        tool_state = serialize_tool_state(agent.tool_state)
+        write_tool_state = tool_state != last_tool_state
         spec = agent.model_spec
         meta = SessionMeta(
             session_id=agent.session_id,
@@ -790,19 +837,41 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
             session_dir / "session.jsonl",
             meta=meta.serialize() if write_meta else None,
             tape_delta=tape_delta or None,
-            tool_state_snapshot=serialize_tool_state(agent.tool_state),
+            tool_state_snapshot=tool_state if write_tool_state else None,
         )
-        persisted_tape_len = len(agent.runtime.tape)
+        persisted_refs.update(record.ref for record in tape_delta)
         meta_written = True
         last_status = agent.status
+        last_tool_state = tool_state
 
     def _rebaseline() -> None:
-        nonlocal persisted_tape_len, meta_written
-        persisted_tape_len = len(agent.runtime.tape)
+        nonlocal meta_written
+        persisted_refs.update(record.ref for record in agent.runtime.tape)
         meta_written = False
 
     agent.runtime.observers.append(_on_event)
     return _rebaseline
+
+
+def _persisted_refs(path: Path) -> set[TapeRef]:
+    if not path.exists():
+        return set()
+    refs: set[TapeRef] = set()
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw_line in f:
+                try:
+                    record = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                ref = _ref_from_json(cast(Mapping[str, object], record).get("ref"))
+                if ref is not None:
+                    refs.add(ref)
+    except OSError:
+        return set()
+    return refs
 
 
 def load_session(
@@ -815,12 +884,12 @@ def load_session(
     record kinds (``kind=history`` without ``ref``, ``kind=clear``,
     ``kind=update``) are upgraded:
 
-    - ``kind=history`` without a ref → ``HistoryRecord`` with a
+    - ``kind=history`` without a ref → ``ReferrableTapeEvent`` with a
       synthetic ref minted from the loaded session id and a monotonic
       ordinal cursor.
     - ``kind=clear`` → barrier ``ContextSplice`` with a synthetic ref.
     - ``kind=update`` → applied in-place to the matching
-      ``HistoryRecord.entry`` (best-effort; dropped if no match).
+      ``ReferrableTapeEvent.event`` (best-effort; dropped if no match).
 
     A final ``repair_dangling_tool_calls`` pass over the resolved
     history fixes interrupted tool exchanges.
@@ -895,7 +964,7 @@ def load_session(
                     entry = _entry_from_json(rec)
                     if entry is not None:
                         ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                        tape.append(HistoryRecord(ref=ref, entry=entry))
+                        tape.append(ReferrableTapeEvent(ref=ref, event=entry))
                 elif kind == "context_splice":
                     ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
                     splice = _splice_from_json(rec, ref)
@@ -911,7 +980,7 @@ def load_session(
                         barrier_candidates.append((splice, line_num))
                 elif kind == "update":
                     # Legacy splice patch: apply to the latest matching
-                    # ``HistoryRecord.entry`` in place; dropped silently
+                    # ``ReferrableTapeEvent.event`` in place; dropped silently
                     # if no match (stale patch from a corrupted file).
                     _apply_update_in_place(tape, rec)
                 # Keep the synthetic-ref cursor monotonic against legacy
@@ -936,7 +1005,7 @@ def load_session(
     state = ToolState()
     if snapshot is not None and not repaired:
         restore_tool_state(state, snapshot)
-    elif meta.bash_cwd and not repaired:
+    if meta.bash_cwd:
         state.bash_cwd = meta.bash_cwd
     _seed_id_counter(tape)
     return meta, tape, state
@@ -985,11 +1054,13 @@ def _record_ordinal(record: TapeRecord) -> int:
 
 
 def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:
-    """Reset the ``HistoryEntry.id`` counter past every loaded entry."""
+    """Reset the ``TapeEvent.id`` counter past every loaded entry."""
     max_id = -1
     for record in tape:
-        if isinstance(record, HistoryRecord):
-            max_id = max(max_id, record.entry.id)
+        if isinstance(record, ReferrableTapeEvent):
+            event = record.event
+            if isinstance(event, (UserMessage, AssistantMessage, ToolResult)):
+                max_id = max(max_id, event.id)
         else:
             for entry in record.payload:
                 max_id = max(max_id, entry.id)
@@ -1001,7 +1072,7 @@ def _apply_update_in_place(
     tape: list[TapeRecord],
     rec: Mapping[str, object],
 ) -> None:
-    """Apply a legacy ``kind=update`` patch to the matching ``HistoryRecord``.
+    """Apply a legacy ``kind=update`` patch to the matching ``ReferrableTapeEvent``.
 
     The patch carries an entry ``id`` and the changed fields
     (``content`` / ``is_error``). Only ``ToolResult`` splices are
@@ -1011,15 +1082,16 @@ def _apply_update_in_place(
     if target_id < 0:
         return
     for i, record in enumerate(tape):
-        if not isinstance(record, HistoryRecord):
+        if not isinstance(record, ReferrableTapeEvent):
             continue
-        if record.entry.id == target_id and isinstance(record.entry, ToolResult):
+        event = record.event
+        if isinstance(event, ToolResult) and event.id == target_id:
             patched = dataclasses.replace(
-                record.entry,
+                event,
                 content=str(rec.get("content") or ""),
                 is_error=bool(rec.get("is_error", False)),
             )
-            tape[i] = dataclasses.replace(record, entry=patched)
+            tape[i] = dataclasses.replace(record, event=patched)
             return
 
 
@@ -1036,7 +1108,7 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
 
     Both shapes are materialized as one barrier splice whose payload is
     :func:`repair_dangling_tool_calls`'s output, so repairs apply equally
-    to ``HistoryRecord`` entries and ``ContextSplice`` payloads.
+    to ``ReferrableTapeEvent`` entries and ``ContextSplice`` payloads.
 
     Args:
       tape: Loaded tape records.
@@ -1067,15 +1139,31 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
             ref=TapeRef(session_id=session_id, ordinal=next_ordinal),
             mask=((tape[0].ref, tape[-1].ref),),
             insert_after=None,
-            payload=tuple(repaired),
+            payload=_coalesce_adjacent_users(repaired),
             strategy="orphan_tool_result_repair",
         ),
     ], True
 
 
+def _coalesce_adjacent_users(
+    history: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
+    out: list[ModelContextEvent] = []
+    for entry in history:
+        if isinstance(entry, UserMessage) and out and isinstance(out[-1], UserMessage):
+            prev = out[-1]
+            out[-1] = UserMessage(
+                text=f"{prev.text}\n\n{entry.text}",
+                attachments=(*prev.attachments, *entry.attachments),
+            )
+        else:
+            out.append(entry)
+    return tuple(out)
+
+
 def repair_dangling_tool_calls(
-    history: list[HistoryEntry],
-) -> list[HistoryEntry]:
+    history: list[ModelContextEvent],
+) -> list[ModelContextEvent]:
     """Synthesize ``[interrupted]`` results for orphan ``tool_use`` blocks.
 
     A session can be interrupted mid-tool (Ctrl+C during execution):
@@ -1103,7 +1191,7 @@ def repair_dangling_tool_calls(
           entries inserted for every unresolved ``tool_use``.
 
     """
-    out: list[HistoryEntry] = []
+    out: list[ModelContextEvent] = []
     i = 0
     while i < len(history):
         msg = history[i]
@@ -1150,7 +1238,7 @@ def _preserve_corrupt_session(session_file: Path) -> None:
         logger.exception("Could not preserve corrupt session file %s.", session_file)
 
 
-def rebuild_content_cache(history: list[HistoryEntry], state: ToolState) -> None:
+def rebuild_content_cache(history: list[ModelContextEvent], state: ToolState) -> None:
     """Reseed ``ToolState`` content cache from disk for previously-touched files.
 
     Walks Read/Edit/Write tool calls in the resumed history, collects

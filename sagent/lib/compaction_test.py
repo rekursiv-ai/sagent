@@ -10,8 +10,9 @@ from sagent.lib.compaction import (
     CLEARED,
     reattach_files,
 )
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -21,13 +22,11 @@ from sagent.types.history import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sagent.types.history import HistoryEntry
-
 
 @pytest.mark.asyncio
 async def test_reattach_files_no_recent_noop(tmp_path: Path) -> None:
     del tmp_path
-    history: list[HistoryEntry] = []
+    history: list[ModelContextEvent] = []
     await reattach_files(history, [], count=3, max_chars=1000, budget=10_000)
     assert history == []
 
@@ -36,7 +35,7 @@ async def test_reattach_files_no_recent_noop(tmp_path: Path) -> None:
 async def test_reattach_files_inserts_user_message(tmp_path: Path) -> None:
     f = tmp_path / "a.py"
     f.write_text("contents of a")
-    history: list[HistoryEntry] = []
+    history: list[ModelContextEvent] = []
     await reattach_files(
         history,
         [str(f)],
@@ -55,7 +54,7 @@ async def test_reattach_files_inserts_user_message(tmp_path: Path) -> None:
 async def test_reattach_files_appends_to_first_user(tmp_path: Path) -> None:
     f = tmp_path / "a.py"
     f.write_text("file body")
-    history: list[HistoryEntry] = [UserMessage(text="original prompt")]
+    history: list[ModelContextEvent] = [UserMessage(text="original prompt")]
     await reattach_files(history, [str(f)], count=3, max_chars=1000, budget=10_000)
     assert len(history) == 1
     first = history[0]
@@ -70,7 +69,7 @@ async def test_reattach_files_skips_already_read(tmp_path: Path) -> None:
     f.write_text("body")
     resolved = str(f.resolve())
     # History shows the Read tool already pulled this file in.
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="hi"),
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="Read", args={"file_path": resolved}),),
@@ -88,7 +87,7 @@ async def test_reattach_files_skips_cleared(tmp_path: Path) -> None:
     f = tmp_path / "a.py"
     f.write_text("body")
     resolved = str(f.resolve())
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="hi"),
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="Read", args={"file_path": resolved}),),
@@ -107,7 +106,7 @@ async def test_reattach_files_truncates_long_file(tmp_path: Path) -> None:
     f = tmp_path / "a.py"
     big = "x" * 10_000
     f.write_text(big)
-    history: list[HistoryEntry] = []
+    history: list[ModelContextEvent] = []
     await reattach_files(history, [str(f)], count=3, max_chars=100, budget=10_000)
     first = history[0]
     assert isinstance(first, UserMessage)
@@ -120,7 +119,7 @@ async def test_reattach_files_budget_caps_total(tmp_path: Path) -> None:
     f2 = tmp_path / "b.py"
     f1.write_text("a" * 500)
     f2.write_text("b" * 500)
-    history: list[HistoryEntry] = []
+    history: list[ModelContextEvent] = []
     await reattach_files(
         history,
         [str(f1), str(f2)],
@@ -138,7 +137,7 @@ async def test_reattach_files_budget_caps_total(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_reattach_files_skips_missing_files(tmp_path: Path) -> None:
     missing = tmp_path / "nope.py"
-    history: list[HistoryEntry] = []
+    history: list[ModelContextEvent] = []
     await reattach_files(
         history, [str(missing)], count=3, max_chars=1000, budget=10_000
     )

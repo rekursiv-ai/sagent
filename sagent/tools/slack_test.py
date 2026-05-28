@@ -9,7 +9,7 @@ import json
 
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.slack import Slack
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 _TOKEN = "test-token-placeholder"  # noqa: S105 -- fake test token

@@ -14,8 +14,8 @@ from sagent.tools.advisor import (
     Advisor,
     _AdvisorModel,
 )
-from sagent.types.history import AssistantMessage, ToolResult
 from sagent.types.model import ModelRequest, ModelResponse, Pricing
+from sagent.types.runtime import AssistantMessage, ToolResult
 
 
 @dataclass(slots=True, kw_only=True)

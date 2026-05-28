@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import json
+
+import pytest
 
 from sagent.agent import (
     runtime as agent_runtime,
     session_io,
 )
+from sagent.agent.agent import Agent
 from sagent.agent.context import resolve_context, validate_context
 from sagent.agent.session_io import (
     SessionMeta,
@@ -26,30 +29,28 @@ from sagent.agent.session_io import (
     serialize_tool_state,
 )
 from sagent.tools.core import ReadCacheEntry, ToolState
-from sagent.types.history import (
+from sagent.types.model import ModelRequest, ModelResponse, Pricing
+from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
-    HistoryEntry,
+    ModelContextEvent,
+    SaveSession,
     ToolCall,
     ToolResult,
     UserMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
+    ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
 )
 
 
-if TYPE_CHECKING:
-    import pytest
-
-
-class _NoopModel:
+class _RuntimeModel:
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
@@ -59,15 +60,76 @@ class _NoopModel:
         return AssistantMessage(text="")
 
 
-def _records_from(entries: list[HistoryEntry]) -> list[TapeRecord]:
-    """Wrap each entry as a ``HistoryRecord`` with a synthetic ref."""
+@dataclass(slots=True, kw_only=True)
+class _NoopModel:
+    model_id: str = "noop"
+    max_request_tokens: int = 100_000
+    max_response_tokens: int = 1_024
+    supports_streaming: bool = True
+    supports_thinking: bool = False
+    supports_effort: bool = False
+    supports_cache_control: bool = False
+    valid_service_tiers: tuple[str, ...] = ()
+    supports_context_management: bool = False
+    supports_persistent_retry: bool = False
+    supports_account_auth: bool = False
+    max_image_dim: int = 8_000
+    max_image_bytes: int = 5 * 1024 * 1024
+
+    @property
+    def pricing(self) -> Pricing:
+        return Pricing()
+
+    def approx_text_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        del data
+        return 256
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        del request
+        return 1
+
+    async def actual_text_tokens(self, text: str) -> int:
+        return self.approx_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        return self.approx_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        return self.approx_request_tokens(request)
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        del error
+        return False
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        del error
+        return False
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        del request, on_text, on_thinking
+        return ModelResponse(message=AssistantMessage(text=""))
+
+
+def _records_from(entries: list[ModelContextEvent]) -> list[TapeRecord]:
+    """Wrap each entry as a ``ReferrableTapeEvent`` with a synthetic ref."""
     return [
-        HistoryRecord(ref=TapeRef(session_id="abc", ordinal=i), entry=e)
+        ReferrableTapeEvent(ref=TapeRef(session_id="abc", ordinal=i), event=e)
         for i, e in enumerate(entries)
     ]
 
 
-def _history_from_tape(tape: list[TapeRecord]) -> list[HistoryEntry]:
+def _history_from_tape(tape: list[TapeRecord]) -> list[ModelContextEvent]:
     """Resolve a loaded tape to its provider-facing entries."""
     return resolve_context(tape).messages
 
@@ -94,7 +156,7 @@ def test_serialize_tool_state_round_trip(tmp_path: Path) -> None:
     assert restored.read_cache["/tmp/x.txt"].mtime == 1234.5  # noqa: S108
 
 
-def _round_trip(entry: HistoryEntry, tmp_path: Path) -> HistoryEntry:
+def _round_trip(entry: ModelContextEvent, tmp_path: Path) -> ModelContextEvent:
     """Write ``entry`` to a fresh session and re-load the first record."""
     history = _round_trip_history([entry], tmp_path)
     assert len(history) == 1
@@ -102,8 +164,8 @@ def _round_trip(entry: HistoryEntry, tmp_path: Path) -> HistoryEntry:
 
 
 def _round_trip_history(
-    entries: list[HistoryEntry], tmp_path: Path
-) -> list[HistoryEntry]:
+    entries: list[ModelContextEvent], tmp_path: Path
+) -> list[ModelContextEvent]:
     """Write ``entries`` to a fresh session and return the reloaded history."""
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
@@ -297,7 +359,7 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
     append_session(
         session_file,
         meta=meta.serialize(),
-        tape_delta=[HistoryRecord(ref=old_ref, entry=UserMessage(text="old"))],
+        tape_delta=[ReferrableTapeEvent(ref=old_ref, event=UserMessage(text="old"))],
     )
     append_session(
         session_file,
@@ -313,7 +375,7 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
     )
     append_session(
         session_file,
-        tape_delta=[HistoryRecord(ref=new_ref, entry=UserMessage(text="new"))],
+        tape_delta=[ReferrableTapeEvent(ref=new_ref, event=UserMessage(text="new"))],
     )
     loaded = load_session(tmp_path, {})
     assert loaded is not None
@@ -403,6 +465,135 @@ def test_load_session_orders_loaded_tape_by_ordinal(tmp_path: Path) -> None:
     assert [entry.text for entry in user_messages] == ["zero", "one", "synthetic"]
 
 
+def test_legacy_override_with_gap_preserves_unmasked_ref(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    refs = [TapeRef(session_id="abc", ordinal=i) for i in range(4)]
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "abc"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 0},
+            "type": "user",
+            "text": "first",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 1},
+            "type": "user",
+            "text": "middle",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 2},
+            "type": "user",
+            "text": "last",
+        },
+        {
+            "kind": "context_override",
+            "ref": {"session_id": "abc", "ordinal": 3},
+            "suppresses": [
+                {"session_id": "abc", "ordinal": 0},
+                {"session_id": "abc", "ordinal": 2},
+            ],
+            "inject_after": None,
+            "payload": [{"type": "user", "text": "replacement"}],
+        },
+    )
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    _, tape, _ = loaded
+    messages = resolve_context(tape).messages
+    assert [entry.text for entry in messages if isinstance(entry, UserMessage)] == [
+        "replacement",
+        "middle",
+    ]
+    splice = tape[-1]
+    assert isinstance(splice, ContextSplice)
+    assert splice.mask == ((refs[0], refs[0]), (refs[2], refs[2]))
+
+
+@pytest.mark.asyncio
+async def test_persistence_skips_externally_replayed_records(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    persisted = ReferrableTapeEvent(
+        ref=TapeRef(session_id="abc", ordinal=0),
+        event=UserMessage(text="persisted"),
+    )
+    append_session(session_file, tape_delta=[persisted])
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    agent.runtime.replay_tape([persisted])
+
+    agent.runtime.publish(SaveSession())
+
+    lines = session_file.read_text(encoding="utf-8").splitlines()
+    texts = [json.loads(line)["text"] for line in lines if '"kind": "history"' in line]
+    assert texts.count("persisted") == 1
+
+
+@pytest.mark.asyncio
+async def test_save_session_skips_tool_state_when_unchanged(tmp_path: Path) -> None:
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    agent.runtime.append_history(UserMessage(text="x"))
+    agent.runtime.publish(SaveSession())
+    session_file = tmp_path / "session.jsonl"
+    size = session_file.stat().st_size
+
+    for _ in range(5):
+        agent.runtime.publish(SaveSession())
+
+    assert session_file.stat().st_size == size
+
+
+@pytest.mark.asyncio
+async def test_save_session_writes_tool_state_when_changed(tmp_path: Path) -> None:
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    agent.runtime.publish(SaveSession())
+    lines_before = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
+
+    agent.tool_state.bash_cwd = "/changed"
+    agent.runtime.publish(SaveSession())
+
+    lines_after = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines_after) > len(lines_before)
+    assert json.loads(lines_after[-1])["bash_cwd"] == "/changed"
+
+
+@pytest.mark.asyncio
+async def test_load_session_with_repair_preserves_meta_bash_cwd(
+    tmp_path: Path,
+) -> None:
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(
+        session_id="dangling",
+        model_id="m",
+        provider="P",
+        auth="env",
+        bash_cwd="/project",
+    )
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="dangling", ordinal=0),
+                event=AssistantMessage(
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                ),
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    _, tape, state = loaded
+    validate_context(resolve_context(tape).messages)
+    assert state.bash_cwd == "/project"
+
+
 def test_out_of_order_barrier_resets_prior_tool_state(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     old_state = ToolState()
@@ -449,9 +640,9 @@ def test_load_session_dangling_repair_resets_prior_tool_state(tmp_path: Path) ->
         session_file,
         meta=meta.serialize(),
         tape_delta=[
-            HistoryRecord(
+            ReferrableTapeEvent(
                 ref=TapeRef(session_id="dangling", ordinal=0),
-                entry=AssistantMessage(
+                event=AssistantMessage(
                     tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
                 ),
             ),
@@ -475,7 +666,7 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
     has no preceding ``AssistantMessage.tool_calls`` match.
     ``repair_dangling_tool_calls`` drops the orphan from its returned
     list, but the loaded tape still contained the orphan as a
-    ``HistoryRecord``; the resolved context surfaced it and the next
+    ``ReferrableTapeEvent``; the resolved context surfaced it and the next
     provider call rejected the request with 400. The load-time tape
     repair must append a suppression override so the resolved view
     is wire-format-valid out of the box.
@@ -490,9 +681,15 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
         session_file,
         meta=meta.serialize(),
         tape_delta=[
-            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=0), entry=user1),
-            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=1), entry=orphan),
-            HistoryRecord(ref=TapeRef(session_id="orphan", ordinal=2), entry=user2),
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="orphan", ordinal=0), event=user1
+            ),
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="orphan", ordinal=1), event=orphan
+            ),
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="orphan", ordinal=2), event=user2
+            ),
         ],
     )
     loaded = load_session(tmp_path, {})
@@ -503,7 +700,9 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
     assert not any(
         isinstance(m, ToolResult) and m.call_id == "ghost_1" for m in resolved
     ), f"orphan ToolResult should be suppressed on load; resolved: {resolved}"
-    assert [m for m in resolved if isinstance(m, UserMessage)] == [user1, user2]
+    users = [m for m in resolved if isinstance(m, UserMessage)]
+    assert len(users) == 1
+    assert users[0].text == f"{user1.text}\n\n{user2.text}"
 
 
 def test_load_session_repairs_orphan_tool_result_from_splice_payload(
@@ -525,9 +724,9 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
         session_file,
         meta=meta.serialize(),
         tape_delta=[
-            HistoryRecord(ref=refs[0], entry=user),
-            HistoryRecord(ref=refs[1], entry=assistant),
-            HistoryRecord(ref=refs[2], entry=result),
+            ReferrableTapeEvent(ref=refs[0], event=user),
+            ReferrableTapeEvent(ref=refs[1], event=assistant),
+            ReferrableTapeEvent(ref=refs[2], event=result),
             ContextSplice(
                 ref=refs[3],
                 mask=((refs[0], refs[2]),),
@@ -558,7 +757,7 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
         and record.mask == ((refs[0], refs[4]),)
         for record in tape
     )
-    runtime = agent_runtime.AgentRuntime(model=_NoopModel())
+    runtime = agent_runtime.AgentRuntime(model=_RuntimeModel())
     runtime.replay_tape(tape)
     runtime.append_splice(
         mask=((runtime.tape[0].ref, runtime.tape[-1].ref),),
@@ -866,7 +1065,7 @@ def test_restore_model_success_path() -> None:
 def test_repair_synthesizes_missing_tool_result() -> None:
     """C2: orphan tool_use gets a synthetic ``[interrupted]`` placeholder."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="do X"),
         asst,
     ]
@@ -882,7 +1081,7 @@ def test_repair_synthesizes_missing_tool_result() -> None:
 def test_repair_is_idempotent() -> None:
     """C2: re-running the repair pass over its own output is a no-op."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="do X"),
         asst,
     ]
@@ -895,7 +1094,7 @@ def test_repair_is_idempotent() -> None:
 def test_repair_drops_orphan_tool_result_with_no_call() -> None:
     """C2: dangling ToolResult lacking a parent AssistantMessage is dropped."""
     orphan = ToolResult(call_id="ghost", content="leftover")
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="hi"),
         orphan,
     ]
@@ -908,7 +1107,7 @@ def test_repair_preserves_matching_tool_result_pair() -> None:
     """C2: existing tool_use + tool_result pair stays intact."""
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
     res = ToolResult(call_id="c1", content="OK")
-    history: list[HistoryEntry] = [
+    history: list[ModelContextEvent] = [
         UserMessage(text="hi"),
         asst,
         res,

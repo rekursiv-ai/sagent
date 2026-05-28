@@ -22,8 +22,9 @@ import hashlib
 import logging
 import os
 import tempfile
+import uuid
 
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,9 @@ PREVIEW_CHARS = 2_000
 PERSISTED_TAG = "<persisted-output>"
 PERSISTED_CLOSE = "</persisted-output>"
 
-_FALLBACK_STORAGE_DIR = Path(tempfile.gettempdir()) / "sagent_results"
+_FALLBACK_STORAGE_DIR = (
+    Path(tempfile.gettempdir()) / "sagent_results" / f"{os.getpid()}-{uuid.uuid4().hex}"
+)
 
 PERSIST_EXEMPT_TOOLS: frozenset[str] = frozenset({"Read"})
 """Tool names whose results bypass disk offloading (output already
@@ -133,15 +136,9 @@ def _persist_oversized(
         "id_" + hashlib.sha256(call_id.encode()).hexdigest()[:16]
     )
     filepath = base / f"{safe}.txt"
+    encoded = content.encode("utf-8")
     try:
-        # O_CREAT|O_EXCL: replay-safe; existing files are kept verbatim.
-        fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            _ = os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
-    except FileExistsError:
-        pass
+        filepath = _write_unique(filepath, encoded)
     except OSError:
         logger.exception("could not persist tool result to %s", filepath)
         return None
@@ -160,6 +157,24 @@ def _persist_oversized(
         f"{preview}{more}"
         f"{PERSISTED_CLOSE}"
     )
+
+
+def _write_unique(filepath: Path, content: bytes) -> Path:
+    """Write content to filepath or a content-hashed sibling."""
+    try:
+        fd = os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        if filepath.read_bytes() == content:
+            return filepath
+        suffix = hashlib.sha256(content).hexdigest()[:16]
+        return _write_unique(
+            filepath.with_name(f"{filepath.stem}-{suffix}.txt"), content
+        )
+    try:
+        _ = os.write(fd, content)
+    finally:
+        os.close(fd)
+    return filepath
 
 
 def _format_size(n: int) -> str:

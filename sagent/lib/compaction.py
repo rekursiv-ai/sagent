@@ -12,9 +12,9 @@ import asyncio
 import dataclasses
 import logging
 
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
-    HistoryEntry,
+    ModelContextEvent,
     ToolResult,
     UserMessage,
 )
@@ -34,7 +34,7 @@ block valid while discarding the large args payload (``Edit``'s
 
 
 async def reattach_files(
-    history: list[HistoryEntry],
+    history: list[ModelContextEvent],
     recent_files: list[str],
     *,
     count: int,
@@ -97,7 +97,7 @@ async def reattach_files(
     )
 
 
-def _append_to_first_user(history: list[HistoryEntry], text: str) -> None:
+def _append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
     """Append ``text`` to the first UserMessage, or insert one at position 0."""
     for j, entry in enumerate(history):
         if isinstance(entry, UserMessage):
@@ -107,7 +107,7 @@ def _append_to_first_user(history: list[HistoryEntry], text: str) -> None:
     history.insert(0, UserMessage(text=text))
 
 
-def _collect_read_paths(history: list[HistoryEntry]) -> set[str]:
+def _collect_read_paths(history: list[ModelContextEvent]) -> set[str]:
     """Collect resolved file paths from Read tool results.
 
     Walks pairs of ``AssistantMessage`` (with a Read ``ToolCall``) plus

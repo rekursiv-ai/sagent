@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import override
 
 import asyncio
@@ -20,8 +20,13 @@ from sagent.lib.json import json_freeze
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.core import current_agent_var
-from sagent.types.history import ToolResult
-from sagent.types.runtime import DetachedResult
+from sagent.types.runtime import (
+    AssistantMessage,
+    DetachedResult,
+    RuntimeEvent,
+    ToolCall,
+    ToolResult,
+)
 
 
 class _PersistentChild(FakeAgent):
@@ -406,7 +411,7 @@ async def test_foreground_success_returns_tool_result() -> None:
         async def deliver() -> None:
             await asyncio.sleep(0.01)
             agent.runtime.publish(
-                DetachedResult(call_id="j", content="payload"),
+                DetachedResult(result=ToolResult(call_id="j", content="payload")),
             )
 
         delivery = asyncio.create_task(deliver())
@@ -414,6 +419,156 @@ async def test_foreground_success_returns_tool_result() -> None:
         await delivery
     assert result.content == "payload"
     assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_wait_cancellation_leaves_job_running() -> None:
+    t = BackgroundTask()
+    wait_forever = asyncio.Event()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[bool] = asyncio.create_task(wait_forever.wait())
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+        foreground = asyncio.create_task(t.run({"operation": "foreground", "id": "j"}))
+        await asyncio.sleep(0)
+
+        foreground.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await foreground
+
+        assert not task.done()
+        assert "j" in agent.background
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_foreground_cancelled_task_returns_tool_error() -> None:
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(10.0))
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+
+        result = await t.run({"operation": "foreground", "id": "j"})
+
+    assert result.is_error
+    assert "cancelled" in result.content
+    assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_crashed_task_returns_tool_error() -> None:
+    async def fail() -> None:
+        raise RuntimeError("boom")
+
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        task = asyncio.create_task(fail())
+        with contextlib.suppress(RuntimeError):
+            await task
+        agent.register_background(
+            "j",
+            BackgroundTaskEntry(
+                task=task, tool_name="Dummy", queue_id="j", started=0.0
+            ),
+        )
+
+        result = await t.run({"operation": "foreground", "id": "j"})
+
+    assert result.is_error
+    assert "RuntimeError: boom" in result.content
+    assert "j" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_foreground_running_background_job_drains_queued_result_and_splices_placeholder() -> (
+    None
+):
+    foreground_waiting = asyncio.Event()
+    finish_background = asyncio.Event()
+
+    t = BackgroundTask()
+    with with_fake_agent() as agent:
+        agent.runtime.append_history(
+            AssistantMessage(
+                tool_calls=(ToolCall(id="j-running", name="Dummy", args={}),),
+            ),
+        )
+        agent.runtime.append_history(
+            ToolResult(
+                call_id="j-running",
+                content="[Running in background: Dummy]",
+            ),
+        )
+
+        async def finish() -> None:
+            await finish_background.wait()
+            agent.runtime.inbox.push_back(
+                DetachedResult(
+                    result=ToolResult(call_id="j-running", content="queued payload")
+                )
+            )
+            agent.cancel_background("j-running")
+
+        task = asyncio.create_task(finish())
+        agent.register_background(
+            "j-running",
+            BackgroundTaskEntry(
+                task=task,
+                tool_name="Dummy",
+                queue_id="j-running",
+                started=0.0,
+            ),
+        )
+
+        class ForegroundAwareObservers(list[Callable[[RuntimeEvent], None]]):
+            @override
+            def append(self, observer: Callable[[RuntimeEvent], None]) -> None:
+                super().append(observer)
+                foreground_waiting.set()
+
+        observers = ForegroundAwareObservers(agent.runtime.observers)
+        agent.runtime.observers = observers
+        foreground = asyncio.create_task(
+            t.run({"operation": "foreground", "id": "j-running"})
+        )
+        try:
+            await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
+            finish_background.set()
+            result = await asyncio.wait_for(foreground, timeout=1.0)
+        finally:
+            agent.runtime.observers = list(observers)
+            if not foreground.done():
+                foreground.cancel()
+    messages = agent.runtime.context().messages
+    assert result.content == "queued payload"
+    assert any(
+        isinstance(message, ToolResult)
+        and message.call_id == "j-running"
+        and message.content == "queued payload"
+        for message in messages
+    )
+    assert not any(
+        isinstance(message, ToolResult)
+        and message.call_id == "j-running"
+        and message.content == "[Running in background: Dummy]"
+        for message in messages
+    )
+    assert not agent.events_of(DetachedResult)
+    assert "j-running" not in agent.background
 
 
 @pytest.mark.asyncio
@@ -457,9 +612,11 @@ async def test_foreground_propagates_error_via_detached_result() -> None:
             await asyncio.sleep(0.01)
             agent.runtime.publish(
                 DetachedResult(
-                    call_id="j",
-                    content="RuntimeError: boom",
-                    is_error=True,
+                    result=ToolResult(
+                        call_id="j",
+                        content="RuntimeError: boom",
+                        is_error=True,
+                    ),
                 ),
             )
 

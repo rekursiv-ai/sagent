@@ -224,9 +224,7 @@ import contextvars
 import dataclasses
 import logging
 
-# Engine consumes a subset of the types. No re-export shim -- callers
-# must import message types and event vocabulary from
-# ``sagent.types.history`` / ``sagent.types.runtime`` directly.
+# Engine consumes a subset of the runtime event vocabulary. No re-export shim.
 from sagent.agent.context import (
     InvalidContextError,
     ResolvedContext,
@@ -238,15 +236,9 @@ from sagent.types.exceptions import (
     log_exception_or_warning,
     log_task_exception,
 )
-from sagent.types.history import (
-    AssistantMessage,
-    HistoryEntry,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
 from sagent.types.runtime import (
     AgentIdle,
+    AssistantMessage,
     Clear,
     CohortComplete,
     CohortStarted,
@@ -259,6 +251,7 @@ from sagent.types.runtime import (
     Halt,
     Kill,
     ModelCallStarted,
+    ModelContextEvent,
     ModelIdle,
     ModelResponseCancelled,
     ModelResponseComplete,
@@ -271,16 +264,22 @@ from sagent.types.runtime import (
     Recompact,
     RuntimeEvent,
     SaveSession,
+    ToolCall,
+    ToolResult,
     ToolResultPartial,
     Undetach,
+    UserMessage,
     UserQueuedMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
-    HistoryRecord,
     InvalidSpliceError,
+    ReferrableTapeEvent,
+    TapeEvent,
     TapeRecord,
     TapeRef,
+    mask_contains_ref,
+    mask_ranges_overlap,
 )
 
 
@@ -357,8 +356,8 @@ def _preserved_mask_gaps(
 
 
 def _sanitize_for_send(
-    entries: Sequence[HistoryEntry],
-) -> tuple[HistoryEntry, ...]:
+    entries: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
     """Return a wire-format-valid version of ``entries``.
 
     Stronger than :func:`_insert_synth_trs_in_payload`: also drops
@@ -376,7 +375,7 @@ def _sanitize_for_send(
 
     Idempotent.
     """
-    out: list[HistoryEntry] = []
+    out: list[ModelContextEvent] = []
     pending: list[str] = []
     seen: set[str] = set()
 
@@ -407,7 +406,15 @@ def _sanitize_for_send(
             seen.add(entry.call_id)
         else:
             _flush_pending()
-            out.append(entry)
+            if out and isinstance(out[-1], UserMessage):
+                prior = out[-1]
+                out[-1] = dataclasses.replace(
+                    prior,
+                    text=f"{prior.text}\n\n{entry.text}",
+                    attachments=prior.attachments + entry.attachments,
+                )
+            else:
+                out.append(entry)
     _flush_pending()
     return tuple(out)
 
@@ -618,7 +625,7 @@ class Model(Protocol):
 
     async def stream(
         self,
-        history: list[HistoryEntry],
+        history: list[ModelContextEvent],
         system: str,
         tools: list[Tool],
         on_text: Callable[[str], None],
@@ -652,7 +659,7 @@ class Compactor(Protocol):
     async def compact(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[HistoryEntry],
+        context: Sequence[ModelContextEvent],
         model: Model,
         mint_ref: Callable[[], TapeRef],
         args: str = "",
@@ -838,8 +845,8 @@ class AgentRuntime:
             self._cached_resolved = resolve_context(self.tape)
         return self._cached_resolved
 
-    def append_history(self, entry: HistoryEntry) -> TapeRef:
-        """Append a ``HistoryRecord`` for ``entry`` to the tape.
+    def append_history(self, entry: TapeEvent) -> TapeRef:
+        """Append a ``ReferrableTapeEvent`` for ``entry`` to the tape.
 
         Args:
           entry: Provider-facing message to record.
@@ -849,7 +856,7 @@ class AgentRuntime:
 
         """
         ref = self.mint_ref()
-        record = HistoryRecord(ref=ref, entry=entry)
+        record = ReferrableTapeEvent(ref=ref, event=entry)
         self.tape.append(record)
         self._cached_resolved = None
         self._index_record(record)
@@ -860,7 +867,7 @@ class AgentRuntime:
         *,
         mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
         insert_after: TapeRef | None = None,
-        payload: tuple[HistoryEntry, ...] = (),
+        payload: tuple[ModelContextEvent, ...] = (),
         strategy: str = "",
         token_before: int = 0,
         token_after: int = 0,
@@ -889,7 +896,7 @@ class AgentRuntime:
           preserved_tail_count: Number of tail entries preserved verbatim
               in fallback mode.
           paired_externally: Call ids whose pair lives outside this
-              payload (typically a ``HistoryRecord``).
+              payload (typically a ``ReferrableTapeEvent``).
 
         Returns:
           ref: ``TapeRef`` minted for the new splice.
@@ -946,27 +953,19 @@ class AgentRuntime:
               where the alive splice's ref is NOT in ``new_mask``.
 
         """
-        new_positions: set[TapeRef] = set()
-        for r_from, r_to in new_mask:
-            for ref in (r.ref for r in self.tape):
-                if r_from.ordinal <= ref.ordinal <= r_to.ordinal:
-                    new_positions.add(ref)
         alive = alive_splices(self.tape)
         for alive_ref in alive:
             splice = self._tape_by_ref.get(alive_ref)
             if not isinstance(splice, ContextSplice):
                 continue
-            if alive_ref in new_positions:
+            if mask_contains_ref(new_mask, alive_ref):
                 continue  # being absorbed by this splice
-            for r_from, r_to in splice.mask:
-                for ref in new_positions:
-                    if r_from.ordinal <= ref.ordinal <= r_to.ordinal:
-                        raise InvalidSpliceError(
-                            f"new splice mask overlaps alive splice {alive_ref}"
-                            f" at {ref}; either don't claim already-claimed"
-                            f" positions or extend the mask to include the"
-                            f" splice's own ref to absorb it",
-                        )
+            if mask_ranges_overlap(new_mask, splice.mask):
+                raise InvalidSpliceError(
+                    f"new splice mask overlaps alive splice {alive_ref};"
+                    f" either don't claim already-claimed positions or extend"
+                    f" the mask to include the splice's own ref to absorb it",
+                )
 
     def append_clear(self) -> TapeRef:
         """Append a barrier splice that masks the full tape prefix.
@@ -1078,19 +1077,17 @@ class AgentRuntime:
     def _index_record(self, record: TapeRecord) -> None:
         """Cache ref->record and call_id->anchor mappings after append."""
         self._tape_by_ref[record.ref] = record
-        if isinstance(record, HistoryRecord):
-            entry = record.entry
-            if isinstance(entry, AssistantMessage):
-                for tc in entry.tool_calls:
+        if isinstance(record, ReferrableTapeEvent):
+            event = record.event
+            if isinstance(event, AssistantMessage):
+                for tc in event.tool_calls:
                     self._parent_assistant_refs[tc.id] = record.ref
-            elif isinstance(entry, ToolResult):
-                self._placeholder_refs[entry.call_id] = record.ref
+            elif isinstance(event, ToolResult):
+                self._placeholder_refs[event.call_id] = record.ref
 
     def _splice_detached_result(
         self,
-        call_id: str,
-        content: str,
-        is_error: bool,
+        result: ToolResult,
     ) -> ToolResult | None:
         """Replace a placeholder ``ToolResult`` with the real detached result.
 
@@ -1099,9 +1096,7 @@ class AgentRuntime:
         provider-valid tool_use/tool_result pairing.
 
         Args:
-          call_id: Tool-call id whose placeholder should be replaced.
-          content: Real result text.
-          is_error: True when the underlying tool signalled failure.
+          result: Real detached tool result.
 
         Returns:
           spliced: The injected ``ToolResult`` instance, or ``None`` when
@@ -1109,14 +1104,15 @@ class AgentRuntime:
               compaction barrier hid it before the result arrived).
 
         """
+        call_id = result.call_id
         placeholder_ref = self._placeholder_refs.get(call_id)
         parent_ref = self._parent_assistant_refs.get(call_id)
         if placeholder_ref is None or parent_ref is None:
             return None
         placeholder_record = self._tape_by_ref.get(placeholder_ref)
-        if not isinstance(placeholder_record, HistoryRecord):
+        if not isinstance(placeholder_record, ReferrableTapeEvent):
             return None
-        prior = placeholder_record.entry
+        prior = placeholder_record.event
         if not isinstance(prior, ToolResult):
             return None
         prior_splice_ref = self._last_detached_splice_for_call.get(call_id)
@@ -1128,7 +1124,7 @@ class AgentRuntime:
         )
         if target_ref not in visible_refs:
             return None
-        real = dataclasses.replace(prior, content=content, is_error=is_error)
+        real = dataclasses.replace(result, id=prior.id, parent_id=prior.parent_id)
         mask = ((target_ref, target_ref),)
         new_ref = self.append_splice(
             mask=mask,
@@ -1197,15 +1193,17 @@ class AgentRuntime:
                                 self.model_call.cancel()
                                 self.model_call = None
                                 self._model_call_generation += 1
-                            if self.compact_task:
-                                self.compact_task.cancel()
+                            if self.compact_task is not None:
+                                compact_task = self.compact_task
+                                if not compact_task.done():
+                                    compact_task.cancel()
+                                    self.publish(
+                                        CompactFailed(
+                                            exception=asyncio.CancelledError(),
+                                            tape_len=len(self.tape),
+                                        ),
+                                    )
                                 self.compact_task = None
-                                self.publish(
-                                    CompactFailed(
-                                        exception=asyncio.CancelledError(),
-                                        tape_len=len(self.tape),
-                                    ),
-                                )
                             # Halt intentionally leaves the cohort intact:
                             # running tools keep going and their results land
                             # via the normal cohort gate after the user resumes.
@@ -1232,15 +1230,17 @@ class AgentRuntime:
                                 self.model_call.cancel()
                                 self.model_call = None
                                 self._model_call_generation += 1
-                            if self.compact_task:
-                                self.compact_task.cancel()
+                            if self.compact_task is not None:
+                                compact_task = self.compact_task
+                                if not compact_task.done():
+                                    compact_task.cancel()
+                                    self.publish(
+                                        CompactFailed(
+                                            exception=asyncio.CancelledError(),
+                                            tape_len=len(self.tape),
+                                        ),
+                                    )
                                 self.compact_task = None
-                                self.publish(
-                                    CompactFailed(
-                                        exception=asyncio.CancelledError(),
-                                        tape_len=len(self.tape),
-                                    ),
-                                )
                             self._stop_all_tools(mode="detach")
                             # Cancel and forget every detached task. Clear
                             # is a hard reset; without this, surviving
@@ -1285,7 +1285,6 @@ class AgentRuntime:
                                     text=f"[Error: {type(exc).__name__}: {exc}]",
                                 ),
                             )
-                            self.publish(item)
                             # Preserve mid-stream content past the error;
                             # commit + publish the coalesced bar so the
                             # pending preview transitions to a permanent
@@ -1293,6 +1292,7 @@ class AgentRuntime:
                             coalesced = self._drain_mid_stream_queue()
                             if coalesced is not None:
                                 self.publish(coalesced)
+                            self.publish(item)
                             self.inbox.push_front(
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
@@ -1388,13 +1388,16 @@ class AgentRuntime:
                             self.compact_task.add_done_callback(
                                 log_task_exception(logger, "compaction task crashed"),
                             )
-                            self.publish(CompactStarted())
+                            started = CompactStarted()
+                            self.append_history(started)
+                            self.publish(started)
 
                         case CompactComplete():
                             # The compaction task already appended its
                             # override(s) to the tape; this handler just
                             # clears bookkeeping and republishes.
                             self.compact_task = None
+                            self.append_history(item)
                             self.publish(item)
 
                         case CompactFailed(exception=exc):
@@ -1407,6 +1410,7 @@ class AgentRuntime:
                                     ),
                                 ),
                             )
+                            self.append_history(item)
                             self.publish(item)
 
                         case UserMessage():
@@ -1429,8 +1433,8 @@ class AgentRuntime:
                                 # follow-up) don't stack as consecutive user
                                 # turns in history.
                                 self._stop_all_tools(mode="detach")
-                                self._append_or_coalesce_user(item)
-                                self.publish(item)
+                                committed = self._append_or_coalesce_user(item)
+                                self.publish(committed)
                             awaiting_user = False
 
                         case UserQueuedMessage():
@@ -1439,8 +1443,8 @@ class AgentRuntime:
                                     text=item.text,
                                     attachments=item.attachments,
                                 )
-                                self._append_or_coalesce_user(coalesced)
-                                self.publish(coalesced)
+                                committed = self._append_or_coalesce_user(coalesced)
+                                self.publish(committed)
                                 awaiting_user = False
                             else:
                                 queued.append(item)
@@ -1558,11 +1562,7 @@ class AgentRuntime:
                             # the real content into the placeholder exactly
                             # like ``DetachedResult`` does.
                             del self.detached[cid]
-                            self._splice_detached_result(
-                                cid,
-                                item.content,
-                                item.is_error,
-                            )
+                            self._splice_detached_result(item)
                             self.publish(item)
 
                         case DetachedResult():
@@ -1573,11 +1573,7 @@ class AgentRuntime:
                             # ``[detached]`` (preempt) and ``[Running in
                             # background: ...]`` (explicit-bg) placeholders
                             # both match by ``call_id``.
-                            spliced_entry = self._splice_detached_result(
-                                item.call_id,
-                                item.content,
-                                item.is_error,
-                            )
+                            spliced_entry = self._splice_detached_result(item.result)
                             spliced = spliced_entry is not None
                             if not spliced:
                                 # No placeholder to splice into (rare:
@@ -1690,8 +1686,8 @@ class AgentRuntime:
                     # ``_append_or_coalesce_user`` collapses consecutive
                     # entries when the model gate fires next.
                     for pending_user in self._pending_detached_user:
-                        self._append_or_coalesce_user(pending_user)
-                        self.publish(pending_user)
+                        committed = self._append_or_coalesce_user(pending_user)
+                        self.publish(committed)
                     self._pending_detached_user.clear()
 
                 # ``UserQueuedMessage`` drains at ``ModelIdle``, not
@@ -1717,14 +1713,14 @@ class AgentRuntime:
                             (),
                         ),
                     )
-                    self._append_or_coalesce_user(coalesced)
+                    committed = self._append_or_coalesce_user(coalesced)
                     queued.clear()
                     # Publish so observers (renderers, persistence, the
                     # REPL's ``make_queued_input_clearer``) see the
                     # commit. Without this, the user bar never renders
                     # in ``console_pane`` and ``queued_input`` is never
                     # cleared.
-                    self.publish(coalesced)
+                    self.publish(committed)
 
                 if (
                     not self.cohort
@@ -1762,7 +1758,7 @@ class AgentRuntime:
             except Exception as exc:  # noqa: BLE001 -- master catch around the dispatch body; a sync raise (e.g. `pending.apply` for a queued ModelSwitch) must not tear down the engine
                 log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
 
-    async def run(self, msg: UserMessage) -> list[HistoryEntry]:
+    async def run(self, msg: UserMessage) -> list[TapeEvent]:
         """Process one user message to completion.
 
         Convenience wrapper for tests and AgentSpawn. Sends the
@@ -1775,29 +1771,29 @@ class AgentRuntime:
           history: Conversation history after processing.
 
         """
-        self.inbox.push_back(msg)
-
+        context_cursor = len(self.context().messages)
         done = asyncio.Event()
-        tape_cursor = len(self.tape)
 
         def _watch(event: RuntimeEvent) -> None:
-            if isinstance(event, ModelIdle):
+            if isinstance(event, (ModelIdle, ModelResponseError)):
                 done.set()
 
         self.observers.append(_watch)
         task = asyncio.create_task(self.run_forever())
+        self.inbox.push_back(msg)
         task.add_done_callback(
             log_task_exception(logger, "run_forever driver task crashed"),
         )
 
-        await done.wait()
-        self.inbox.push_back(Quit())
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        self.observers.remove(_watch)
-        return [
-            r.entry for r in self.tape[tape_cursor:] if isinstance(r, HistoryRecord)
-        ]
+        try:
+            await done.wait()
+            return list(self.context().messages[context_cursor:])
+        finally:
+            if _watch in self.observers:
+                self.observers.remove(_watch)
+            self.inbox.push_back(Quit())
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     def pending_mid_stream(self) -> Sequence[UserMessage]:
         """Snapshot of mid-stream ``UserMessage`` items awaiting drain.
@@ -1827,11 +1823,11 @@ class AgentRuntime:
 
         The model-call gate's last guard before firing the provider:
 
-        1. Repair HistoryRecord-level orphans
+        1. Repair ReferrableTapeEvent-level orphans
            (:meth:`_repair_history_record_orphans`): pair unmatched
            ``tool_use`` ids with synthetic ``[interrupted]``
            ``ToolResult`` records; suppress orphan ``ToolResult`` from
-           a ``HistoryRecord`` origin.
+           a ``ReferrableTapeEvent`` origin.
         2. If validation still fails -- typically a legacy session
            reconstructed via :meth:`ContextSplice.replay` with
            invalid payloads predating the construct-time invariant --
@@ -1901,12 +1897,12 @@ class AgentRuntime:
         )
 
     def _repair_history_record_orphans(self) -> None:
-        """Pair / drop HistoryRecord-origin orphans in the resolved context.
+        """Pair / drop ReferrableTapeEvent-origin orphans in the resolved context.
 
         For each ``AssistantMessage`` with unpaired ``tool_calls`` from
-        a ``HistoryRecord`` origin, append an override injecting synth
+        a ``ReferrableTapeEvent`` origin, append an override injecting synth
         ``[interrupted]`` ``ToolResult`` records in its slot suffix.
-        For each orphan ``ToolResult`` from a ``HistoryRecord`` origin,
+        For each orphan ``ToolResult`` from a ``ReferrableTapeEvent`` origin,
         append a suppression override.
 
         Overrides from forward producers carry ``paired_externally``
@@ -1934,7 +1930,7 @@ class AgentRuntime:
         for idx, entry in enumerate(messages):
             origin = origins[idx]
             origin_record = self._tape_by_ref.get(origin)
-            origin_is_hr = isinstance(origin_record, HistoryRecord)
+            origin_is_hr = isinstance(origin_record, ReferrableTapeEvent)
             if isinstance(entry, AssistantMessage):
                 _flush_pending()
                 am_repair_anchor = origin if origin_is_hr else None
@@ -1966,7 +1962,7 @@ class AgentRuntime:
                 for cid in missing_ids
             )
             # The synth TRs have no matching AM in their payload; the
-            # matching AMs live in the ``HistoryRecord`` at ``anchor``.
+            # matching AMs live in the ``ReferrableTapeEvent`` at ``anchor``.
             # Empty mask: pure injection, doesn't claim any positions.
             self.append_splice(
                 mask=(),
@@ -1984,8 +1980,8 @@ class AgentRuntime:
                 strategy="orphan_tool_result_repair",
             )
 
-    def _append_or_coalesce_user(self, item: UserMessage) -> None:
-        r"""Append ``item`` to history; coalesce with tail if also ``UserMessage``.
+    def _append_or_coalesce_user(self, item: UserMessage) -> UserMessage:
+        r"""Append ``item`` to history; return the committed entry.
 
         Anthropic-style chat APIs require user/assistant turn alternation.
         Several runtime paths produce a ``UserMessage`` while the previous
@@ -2018,7 +2014,7 @@ class AgentRuntime:
         messages = resolved.messages
         if not messages or not isinstance(messages[-1], UserMessage):
             self.append_history(item)
-            return
+            return item
         tail = messages[-1]
         combined = dataclasses.replace(
             tail,
@@ -2059,6 +2055,7 @@ class AgentRuntime:
             payload=(combined,),
             strategy="user_coalesce",
         )
+        return combined
 
     def _stop_tool(
         self,
@@ -2129,8 +2126,7 @@ class AgentRuntime:
             ),
         )
         self._mid_stream_queue.clear()
-        self._append_or_coalesce_user(coalesced)
-        return coalesced
+        return self._append_or_coalesce_user(coalesced)
 
     def _collect_detached(self) -> None:
         """Clean up detached tasks that completed or were cancelled.
@@ -2274,11 +2270,7 @@ class AgentRuntime:
             )
             del self.detached[call.id]
             self.inbox.push_back(
-                DetachedResult(
-                    call_id=call.id,
-                    content=result.content,
-                    is_error=result.is_error,
-                ),
+                DetachedResult(result=dataclasses.replace(result, call_id=call.id)),
             )
         else:
             logger.debug(
@@ -2298,7 +2290,7 @@ class AgentRuntime:
         override on the tape and publishes ``CompactComplete``.
         """
         if self.compactor is None:
-            self.inbox.push_back(CompactComplete(records=()))
+            self.inbox.push_back(CompactComplete())
             return
         tape_len = len(self.tape)
         try:
@@ -2322,6 +2314,9 @@ class AgentRuntime:
         self.inbox.push_back(
             CompactComplete(
                 records=(override,),
+                token_before=override.token_before,
+                token_after=override.token_after,
+                payload_entries=len(override.payload),
                 fallback_reason=override.fallback_reason,
                 preserved_tail_count=override.preserved_tail_count,
             ),

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 from sagent.agent.result_storage import (
     PERSIST_EXEMPT_TOOLS,
     PERSISTED_TAG,
     post_process_result,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 def test_empty_result_gets_completed_marker() -> None:
@@ -84,11 +86,24 @@ def test_persist_dedup_on_existing_file(tmp_path: Path) -> None:
     target = tmp_path / "tool-results"
     target.mkdir()
     _ = (target / "call_abc.txt").write_text("PRIOR")
+    result = ToolResult(call_id="call_abc", content="PRIOR")
+    _ = post_process_result(result, "Bash", session_dir=tmp_path, persist_threshold=1)
+    assert (target / "call_abc.txt").read_text() == "PRIOR"
+
+
+def test_persist_collision_writes_distinct_file(tmp_path: Path) -> None:
+    target = tmp_path / "tool-results"
+    target.mkdir()
+    _ = (target / "call_abc.txt").write_text("PRIOR")
     result = ToolResult(call_id="call_abc", content="X" * 5_000)
-    _ = post_process_result(
+    out = post_process_result(
         result, "Bash", session_dir=tmp_path, persist_threshold=1_000
     )
-    # Prior content preserved (O_CREAT|O_EXCL skips redundant write).
+    match = re.search(r"Full output saved to: (.+)", out.content)
+    assert match is not None
+    saved = Path(match.group(1))
+    assert saved.name != "call_abc.txt"
+    assert saved.read_text() == "X" * 5_000
     assert (target / "call_abc.txt").read_text() == "PRIOR"
 
 

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import override
 
+import asyncio
 import time
 
 import httpx
@@ -18,15 +19,19 @@ from sagent.agent.retry import (
     RETRYABLE_STATUS_CODES,
     RateLimitError,
     RetriesExhaustedError,
+    error_diagnostics,
     error_status,
     extract_retry_after,
     is_retryable,
     send_with_retry,
 )
 from sagent.testing import MockModelCaps
-from sagent.types.exceptions import StreamInterruptedError
-from sagent.types.history import AssistantMessage
-from sagent.types.model import ModelRequest, ModelResponse
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    StreamInterruptedError,
+)
+from sagent.types.runtime import AssistantMessage
 
 
 @dataclass(slots=True, kw_only=True)
@@ -85,15 +90,17 @@ def _silent(_text: str) -> None:
 
 
 class _FakeResponse:
-    """Minimal stand-in for ``httpx.Response`` carrying status + headers."""
+    """Minimal stand-in for ``httpx.Response`` carrying status + headers + body."""
 
     def __init__(
         self,
         status_code: int,
         headers: dict[str, str] | None = None,
+        text: str = "",
     ) -> None:
         self.status_code = status_code
         self.headers = headers or {}
+        self.text = text
 
 
 class _HTTPError(Exception):
@@ -511,6 +518,112 @@ async def test_send_with_retry_stream_interrupt_on_discarded_response_called() -
     )
     assert resp.message.text == "done"
     assert discarded == [partial]
+
+
+def test_error_diagnostics_includes_status_headers_body() -> None:
+    err = _HTTPError(
+        _FakeResponse(
+            429,
+            {
+                "retry-after": "14868",
+                "anthropic-ratelimit-unified-reset": "1234567890",
+                "x-other": "ignored",
+            },
+            text='{"type":"error","error":{"type":"rate_limit_error"}}',
+        )
+    )
+    diag = error_diagnostics(err)
+    assert "status=429" in diag
+    assert "retry-after" in diag
+    assert "anthropic-ratelimit-unified-reset" in diag
+    assert "x-other" not in diag
+    assert "rate_limit_error" in diag
+
+
+def test_error_diagnostics_no_response_returns_empty() -> None:
+    assert error_diagnostics(ValueError("plain")) == ""
+
+
+def test_error_diagnostics_truncates_long_body() -> None:
+    err = _HTTPError(_FakeResponse(500, text="A" * 10_000))
+    diag = error_diagnostics(err)
+    assert len(diag) < 1_000
+
+
+def test_rate_limit_error_carries_diagnostics() -> None:
+    original = _HTTPError(
+        _FakeResponse(429, {"retry-after": "14868"}, text='{"weekly":"limit"}')
+    )
+    e = RateLimitError(time.time() + 14_868, original)
+    assert "status=429" in e.diagnostics
+    assert "weekly" in e.diagnostics
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_short_wait_banner_uses_seconds() -> None:
+    err = _HTTPError(_FakeResponse(503))
+    model = _ScriptedModel(stream_responses=[err, _resp("ok")])
+    chunks: list[str] = []
+    _ = await send_with_retry(
+        model,
+        _request(),
+        on_text=chunks.append,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+    banner = "".join(c for c in chunks if c.startswith(("\n[", "[")))
+    assert "retrying in" in banner
+    assert "resumes at" not in banner
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_long_server_wait_banner_shows_resume_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``retry-after`` exceeds 60s, banner switches to wall-clock format."""
+    err = _HTTPError(_FakeResponse(503, {"retry-after": "3600"}))
+    model = _PersistentModel(stream_responses=[err, _resp("ok")])
+    chunks: list[str] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    _ = await send_with_retry(
+        model,
+        _request(),
+        on_text=chunks.append,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+    )
+    banner = "".join(c for c in chunks if "[" in c)
+    assert "rate-limited" in banner
+    assert "resumes at" in banner
+    assert sleeps
+    assert sleeps[0] >= 3600.0
+
+
+@pytest.mark.asyncio
+async def test_publish_recoverable_includes_diagnostics_on_retry() -> None:
+    """``publish_recoverable`` payloads append ``[status=... body=...]`` for HTTP errors."""
+    err = _HTTPError(_FakeResponse(503, text="upstream gone"))
+    model = _ScriptedModel(stream_responses=[err, _resp("ok")])
+    notes: list[str] = []
+    _ = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=notes.append,
+    )
+    retry_notes = [n for n in notes if n.startswith("retry attempt")]
+    assert retry_notes
+    assert "status=503" in retry_notes[0]
+    assert "upstream gone" in retry_notes[0]
 
 
 if __name__ == "__main__":

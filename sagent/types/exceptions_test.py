@@ -11,15 +11,17 @@ import pytest
 from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
-    ModelTerminationError,
-    PromptTooLongError,
-    StreamInterruptedError,
     UserFacingError,
     log_exception_or_warning,
     log_task_exception,
 )
-from sagent.types.history import AssistantMessage, ToolCall
-from sagent.types.model import ModelResponse
+from sagent.types.model import (
+    ModelResponse,
+    ModelTerminationError,
+    PromptTooLongError,
+    StreamInterruptedError,
+)
+from sagent.types.runtime import AssistantMessage, ToolCall
 
 
 def test_prompt_too_long_default_message() -> None:

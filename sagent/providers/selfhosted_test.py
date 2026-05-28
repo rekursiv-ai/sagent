@@ -27,13 +27,13 @@ from sagent.providers.selfhosted import (
     _tool_preamble,
     _tool_schema,
 )
-from sagent.types.history import (
+from sagent.types.model import ModelRequest
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest
 from sagent.types.tools import Tool
 
 

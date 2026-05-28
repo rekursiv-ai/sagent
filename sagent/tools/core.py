@@ -20,7 +20,9 @@ from typing import cast, get_type_hints, overload
 
 import asyncio
 import dataclasses
+import functools
 import inspect
+import locale
 import logging
 import re
 import time
@@ -44,7 +46,7 @@ from sagent.agent.state import (
     tool_state_var,
 )
 from sagent.lib.json import JSON, int_val, json_freeze
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
@@ -167,8 +169,9 @@ def load_tool_description(name: str) -> str:
     Tool descriptions are optional prompt fragments, so missing files soft-fail
     to a generic agent-visible description. Other recipe assets stay strict at
     their call sites. Paths are explicit in recipe.yaml -- no fallback search.
-    Substitutes ``{{NOW}}`` with the current local date and time
-    (``Weekday, Month DD, YYYY HH:MM ZZZ``).
+    Substitutes ``{{NOW}}`` with the current locale-formatted weekday, date,
+    and 6-hour bucket (``Weekday, locale-date, 12am - 6am``). Coarse buckets
+    keep cross-process prompt caches warm: at most four invalidations per day.
 
     Args:
       name: Tool name (case-insensitive lookup).
@@ -196,8 +199,45 @@ def load_tool_description(name: str) -> str:
         )
         return _MISSING_TOOL_DESCRIPTION
     if _NOW_PLACEHOLDER in text:
-        text = text.replace(_NOW_PLACEHOLDER, time.strftime("%A, %B %d, %Y %H:%M %Z"))
+        text = text.replace(_NOW_PLACEHOLDER, _now_bucket())
     return text
+
+
+def _now_bucket(now: time.struct_time | None = None) -> str:
+    """Locale-formatted weekday, date, and 6-hour bucket range.
+
+    Honors ``$LC_TIME``. Buckets at 00/06/12/18 keep cross-process prompt
+    caches warm: at most four invalidations per day.
+    """
+    _ensure_locale_time()
+    t = now if now is not None else time.localtime()
+    lo = (t.tm_hour // 6) * 6
+
+    def fmt(h: int) -> str:
+        b = time.struct_time(
+            (
+                t.tm_year,
+                t.tm_mon,
+                t.tm_mday,
+                h % 24,
+                0,
+                0,
+                t.tm_wday,
+                t.tm_yday,
+                t.tm_isdst,
+            )
+        )
+        return re.sub(r":00(?=\D|$)", "", time.strftime("%X", b), count=1)
+
+    return f"{time.strftime('%a, %x', t)}, {fmt(lo)} - {fmt(lo + 6)}"
+
+
+@functools.cache
+def _ensure_locale_time() -> None:
+    try:
+        locale.setlocale(locale.LC_TIME, "")
+    except locale.Error:
+        locale.setlocale(locale.LC_TIME, "C")
 
 
 # 100K tokens × ~4 chars/token.

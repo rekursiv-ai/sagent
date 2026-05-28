@@ -799,7 +799,7 @@ def _event_to_json_record(event: types.runtime.RuntimeEvent) -> MutableJSON | No
             "content": event.text,
             "call_id": event.call_id,
         }
-    if isinstance(event, types.history.ToolResult):
+    if isinstance(event, types.runtime.ToolResult):
         return {
             "descriptor": "application/x-tool-result",
             "call_id": event.call_id,
@@ -858,7 +858,7 @@ async def _run_headless(
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)
 
-    user_msg = types.history.UserMessage(text=prompt)
+    user_msg = types.runtime.UserMessage(text=prompt)
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
             record = _event_to_json_record(event)
@@ -881,10 +881,10 @@ async def _run_headless(
         sys.stdout.write("\n")
 
 
-def _last_assistant_text(history: list[types.history.HistoryEntry]) -> str:
+def _last_assistant_text(history: list[types.runtime.ModelContextEvent]) -> str:
     """Return the text from the most recent ``AssistantMessage`` in ``history``."""
     for entry in reversed(history):
-        if isinstance(entry, types.history.AssistantMessage):
+        if isinstance(entry, types.runtime.AssistantMessage):
             return entry.text
     return ""
 

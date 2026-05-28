@@ -173,7 +173,7 @@ class AgentSelf:
         parts = _summary_parts(args)
         return "AgentSelf " + " ".join(parts) if parts else "AgentSelf"
 
-    def summary_result(self, result: types.history.ToolResult) -> str | None:
+    def summary_result(self, result: types.runtime.ToolResult) -> str | None:
         """Return no per-result receipt for AgentSelf.
 
         Args:
@@ -195,7 +195,7 @@ class AgentSelf:
         """
         return ""
 
-    async def run(self, args: Mapping[str, object]) -> types.history.ToolResult:
+    async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
         """Apply an AgentSelf patch object.
 
         Args:
@@ -288,16 +288,16 @@ def _summary_parts(d: Mapping[str, object]) -> list[str]:
     return parts
 
 
-def _apply_patch(d: Mapping[str, object]) -> types.history.ToolResult:
+def _apply_patch(d: Mapping[str, object]) -> types.runtime.ToolResult:
     """Validate and apply an AgentSelf patch object."""
     active = current_agent_var.get(None)
     if active is None:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content="No active agent.", is_error=True
         )
     agent = cast("Agent", active)
     plan_or_err = _build_patch_plan(agent, d)
-    if isinstance(plan_or_err, types.history.ToolResult):
+    if isinstance(plan_or_err, types.runtime.ToolResult):
         return plan_or_err
     parts = _commit_patch_plan(agent, plan_or_err)
     if d.get("diagnostics") is True:
@@ -309,8 +309,8 @@ def _apply_patch(d: Mapping[str, object]) -> types.history.ToolResult:
         if parts:
             lines.append("AgentSelf updated: " + ", ".join(parts))
         lines.extend(_catalog_lines(d, agent))
-        return types.history.ToolResult(call_id="", content="\n".join(lines))
-    return types.history.ToolResult(
+        return types.runtime.ToolResult(call_id="", content="\n".join(lines))
+    return types.runtime.ToolResult(
         call_id="",
         content="AgentSelf updated: " + ", ".join(parts) if parts else "No changes.",
     )
@@ -318,20 +318,20 @@ def _apply_patch(d: Mapping[str, object]) -> types.history.ToolResult:
 
 def _build_patch_plan(
     agent: Agent, d: Mapping[str, object]
-) -> _PatchPlan | types.history.ToolResult:
+) -> _PatchPlan | types.runtime.ToolResult:
     """Validate an AgentSelf patch without mutating state."""
     err = _validate_patch(d)
     if err is not None:
         return err
     model_plan = _plan_model(agent, d)
-    if isinstance(model_plan, types.history.ToolResult):
+    if isinstance(model_plan, types.runtime.ToolResult):
         return model_plan
     target_model = model_plan.model if model_plan is not None else agent.model
     status = _plan_status(d)
-    if isinstance(status, types.history.ToolResult):
+    if isinstance(status, types.runtime.ToolResult):
         return status
     options_or_err = _plan_model_options(target_model, d)
-    if isinstance(options_or_err, types.history.ToolResult):
+    if isinstance(options_or_err, types.runtime.ToolResult):
         return options_or_err
     options = options_or_err
     thinking = cast(bool | None, options.get("thinking"))
@@ -340,7 +340,7 @@ def _build_patch_plan(
     has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
     if has_explicit_limits:
         limits = _plan_limits(agent, target_model, d)
-        if isinstance(limits, types.history.ToolResult):
+        if isinstance(limits, types.runtime.ToolResult):
             return limits
     else:
         limits = {}
@@ -410,31 +410,31 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
     return parts
 
 
-def _validate_patch(d: Mapping[str, object]) -> types.history.ToolResult | None:
+def _validate_patch(d: Mapping[str, object]) -> types.runtime.ToolResult | None:
     """Validate cross-field AgentSelf patch constraints."""
     if "context_prompt" in d and "context" not in d:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content="context_prompt is only valid when context is set.",
             is_error=True,
         )
     context = d.get("context")
     if context is not None and context not in ("clear", "compact", "recompact"):
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content=f"Invalid context: {context!r}.", is_error=True
         )
     options = d.get("model_options")
     if options is not None and not isinstance(options, Mapping):
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content="model_options must be an object.", is_error=True
         )
     catalog = d.get("catalog")
     if catalog is not None and catalog not in ("providers", "models"):
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content=f"Invalid catalog: {catalog!r}.", is_error=True
         )
     if "catalog_provider" in d and catalog != "models":
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content="catalog_provider is only valid with catalog='models'.",
             is_error=True,
@@ -442,14 +442,14 @@ def _validate_patch(d: Mapping[str, object]) -> types.history.ToolResult | None:
     return None
 
 
-def _plan_status(d: Mapping[str, object]) -> str | types.history.ToolResult | None:
+def _plan_status(d: Mapping[str, object]) -> str | types.runtime.ToolResult | None:
     """Validate an optional status update."""
     raw = d.get("status")
     if raw is None:
         return None
     status = str(raw).strip()
     if not status:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content="status cannot be empty when provided.", is_error=True
         )
     return status
@@ -457,13 +457,13 @@ def _plan_status(d: Mapping[str, object]) -> str | types.history.ToolResult | No
 
 def _plan_model(
     agent: Agent, d: Mapping[str, object]
-) -> _ModelPlan | types.history.ToolResult | None:
+) -> _ModelPlan | types.runtime.ToolResult | None:
     """Build an optional model/provider/account update without applying it."""
     if not any(k in d for k in ("model_id", "provider", "auth", "account")):
         return None
     spec = agent.model_spec
     if spec is None:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="", content="Agent has no model spec; cannot swap.", is_error=True
         )
     model_id = str(d.get("model_id", "")).strip() or None
@@ -477,13 +477,13 @@ def _plan_model(
     if "account" in d:
         account = str(d["account"]).strip()
         if not account:
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="", content="account cannot be empty.", is_error=True
             )
     else:
         account = spec.account
     if not model_id and prov_name == spec.provider:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content="model_id is required when changing auth/account without provider.",
             is_error=True,
@@ -499,7 +499,7 @@ def _plan_model(
         prov = build_provider(prov_name, auth, account=account)
         new_model = prov.model(model_id)
     except (AttributeError, RuntimeError, ValueError) as exc:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=f"Failed to build model {model_id!r}: {exc}",
             is_error=True,
@@ -523,7 +523,7 @@ def _plan_model(
 
 def _plan_model_options(
     model: types.model.Model, d: Mapping[str, object]
-) -> dict[str, object] | types.history.ToolResult:
+) -> dict[str, object] | types.runtime.ToolResult:
     """Validate provider/model-specific options against the target model."""
     raw = d.get("model_options")
     if raw is None:
@@ -532,7 +532,7 @@ def _plan_model_options(
     supported = _supported_model_options(model)
     unknown = sorted(set(options) - set(supported))
     if unknown:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=f"Unsupported model_options for {model.model_id}: {', '.join(unknown)}.",
             is_error=True,
@@ -541,7 +541,7 @@ def _plan_model_options(
     if "thinking" in options:
         value = options["thinking"]
         if not isinstance(value, bool):
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content="model_options.thinking must be boolean.",
                 is_error=True,
@@ -550,7 +550,7 @@ def _plan_model_options(
     if "effort" in options:
         value = options["effort"]
         if value is not None and not isinstance(value, str):
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content="model_options.effort must be a string or null.",
                 is_error=True,
@@ -559,7 +559,7 @@ def _plan_model_options(
     if "cache_ttl" in options:
         value = options["cache_ttl"]
         if value not in ("5m", "1h"):
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content="model_options.cache_ttl must be '5m' or '1h'.",
                 is_error=True,
@@ -570,7 +570,7 @@ def _plan_model_options(
         valid = model.valid_service_tiers
         if value is not None and value not in valid:
             quoted = ", ".join(repr(t) for t in valid) or "(none)"
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content=(
                     f"model_options.service_tier for {model.model_id} must"
@@ -599,22 +599,22 @@ def _supported_model_options(model: types.model.Model) -> dict[str, str]:
 
 def _plan_limits(
     agent: Agent, model: types.model.Model, d: Mapping[str, object]
-) -> dict[str, int] | types.history.ToolResult:
+) -> dict[str, int] | types.runtime.ToolResult:
     """Validate explicit token-limit updates against the target model."""
     limits: dict[str, int] = {}
     max_request_tokens = _plan_one_limit(
         d.get("max_request_tokens"), "max_request_tokens"
     )
-    if isinstance(max_request_tokens, types.history.ToolResult):
+    if isinstance(max_request_tokens, types.runtime.ToolResult):
         return max_request_tokens
     max_response_tokens = _plan_one_limit(
         d.get("max_response_tokens"), "max_response_tokens"
     )
-    if isinstance(max_response_tokens, types.history.ToolResult):
+    if isinstance(max_response_tokens, types.runtime.ToolResult):
         return max_response_tokens
     if max_request_tokens is not None:
         if max_request_tokens > model.max_request_tokens:
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content=(
                     "Invalid AgentSelf limit override: "
@@ -626,7 +626,7 @@ def _plan_limits(
         limits["max_request_tokens"] = max_request_tokens
     if max_response_tokens is not None:
         if max_response_tokens > model.max_response_tokens:
-            return types.history.ToolResult(
+            return types.runtime.ToolResult(
                 call_id="",
                 content=(
                     "Invalid AgentSelf limit override: "
@@ -647,7 +647,7 @@ def _plan_limits(
                 budget, max_response_tokens=limits["max_response_tokens"]
             )
     except (ValueError, TypeError) as exc:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {exc}",
             is_error=True,
@@ -655,12 +655,12 @@ def _plan_limits(
     return limits
 
 
-def _plan_one_limit(raw: object, attr: str) -> int | types.history.ToolResult | None:
+def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | None:
     """Validate a single token limit without applying it."""
     if raw is None:
         return None
     if not isinstance(raw, (int, float, str)):
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {attr} must be a number.",
             is_error=True,
@@ -668,13 +668,13 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.history.ToolResult | 
     try:
         val = int(raw)
     except ValueError as exc:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {exc}",
             is_error=True,
         )
     if val < 1:
-        return types.history.ToolResult(
+        return types.runtime.ToolResult(
             call_id="",
             content=(
                 f"Invalid AgentSelf limit override: {attr}={val}. Must be at least 1."
@@ -701,7 +701,7 @@ def _commit_context(agent: Agent, context: str, prompt: str) -> None:
 def _do_diagnostics(
     changes: list[str] | None = None,
     d: Mapping[str, object] | None = None,
-) -> types.history.ToolResult:
+) -> types.runtime.ToolResult:
     """Return current agent diagnostics."""
     agent = cast("Agent | None", current_agent_var.get(None))
     spec = agent.model_spec if agent is not None else None
@@ -721,7 +721,7 @@ def _do_diagnostics(
     if agent is not None:
         lines.extend(_agent_option_lines(agent))
         lines.extend(_session_lines(agent))
-    return types.history.ToolResult(call_id="", content="\n".join(lines))
+    return types.runtime.ToolResult(call_id="", content="\n".join(lines))
 
 
 def _catalog_lines(d: Mapping[str, object], agent: Agent | None) -> list[str]:

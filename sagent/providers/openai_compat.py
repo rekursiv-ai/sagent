@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import json
 import logging
@@ -61,17 +62,19 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.exceptions import (
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
     PromptTooLongError,
     StreamInterruptedError,
+    TokenCount,
 )
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
     ToolCall,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 logger = logging.getLogger(__name__)
@@ -178,15 +181,26 @@ class OpenAICompat:
 
 def _is_context_overflow_text(msg: str) -> bool:
     """True if the error body text describes a context-window overflow."""
+    with contextlib.suppress(json.JSONDecodeError):
+        raw_body = json.loads(msg)
+        if isinstance(raw_body, Mapping):
+            body = cast(Mapping[str, object], raw_body)
+            raw_error = body.get("error")
+            if isinstance(raw_error, Mapping):
+                error = cast(Mapping[str, object], raw_error)
+                code = error.get("code")
+                if code is not None:
+                    return code == "context_length_exceeded"
     lower = msg.lower()
-    return (
-        "context_length_exceeded" in lower
-        or "maximum context length" in lower
-        or "prompt too long" in lower
-        or "context window" in lower
-        or "model context" in lower
-        or "input too large" in lower
-    )
+    if "context_length_exceeded" in lower or "prompt too long" in lower:
+        return True
+    if "maximum context length" in lower or "input too large" in lower:
+        return True
+    if "context window" in lower and (
+        "exceed" in lower or "overflow" in lower or "maximum" in lower
+    ):
+        return True
+    return "model context" in lower and "exceed" in lower
 
 
 class OpenAICompatModel:

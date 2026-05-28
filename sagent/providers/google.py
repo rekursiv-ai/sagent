@@ -47,13 +47,17 @@ from sagent.providers.lib.cost import (
     compute_cost,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.exceptions import PromptTooLongError
-from sagent.types.history import (
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    PromptTooLongError,
+    TokenCount,
+)
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 
 
 logger = logging.getLogger(__name__)

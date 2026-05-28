@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
 import stat
 
 import pytest
@@ -93,6 +94,43 @@ def test_atomic_write_bytes_with_file_mode(tmp_path: Path) -> None:
     atomic_write_bytes(dst, b"secret", file_mode=0o600)
     mode = stat.S_IMODE(dst.stat().st_mode)
     assert mode == 0o600
+
+
+def test_atomic_write_bytes_file_mode_ignores_restrictive_umask(
+    tmp_path: Path,
+) -> None:
+    dst = tmp_path / "exec.sh"
+    old_umask = os.umask(0o077)
+    try:
+        atomic_write_bytes(dst, b"#!/bin/sh\n", file_mode=0o755)
+    finally:
+        os.umask(old_umask)
+    mode = stat.S_IMODE(dst.stat().st_mode)
+    assert mode == 0o755
+
+
+def test_atomic_write_bytes_with_file_mode_retries_partial_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dst = tmp_path / "creds.bin"
+    payload = b"secret payload"
+    real_write = os.write
+    write_sizes: list[int] = []
+
+    def partial_write(fd: int, data: bytes) -> int:
+        if not write_sizes:
+            write_sizes.append(len(data) // 2)
+            return real_write(fd, data[: write_sizes[-1]])
+        write_sizes.append(len(data))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", partial_write)
+
+    atomic_write_bytes(dst, payload, file_mode=0o600)
+
+    assert write_sizes == [len(payload) // 2, len(payload) - len(payload) // 2]
+    assert dst.read_bytes() == payload
 
 
 def test_atomic_write_bytes_rollback_on_open_failure(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.list import List
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 list_tool = List()

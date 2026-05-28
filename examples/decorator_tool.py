@@ -8,7 +8,7 @@ import sys
 from sagent.agent import Agent
 from sagent.providers import Google
 from sagent.tools import tool
-from sagent.types.history import AssistantMessage, UserMessage
+from sagent.types.runtime import AssistantMessage, UserMessage
 
 
 @tool(name="WordCount")

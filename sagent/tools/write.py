@@ -16,7 +16,7 @@ from sagent.tools.core import (
     load_tool_description,
     resolve_tool_path,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 # Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.

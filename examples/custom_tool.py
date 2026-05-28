@@ -10,7 +10,7 @@ import sys
 from sagent.agent import Agent
 from sagent.lib.json import json_freeze
 from sagent.providers import Google
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
     ToolResult,
     UserMessage,

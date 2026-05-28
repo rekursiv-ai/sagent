@@ -29,7 +29,7 @@ import os
 from sagent.lib.json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 _API_URL = "https://api.linear.app/graphql"

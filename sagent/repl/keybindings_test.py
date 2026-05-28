@@ -11,8 +11,7 @@ from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 
 from sagent.agent.agent import Agent
 from sagent.repl.keybindings import NavState, build_key_bindings
-from sagent.types.history import UserMessage
-from sagent.types.runtime import UserQueuedMessage
+from sagent.types.runtime import UserMessage, UserQueuedMessage
 
 
 @dataclass(slots=True, kw_only=True)

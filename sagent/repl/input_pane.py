@@ -141,11 +141,11 @@ from sagent.types.exceptions import (
     log_exception_or_warning,
     log_task_exception,
 )
-from sagent.types.history import UserMessage
 from sagent.types.runtime import (
     Clear,
     Compact,
     Recompact,
+    UserMessage,
     UserQueuedMessage,
 )
 

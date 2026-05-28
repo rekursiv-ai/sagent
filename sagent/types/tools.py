@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from sagent.lib.json import JSON
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 __all__ = [

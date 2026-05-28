@@ -9,17 +9,24 @@ from typing import TYPE_CHECKING, cast
 from sagent.lib.compaction import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
+    CompactComplete,
+    CompactStarted,
     ToolCall,
     ToolResult,
     UserMessage,
+)
+from sagent.types.tape import (
+    ContextSplice,
+    ReferrableTapeEvent,
+    TapeEvent,
+    TapeRef,
 )
 
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
-    from sagent.types.history import HistoryEntry
 
 
 @dataclass(slots=True, kw_only=True)
@@ -36,7 +43,13 @@ class _StubTool:
 class _StubAgent:
     """Minimum surface ``replay_messages`` consumes."""
 
-    history: list[HistoryEntry] = field(default_factory=list)
+    history: list[TapeEvent] = field(default_factory=list)
+    tape: list[object] = field(default_factory=list)
+
+    @property
+    def runtime(self) -> object:
+        return self
+
     tools_map: Mapping[str, _StubTool] = field(
         default_factory=lambda: cast("Mapping[str, _StubTool]", {}),
     )
@@ -46,14 +59,20 @@ class _StubAgent:
 
 def _agent(
     *,
-    history: list[HistoryEntry] | None = None,
+    history: list[TapeEvent] | None = None,
+    tape: list[object] | None = None,
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
     show_thinking: bool = True,
 ) -> Agent:
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
+    history_records = [
+        ReferrableTapeEvent(ref=TapeRef(session_id="t", ordinal=i), event=entry)
+        for i, entry in enumerate(history or [])
+    ]
     stub = _StubAgent(
         history=list(history) if history else [],
+        tape=list(tape) if tape is not None else cast("list[object]", history_records),
         tools_map=tools_map or {},
         total_cost_usd=total_cost_usd,
         show_thinking=show_thinking,
@@ -70,7 +89,7 @@ def test_replay_empty_history_no_output() -> None:
 
 
 def test_replay_user_message() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="hello")]
+    history: list[TapeEvent] = [UserMessage(text="hello")]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
     assert p.user_bars == ["hello"]
@@ -79,21 +98,21 @@ def test_replay_user_message() -> None:
 
 
 def test_replay_assistant_text_block() -> None:
-    history: list[HistoryEntry] = [AssistantMessage(text="response body")]
+    history: list[TapeEvent] = [AssistantMessage(text="response body")]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
     assert p.markdowns == ["response body"]
 
 
 def test_replay_assistant_empty_text_skipped() -> None:
-    history: list[HistoryEntry] = [AssistantMessage(text="   ")]
+    history: list[TapeEvent] = [AssistantMessage(text="   ")]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
     assert p.markdowns == []
 
 
 def test_replay_assistant_thinking_blocks() -> None:
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         AssistantMessage(
             text="",
             thinking_blocks=(
@@ -109,7 +128,7 @@ def test_replay_assistant_thinking_blocks() -> None:
 
 
 def test_replay_assistant_thinking_blocks_can_be_hidden() -> None:
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         AssistantMessage(text="ok", thinking_blocks=({"thinking": "hidden"},))
     ]
     p = RecordingPrinter()
@@ -119,7 +138,7 @@ def test_replay_assistant_thinking_blocks_can_be_hidden() -> None:
 
 
 def test_replay_tool_call_with_known_tool() -> None:
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="Echo", args={"x": 1}),),
         )
@@ -133,7 +152,7 @@ def test_replay_tool_call_with_known_tool() -> None:
 
 
 def test_replay_tool_call_unknown_tool_falls_back_to_name() -> None:
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="MysteryTool", args={}),),
         )
@@ -154,7 +173,7 @@ def test_replay_microcompacted_tool_call_renders_stored_summary() -> None:
     ``args.get("file_path", "")`` fallback in ``Read.summary``),
     losing every previously-displayed filename.
     """
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         AssistantMessage(
             tool_calls=(
                 ToolCall(
@@ -171,7 +190,7 @@ def test_replay_microcompacted_tool_call_renders_stored_summary() -> None:
 
 
 def test_replay_tool_result_summary() -> None:
-    history: list[HistoryEntry] = [
+    history: list[TapeEvent] = [
         ToolResult(call_id="c1", content="ok", summary="one line")
     ]
     p = RecordingPrinter()
@@ -180,7 +199,7 @@ def test_replay_tool_result_summary() -> None:
 
 
 def test_replay_footer_with_cost() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[TapeEvent] = [UserMessage(text="hi")]
     p = RecordingPrinter()
     replay_messages(_agent(history=history, total_cost_usd=1.23), p)
     footer = p.lines[0]
@@ -189,12 +208,58 @@ def test_replay_footer_with_cost() -> None:
 
 
 def test_replay_footer_without_cost() -> None:
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[TapeEvent] = [UserMessage(text="hi")]
     p = RecordingPrinter()
     replay_messages(_agent(history=history, total_cost_usd=0.0), p)
     footer = p.lines[0]
     assert "$" not in footer
     assert "1 messages" in footer
+
+
+def test_replay_uses_forward_tape_not_compacted_context_payload() -> None:
+    original_user = ReferrableTapeEvent(
+        ref=TapeRef(session_id="t", ordinal=0),
+        event=UserMessage(text="original question"),
+    )
+    original_assistant = ReferrableTapeEvent(
+        ref=TapeRef(session_id="t", ordinal=1),
+        event=AssistantMessage(text="original answer"),
+    )
+    started = ReferrableTapeEvent(
+        ref=TapeRef(session_id="t", ordinal=2),
+        event=CompactStarted(),
+    )
+    splice = ContextSplice(
+        ref=TapeRef(session_id="t", ordinal=3),
+        mask=((original_user.ref, original_assistant.ref),),
+        insert_after=None,
+        payload=(UserMessage(text="summary payload"),),
+        strategy="summary",
+        token_before=100,
+        token_after=10,
+    )
+    complete = ReferrableTapeEvent(
+        ref=TapeRef(session_id="t", ordinal=4),
+        event=CompactComplete(
+            token_before=100,
+            token_after=10,
+            payload_entries=1,
+        ),
+    )
+    p = RecordingPrinter()
+
+    replay_messages(
+        _agent(tape=[original_user, original_assistant, started, splice, complete]),
+        p,
+    )
+
+    assert p.user_bars == ["original question"]
+    assert p.markdowns == ["original answer"]
+    assert "summary payload" not in "".join(p.user_bars + p.markdowns)
+    assert p.dim_lines == [
+        "[compacting history…]",
+        "[compaction complete: ~100 → ~10 tokens, 1 entries]",
+    ]
 
 
 if __name__ == "__main__":

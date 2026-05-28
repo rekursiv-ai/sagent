@@ -45,17 +45,19 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.exceptions import (
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
     PromptTooLongError,
     StreamInterruptedError,
+    TokenCount,
 )
-from sagent.types.history import (
+from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
     ToolResult,
     UserMessage,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 from sagent.types.tools import Tool
 
 
@@ -424,12 +426,23 @@ class Anthropic:
           client: Shared ``AsyncAnthropic`` instance.
 
         """
-        if self._sdk is not None:
-            return self._sdk
         async with self._lock:
             if self._sdk is None:
                 self._sdk = anthropic.AsyncAnthropic(api_key=self._api_key)
             return self._sdk
+
+    async def close_sdk(self) -> None:
+        """Close and clear the shared Anthropic SDK client."""
+        async with self._lock:
+            if self._sdk is None:
+                return
+            sdk = self._sdk
+            self._sdk = None
+        close = getattr(sdk, "close", None)
+        if close is not None:
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
 
     def build_system(
         self,
@@ -514,16 +527,62 @@ _RETRYABLE_BODY_TYPES = frozenset(
 )
 
 
-def _is_prompt_too_long_text(msg: str) -> bool:
-    """True if the error body text describes a context-window overflow."""
+def _is_prompt_too_long_text(
+    msg: str,
+    *,
+    error_body: Mapping[str, object] | None = None,
+) -> bool:
+    """True if the error describes a context-window overflow.
+
+    Prefers the structured ``error.type``/``error.message`` fields on
+    ``error_body`` when present: an Anthropic ``invalid_request_error``
+    whose ``message`` text mentions overflow phrases is canonical. When
+    ``error_body`` is absent, falls back to substring matching against
+    the stringified error -- which is fragile and matches benign 400s
+    that incidentally mention "context window" (e.g. tool-schema
+    validation errors). Callers with access to the parsed SDK body
+    should always pass ``error_body``.
+
+    Args:
+      msg: Stringified error or message text.
+      error_body: Parsed Anthropic error body (``e.body``), when available.
+
+    Returns:
+      overflow: True when the error indicates a prompt-too-long condition.
+
+    """
+    if error_body is not None:
+        nested = error_body.get("error")
+        if isinstance(nested, Mapping):
+            nested_map = cast(Mapping[str, object], nested)
+            error_type = nested_map.get("type")
+            if error_type != "invalid_request_error":
+                return False
+            inner = nested_map.get("message")
+            return isinstance(inner, str) and _matches_overflow_phrase(inner)
+    return _matches_overflow_phrase(msg)
+
+
+def _matches_overflow_phrase(msg: str) -> bool:
+    """Substring fallback for Anthropic overflow phrases."""
     lower = msg.lower()
-    return "too long" in lower or "too_long" in lower or "context window" in lower
+    if "too long" in lower or "too_long" in lower:
+        return True
+    return "context window" in lower and (
+        "exceed" in lower or "overflow" in lower or "maximum" in lower
+    )
+
+
+def _api_status_body(error: anthropic.APIStatusError) -> Mapping[str, object] | None:
+    """Return the parsed Anthropic error body, if the SDK exposed one."""
+    body = getattr(error, "body", None)
+    return cast(Mapping[str, object], body) if isinstance(body, Mapping) else None
 
 
 def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
     """Re-raise as PromptTooLongError if this is a prompt-too-long error."""
     raw = str(e)
-    if not _is_prompt_too_long_text(raw):
+    if not _is_prompt_too_long_text(raw, error_body=_api_status_body(e)):
         return
     actual, limit = None, None
     m = _RE_ANTHROPIC_TOKENS.search(raw)
@@ -786,7 +845,11 @@ class _AnthropicModel:
             return True
         if not isinstance(error, anthropic.APIStatusError):
             return False
-        return _is_prompt_too_long_text(str(error))
+        return _is_prompt_too_long_text(str(error), error_body=_api_status_body(error))
+
+    async def close(self) -> None:
+        """Close the shared provider SDK owned by this model."""
+        await self._provider.close_sdk()
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """Statusless Anthropic errors that still declare retryability.
@@ -927,7 +990,7 @@ class _AnthropicModel:
             )
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.APIStatusError as e:
-            if not _is_prompt_too_long_text(str(e)):
+            if not _is_prompt_too_long_text(str(e), error_body=_api_status_body(e)):
                 raise
             debug_log.trace_error(
                 "bad_request",
@@ -1077,7 +1140,7 @@ def _build_messages(
                     )
                 )
         else:
-            # HistoryEntry is the closed union {UserMessage, AssistantMessage,
+            # TapeEvent is the closed union {UserMessage, AssistantMessage,
             # ToolResult}; the two branches above consume the first two.
             pending_tool_results.append(
                 _tool_result_block(entry, ids, max_image_dim, max_image_bytes)

@@ -15,7 +15,11 @@ from sagent.tools.skill import (
     discover,
     format_listing,
 )
-from sagent.types.history import HistoryEntry, ToolResult, UserMessage
+from sagent.types.runtime import (
+    ModelContextEvent,
+    ToolResult,
+    UserMessage,
+)
 
 
 def _write_skill(
@@ -241,7 +245,7 @@ async def test_post_compact_restore_noop_without_invoked(tmp_path: Path) -> None
     t = Skill()
     state = ToolState()
     state.bash_cwd = str(tmp_path)
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await t.post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -254,7 +258,7 @@ async def test_post_compact_restore_reattaches_into_first_user(tmp_path: Path) -
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill().post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -268,7 +272,7 @@ async def test_post_compact_restore_skips_when_cwd_unset(tmp_path: Path) -> None
     state = ToolState()
     state.bash_cwd = ""
     state.invoked_skills.add("alpha")
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill().post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -282,7 +286,7 @@ async def test_post_compact_restore_truncates_huge_body(tmp_path: Path) -> None:
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill().post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -296,7 +300,7 @@ async def test_post_compact_restore_budget_caps_total(tmp_path: Path) -> None:
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.update({"alpha", "beta"})
-    history: list[HistoryEntry] = [UserMessage(text="hi")]
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
     # Budget caps total at ~one body; the second body is skipped.
     await Skill().post_compact_restore(history, state, budget_chars=700)
     entry = history[0]

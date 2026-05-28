@@ -20,7 +20,7 @@ from sagent.tools.lib.path_sort import (
     safe_size,
     sort_paths,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 _NUDGE = "find via Bash is a bad UX. Use the Glob tool."

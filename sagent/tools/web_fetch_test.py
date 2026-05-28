@@ -5,8 +5,10 @@ from __future__ import annotations
 from types import ModuleType
 from typing import cast
 from unittest.mock import MagicMock, patch
+from urllib.parse import unquote, urlparse
 
 import asyncio
+import json
 import socket
 import sys
 
@@ -30,6 +32,7 @@ from sagent.tools.web_fetch import (
     _KIND_HTML,
     _KIND_MARKDOWN,
     _KIND_REDDIT,
+    _KIND_REDDIT_LISTING,
     _KIND_RSS,
     WebFetch,
     _format_rss,
@@ -38,9 +41,10 @@ from sagent.tools.web_fetch import (
     _parse_rss_cluster,
     _RedditAdapter,
     _url_is_safe,
+    _validated_host,
     _XAdapter,
 )
-from sagent.types.history import ToolResult
+from sagent.types.runtime import ToolResult
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -112,6 +116,17 @@ def test_url_is_safe_public_passes() -> None:
     with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")):
         err = _url_is_safe("https://example.com")
     assert err is None
+
+
+def test_validated_host_rejects_rebound_private_ip() -> None:
+    with (
+        patch(
+            "socket.getaddrinfo",
+            side_effect=[_addrinfo("8.8.8.8"), _addrinfo("127.0.0.1")],
+        ),
+        pytest.raises(ValueError, match="non-public"),
+    ):
+        _validated_host("example.com")
 
 
 def test_reddit_adapter_matches_canonical() -> None:
@@ -439,6 +454,82 @@ def test_fetch_body_reddit_root_no_thread_pattern() -> None:
     assert b"regular" in body
 
 
+def test_fetch_body_reddit_listing_json_path() -> None:
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
+
+    captured: dict[str, object] = {}
+
+    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
+        captured["url"] = url
+        return b'{"kind":"Listing","data":{"children":[]}}'
+
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        side_effect=fake_safe_fetch,
+    ):
+        body, kind = asyncio.run(
+            _fetch_body(
+                "https://www.reddit.com/r/foo/new/.json?limit=25",
+                method="GET",
+                json_body=None,
+                form_body=None,
+            ),
+        )
+    assert kind == _KIND_REDDIT_LISTING
+    assert body.startswith(b"{")
+    assert captured["url"] == "https://www.reddit.com/r/foo/new/.json?limit=25"
+
+
+def test_extract_text_reddit_listing_formats_posts() -> None:
+    from sagent.tools.web_fetch import _extract_text  # noqa: PLC0415
+
+    payload = json.dumps(
+        {
+            "kind": "Listing",
+            "data": {
+                "children": [
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "title": "First post",
+                            "author": "alice",
+                            "score": 12,
+                            "num_comments": 3,
+                            "created_utc": 1_779_731_536,
+                            "permalink": "/r/foo/comments/abc/first/",
+                            "url": "https://example.com/a",
+                            "link_flair_text": "Discussion",
+                            "selftext": "Body text for the listing item.",
+                        },
+                    },
+                    {
+                        "kind": "t3",
+                        "data": {
+                            "title": "Second post",
+                            "author": "bob",
+                            "score": 1,
+                            "num_comments": 0,
+                            "created_utc": 1_779_731_600,
+                            "permalink": "/r/foo/comments/def/second/",
+                            "url": "https://www.reddit.com/r/foo/comments/def/second/",
+                            "selftext": "",
+                        },
+                    },
+                ]
+            },
+        }
+    ).encode()
+    out = asyncio.run(_extract_text(payload, kind=_KIND_REDDIT_LISTING, method="GET"))
+    assert "# Reddit listing" in out
+    assert "First post" in out
+    assert "u/alice" in out
+    assert "2026-05-25T17:52:16+00:00" in out
+    assert "https://www.reddit.com/r/foo/comments/abc/first/" in out
+    assert "Body text for the listing item." in out
+    assert "Second post" in out
+    assert '"kind"' not in out
+
+
 def test_extract_text_html_path_uses_trafilatura() -> None:
     """``_extract_text`` for HTML goes through trafilatura.extract."""
     from sagent.tools.web_fetch import (  # noqa: PLC0415
@@ -753,7 +844,7 @@ def test_reader_proxy_fetch_raises_on_soft_failure_sentinel() -> None:
     )
 
     soft_fail = (
-        b"Title: nytimes.com\n\n"
+        b"Title: example.org\n\n"
         b"Warning: Target URL returned error 403: Forbidden\n\n"
         b"Markdown Content:\n\n"
     )
@@ -764,7 +855,7 @@ def test_reader_proxy_fetch_raises_on_soft_failure_sentinel() -> None:
         ),
         pytest.raises(FetchError) as exc_info,
     ):
-        _reader_proxy_fetch("https://www.nytimes.com/article")
+        _reader_proxy_fetch("https://www.example.org/article")
     # 502 is the synthetic status used to signal proxy-level failure.
     assert exc_info.value.status == 502
 
@@ -816,12 +907,27 @@ def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
         "sagent.tools.web_fetch._safe_fetch",
         side_effect=fake_safe_fetch,
     ):
-        body = _reader_proxy_fetch("https://www.nytimes.com/2026/05/article")
+        body = _reader_proxy_fetch(
+            "https://www.example.org/2026/05/article?x=1&y=2#frag"
+        )
     assert body == b"# markdown"
     url = captured["url"]
     assert isinstance(url, str)
-    assert url.startswith("https://r.jina.ai/")
-    assert "nytimes.com" in url
+    parsed_proxy = urlparse(url)
+    assert parsed_proxy.scheme == "https"
+    assert parsed_proxy.netloc == "r.jina.ai"
+    encoded = parsed_proxy.path.removeprefix("/")
+    target = urlparse(unquote(encoded))
+    assert target.scheme == "https"
+    assert target.netloc == "www.example.org"
+    assert target.path == "/2026/05/article"
+    assert target.query == "x=1&y=2"
+    assert target.fragment == "frag"
+    assert "%3F" in encoded
+    assert "%26" in encoded
+    assert "%23" in encoded
+    assert "?" not in encoded
+    assert "#" not in encoded
 
 
 # Host adapter dispatch & per-host adapters.
