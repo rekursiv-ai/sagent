@@ -53,6 +53,7 @@ from sagent.thinking import ThinkingState, resolve_thinking_command
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
+    AssistantMessage,
     ModelIdle,
     RuntimeEvent,
     ToolResult,
@@ -113,6 +114,7 @@ async def run_repl(
         pump_task = spawn_repl_pump(
             agent,
             PromptToolkitInputSource(session, queues=queues, console=console),
+            queues=queues,
             printer=printer,
         )
         replay_messages(agent, printer)
@@ -182,12 +184,37 @@ def make_input_queue_committer(
     queues: InputQueues,
 ) -> Callable[[RuntimeEvent], None]:
     """Observer that commits REPL-local queues at their lifecycle events."""
+    previous_before_tool_spawn = agent.runtime.before_tool_spawn
+    agent.runtime.before_tool_spawn = functools.partial(
+        _before_tool_spawn,
+        queues=queues,
+        previous_before_tool_spawn=previous_before_tool_spawn,
+    )
+    return functools.partial(_commit_local_queues, agent=agent, queues=queues)
 
-    def observer(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelIdle) and not queues.commit_urgent(agent):
-            queues.commit_deferred_on_idle(agent)
 
-    return observer
+def _before_tool_spawn(
+    message: AssistantMessage,
+    *,
+    queues: InputQueues,
+    previous_before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None]
+    | None,
+) -> RuntimeEvent | None:
+    if previous_before_tool_spawn is not None:
+        event = previous_before_tool_spawn(message)
+        if event is not None:
+            return event
+    return queues.pop_urgent_message()
+
+
+def _commit_local_queues(
+    event: RuntimeEvent,
+    *,
+    agent: Agent,
+    queues: InputQueues,
+) -> None:
+    if isinstance(event, ModelIdle) and not queues.commit_urgent(agent):
+        queues.commit_deferred_on_idle(agent)
 
 
 def do_switch_model(

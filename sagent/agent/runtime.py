@@ -97,7 +97,7 @@ runtime maintains this invariant by stubbing unfinished tools with
 ``[detached]`` placeholders before appending user-side content that
 would otherwise leave the branch open. Within that constraint, a
 ``UserMessage`` arriving while the agent is busy can be released at
-one of four trigger points, trading responsiveness against
+one of several trigger points, trading responsiveness against
 preservation of in-flight work:
 
 - **Pre-MRC (immediate cancel).** Cancel ``model_call``, discard
@@ -121,6 +121,11 @@ preservation of in-flight work:
   ``not self._should_call_model()`` -- i.e. the gate would not fire
   naturally, meaning history's tail is an ``AssistantMessage`` with
   no tool_calls. Coalesces with ``\n\n`` joins.
+- **Control/error drains.** ``Halt``, ``ModelResponseError``, and
+  ``Compact`` also drain runtime-owned ``_mid_stream_queue`` so
+  already-submitted non-REPL messages are not stranded behind control
+  flow. REPL-local urgent/deferred queues are handled by the REPL
+  observer/keybindings before they enter runtime history.
 
 ``UserMessage`` arriving mid-cohort (model_call is None, cohort
 non-empty) preempts: tools are stubbed to ``detached``, the user
@@ -1463,8 +1468,8 @@ class AgentRuntime:
 
                         case UserMessage():
                             if self.model_call is not None:
-                                # Mid-stream: buffer only. The ``queued_input_pane``
-                                # in the REPL renders ``pending_mid_stream()`` as
+                                # Mid-stream: buffer only. The REPL input pane
+                                # renders ``pending_mid_stream()`` as
                                 # a dim preview while the buffer is non-empty,
                                 # so the user has immediate visual feedback
                                 # without a duplicate bar in console. The bar
@@ -1513,17 +1518,43 @@ class AgentRuntime:
                                 )
                                 continue
                             self.model_call = None
+                            before_tool_spawn = None
                             if self.before_tool_spawn is not None:
-                                rejected = self.before_tool_spawn(msg)
-                                if rejected is not None:
-                                    self.inbox.push_front(
-                                        rejected,
-                                        *items[item_idx + 1 :],
-                                    )
-                                    break
+                                before_tool_spawn = self.before_tool_spawn(msg)
+                            if before_tool_spawn is not None and not isinstance(
+                                before_tool_spawn, UserMessage
+                            ):
+                                self.inbox.push_front(
+                                    before_tool_spawn,
+                                    *items[item_idx + 1 :],
+                                )
+                                break
                             self.append_history(msg)
                             self.publish(item)
-                            if self._mid_stream_queue:
+                            if isinstance(before_tool_spawn, UserMessage):
+                                for tc in msg.tool_calls:
+                                    self.append_history(
+                                        ToolResult(
+                                            call_id=tc.id,
+                                            parent_id=msg.id,
+                                            content="[detached]",
+                                        ),
+                                    )
+                                    detached_task = asyncio.create_task(
+                                        self._run_tool_and_post(tc, parent_id=msg.id),
+                                    )
+                                    detached_task.add_done_callback(
+                                        log_task_exception(
+                                            logger,
+                                            f"detached tool {tc.name!r} crashed",
+                                        ),
+                                    )
+                                    self.detached[tc.id] = detached_task
+                                committed = self._append_or_coalesce_user(
+                                    before_tool_spawn
+                                )
+                                self.publish(committed)
+                            elif self._mid_stream_queue:
                                 # User typed mid-stream. Cut their content in
                                 # line: relegate any tool calls to background
                                 # (placeholder + detached task; the result
@@ -1763,11 +1794,9 @@ class AgentRuntime:
                     )
                     committed = self._append_or_coalesce_user(coalesced)
                     queued.clear()
-                    # Publish so observers (renderers, persistence, the
-                    # REPL's ``make_queued_input_clearer``) see the
-                    # commit. Without this, the user bar never renders
-                    # in ``console_pane`` and ``queued_input`` is never
-                    # cleared.
+                    # Publish so observers (renderers, persistence, REPL queue
+                    # observers) see the commit. Without this, the user bar never
+                    # renders in ``console_pane``.
                     self.publish(committed)
 
                 if (
@@ -1858,12 +1887,6 @@ class AgentRuntime:
 
         """
         return tuple(self._mid_stream_queue)
-
-    def pop_pending_mid_stream(self) -> tuple[UserMessage, ...]:
-        """Remove and return mid-stream user messages awaiting drain."""
-        pending = tuple(self._mid_stream_queue)
-        self._mid_stream_queue.clear()
-        return pending
 
     def _should_call_model(self) -> bool:
         """Return True when history ends with content the model should answer."""

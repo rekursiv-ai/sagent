@@ -263,6 +263,56 @@ async def test_simple_text_response() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_before_tool_spawn_user_detaches_tools_before_cohort_start() -> None:
+    tool = StubTool(response="tool output", delay_sec=10.0)
+    agent, collector = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
+            AssistantMessage(text="urgent answered"),
+        ],
+        tools=[tool],
+    )
+    urgent = [UserMessage(text="urgent")]
+
+    def _before_tool_spawn(_msg: AssistantMessage) -> UserMessage | None:
+        return urgent.pop() if urgent else None
+
+    agent.before_tool_spawn = _before_tool_spawn
+
+    idle = asyncio.Event()
+
+    def _quit_on_idle(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle):
+            idle.set()
+            agent.inbox.push_back(Quit())
+
+    agent.observers.append(_quit_on_idle)
+    task = asyncio.create_task(agent.run_forever())
+    try:
+        agent.inbox.push_back(UserMessage(text="start"))
+        await asyncio.wait_for(idle.wait(), timeout=1.0)
+        await task
+
+        assert not collector.has(CohortStarted)
+        assert tool.call_count == 1
+        tool_results = [
+            m for m in agent.context().messages if isinstance(m, ToolResult)
+        ]
+        assert any(
+            r.call_id == "t1" and r.content == "[detached]" for r in tool_results
+        )
+        user_texts = [
+            m.text for m in agent.context().messages if isinstance(m, UserMessage)
+        ]
+        assert user_texts == ["start", "urgent"]
+    finally:
+        for detached_task in agent.detached.values():
+            _ = detached_task.cancel()
+        await asyncio.gather(*agent.detached.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_tool_call_round() -> None:
     """User -> model calls tool -> result -> model responds with text."""
     echo = StubTool(response="tool output")

@@ -26,7 +26,7 @@ from sagent.repl.input_pane import (
     render_input_pane,
     spawn_repl_pump,
 )
-from sagent.repl.input_queues import InputQueues
+from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.slash import (
     Clear as SlashClear,
@@ -381,6 +381,15 @@ async def test_dispatch_send_unknown_writes_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_send_invalid_target_regex_writes_target_error() -> None:
+    a = _agent()
+    p = RecordingPrinter()
+    exit_ = await _dispatch(a, SlashSend(target="/[/", content="hello"), p)
+    assert exit_ is False
+    assert any("invalid target regex" in error for error in p.tool_errors)
+
+
+@pytest.mark.asyncio
 async def test_dispatch_help_writes_help() -> None:
     a = _agent()
     p = RecordingPrinter()
@@ -439,6 +448,24 @@ async def test_dispatch_login_calls_run_repl() -> None:
     assert mock.called
 
 
+@pytest.mark.asyncio
+async def test_dispatch_login_flushes_local_deferred_queue() -> None:
+    a = _agent()
+    stub = cast(_StubAgent, a)
+    queues = InputQueues(deferred=[QueuedInputBlock(text="retry after login")])
+    _ = repl_input_mod._run_repl.do_login  # type: ignore[attr-defined] -- trigger proxy import
+    with patch.object(
+        repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+        "do_login",
+    ):
+        _ = await _dispatch(a, SlashLogin(), None, queues=queues)
+    assert not queues.has_any()
+    assert any(
+        isinstance(item, UserQueuedMessage) and item.text == "retry after login"
+        for item in stub.runtime.inbox.items
+    )
+
+
 def test_repl_pump_key_is_stable() -> None:
     # Used by ``spawn_repl_pump`` and the orchestrator to address the
     # hidden background entry; verify it doesn't drift.
@@ -459,7 +486,7 @@ async def test_input_pump_none_line_shuts_down() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     src = StubInputSource([None])
-    await _input_pump(a, src, None)
+    await _input_pump(a, src, None, None)
     assert stub.shutdown_calls == [False]
 
 
@@ -468,7 +495,7 @@ async def test_input_pump_empty_line_skipped() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     src = StubInputSource(["", None])
-    await _input_pump(a, src, None)
+    await _input_pump(a, src, None, None)
     # Empty line returned None from parse_slash and was ignored;
     # second None triggers shutdown.
     assert stub.shutdown_calls == [False]
@@ -479,7 +506,7 @@ async def test_input_pump_quit_exits_loop() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     src = StubInputSource(["/quit"])
-    await _input_pump(a, src, None)
+    await _input_pump(a, src, None, None)
     assert stub.shutdown_calls == [False]
 
 
@@ -488,7 +515,7 @@ async def test_input_pump_text_lines_pushed() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     src = StubInputSource(["first message", "second message", None])
-    await _input_pump(a, src, None)
+    await _input_pump(a, src, None, None)
     texts = [
         item.text for item in stub.runtime.inbox.items if isinstance(item, UserMessage)
     ]
@@ -502,7 +529,14 @@ async def test_input_pump_handles_dispatch_exception(
     a = _agent()
     p = RecordingPrinter()
 
-    async def boom(_a: object, _action: object, _p: object) -> bool:
+    async def boom(
+        _a: object,
+        _action: object,
+        _p: object,
+        *,
+        queues: object | None = None,
+    ) -> bool:
+        del queues
         raise RuntimeError("pump crashed")
 
     monkeypatch.setattr(
@@ -511,7 +545,7 @@ async def test_input_pump_handles_dispatch_exception(
     )
     # Send one line then None; pump should log the error and shut down.
     src = StubInputSource(["hello", None])
-    await _input_pump(a, src, p)
+    await _input_pump(a, src, None, p)
     assert any("pump crashed" in e for e in p.tool_errors)
 
 
@@ -545,7 +579,7 @@ async def test_input_pump_cancellation_propagates() -> None:
             await asyncio.Event().wait()
             return None
 
-    task = asyncio.create_task(_input_pump(a, _BlockingSource(), None))
+    task = asyncio.create_task(_input_pump(a, _BlockingSource(), None, None))
     # Let the pump enter ``source.next_line()``.
     await asyncio.sleep(0)
     _ = task.cancel()
@@ -600,7 +634,7 @@ def _as_real_agent(a: _FakeAgent) -> _RealAgent:
 
 
 def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
-    """Empty ``queued_input`` renders only the ``> `` prompt token."""
+    """Empty queues render only the ``> `` prompt token."""
     fp = render_input_pane(_as_real_agent(_FakeAgent()), InputQueues())
     assert isinstance(fp, FormattedText)
     assert list(fp) == [("class:input_pane", "> ")]
@@ -609,16 +643,11 @@ def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
 def test_render_input_pane_shows_mid_stream_queue() -> None:
     """Mid-stream ``UserMessage`` buffer must surface in ``queue_pane``.
 
-    Two buffers exist for pending user content: ``queued_input`` (Tab-
-    staged, REPL-local) and ``_mid_stream_queue`` (Enter-mid-stream,
+    Two buffers exist for pending user content: REPL-local queues
+    (urgent/deferred) and ``_mid_stream_queue`` (external mid-stream,
     runtime-internal). Both hold messages waiting for the model to be
-    ready. Today only ``queued_input`` renders in ``queued_input_pane``;
-    mid-stream sends are invisible despite being semantically queued,
-    so a user who hits Enter while the model is streaming sees a bar
-    fly past in scrollback but nothing in the queue pane -- making
-    "is my message queued?" unanswerable from the UI.
-
-    This test fails until ``render_input_pane`` reads both buffers.
+    ready. Both should render in the same dim queue preview so users can
+    tell whether their message is waiting for the model boundary.
     """
     fake = _FakeAgent()
     fake.runtime._mid_stream_queue = [
@@ -647,7 +676,8 @@ def test_render_input_pane_shows_mid_stream_queue() -> None:
 def test_render_input_pane_single_block_renders_full_text() -> None:
     """Single staged block renders verbatim above the prompt."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()), InputQueues(deferred=["hello world"])
+        _as_real_agent(_FakeAgent()),
+        InputQueues(deferred=[QueuedInputBlock(text="hello world")]),
     )
     parts = list(fp)
     assert parts[0] == ("class:queued_input_pane", "deferred: hello world")
@@ -658,7 +688,10 @@ def test_render_input_pane_single_block_renders_full_text() -> None:
 def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
     fake = _FakeAgent()
     fake.runtime._mid_stream_queue = [UserMessage(text="already sent")]
-    fp = render_input_pane(_as_real_agent(fake), InputQueues(deferred=["tab staged"]))
+    fp = render_input_pane(
+        _as_real_agent(fake),
+        InputQueues(deferred=[QueuedInputBlock(text="tab staged")]),
+    )
     rendered = "".join(t[1] for t in fp)
     assert "deferred: tab staged" in rendered
     assert "pending: already sent" in rendered
@@ -667,7 +700,14 @@ def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
 def test_render_input_pane_multiple_blocks_join_with_double_newline() -> None:
     r"""Multiple staged blocks render joined by ``\\n\\n``."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()), InputQueues(deferred=["a", "b", "c"])
+        _as_real_agent(_FakeAgent()),
+        InputQueues(
+            deferred=[
+                QueuedInputBlock(text="a"),
+                QueuedInputBlock(text="b"),
+                QueuedInputBlock(text="c"),
+            ]
+        ),
     )
     parts = list(fp)
     assert parts[0] == (
@@ -681,7 +721,8 @@ def test_render_input_pane_multiple_blocks_join_with_double_newline() -> None:
 def test_render_input_pane_preserves_multi_line_block_content() -> None:
     """Internal newlines in a block are preserved verbatim (no collapse)."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()), InputQueues(deferred=["line1\nline2"])
+        _as_real_agent(_FakeAgent()),
+        InputQueues(deferred=[QueuedInputBlock(text="line1\nline2")]),
     )
     parts = list(fp)
     assert parts[0] == ("class:queued_input_pane", "deferred: line1\nline2")
@@ -764,7 +805,7 @@ def test_quit_surfaces_queued_input_preview() -> None:
 
     session.prompt_async = _prompt_async
     console = MagicMock()
-    queues = InputQueues(deferred=["queued line"])
+    queues = InputQueues(deferred=[QueuedInputBlock(text="queued line")])
     src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line is None
@@ -780,12 +821,12 @@ def test_quit_without_console_swallows_preview() -> None:
         return "/quit"
 
     session.prompt_async = _prompt_async
-    queues = InputQueues(deferred=["queued"])
+    queues = InputQueues(deferred=[QueuedInputBlock(text="queued")])
     src = PromptToolkitInputSource(session, queues=queues, console=None)
     line = asyncio.run(src.next_line())
     assert line is None
     # buffer left alone when there's no console to surface to.
-    assert queues.deferred == ["queued"]
+    assert [b.text for b in queues.deferred] == ["queued"]
 
 
 if __name__ == "__main__":

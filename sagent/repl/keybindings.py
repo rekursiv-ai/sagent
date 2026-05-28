@@ -37,7 +37,7 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.repl.input_queues import InputQueues
+from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.types.runtime import UserMessage
 
 
@@ -52,22 +52,29 @@ class NavState:
     """Up/Down navigation cursor + snapshot.
 
     ``cursor == 0`` means "not navigating": the buffer holds the user's
-    typing and ``queued_input`` is shown in ``queued_input_pane`` as
-    usual. ``cursor > 0`` means a navigation is in progress; ``snapshot``
-    holds the ``(queued_input_copy, buffer_text)`` captured at the
-    moment the first Up was pressed. Final Down restores the snapshot;
-    Enter / Tab at ``cursor > 0`` commit the buffer as a queued block
-    and restore the rest of the snapshot. See the contract figure in
-    :mod:`repl.input_pane`.
+    typing and the REPL queue preview shows urgent/deferred blocks.
+    ``cursor > 0`` means navigation is in progress; ``snapshot`` holds
+    the queued blocks plus the original buffer text captured when Up was
+    pressed. Final Down restores the snapshot; Enter / Tab at
+    ``cursor > 0`` commits the buffer back into the queues and restores
+    the original buffer text.
     """
 
     cursor: int = 0
-    snapshot_queue: tuple[str, ...] = field(default_factory=tuple)
+    snapshot_queue: tuple[QueuedInputBlock, ...] = field(default_factory=tuple)
+    snapshot_urgent_count: int = 0
     snapshot_input: str = ""
 
-    def begin(self, queued: list[str], buffer_text: str) -> None:
+    def begin(
+        self,
+        queued: list[QueuedInputBlock],
+        buffer_text: str,
+        *,
+        urgent_count: int = 0,
+    ) -> None:
         """Capture a snapshot at the start of navigation."""
         self.snapshot_queue = tuple(queued)
+        self.snapshot_urgent_count = urgent_count
         self.snapshot_input = buffer_text
         self.cursor = 1
 
@@ -75,6 +82,7 @@ class NavState:
         """Clear the snapshot when navigation completes."""
         self.cursor = 0
         self.snapshot_queue = ()
+        self.snapshot_urgent_count = 0
         self.snapshot_input = ""
 
 
@@ -139,6 +147,7 @@ def _commit_queued_and_restore(
         nav.snapshot_queue,
         buf_text,
         edit_mode=nav.cursor == 1 and bool(nav.snapshot_queue),
+        urgent_count=nav.snapshot_urgent_count,
     )
     restored = nav.snapshot_input
     nav.end()
@@ -187,7 +196,7 @@ def _kb_submit(
         buf.cursor_position = len(buf.text)
         return
     if (
-        agent.work is not None
+        agent.runtime.model_call is not None
         and not agent.runtime.cohort
         and not agent.runtime.inbox.gate_armed
     ):
@@ -204,12 +213,13 @@ def _kb_defer(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Tab handler: stage buffer in ``queued_input`` for deferred dispatch.
+    """Tab handler: stage buffer for deferred dispatch.
 
-    At ``cursor == 0`` (no navigation): the text is appended to
-    ``queued_input`` and the buffer is cleared. No runtime push.
-    ``make_queued_input_committer`` in :mod:`repl.run_repl` commits the
-    queue as a single ``UserQueuedMessage`` on ``ModelIdle``.
+    At ``cursor == 0`` (no navigation): the text is appended to the
+    deferred queue and the buffer is cleared. ``make_input_queue_committer``
+    in :mod:`repl.run_repl` commits deferred input as a single
+    ``UserQueuedMessage`` on ``ModelIdle``; an already-armed user gate is
+    released immediately because no future ``ModelIdle`` will arrive.
 
     At ``cursor > 0`` (navigation active): same commit path as Enter --
     queue gets ``snapshot_queue + [buffer]`` and the buffer is restored
@@ -227,7 +237,7 @@ def _kb_defer(
         return
     queues.stage_deferred(text)
     if agent.runtime.inbox.gate_armed:
-        queues.commit_urgent(agent)
+        queues.commit_deferred_on_idle(agent)
     buf.append_to_history()
     buf.reset()
 
@@ -257,7 +267,10 @@ def _kb_down(
     if nav.cursor == 1:
         # Final Down: restore snapshot atomically.
         snapshot_input = nav.snapshot_input
-        queues.restore_from_snapshot(nav.snapshot_queue)
+        queues.restore_from_snapshot(
+            nav.snapshot_queue,
+            urgent_count=nav.snapshot_urgent_count,
+        )
         buf.text = snapshot_input
         buf.cursor_position = len(buf.text)
         nav.end()
@@ -266,7 +279,7 @@ def _kb_down(
     history_strings = _history_strings(buf)
     if case_1 and nav.cursor == 1:
         # Back to "queue dequeued" position.
-        buf.text = "\n\n".join(nav.snapshot_queue)
+        buf.text = "\n\n".join(block.text for block in nav.snapshot_queue)
     else:
         offset = nav.cursor - 1 if case_1 else nav.cursor
         buf.text = (
@@ -303,7 +316,7 @@ def _kb_up(
 ) -> None:
     """Up handler. See :mod:`repl.input_pane` for the full contract.
 
-    First Up: capture ``(queued_input_copy, buffer_text)`` snapshot
+    First Up: capture ``(queued_blocks, buffer_text)`` snapshot
     and either (case 1) lift the queue into the buffer, or (case 2)
     pull ``history[-1]`` into the buffer. Subsequent Ups walk older
     history. No-op when there's neither a queue nor history available.
@@ -314,12 +327,16 @@ def _kb_up(
         restore_blocks = queues.restore_blocks()
         if restore_blocks:
             # Case 1: lift queued input.
-            nav.begin(restore_blocks, buf.text)
+            nav.begin(
+                list(queues.snapshot_blocks()),
+                buf.text,
+                urgent_count=len(queues.urgent),
+            )
             buf.text = "\n\n".join(restore_blocks)
             queues.clear()
         elif history_strings:
             # Case 2: walk history[-1] in.
-            nav.begin(restore_blocks, buf.text)
+            nav.begin([], buf.text)
             buf.text = history_strings[-1]
         else:
             # No queue, no history -- nothing to do.
@@ -379,10 +396,13 @@ def _kb_ctrl_c(agent: Agent, queues: InputQueues, event: KeyPressEvent) -> None:
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()
         if queues.urgent:
-            event.current_buffer.text = "\n\n".join(queues.urgent)
+            event.current_buffer.text = "\n\n".join(
+                block.text for block in queues.urgent
+            )
             event.current_buffer.cursor_position = len(event.current_buffer.text)
             queues.urgent.clear()
         return
+    queues.clear()
     event.current_buffer.reset()
 
 
