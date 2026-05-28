@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import override
@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import asyncio
 import itertools
+import json
 import logging
 
 import pytest
@@ -41,7 +42,10 @@ from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 from sagent.types.runtime import (
     AgentIdle,
     AssistantMessage,
+    ChildEvent,
     ModelIdle,
+    ModelServiceSuspended,
+    ServiceErrorSnapshot,
     ToolResult,
     UserMessage,
 )
@@ -620,6 +624,21 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
 
 
 @pytest.mark.asyncio
+async def test_spawn_persistent_rejects_job_prefix_label() -> None:
+    parent = _make_parent()
+    child = _BoomAgent(
+        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+        tools=[],
+    )
+
+    t = AgentSpawn()
+    with _parent_context(parent):
+        result = t._spawn_persistent(child, "job-helper", "prompt")
+    assert result.is_error
+    assert "reserved" in result.content
+
+
+@pytest.mark.asyncio
 async def test_spawn_persistent_rejects_duplicate_label() -> None:
     """Duplicate label must error -- silent overwrite orphans the prior agent.
 
@@ -773,6 +792,88 @@ def test_forwarder_notify_on_asleep_ignores_other_events() -> None:
     fwd(ModelIdle())
 
     assert parent.runtime.inbox.empty()
+
+
+def test_forwarder_always_forwards_model_service_suspended() -> None:
+    parent = _make_parent()
+    seen: list[ChildEvent] = []
+    parent.runtime.observers.append(
+        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None
+    )
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
+    suspended = ModelServiceSuspended(
+        provider="OpenAISubscription",
+        auth="credentials",
+        account="default",
+        model_id="gpt-5.5",
+        retry_at=1_800_000_000.0,
+        delay_sec=120.0,
+        server_supplied=True,
+        error=ServiceErrorSnapshot(
+            type_name="RateLimitError",
+            message="limited",
+            status=429,
+        ),
+    )
+
+    fwd(suspended)
+
+    assert len(seen) == 1
+    assert seen[0].label == "child"
+    assert seen[0].inner is suspended
+
+
+@pytest.mark.asyncio
+async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -> None:
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=tmp_path,
+    )
+    child = Agent(
+        model=StubProviderModel(
+            model_id="gpt-5.5",
+            responses=[AssistantMessage(text="done")],
+        ),
+        model_spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="gpt-5.5",
+            account="default",
+        ),
+        tools=[],
+        system="child system",
+    )
+    spawn = AgentSpawn()
+
+    with _parent_context(parent):
+        result = spawn._spawn_persistent(
+            child, "fix-tools", "do work", notify_on_asleep=False
+        )
+
+    task = _persistent_tasks.get("fix-tools")
+    try:
+        assert not result.is_error
+        lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
+        lifecycle = [json.loads(line) for line in lines if "persistent_agent" in line]
+        assert len(lifecycle) == 1
+        record = lifecycle[0]
+        assert record["label"] == "fix-tools"
+        assert record["state"] == "running"
+        assert record["provider"] == "OpenAISubscription"
+        assert record["auth"] == "credentials"
+        assert record["account"] == "default"
+        assert record["model_id"] == "gpt-5.5"
+        assert record["tools"] == []
+        assert record["system"] == child.system
+        assert record["notify_on_asleep"] is False
+        assert record["session_dir"] == str(child.session_dir or "")
+    finally:
+        child.shutdown(force=True)
+        if task is not None:
+            _ = task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 @pytest.mark.asyncio
@@ -987,7 +1088,7 @@ def test_resolve_model_rejects_provider_outside_allow_list() -> None:
     result = t._resolve_model(
         provider="Anthropic",
         auth="env",
-        model_id="claude-opus-4-7",
+        model_id="gpt-5.5",
         account=None,
         parent_agent=parent,
     )

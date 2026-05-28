@@ -653,9 +653,37 @@ def test_format_tasks_lists_bg_jobs() -> None:
         {"Agent_0": other},
     ):
         out = format_tasks(_as_agent(agent))
-    assert "bg-1" in out
+    assert "Agent_0/bg-1" in out
     assert "Bash" in out
     assert "running" in out
+
+
+def test_format_tasks_namespaces_same_job_id_by_agent_label() -> None:
+    agent = _FakeAgent()
+    task = MagicMock()
+    task.done.return_value = False
+    task.cancelled.return_value = False
+    job = BackgroundTaskEntry(
+        task=task,
+        tool_name="Bash",
+        queue_id="job-1",
+        started=0.0,
+        kind="tool",
+        hidden=False,
+    )
+    first = MagicMock()
+    first.work = None
+    first.background = {"job-1": job}
+    second = MagicMock()
+    second.work = None
+    second.background = {"job-1": job}
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"Agent": first, "fix-tools": second},
+    ):
+        out = format_tasks(_as_agent(agent))
+    assert "Agent/job-1" in out
+    assert "fix-tools/job-1" in out
 
 
 def test_run_repl_invokes_replay_messages() -> None:

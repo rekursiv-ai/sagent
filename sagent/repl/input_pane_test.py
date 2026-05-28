@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -15,6 +14,7 @@ import pytest
 
 from sagent.agent.agent import Agent as _RealAgent
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.state import agent_registry
 from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -22,6 +22,7 @@ from sagent.repl.input_pane import (
     StubInputSource,
     _dispatch,
     _input_pump,
+    _resolve_targets,
     render_input_pane,
     spawn_repl_pump,
 )
@@ -37,6 +38,7 @@ from sagent.repl.slash import (
     ModelSwitch as SlashModelSwitch,
     Quit as SlashQuit,
     Recompact as SlashRecompact,
+    Send as SlashSend,
     Tasks as SlashTasks,
     Text as SlashText,
     Unknown as SlashUnknown,
@@ -81,6 +83,7 @@ class _StubAgent:
     killed: list[str] = field(default_factory=list)
     shutdown_calls: list[bool] = field(default_factory=list)
     background_registry: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+    _persistent: bool = False
 
     def halt(self) -> None:
         self.halted += 1
@@ -94,12 +97,23 @@ class _StubAgent:
     def shutdown(self, *, force: bool = False) -> None:
         self.shutdown_calls.append(force)
 
+    @property
+    def background(self) -> dict[str, BackgroundTaskEntry]:
+        return self.background_registry
+
     def register_background(self, job_id: str, entry: BackgroundTaskEntry) -> None:
         self.background_registry[job_id] = entry
+
+    def cancel_background(self, job_id: str) -> None:
+        self.background_registry.pop(job_id, None)
 
 
 def _agent() -> Agent:
     return cast("Agent", _StubAgent())
+
+
+def _persistent_agent() -> Agent:
+    return cast("Agent", _StubAgent(_persistent=True))
 
 
 @pytest.mark.asyncio
@@ -133,9 +147,6 @@ async def test_dispatch_halt_self_calls_halt() -> None:
 async def test_dispatch_halt_bare_name_does_not_halt_when_registry_label_suffixed() -> (
     None
 ):
-    """Regression: ``/halt AgentA`` must error when the live registry
-    label is ``AgentA_2`` (not match ``agent.name`` directly).
-    """
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
@@ -145,28 +156,22 @@ async def test_dispatch_halt_bare_name_does_not_halt_when_registry_label_suffixe
     ):
         _ = await _dispatch(a, SlashHalt(target="AgentA"), p)
     assert stub.halted == 0
-    assert any("unknown agent" in e for e in p.tool_errors)
+    assert any("no matching subagents" in e for e in p.tool_errors)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_halt_by_registry_label() -> None:
-    """``/halt <label>`` halts the agent registered under that label,
-    even when ``label`` equals the current agent's registry key.
-
-    Previously the dispatcher matched ``action.target`` against
-    ``agent.name`` (the constructor name), which is wrong when the
-    live registry key has a ``_N`` suffix from
-    ``unique_registry_label``. Looking up the registry directly
-    routes correctly in both cases.
-    """
     a = _agent()
-    stub = cast(_StubAgent, a)
+    child = _persistent_agent()
+    child_stub = cast(_StubAgent, child)
+    p = RecordingPrinter()
     with patch(
         "sagent.repl.input_pane.agent_registry",
-        new={"AgentA": a},
+        new={"fix-tools": child},
     ):
-        _ = await _dispatch(a, SlashHalt(target="AgentA"), None)
-    assert stub.halted == 1
+        _ = await _dispatch(a, SlashHalt(target="fix-tools"), p)
+    assert child_stub.halted == 1
+    assert "[/halt fix-tools] halted" in p.lines
 
 
 @pytest.mark.asyncio
@@ -178,17 +183,32 @@ async def test_dispatch_halt_unknown_agent_writes_error() -> None:
         new={},
     ):
         _ = await _dispatch(a, SlashHalt(target="Other"), p)
-    assert any("unknown agent" in e for e in p.tool_errors)
+    assert any("no matching subagents" in e for e in p.tool_errors)
 
 
 @pytest.mark.asyncio
-async def test_dispatch_kill_qid() -> None:
+async def test_dispatch_kill_job_id() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashKill(target="q-1"), p)
-    assert stub.killed == ["q-1"]
-    assert any("cancelled q-1" in line for line in p.lines)
+    _ = await _dispatch(a, SlashKill(target="job-1"), p)
+    assert stub.killed == ["job-1"]
+    assert any("cancelled job-1" in line for line in p.lines)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_kill_namespaced_subagent_job() -> None:
+    a = _agent()
+    child = _persistent_agent()
+    child_stub = cast(_StubAgent, child)
+    p = RecordingPrinter()
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"fix-tools": child},
+    ):
+        _ = await _dispatch(a, SlashKill(target="fix-tools/job-1"), p)
+    assert child_stub.killed == ["job-1"]
+    assert "[/kill fix-tools/job-1] cancelled" in p.lines
 
 
 @pytest.mark.asyncio
@@ -199,6 +219,21 @@ async def test_dispatch_kill_all() -> None:
     _ = await _dispatch(a, SlashKill(target="all"), p)
     assert stub.killed_all == 1
     assert any("cancelled all" in line for line in p.lines)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_kill_persistent_subagent() -> None:
+    a = _agent()
+    child = _persistent_agent()
+    child_stub = cast(_StubAgent, child)
+    p = RecordingPrinter()
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"fix-tools": child},
+    ):
+        _ = await _dispatch(a, SlashKill(target="fix-tools"), p)
+    assert child_stub.shutdown_calls == [True]
+    assert "[/kill fix-tools] cancelled" in p.lines
 
 
 @pytest.mark.asyncio
@@ -260,6 +295,81 @@ async def test_dispatch_defer_pushes_user_queued_message() -> None:
     assert any(
         isinstance(i, UserQueuedMessage) and i.text == "for later" for i in pushed
     )
+
+
+def test_resolve_targets_supports_exact_glob_brace_and_regex() -> None:
+    child1 = _persistent_agent()
+    child2 = _persistent_agent()
+    non_persistent = _agent()
+    agent_registry.update(
+        {
+            "fix-tools": child1,
+            "fix-compact": child2,
+            "helper": non_persistent,
+        }
+    )
+    try:
+        assert _resolve_targets("fix-tools") == ["fix-tools"]
+        assert _resolve_targets("fix-*") == ["fix-tools", "fix-compact"]
+        assert _resolve_targets("{fix-compact,helper,fix-tools}") == [
+            "fix-compact",
+            "fix-tools",
+        ]
+        assert _resolve_targets("/compact$/") == ["fix-compact"]
+    finally:
+        agent_registry.clear()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_sends_user_message_to_child() -> None:
+    a = _agent()
+    child = _persistent_agent()
+    child_stub = cast(_StubAgent, child)
+    p = RecordingPrinter()
+    agent_registry["fix-tools"] = child
+    try:
+        _ = await _dispatch(a, SlashSend(target="fix-tools", content="continue"), p)
+    finally:
+        agent_registry.clear()
+
+    assert any(
+        isinstance(item, UserMessage) and item.text == "continue"
+        for item in child_stub.runtime.inbox.items
+    )
+    assert "[/send fix-tools] sent" in p.lines
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_model_switch_routes_to_child() -> None:
+    a = _agent()
+    child = _persistent_agent()
+    p = RecordingPrinter()
+    agent_registry["fix-tools"] = child
+    _ = repl_input_mod._run_repl.do_switch_model  # type: ignore[attr-defined] -- trigger proxy import
+    try:
+        with patch.object(
+            repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+            "do_switch_model",
+        ) as mock:
+            _ = await _dispatch(
+                a,
+                SlashSend(target="fix-tools", content="/model claude-opus-4-7"),
+                p,
+            )
+    finally:
+        agent_registry.clear()
+
+    args = mock.call_args.args
+    assert args[0] is child
+    assert args[1] == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_unknown_writes_error() -> None:
+    a = _agent()
+    p = RecordingPrinter()
+    _ = await _dispatch(a, SlashSend(target="missing", content="hello"), p)
+    assert any("no matching subagents" in error for error in p.tool_errors)
 
 
 @pytest.mark.asyncio
@@ -436,11 +546,9 @@ async def test_input_pump_cancellation_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_halt_routes_to_registered_agent() -> None:
-    # When the target maps to a registered agent of the same Agent-like
-    # type, ``other.halt()`` is invoked instead of writing an error.
+async def test_dispatch_halt_routes_to_registered_persistent_agent() -> None:
     a = _agent()
-    other = _StubAgent(name="Other")
+    other = _StubAgent(name="Other", _persistent=True)
     with patch(
         "sagent.repl.input_pane.agent_registry",
         new={"Other": other},
@@ -451,11 +559,10 @@ async def test_dispatch_halt_routes_to_registered_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
-    # No printer + unknown agent target: silently no-op.
     a = _agent()
     with patch(
         "sagent.repl.input_pane.agent_registry",
-        new=cast("Mapping[str, object]", {}),
+        new={},
     ):
         exit_ = await _dispatch(a, SlashHalt(target="ghost"), None)
     assert exit_ is False

@@ -108,6 +108,14 @@ class Defer:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Send:
+    """User typed ``/send <target> <message>``; route to subagent(s)."""
+
+    target: str
+    content: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Unknown:
     """User typed an unrecognized ``/foo``; surface as an error."""
 
@@ -128,6 +136,7 @@ type SlashAction = (
     | Tasks
     | Text
     | Defer
+    | Send
     | Unknown
 )
 
@@ -137,7 +146,7 @@ QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 # Public list of supported commands; drives the unknown-command help line.
 _SUPPORTED = (
     "/help /clear /compact /recompact /model /provider /thinking /login /tasks"
-    " /halt /kill /defer /quit /exit"
+    " /halt /kill /defer /send /quit /exit"
 )
 
 
@@ -197,6 +206,12 @@ def parse_slash(line: str) -> SlashAction | None:
         if not arg:
             return Unknown(text="/defer requires <text>")
         return Defer(content=arg)
+    arg = _arg_after("/send", stripped)
+    if arg is not None:
+        target, sep, content = arg.partition(" ")
+        if not sep or not target or not content.strip():
+            return Unknown(text="/send requires <target> <message>")
+        return Send(target=target, content=content.strip())
     if stripped.startswith("/"):
         cmd = stripped.split(maxsplit=1)[0]
         return Unknown(text=f"unknown command: {cmd}. Supported: {_SUPPORTED}")

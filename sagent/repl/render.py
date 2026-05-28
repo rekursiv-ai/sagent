@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 import logging
+import time
 
 from sagent.repl.render_diff import find_stable_boundary
 from sagent.types.exceptions import (
@@ -39,6 +40,7 @@ from sagent.types.runtime import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
+    ModelServiceSuspended,
     ModelSwitchRejected,
     RuntimeEvent,
     StatusChanged,
@@ -59,7 +61,15 @@ HALT_MESSAGE_CONTEXT = (
     "agent halted — run /compact <hints>, /clear, or /model to reduce context"
 )
 
-type ChildItem = ToolResult | UserMessage | AssistantMessage
+
+def service_suspended_text(event: ModelServiceSuspended) -> str:
+    """Render concise service-suspension text for parent and child panes."""
+    clock = time.strftime("%H:%M:%S", time.localtime(event.retry_at))
+    reason = "rate-limited" if event.error.status == 429 else "temporarily blocked"
+    return f"[model service suspended: {reason}; resumes at {clock}]"
+
+
+type ChildItem = ToolResult | UserMessage | AssistantMessage | ModelServiceSuspended
 
 
 class Printer(Protocol):
@@ -293,6 +303,9 @@ class RenderObserver:
             case ModelResponseCancelled():
                 self._flush_stream()
                 self._printer.write_interrupted()
+            case ModelServiceSuspended():
+                self._flush_stream()
+                self._printer.write_dim_line(service_suspended_text(event))
             case ModelResponseError(exception=exc):
                 self._flush_stream()
                 # ``UserFacingError`` carries a polished, user-actionable
@@ -436,6 +449,8 @@ def _child_atomic_item(inner: RuntimeEvent) -> object | None:
         return inner
     if isinstance(inner, ToolResult):
         return inner
+    if isinstance(inner, ModelServiceSuspended):
+        return inner
     if isinstance(inner, UserMessage):
         return inner
     return None
@@ -457,7 +472,8 @@ sagent commands
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)
-  /halt     [<label>]         halt the current round; wait for redirect (Ctrl+C)
-  /kill     <qid|all>         cancel one or all outstanding tool tasks
+  /send     <target> <text>   send to subagent target: label, glob, {a,b}, /re/
+  /halt     [<target>]        halt self or matching subagents (Ctrl+C)
+  /kill     <qid|all|target>  cancel tool task(s) or matching subagents
   /defer    <text>            send as deferred (non-preempting); drains at ModelIdle\
 """

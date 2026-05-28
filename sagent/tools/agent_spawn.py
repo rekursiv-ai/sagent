@@ -28,6 +28,7 @@ import time
 import uuid
 
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.session_io import append_persistent_agent_lifecycle
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.providers import (
@@ -60,6 +61,7 @@ from sagent.types.runtime import (
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
+    ModelServiceSuspended,
     RuntimeEvent,
     ToolLabel,
     ToolResult,
@@ -578,6 +580,12 @@ class AgentSpawn:
         entry too, leaving both agents unreachable. The caller must
         kill the prior agent first.
         """
+        if label.startswith("job-"):
+            return ToolResult(
+                call_id="",
+                content=f"Persistent agent label {label!r} is reserved for job ids.",
+                is_error=True,
+            )
         if label in agent_registry:
             return ToolResult(
                 call_id="",
@@ -600,6 +608,14 @@ class AgentSpawn:
         )
         if self._session_root_dir is not None:
             child.session_dir = self._session_root_dir / label
+        run_id = uuid.uuid4().hex
+        self._persist_lifecycle(
+            child,
+            label,
+            run_id,
+            state="running",
+            notify_on_asleep=notify_on_asleep,
+        )
         agent_registry[label] = child
         forwarder = _build_forwarder(
             label,
@@ -650,6 +666,8 @@ class AgentSpawn:
                     started=time.time(),
                     hidden=False,
                     kind="persistent_subagent",
+                    persistent_run_id=run_id,
+                    notify_on_asleep=notify_on_asleep,
                 ),
             )
         if self.on_persistent_spawn is not None and external_queue is not None:
@@ -672,6 +690,28 @@ class AgentSpawn:
         return ToolResult(
             call_id="",
             content=f"Persistent agent started: {label}. {reply_path}",
+        )
+
+    def _persist_lifecycle(
+        self,
+        child: _Agent,
+        label: str,
+        run_id: str,
+        *,
+        state: str,
+        notify_on_asleep: bool,
+    ) -> None:
+        """Append a parent-side persistent-agent lifecycle record."""
+        parent_agent = _current_agent()
+        if parent_agent is None:
+            return
+        append_persistent_agent_lifecycle(
+            parent_agent,
+            child,
+            label,
+            run_id,
+            state=state,
+            notify_on_asleep=notify_on_asleep,
         )
 
     def _inherit(self, name: str, parent_agent: _Agent | None) -> object:
@@ -1030,9 +1070,9 @@ class _ChildForwarder:
         if isinstance(event, ModelResponsePartial):
             self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4
-        always_forward = isinstance(event, ModelResponseError) or (
-            isinstance(event, ToolResult) and event.is_error
-        )
+        always_forward = isinstance(
+            event, (ModelResponseError, ModelServiceSuspended)
+        ) or (isinstance(event, ToolResult) and event.is_error)
         if not always_forward and type(event) not in self._forward_set:
             return
         self._parent_agent.publish(ChildEvent(label=self._label, inner=event))

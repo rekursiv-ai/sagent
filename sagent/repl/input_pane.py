@@ -109,7 +109,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, override
 
 import asyncio
+import fnmatch
 import logging
+import re
 import time
 
 from prompt_toolkit.formatted_text import FormattedText
@@ -129,12 +131,14 @@ from sagent.repl.slash import (
     ModelSwitch as SlashModelSwitch,
     Quit as SlashQuit,
     Recompact as SlashRecompact,
+    Send as SlashSend,
     SlashAction,
     Tasks as SlashTasks,
     Text as SlashText,
     Thinking as SlashThinking,
     parse_slash,
 )
+from sagent.tools.background_task import shutdown_persistent_subagent
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import (
     UserFacingError,
@@ -144,6 +148,7 @@ from sagent.types.exceptions import (
 from sagent.types.runtime import (
     Clear,
     Compact,
+    Quit,
     Recompact,
     UserMessage,
     UserQueuedMessage,
@@ -161,6 +166,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from sagent.agent.agent import Agent
+    from sagent.agent.state import AgentLike
     from sagent.repl.render import Printer
 
 logger = logging.getLogger(__name__)
@@ -270,6 +276,132 @@ async def _input_pump(
                 printer.write_tool_error(f"[input pump] {detail}")
 
 
+def _dispatch_send(action: SlashSend, printer: Printer | None) -> None:
+    """Dispatch ``/send`` content to matching persistent subagents."""
+    targets = _resolve_targets(action.target)
+    if not targets:
+        if printer is not None:
+            printer.write_tool_error(f"[/send] no matching subagents: {action.target}")
+        return
+    for label in targets:
+        target = agent_registry[label]
+        if action.content.startswith("/"):
+            _dispatch_target_control(target, action.content, printer, label=label)
+        else:
+            target.runtime.inbox.push_back(UserMessage(text=action.content))
+            if printer is not None:
+                printer.write_line(f"[/send {label}] sent")
+
+
+def _dispatch_target_control(
+    target: AgentLike,
+    body: str,
+    printer: Printer | None,
+    *,
+    label: str,
+) -> None:
+    """Dispatch a slash command against one targeted subagent."""
+    action = parse_slash(body)
+    if isinstance(action, SlashModelSwitch):
+        _run_repl.do_switch_model(target, action.args, printer)
+        return
+    if isinstance(action, SlashThinking):
+        _run_repl.do_switch_thinking(target, action.command, printer)
+        return
+    if isinstance(action, SlashHalt):
+        target.halt()
+        return
+    if isinstance(action, SlashQuit):
+        target.runtime.inbox.push_back(Quit())
+        return
+    if printer is not None:
+        printer.write_tool_error(f"[/send {label}] unsupported control: {body}")
+
+
+def _resolve_targets(pattern: str) -> list[str]:
+    """Resolve an exact, glob, brace-list, or regex subagent target."""
+    labels = [
+        label
+        for label, agent in agent_registry.items()
+        if _is_persistent_subagent(agent)
+    ]
+    if pattern.startswith("{") and pattern.endswith("}"):
+        wanted = [part.strip() for part in pattern[1:-1].split(",") if part.strip()]
+        return [label for label in wanted if label in labels]
+    if pattern.startswith("/") and pattern.endswith("/"):
+        regex = re.compile(pattern[1:-1])
+        return [label for label in labels if regex.search(label)]
+    if any(char in pattern for char in "*?["):
+        return [label for label in labels if fnmatch.fnmatchcase(label, pattern)]
+    return [pattern] if pattern in labels else []
+
+
+def _is_persistent_subagent(agent: AgentLike) -> bool:
+    """Return true when ``agent`` is a live persistent subagent."""
+    return bool(getattr(agent, "_persistent", False))
+
+
+def _dispatch_halt(
+    agent: Agent,
+    action: SlashHalt,
+    printer: Printer | None,
+) -> None:
+    """Halt the current agent or matching persistent subagents."""
+    if not action.target:
+        agent.halt()
+        return
+    targets = _resolve_targets(action.target)
+    if not targets:
+        if printer is not None:
+            printer.write_tool_error(f"[/halt] no matching subagents: {action.target}")
+        return
+    for label in targets:
+        agent_registry[label].halt()
+        if printer is not None:
+            printer.write_line(f"[/halt {label}] halted")
+
+
+def _dispatch_kill(
+    agent: Agent,
+    action: SlashKill,
+    printer: Printer | None,
+) -> None:
+    """Cancel tool tasks or matching persistent subagents."""
+    if action.target == "all":
+        agent.kill_all_tools()
+        if printer is not None:
+            printer.write_line("[/kill] cancelled all tool tasks")
+        return
+    owner, sep, job_id = action.target.partition("/")
+    if sep:
+        target = agent_registry.get(owner)
+        if target is not None:
+            target.kill_tool(job_id)
+            if printer is not None:
+                printer.write_line(f"[/kill {owner}/{job_id}] cancelled")
+            return
+    targets = _resolve_targets(action.target)
+    if targets:
+        for label in targets:
+            _kill_persistent_subagent(agent, label)
+            if printer is not None:
+                printer.write_line(f"[/kill {label}] cancelled")
+        return
+    agent.kill_tool(action.target)
+    if printer is not None:
+        printer.write_line(f"[/kill] cancelled {action.target}")
+
+
+def _kill_persistent_subagent(agent: Agent, label: str) -> None:
+    """Cancel one persistent subagent through lifecycle-aware shutdown."""
+    job = agent.background.get(f"persistent:{label}")
+    if job is not None and job.kind == "persistent_subagent":
+        shutdown_persistent_subagent(agent, job)
+        agent.cancel_background(f"persistent:{label}")
+        return
+    agent_registry[label].shutdown(force=True)
+
+
 async def _dispatch(
     agent: Agent,
     action: SlashAction,
@@ -280,30 +412,10 @@ async def _dispatch(
         agent.shutdown(force=False)
         return True
     if isinstance(action, SlashHalt):
-        # Empty target halts self; non-empty target looks up the live
-        # registry label (which may have a ``_N`` suffix when default
-        # names collide). Comparing against ``agent.name`` here would
-        # halt the current agent on ``/halt Agent`` even if the live
-        # registry key is ``Agent_2`` -- a target/label mismatch.
-        if not action.target:
-            agent.halt()
-            return False
-        other = agent_registry.get(action.target)
-        if other is None:
-            if printer is not None:
-                printer.write_tool_error(f"[/halt] unknown agent: {action.target}")
-            return False
-        other.halt()
+        _dispatch_halt(agent, action, printer)
         return False
     if isinstance(action, SlashKill):
-        if action.target == "all":
-            agent.kill_all_tools()
-            if printer is not None:
-                printer.write_line("[/kill] cancelled all tool tasks")
-        else:
-            agent.kill_tool(action.target)
-            if printer is not None:
-                printer.write_line(f"[/kill] cancelled {action.target}")
+        _dispatch_kill(agent, action, printer)
         return False
     if isinstance(action, SlashClear):
         agent.runtime.inbox.push_back(Clear())
@@ -344,6 +456,9 @@ async def _dispatch(
         return False
     if isinstance(action, SlashDefer):
         agent.runtime.inbox.push_back(UserQueuedMessage(text=action.content))
+        return False
+    if isinstance(action, SlashSend):
+        _dispatch_send(action, printer)
         return False
     # Remaining variant: Unknown -- surface the parse error.
     if printer is not None:

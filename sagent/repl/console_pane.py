@@ -20,12 +20,16 @@ from sagent.repl.format import (
     print_user_bar,
     set_terminal_title,
 )
-from sagent.repl.render import render_tool_result
+from sagent.repl.render import (
+    render_tool_result,
+    service_suspended_text,
+)
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponseThinking,
+    ModelServiceSuspended,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -268,6 +272,8 @@ def _render_child_item(printer: ConsolePrinter, item: object) -> None:
         printer.write_tool_label(item.text)
     elif isinstance(item, ModelResponseThinking):
         printer.write_thinking(item.text)
+    elif isinstance(item, ModelServiceSuspended):
+        printer.write_dim_line(service_suspended_text(item))
     elif isinstance(item, ToolResult):
         render_tool_result(printer, item)
     elif isinstance(item, UserMessage):

@@ -17,8 +17,8 @@ Constants:
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import logging
@@ -33,6 +33,7 @@ else:
 
     httpx = lazy_import("httpx")  # 168ms
 
+from sagent.types import runtime as runtime_types
 from sagent.types.model import (
     Model,
     ModelRequest,
@@ -160,12 +161,6 @@ def extract_retry_after(error: Exception) -> float | None:
 def error_diagnostics(error: Exception) -> str:
     """Render a one-line forensic summary of an HTTP error.
 
-    Captures status code, rate-limit-relevant response headers, and a
-    truncated response body. Designed for ``publish_recoverable`` /
-    debug-log payloads so post-mortem analysis can distinguish
-    e.g. weekly-vs-5h-window rate limits without re-triggering the
-    error.
-
     Args:
       error: Exception to inspect, typically carrying ``.response``.
 
@@ -174,23 +169,36 @@ def error_diagnostics(error: Exception) -> str:
           there is nothing useful to surface.
 
     """
+    snapshot = service_error_snapshot(error)
     parts: list[str] = []
-    status = error_status(error)
-    if status is not None:
-        parts.append(f"status={status}")
+    if snapshot.status is not None:
+        parts.append(f"status={snapshot.status}")
+    if snapshot.headers:
+        parts.append(f"headers={dict(snapshot.headers)}")
+    if snapshot.body:
+        parts.append(f"body={snapshot.body!r}")
+    return " ".join(parts)
+
+
+def service_error_snapshot(error: Exception) -> runtime_types.ServiceErrorSnapshot:
+    """Capture sanitized provider error details for durable runtime events.
+
+    Args:
+      error: Exception to inspect, typically carrying ``.response``.
+
+    Returns:
+      snapshot: JSON-serializable error details safe for session logs.
+
+    """
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", {}) or {}
-    rate_headers = {
-        k: v
-        for k, v in headers.items()
-        if k.lower().startswith(("retry-after", "anthropic-ratelimit", "x-ratelimit"))
-    }
-    if rate_headers:
-        parts.append(f"headers={rate_headers}")
-    body = _response_body_excerpt(response)
-    if body:
-        parts.append(f"body={body!r}")
-    return " ".join(parts)
+    return runtime_types.ServiceErrorSnapshot(
+        type_name=type(error).__name__,
+        message=str(error),
+        status=error_status(error),
+        headers=_diagnostic_headers(headers),
+        body=_response_body_excerpt(response),
+    )
 
 
 async def send_with_retry(
@@ -203,6 +211,7 @@ async def send_with_retry(
     persistent_retry: bool,
     publish_recoverable: Callable[[str], None],
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
+    on_service_suspended: Callable[[float, float, bool, Exception], None] | None = None,
 ) -> ModelResponse:
     """Send with backoff and error classification.
 
@@ -229,6 +238,9 @@ async def send_with_retry(
           request that will be retried (e.g. StreamInterruptedError).
           The API billed for these tokens; this callback lets the
           caller account them.
+      on_service_suspended: Called when a recoverable provider error
+          schedules a retry sleep. Arguments are retry_at, delay_sec,
+          server_supplied, and the original exception.
 
     Returns:
       response: Completed model response.
@@ -347,7 +359,10 @@ async def send_with_retry(
                 delay,
                 f" {diagnostics}" if diagnostics else "",
             )
-            if on_text is not None:
+            retry_at = time.time() + delay
+            if on_service_suspended is not None:
+                on_service_suspended(retry_at, delay, server_delay is not None, e)
+            elif on_text is not None:
                 on_text(_format_retry_banner(delay, server_delay is not None))
             await asyncio.sleep(delay)
     raise RetriesExhaustedError(
@@ -399,6 +414,22 @@ def _make_stream_callback(
 
 
 _BODY_EXCERPT_CHARS = 500
+
+
+def _diagnostic_headers(headers: object) -> dict[str, str]:
+    """Return allowlisted response headers useful for rate-limit forensics."""
+    if not isinstance(headers, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in cast(Mapping[object, object], headers).items():
+        name = str(key).lower()
+        if (
+            name == "retry-after"
+            or name.startswith(("anthropic-ratelimit", "x-ratelimit"))
+            or name in {"request-id", "x-request-id"}
+        ):
+            out[str(key)] = str(value)
+    return out
 
 
 def _response_body_excerpt(response: object) -> str:

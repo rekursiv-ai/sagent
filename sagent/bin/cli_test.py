@@ -14,6 +14,7 @@ import subprocess
 import pytest
 
 from sagent.agent.session_io import SessionMeta
+from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     _apply_resume_model_defaults,
@@ -27,9 +28,11 @@ from sagent.bin.cli import (
     _provider_kwargs,
     _resolve_cli_thinking_state,
     _resolve_session_dir,
+    _resume_label,
     parse_agent_args,
     resolve_tools,
 )
+from sagent.testing import FakeAgent
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -131,6 +134,24 @@ def test_parse_cli_args_resume_no_value() -> None:
 def test_parse_cli_args_resume_with_hash() -> None:
     ns = _parse(["--resume", "abc123"])
     assert ns.resume == "abc123"
+
+
+def test_parse_cli_args_resume_persistent_defaults_enabled() -> None:
+    ns = _parse([])
+    assert ns.resume_persistent is True
+
+
+def test_parse_cli_args_no_resume_persistent() -> None:
+    ns = _parse(["--no-resume-persistent"])
+    assert ns.resume_persistent is False
+
+
+def test_resume_label_renames_collision() -> None:
+    agent_registry["fix-tools"] = FakeAgent()
+    try:
+        assert _resume_label("fix-tools") == "fix-tools_1"
+    finally:
+        agent_registry.pop("fix-tools", None)
 
 
 def test_resume_model_defaults_use_session_meta_when_no_explicit_flags() -> None:

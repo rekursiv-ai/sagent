@@ -85,10 +85,11 @@ def test_fake_agent_background_merges_runtime_detached() -> None:
 
         merged = a.background
 
-        assert merged["det-1"].kind == "detached"
-        assert merged["det-1"].queue_id == "det-1"
-        assert merged["det-1"].tool_name == "Read"
-        assert merged["det-1"].started == 123.0
+        assert merged["job-1"].kind == "detached"
+        assert merged["job-1"].queue_id == "job-1"
+        assert merged["job-1"].call_id == "det-1"
+        assert merged["job-1"].tool_name == "Read"
+        assert merged["job-1"].started == 123.0
         _ = task.cancel()
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:
@@ -104,8 +105,9 @@ def test_fake_agent_background_uses_defaults_for_unregistered_detached() -> None
 
         merged = a.background
 
-        assert merged["det-1"].tool_name == "?"
-        assert merged["det-1"].started > 0.0
+        assert merged["job-1"].tool_name == "?"
+        assert merged["job-1"].call_id == "det-1"
+        assert merged["job-1"].started > 0.0
         _ = task.cancel()
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:

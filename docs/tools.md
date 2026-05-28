@@ -83,7 +83,7 @@ class EchoTool:
 | `Glob` | Find files by filename pattern. | `pattern`; optional `path`, `max_results`. |
 | `Grep` | Search file contents with ripgrep. | `pattern`; filters and output controls. |
 | `List` | List directory entries. | `path`; optional `show_hidden`, `long`, `max_results`. |
-| `Bash` | Run shell commands. | `command`; optional `timeout`, `description`, `run_in_background`. |
+| `Bash` | Run shell commands. | `command`; optional `timeout`, `description`. |
 | `WebSearch` | Query web search backends. | `query`; optional domain filters and `backend`. |
 | `WebFetch` | Fetch and extract readable URL content. | `url`. |
 | `PaperSearch` | Search scholarly papers. | `query`; optional source, year, OA, limit filters. |
@@ -113,8 +113,6 @@ class EchoTool:
 ## Bash
 
 `Bash` runs `/bin/bash -c <command>` with the agent process permissions. The default timeout is 120 seconds and the maximum is 600 seconds.
-
-`run_in_background` starts a detached subprocess, returns its PID, and discards stdout/stderr. This is separate from `BackgroundTask` job control.
 
 When `Bash` is constructed with peer tools, it can warn the model when a dedicated tool should be used instead of a shell command.
 
