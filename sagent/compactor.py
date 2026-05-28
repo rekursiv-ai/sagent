@@ -36,7 +36,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
+from sagent.types.tape import (
+    ContextSplice,
+    TapeRecord,
+    TapeRef,
+    full_tape_mask,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -207,10 +212,11 @@ class SummaryCompactor:
         compact_model = self._model or model
         # The barrier mask covers everything currently on the tape so
         # every alive splice gets absorbed; the new summary becomes the
-        # sole live editor.
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = (
-            ((tape[0].ref, tape[-1].ref),) if tape else ()
-        )
+        # sole live editor. ``full_tape_mask`` partitions by session_id
+        # so a resumed session whose tape carries multiple namespaces
+        # (legacy ``""`` plus the persisted id) still passes
+        # ``_validate_mask_disjoint``.
+        mask = full_tape_mask(tape)
         history = _strip_attachments(list(context))
         direction = self._direction
         effective_keep = self._keep_recent
