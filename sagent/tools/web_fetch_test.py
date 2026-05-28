@@ -480,6 +480,58 @@ def test_fetch_body_reddit_listing_json_path() -> None:
     assert captured["url"] == "https://www.reddit.com/r/foo/new/.json?limit=25"
 
 
+def test_fetch_body_reddit_listing_json_403_falls_back_to_feed() -> None:
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
+
+    fetched: list[str] = []
+
+    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
+        fetched.append(url)
+        if url.endswith(".json?limit=25"):
+            raise FetchError(url=url, status=403, headers={}, body=b"blocked")
+        return (
+            b'<feed xmlns="http://www.w3.org/2005/Atom"><title>fallback</title></feed>'
+        )
+
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        side_effect=fake_safe_fetch,
+    ):
+        body, kind = asyncio.run(
+            _fetch_body(
+                "https://www.reddit.com/r/foo/new.json?limit=25",
+                method="GET",
+                json_body=None,
+                form_body=None,
+            ),
+        )
+    assert kind == _KIND_RSS
+    assert body.startswith(b"<feed")
+    assert fetched == [
+        "https://www.reddit.com/r/foo/new.json?limit=25",
+        "https://www.reddit.com/r/foo/new/.rss?limit=25",
+    ]
+
+
+def test_fetch_body_reddit_direct_feed_is_rss() -> None:
+    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
+
+    with patch(
+        "sagent.tools.web_fetch._safe_fetch",
+        return_value=b'<feed xmlns="http://www.w3.org/2005/Atom"><title>feed</title></feed>',
+    ):
+        body, kind = asyncio.run(
+            _fetch_body(
+                "https://www.reddit.com/r/foo/new/.rss",
+                method="GET",
+                json_body=None,
+                form_body=None,
+            ),
+        )
+    assert kind == _KIND_RSS
+    assert body.startswith(b"<feed")
+
+
 def test_extract_text_reddit_listing_formats_posts() -> None:
     from sagent.tools.web_fetch import _extract_text  # noqa: PLC0415
 
@@ -1142,6 +1194,29 @@ def test_format_rss_expands_google_news_cluster() -> None:
     assert out.count("Lead headline") == 1
     assert "- [Sibling one](https://sib.example/1) -- CNN" in out
     assert "- [Sibling two](https://sib.example/2) -- BBC" in out
+
+
+def test_format_rss_renders_atom_entries() -> None:
+    """Atom ``<entry>`` feeds render the same listing-friendly shape."""
+    feed = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<feed xmlns="http://www.w3.org/2005/Atom">'
+        b"<title>newest submissions : LocalLLaMA</title>"
+        b"<entry>"
+        b"<title>Granite 4.1 Architecture Changes?</title>"
+        b"<author><name>/u/the-salami</name></author>"
+        b"<updated>2026-05-28T17:44:55+00:00</updated>"
+        b"<link href='https://www.reddit.com/r/LocalLLaMA/comments/abc/post/'/>"
+        b"<content type='html'>&lt;p&gt;Why pure transformer?&lt;/p&gt;</content>"
+        b"</entry>"
+        b"</feed>"
+    )
+    out = _format_rss(feed)
+    assert "# newest submissions : LocalLLaMA" in out
+    assert "## Granite 4.1 Architecture Changes?" in out
+    assert "/u/the-salami -- 2026-05-28T17:44:55+00:00" in out
+    assert "https://www.reddit.com/r/LocalLLaMA/comments/abc/post/" in out
+    assert "Why pure transformer?" in out
 
 
 def test_format_rss_invalid_xml_returns_raw_decoded() -> None:
