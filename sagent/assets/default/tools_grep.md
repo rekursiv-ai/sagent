@@ -4,6 +4,6 @@ Ripgrep-backed content search. Never shell out to `grep`/`rg`.
 - `path` defaults to the session cwd; pass absolute to scope elsewhere.
 - Narrow with `glob` or `type`; exclude with `exclude`.
 - `output_mode`: `files_with_matches` (default), `content`, `count`.
-- `multiline: true` -- `.` crosses newlines.
+- `multiline: true` -- pattern may match across newlines (literal `\n`, or `.` spanning lines). Without it, `\n` in the pattern errors.
 - `pcre: true` -- PCRE2 (lookaround, backrefs).
 - Multi-round exploration: delegate to subagent.

@@ -18,7 +18,7 @@ from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.lib import last_models
 from sagent.providers import Google
-from sagent.repl.input_queues import InputQueues
+from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.render import (
     RecordingPrinter,
     make_render_observer,
@@ -39,6 +39,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
     ModelIdle,
+    ModelResponseComplete,
     ModelResponseError,
     Quit,
     RuntimeEvent,
@@ -91,6 +92,91 @@ def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
         account=parsed.account if parsed.account_set else None,
     )
     return target.provider, target.auth, target.account, target.model_id
+
+
+def test_input_queue_committer_installs_before_tool_spawn_hook() -> None:
+    agent = _QueueAgent()
+    queues = InputQueues(
+        urgent=[QueuedInputBlock(text="interrupt now")],
+        deferred=[QueuedInputBlock(text="later")],
+    )
+    make_input_queue_committer(_as_queue_agent(agent), queues)
+    hook = agent.runtime.before_tool_spawn
+    assert callable(hook)
+    pushed = hook(AssistantMessage(text="tool next"))
+    assert queues.urgent == []
+    assert [b.text for b in queues.deferred] == ["later"]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "interrupt now"
+
+
+def test_input_queue_committer_preserves_existing_before_tool_spawn_hook() -> None:
+    original_error = ModelResponseError(RuntimeError("too many tool rounds"))
+
+    def _original(_message: AssistantMessage) -> RuntimeEvent | None:
+        return original_error
+
+    agent = _QueueAgent()
+    agent.runtime.before_tool_spawn = _original
+    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+
+    make_input_queue_committer(_as_queue_agent(agent), queues)
+
+    hook = agent.runtime.before_tool_spawn
+    assert callable(hook)
+    assert hook(AssistantMessage(text="tool next")) is original_error
+    assert [block.text for block in queues.urgent] == ["interrupt now"]
+
+
+def test_input_queue_committer_composes_existing_empty_hook() -> None:
+    seen: list[AssistantMessage] = []
+
+    def _original(message: AssistantMessage) -> RuntimeEvent | None:
+        seen.append(message)
+        return None
+
+    agent = _QueueAgent()
+    agent.runtime.before_tool_spawn = _original
+    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+
+    make_input_queue_committer(_as_queue_agent(agent), queues)
+
+    hook = agent.runtime.before_tool_spawn
+    assert callable(hook)
+    message = AssistantMessage(text="tool next")
+    pushed = hook(message)
+    assert seen == [message]
+    assert isinstance(pushed, UserMessage)
+    assert pushed.text == "interrupt now"
+    assert queues.urgent == []
+
+
+def test_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
+    agent = _QueueAgent()
+    queues = InputQueues()
+    observer = make_input_queue_committer(_as_queue_agent(agent), queues)
+    later_error = ModelResponseError(RuntimeError("later hook"))
+
+    def _later(_message: AssistantMessage) -> RuntimeEvent | None:
+        return later_error
+
+    agent.runtime.before_tool_spawn = _later
+    observer(ModelIdle())
+
+    hook = agent.runtime.before_tool_spawn
+    assert callable(hook)
+    assert hook(AssistantMessage(text="tool next")) is later_error
+
+
+def test_input_queue_committer_deferred_does_not_fire_on_model_response_complete() -> (
+    None
+):
+    agent = _QueueAgent()
+    queues = InputQueues(deferred=[QueuedInputBlock(text="later")])
+    observer = make_input_queue_committer(_as_queue_agent(agent), queues)
+    observer(ModelResponseComplete(message=AssistantMessage(text="done")))
+    assert [b.text for b in queues.deferred] == ["later"]
+    assert agent.runtime.inbox.pushed == []
 
 
 def test_parse_model_args_no_tokens_returns_usage_string() -> None:
@@ -316,6 +402,21 @@ class _FakeAgent:
 
 
 def _as_agent(a: _FakeAgent) -> Agent:
+    return cast(Agent, a)
+
+
+@dataclass(slots=True, kw_only=True)
+class _QueueRuntime:
+    inbox: _FakeInbox = field(default_factory=_FakeInbox)
+    before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None] | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class _QueueAgent:
+    runtime: _QueueRuntime = field(default_factory=_QueueRuntime)
+
+
+def _as_queue_agent(a: _QueueAgent) -> Agent:
     return cast(Agent, a)
 
 
@@ -734,7 +835,13 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 @pytest.mark.asyncio
 async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> None:
     """``ModelIdle`` with non-empty queue → coalesced ``UserQueuedMessage`` pushed; queue cleared."""
-    queues = InputQueues(deferred=["elephant", "banana", "chair"])
+    queues = InputQueues(
+        deferred=[
+            QueuedInputBlock(text="elephant"),
+            QueuedInputBlock(text="banana"),
+            QueuedInputBlock(text="chair"),
+        ]
+    )
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = make_input_queue_committer(cast(Agent, holder), queues)
@@ -749,13 +856,13 @@ async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> Non
 
 def test_make_input_queue_committer_ignores_non_idle_events() -> None:
     """Non-``ModelIdle`` events leave ``queued_input`` and the inbox untouched."""
-    queues = InputQueues(deferred=["elephant"])
+    queues = InputQueues(deferred=[QueuedInputBlock(text="elephant")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = make_input_queue_committer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
-    assert queues.deferred == ["elephant"]
+    assert [b.text for b in queues.deferred] == ["elephant"]
     assert runtime.inbox._queue.empty()
 
 
@@ -772,7 +879,9 @@ def test_make_input_queue_committer_ignores_idle_when_empty() -> None:
 @pytest.mark.asyncio
 async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
     """Resume starts already idle, so emit one idle edge for queue flushers."""
-    queues = InputQueues(deferred=["were we implementing issue 25?"])
+    queues = InputQueues(
+        deferred=[QueuedInputBlock(text="were we implementing issue 25?")]
+    )
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
@@ -788,7 +897,7 @@ async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
 
 def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
     """Startup idle pulse must not mask a pending model-triggering turn."""
-    queues = InputQueues(deferred=["for later"])
+    queues = InputQueues(deferred=[QueuedInputBlock(text="for later")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     runtime.append_history(UserMessage(text="answer this first"))
@@ -796,7 +905,7 @@ def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
 
     _publish_startup_idle_if_settled(runtime)
 
-    assert queues.deferred == ["for later"]
+    assert [b.text for b in queues.deferred] == ["for later"]
     assert runtime.inbox._queue.empty()
 
 
@@ -832,7 +941,13 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     queue back as ``UserQueuedMessage``. The runtime then drains it
     at the next gate-section pass and fires a fresh round.
     """
-    queues = InputQueues(deferred=["elephant", "banana", "chair"])
+    queues = InputQueues(
+        deferred=[
+            QueuedInputBlock(text="elephant"),
+            QueuedInputBlock(text="banana"),
+            QueuedInputBlock(text="chair"),
+        ]
+    )
     agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="committed"))
 
     class _Holder:

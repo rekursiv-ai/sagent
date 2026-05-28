@@ -81,7 +81,13 @@ _GREP_VALUE_FLAGS: frozenset[str] = frozenset({"-B", "-A", "-C"})
 # ``exclude``. Both forms (``--flag=VAL`` and ``--flag VAL``) are
 # accepted.
 _GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
-_NUDGE = "grep via Bash is a bad UX. Use the Grep tool."
+
+# Bash executables we redirect to the Grep tool. ``rg`` shares grep's
+# basic shape (``rg PATTERN [PATH]`` with the same -i/-n/-l/-c/-A/-B/-C
+# flags), so the same parsers apply; ripgrep-only flags like ``-U`` or
+# ``-t`` fall through and the nudge bails on those shapes.
+_GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
+_NUDGE = "grep/rg via Bash is a bad UX. Use the Grep tool."
 
 
 class Grep:
@@ -391,12 +397,12 @@ def _kw_bool(
 
 
 def _match_single_grep(trees: Sequence[Node]) -> str | None:
-    """Match ``grep …`` (optionally prefixed by ``cd X &&``)."""
+    """Match ``grep …`` or ``rg …`` (optionally prefixed by ``cd X &&``)."""
     unwrapped = unwrap_cd_prefix(trees)
     if unwrapped is None:
         return None
     _, cmd = unwrapped
-    if cmd.exe != "grep" or cmd.env_prefix:
+    if cmd.exe not in _GREP_EXES or cmd.env_prefix:
         return None
     if not _parse_grep_args(cmd.args, positional_path=True):
         return None
@@ -404,15 +410,20 @@ def _match_single_grep(trees: Sequence[Node]) -> str | None:
 
 
 def _match_pipeline_grep(trees: Sequence[Node]) -> str | None:
-    """Match ``find X … | xargs grep …``, ``cat FILE | grep …``, or
-    ``grep … | {head,tail,less,more,cat}``.
+    """Match grep/rg shapes wired through a pipeline.
+
+    Shapes:
+    - ``find X … | xargs {grep,rg} …``
+    - ``cat FILE | {grep,rg} …``
+    - ``{grep,rg} … | {head,tail,less,more,cat}``
+    - ``{grep,rg} … | wc -l``
     """
     pair = match_pipeline(trees)
     if pair is None:
         return None
     first, second = pair
 
-    # Shape 1: find … | xargs grep …
+    # Shape 1: find … | xargs {grep,rg} …
     if first.exe == "find" and second.exe == "xargs":
         if not _parse_find_for_grep(first.args):
             return None
@@ -423,24 +434,24 @@ def _match_pipeline_grep(trees: Sequence[Node]) -> str | None:
             return None
         return _NUDGE
 
-    # Shape 2: cat FILE | grep PATTERN
-    if first.exe == "cat" and second.exe == "grep":
+    # Shape 2: cat FILE | {grep,rg} PATTERN
+    if first.exe == "cat" and second.exe in _GREP_EXES:
         if len(first.args) != 1 or first.args[0].startswith("-"):
             return None
         if not _parse_grep_args(second.args, positional_path=False):
             return None
         return _NUDGE
 
-    # Shape 3: grep … | DISPLAY_SHAPER -- user is just truncating or
+    # Shape 3: {grep,rg} … | DISPLAY_SHAPER -- user is just truncating or
     # paginating Grep's output; Grep tool handles both natively.
-    if first.exe == "grep" and second.exe in _DISPLAY_SHAPERS:
+    if first.exe in _GREP_EXES and second.exe in _DISPLAY_SHAPERS:
         if not _parse_grep_args(first.args, positional_path=True):
             return None
         return _NUDGE
 
-    # Shape 4: grep … | wc -l -- line count equals Grep output_mode="count".
+    # Shape 4: {grep,rg} … | wc -l -- line count equals Grep output_mode="count".
     if (
-        first.exe == "grep"
+        first.exe in _GREP_EXES
         and second.exe == "wc"
         and second.args == ("-l",)
         and _parse_grep_args(first.args, positional_path=True)
@@ -511,11 +522,11 @@ _XARGS_PLUMBING_FLAGS: frozenset[str] = frozenset(
 
 
 def _strip_xargs_prefix(args: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Return the ``grep …`` tail of an ``xargs [-0|-r …] grep …`` call.
+    """Return the search-command tail of ``xargs [-0|-r …] {grep,rg} …``.
 
     Bails on any xargs option outside our plumbing allowlist (``-I``,
-    ``-n``, ``-P``, etc. change how grep is invoked per-file, which
-    doesn't round-trip to a single Grep tool call).
+    ``-n``, ``-P``, etc. change how the search is invoked per-file,
+    which doesn't round-trip to a single Grep tool call).
     """
     i = 0
     while i < len(args):
@@ -525,7 +536,7 @@ def _strip_xargs_prefix(args: tuple[str, ...]) -> tuple[str, ...] | None:
             continue
         if a.startswith("-"):
             return None
-        if a != "grep":
+        if a not in _GREP_EXES:
             return None
         return args[i + 1 :]
     return None
@@ -609,6 +620,12 @@ def _grep_rg(
     )
     if result.returncode >= 2:
         err = result.stderr.strip() or "unknown"
+        if not multiline and 'the literal "\\n" is not allowed' in err:
+            err = (
+                "pattern references a newline but multiline is off. "
+                'Pass multiline=true to match across lines (literal "\\n" '
+                "or `.` spanning newlines)."
+            )
         return ToolResult(
             call_id="",
             content=f"ripgrep error (exit {result.returncode}): {err}",

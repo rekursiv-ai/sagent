@@ -51,15 +51,13 @@ Case 2 -- queue is empty::
 Enter
 ~~~~~
 
-- No navigation active (``cursor == 0``): preempt-dispatch as today --
-  push ``UserMessage`` straight to the runtime, cutting in line over any
-  cohort/stream. ``queued_input`` is not touched. Snapshot discarded.
-- Navigation active (``cursor > 0``): commit the buffer as a queued
-  block. Case 1 appends to ``queued_input``; case 2 creates the queue
-  from the buffer's content. The snapshot is discarded; ``cursor``
-  returns to 0; the dim ``queued_input_pane`` redraws with the new
-  state. The runtime sees the queued blocks at the next ``ModelIdle``
-  via ``make_queued_input_committer``.
+- No navigation active (``cursor == 0``): send immediately when idle,
+  during tool wait, or while awaiting user input. While a model is
+  streaming, stage the text in the urgent queue; it is still editable
+  with Up and fires at ``ModelResponseComplete`` before tool calls run.
+- Navigation active (``cursor > 0``): commit the buffer back to the
+  queued lanes, preserving urgent/deferred lane metadata from the
+  snapshot. The snapshot is discarded; ``cursor`` returns to 0.
 - Text ending in ``\``: backslash continuation -- replace trailing
   ``\`` with literal ``\n``, stay in buffer, do not dispatch.
 - Empty buffer: nothing.
@@ -68,13 +66,14 @@ Enter
 Tab
 ~~~
 
-Tab stages the buffer in ``queued_input`` (REPL-local). No runtime
-push. ``make_queued_input_committer`` in :mod:`repl.run_repl` commits
-the joined queue as a single ``UserQueuedMessage`` on ``ModelIdle``.
+Tab stages the buffer in the deferred queue (REPL-local). The
+``make_input_queue_committer`` observer commits deferred blocks as a
+single ``UserQueuedMessage`` on ``ModelIdle``. If the runtime is already
+awaiting user input, Tab commits immediately because no future
+``ModelIdle`` will release the gate.
 
-``queued_input`` is purely a Tab-staging buffer plus the post-navigation
-commit target. Up-arrow's lift is a true retract because nothing was
-ever in the runtime to begin with.
+Urgent/deferred queues are local draft state. Up-arrow's lift is a true
+retract because the queued text has not entered runtime history.
 
 Headless callers without a Tab key use the ``/defer <text>`` slash
 command, which pushes ``UserQueuedMessage`` directly through the pump
@@ -96,12 +95,10 @@ Input-pane rendering
 ~~~~~~~~~~~~~~~~~~~~
 
 :func:`render_input_pane` builds the prompt-toolkit ``FormattedText``
-for the input zone: an optional dim ``queued_input_pane`` preview
-above the ``> `` prompt sigil whenever ``queued_input`` is
-non-empty. The preview shows all staged blocks joined by ``\n\n``.
-The runtime's ``make_queued_input_clearer`` observer empties
-``queued_input`` once the runtime publishes the committed
-``UserMessage`` event so the dim preview stops showing stale entries.
+for the input zone: an optional dim queue preview above the ``> ``
+prompt sigil whenever urgent/deferred local queues or runtime pending
+mid-stream messages exist. Local queue entries are removed by the
+keybinding/observer that commits or restores them.
 """
 
 from __future__ import annotations
@@ -210,6 +207,7 @@ def spawn_repl_pump(
     agent: Agent,
     source: InputSource,
     *,
+    queues: InputQueues | None = None,
     printer: Printer | None = None,
 ) -> asyncio.Task[None]:
     """Spawn the REPL input pump as a hidden background task.
@@ -217,6 +215,7 @@ def spawn_repl_pump(
     Args:
       agent: Agent to drive.
       source: Where lines come from (prompt-toolkit in production).
+      queues: Optional REPL-local queues to flush after slash recovery commands.
       printer: Optional sink for status echoes (``/help``, ``/tasks``,
           ``/login``, ``/model``).
 
@@ -224,7 +223,7 @@ def spawn_repl_pump(
       task: The running pump task.
 
     """
-    task = asyncio.create_task(_input_pump(agent, source, printer))
+    task = asyncio.create_task(_input_pump(agent, source, queues, printer))
     task.add_done_callback(
         log_task_exception(logger, "REPL input pump crashed"),
     )
@@ -245,6 +244,7 @@ def spawn_repl_pump(
 async def _input_pump(
     agent: Agent,
     source: InputSource,
+    queues: InputQueues | None,
     printer: Printer | None,
 ) -> None:
     """Read lines from ``source`` and dispatch the parsed action."""
@@ -257,7 +257,7 @@ async def _input_pump(
             action = parse_slash(line)
             if action is None:
                 continue
-            should_exit = await _dispatch(agent, action, printer)
+            should_exit = await _dispatch(agent, action, printer, queues=queues)
             if should_exit:
                 return
         except asyncio.CancelledError:
@@ -279,7 +279,12 @@ async def _input_pump(
 
 def _dispatch_send(action: SlashSend, printer: Printer | None) -> None:
     """Dispatch ``/send`` content to matching persistent subagents."""
-    targets = _resolve_targets(action.target)
+    try:
+        targets = _resolve_targets(action.target)
+    except UserFacingError as exc:
+        if printer is not None:
+            printer.write_tool_error(f"[/send] {exc}")
+        return
     if not targets:
         if printer is not None:
             printer.write_tool_error(f"[/send] no matching subagents: {action.target}")
@@ -330,7 +335,10 @@ def _resolve_targets(pattern: str) -> list[str]:
         wanted = [part.strip() for part in pattern[1:-1].split(",") if part.strip()]
         return [label for label in wanted if label in labels]
     if pattern.startswith("/") and pattern.endswith("/"):
-        regex = re.compile(pattern[1:-1])
+        try:
+            regex = re.compile(pattern[1:-1])
+        except re.error as exc:
+            raise UserFacingError(f"invalid target regex: {exc}") from exc
         return [label for label in labels if regex.search(label)]
     if any(char in pattern for char in "*?["):
         return [label for label in labels if fnmatch.fnmatchcase(label, pattern)]
@@ -402,6 +410,8 @@ async def _dispatch(
     agent: Agent,
     action: SlashAction,
     printer: Printer | None,
+    *,
+    queues: InputQueues | None = None,
 ) -> bool:
     """Dispatch one parsed slash action; return True to exit the pump."""
     if isinstance(action, SlashQuit):
@@ -438,6 +448,8 @@ async def _dispatch(
         return False
     if isinstance(action, SlashLogin):
         await _run_repl.do_login(agent, printer)
+        if queues is not None:
+            queues.commit_deferred_on_idle(agent)
         return False
     if isinstance(action, SlashHelp):
         if printer is not None:
