@@ -6,20 +6,35 @@ Includes:
   - :func:`pkce_pair`: PKCE verifier/challenge generator.
   - :func:`resolve_account` and :func:`credentials_path`: per-account
     credentials-file routing shared by every subscription provider.
+  - :func:`credential_file_lock`: cross-process exclusive lock around
+    the read-disk → maybe-POST → write-disk refresh sequence so
+    concurrent processes can't race on refresh-token rotation.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock as _ThreadLock
 from typing import cast, override
 
+import asyncio
 import base64
+import contextlib
+import fcntl
 import hashlib
 import http.server as http_server
+import logging
+import os
 import re
 import secrets
 import threading
 import urllib.parse
+
+
+logger = logging.getLogger(__name__)
 
 
 _DEFAULT_ACCOUNT = "default"
@@ -276,3 +291,80 @@ def pkce_pair() -> tuple[str, str]:
     digest = hashlib.sha256(verifier.encode()).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
     return verifier, challenge
+
+
+@dataclass(slots=True, kw_only=True)
+class _PathLock:
+    """Per-path lock pair: asyncio (in-process) + lazily-opened fcntl fd."""
+
+    path: Path
+    async_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _fd: int | None = None
+
+    def open_fd(self) -> int:
+        """Open the sidecar lockfile lazily; reuse the fd across acquisitions."""
+        if self._fd is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        return self._fd
+
+
+_LOCK_REGISTRY: dict[str, _PathLock] = {}
+_LOCK_REGISTRY_GUARD = _ThreadLock()
+
+
+def _path_lock_for(lock_path: Path) -> _PathLock:
+    """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
+    key = str(lock_path.resolve() if lock_path.exists() else lock_path)
+    with _LOCK_REGISTRY_GUARD:
+        existing = _LOCK_REGISTRY.get(key)
+        if existing is not None:
+            return existing
+        new = _PathLock(path=lock_path)
+        _LOCK_REGISTRY[key] = new
+        return new
+
+
+@asynccontextmanager
+async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
+    """Hold an exclusive cross-process lock around an OAuth refresh sequence.
+
+    Wraps an in-process ``asyncio.Lock`` around an ``fcntl.flock`` on a
+    sidecar ``<cred_path>.lock`` file. Refresh-token rotation makes
+    concurrent refreshes destructive: the first POST consumes the
+    shared refresh_token and the OAuth endpoint revokes it for the
+    second POSTer, who then sees a 400/401 and surfaces a re-login
+    prompt to the user.
+
+    Callers must keep the lock held across the entire read-disk →
+    maybe-POST → write-disk sequence. The loser of a contention race
+    reads the winner's freshly-written disk credentials and short-
+    circuits without POSTing a now-revoked refresh_token. Usage::
+
+        async with credential_file_lock(creds_path):
+            disk = load(creds_path)
+            if disk["access_token"] != self._access_token:
+                self._adopt(disk)   # sibling already refreshed
+                return
+            await self._post_refresh()
+
+    The lock targets a sidecar ``.lock`` file rather than the
+    credential file itself: atomic writes replace the credential
+    file's inode, which would silently break any fcntl lock held on
+    the credential file across the rename.
+
+    Args:
+      cred_path: Credential file path. The lock targets
+          ``<cred_path>.lock`` next to it.
+
+    """
+    lock_path = cred_path.with_suffix(cred_path.suffix + ".lock")
+    path_lock = _path_lock_for(lock_path)
+    async with path_lock.async_lock:
+        fd = path_lock.open_fd()
+        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)

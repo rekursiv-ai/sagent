@@ -99,6 +99,7 @@ from sagent.providers.lib.cost import (
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
+    credential_file_lock,
     credentials_path,
     parse_manual_auth_code,
     pkce_pair,
@@ -498,16 +499,15 @@ class OpenAISubscription(OpenAI):
     async def _ensure_valid(self) -> str:
         """Return a valid access token, reloading from disk or refreshing.
 
-        Race recovery for multi-process credential sharing: a sibling
-        process may have already rotated the refresh token (saving new
-        creds to disk and invalidating our in-memory refresh_token).
-        Try disk first; only fall through to ``_refresh`` if disk
-        agrees with memory (no sibling activity), so we don't post a
-        now-revoked refresh_token to the OAuth endpoint.
+        Holds a cross-process file lock around the read-disk → maybe-
+        POST → write-disk sequence so concurrent processes can't both
+        consume the same refresh_token and have one revoked by the
+        OAuth endpoint's rotation rule.
         """
         if not self.expired:
             return self._access_token
-        async with self._lock:
+        cred_path = credentials_path(DEFAULT_CREDENTIALS_PATH, self._account)
+        async with self._lock, credential_file_lock(cred_path):
             if not self.expired:
                 return self._access_token
             try:
@@ -529,12 +529,11 @@ class OpenAISubscription(OpenAI):
     async def handle_auth_error(self) -> None:
         """Reload credentials from disk or force-refresh on 401.
 
-        Another process (or an interactive ``/login``) may have written
-        fresh tokens to disk, revoking the one we loaded at startup.
-        Reload from disk first; if that token also matches the
-        in-memory one, force a network refresh.
+        Holds the cross-process credential lock so a concurrent
+        sibling can't refresh between our disk-check and POST.
         """
-        async with self._lock:
+        cred_path = credentials_path(DEFAULT_CREDENTIALS_PATH, self._account)
+        async with self._lock, credential_file_lock(cred_path):
             try:
                 creds = OpenAISubscription.load(account=self._account)
                 disk_at = creds["access_token"]
