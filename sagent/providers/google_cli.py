@@ -43,7 +43,10 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.providers.lib.oauth import credentials_path
+from sagent.providers.lib.oauth import (
+    credential_file_lock,
+    credentials_path,
+)
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.subproc import (
     Subproc,
@@ -722,7 +725,10 @@ class _GoogleCLIModel:
 
         Skipped if the user's copy is newer than the tmpdir's, so stale
         in-flight refreshes never clobber a fresher token from a sibling
-        process or an interactive ``/login``.
+        process or an interactive ``/login``. Holds the cross-process
+        credential lock around the read-expiry → compare → write so a
+        concurrent sagent can't read the same stale target and both
+        race to write back conflicting tokens.
         """
         if self._tmpdir is None:
             return
@@ -731,11 +737,14 @@ class _GoogleCLIModel:
             if not src.exists():
                 return
             target = credentials_path(_CREDS_PATH, self._provider.account)
-            tmpdir_expiry = _read_expiry(src)
-            user_expiry = _read_expiry(target) if target.exists() else 0.0
-            if tmpdir_expiry <= user_expiry:
-                return
-            atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
+            async with credential_file_lock(target):
+                # Re-check expiry under the cross-process lock so a sibling
+                # that just wrote a fresher token won't get clobbered.
+                tmpdir_expiry = _read_expiry(src)
+                user_expiry = _read_expiry(target) if target.exists() else 0.0
+                if tmpdir_expiry <= user_expiry:
+                    return
+                atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
 
 
 def _hash_system(system: str | None) -> str:

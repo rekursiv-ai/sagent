@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
 import base64
+import fcntl
 import hashlib
+import os
 
 import pytest
 
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
+    credential_file_lock,
     credentials_path,
     parse_manual_auth_code,
     pkce_pair,
@@ -142,6 +146,61 @@ def test_auth_code_listener_stop_idempotent() -> None:
     listener.start()
     listener.stop()
     listener.stop()  # Must not raise on a second invocation.
+
+
+@pytest.mark.asyncio
+async def test_credential_file_lock_serializes_in_process(tmp_path: Path) -> None:
+    """Two coroutines for the same cred path see each other inside the lock."""
+    cred = tmp_path / "creds.json"
+    order: list[str] = []
+
+    async def hold(name: str, delay: float) -> None:
+        async with credential_file_lock(cred):
+            order.append(f"{name}-enter")
+            await asyncio.sleep(delay)
+            order.append(f"{name}-exit")
+
+    await asyncio.gather(hold("a", 0.05), hold("b", 0.01))
+    assert order in (
+        ["a-enter", "a-exit", "b-enter", "b-exit"],
+        ["b-enter", "b-exit", "a-enter", "a-exit"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_credential_file_lock_creates_sidecar(tmp_path: Path) -> None:
+    """The lock targets ``<cred>.lock`` so atomic-rename of cred can't break it."""
+    cred = tmp_path / "creds.json"
+    async with credential_file_lock(cred):
+        assert cred.with_suffix(".json.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_credential_file_lock_blocks_on_external_holder(
+    tmp_path: Path,
+) -> None:
+    """A second process holding the file lock blocks until release."""
+    cred = tmp_path / "creds.json"
+    lock_path = cred.with_suffix(".json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        released = asyncio.Event()
+
+        async def waiter() -> None:
+            async with credential_file_lock(cred):
+                released.set()
+
+        task = asyncio.create_task(waiter())
+        # Give the waiter time to attempt-and-block on the file lock.
+        await asyncio.sleep(0.05)
+        assert not released.is_set()
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        await asyncio.wait_for(released.wait(), timeout=1.0)
+        await task
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":
