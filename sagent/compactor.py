@@ -68,6 +68,11 @@ _RE_SUMMARY = re.compile(r"<summary>([\s\S]*?)</summary>")
 _MAX_FALLBACK_SUMMARY_CHARS = 10_000
 _COMPACTOR_TOOL_RESULT_CHARS = 8_000
 _COMPACTOR_TOOL_RESULT_NOTICE = "[tool result truncated for compaction]"
+_SKILL_TOOL_NAME = "Skill"
+_SKILL_BODY_ELIDED_NOTICE = (
+    "[Skill body elided for compaction; the skill catalog still lists triggers"
+    " and the agent can re-invoke Skill on demand.]"
+)
 
 
 def _entry_chars(entry: ModelContextEvent) -> int:
@@ -437,10 +442,46 @@ class SummaryCompactor:
 def _request_entries(groups: list[list[ModelContextEvent]]) -> list[ModelContextEvent]:
     """Flatten request groups and normalize provider-facing shape."""
     entries = [entry for group in groups for entry in group]
+    entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
     if entries and not isinstance(entries[0], UserMessage):
         return [UserMessage(text="[earlier messages elided]"), *entries]
     return entries
+
+
+def _elide_skill_results(
+    entries: list[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    """Replace ``Skill`` tool-result bodies with a stable notice.
+
+    Skill bodies are derived from ``(name, cwd)`` via the live catalog;
+    summarizing them is summarizing a lookup key's expansion. Drop them
+    from the compactor's input so the summarizer doesn't tokenize the
+    full SKILL.md bytes. The notice is idempotent (prefix-checked) so
+    repeated passes are safe. Mirrors ``_collect_read_paths`` for the
+    call-id walk: AM tool_calls determine the owning tool name; only
+    matching ``ToolResult`` entries are rewritten.
+    """
+    skill_call_ids: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, AssistantMessage):
+            continue
+        for tc in entry.tool_calls:
+            if tc.name == _SKILL_TOOL_NAME:
+                skill_call_ids.add(tc.id)
+    if not skill_call_ids:
+        return entries
+    out: list[ModelContextEvent] = []
+    for entry in entries:
+        if (
+            isinstance(entry, ToolResult)
+            and entry.call_id in skill_call_ids
+            and not entry.content.startswith(_SKILL_BODY_ELIDED_NOTICE)
+        ):
+            out.append(dataclasses.replace(entry, content=_SKILL_BODY_ELIDED_NOTICE))
+        else:
+            out.append(entry)
+    return out
 
 
 def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool:

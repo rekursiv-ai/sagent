@@ -565,6 +565,61 @@ async def test_request_entries_drop_duplicate_tool_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_entries_elides_skill_bodies() -> None:
+    """``Skill`` tool results are replaced with a stable elision notice.
+
+    Bodies are derived from ``(name, cwd)`` via the live catalog; the
+    summarizer never needs to see the SKILL.md bytes.
+    """
+    skill_call = ToolCall(id="call_s", name="Skill", args={"skill": "debug"})
+    bash_call = ToolCall(id="call_b", name="Bash", args={"command": "ls"})
+    skill_body = "<skill name='debug' source='project'>\n" + "x" * 5000 + "\n</skill>"
+    result = _request_entries(
+        [
+            [
+                UserMessage(text="seed"),
+                AssistantMessage(tool_calls=(skill_call,)),
+                ToolResult(call_id="call_s", content=skill_body),
+                AssistantMessage(tool_calls=(bash_call,)),
+                ToolResult(call_id="call_b", content="ls output"),
+            ]
+        ]
+    )
+
+    skill_results = [
+        r for r in result if isinstance(r, ToolResult) and r.call_id == "call_s"
+    ]
+    assert len(skill_results) == 1
+    assert "Skill body elided" in skill_results[0].content
+    assert "x" * 100 not in skill_results[0].content
+
+    bash_results = [
+        r for r in result if isinstance(r, ToolResult) and r.call_id == "call_b"
+    ]
+    assert len(bash_results) == 1
+    assert bash_results[0].content == "ls output"
+
+
+@pytest.mark.asyncio
+async def test_request_entries_skill_elision_is_idempotent() -> None:
+    """Repeated passes leave already-elided skill results untouched."""
+    skill_call = ToolCall(id="call_s", name="Skill", args={"skill": "debug"})
+    groups: list[list[ModelContextEvent]] = [
+        [
+            UserMessage(text="seed"),
+            AssistantMessage(tool_calls=(skill_call,)),
+            ToolResult(call_id="call_s", content="real body"),
+        ]
+    ]
+    once = _request_entries(groups)
+    twice = _request_entries([list(once)])
+
+    once_skill = next(r for r in once if isinstance(r, ToolResult))
+    twice_skill = next(r for r in twice if isinstance(r, ToolResult))
+    assert once_skill.content == twice_skill.content
+
+
+@pytest.mark.asyncio
 async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
     """Every attempt fails → fallback ``UserMessage`` returned in the override."""
     overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)

@@ -22,11 +22,27 @@ class _FakeCostTracker:
 
 
 @dataclass(slots=True, kw_only=True)
+class _FakeInbox:
+    gate_armed: bool = False
+
+
+@dataclass(slots=True, kw_only=True)
+class _FakeRuntime:
+    model_call: object = None
+    compact_task: object = None
+    running_tools: dict[str, object] = field(default_factory=dict)
+    cohort: set[str] = field(default_factory=set)
+    inbox: _FakeInbox = field(default_factory=_FakeInbox)
+    service_suspended_until: float | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class _FakeAgent:
     """Minimal stand-in for ``Agent`` matching only the surface the status pane reads."""
 
     activity: ActivityTracker = field(default_factory=ActivityTracker)
     cost_tracker: _FakeCostTracker = field(default_factory=_FakeCostTracker)
+    runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
     budget: ContextBudget = field(
         default_factory=lambda: ContextBudget(
             max_request_tokens=200_000,
@@ -82,6 +98,10 @@ def _agent(**overrides: object) -> _FakeAgent:
             a.activity.current_compact_start = cast(float, v)
         elif k == "live_response_chars":
             a.activity.live_response_chars = cast(int, v)
+        elif k == "compact_task":
+            a.runtime.compact_task = v
+        elif k == "service_suspended_until":
+            a.runtime.service_suspended_until = cast(float, v)
     return a
 
 
@@ -161,7 +181,7 @@ def test_active_prefixes_spinner() -> None:
     s = render_status_pane(_as_agent(a))
     assert s.endswith("[5s 10↑ 20↓ 0↟ 0↡ $0.05]")
     assert s[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    assert s[1] == " "
+    assert s[1:].startswith(" [")
 
 
 @pytest.mark.usefixtures("patched_loop_time")
@@ -194,6 +214,20 @@ def test_idle_ignores_live_output_estimate() -> None:
 
 
 @pytest.mark.usefixtures("patched_loop_time")
+def test_active_tool_phase_keeps_bracket_prefix_stable() -> None:
+    a = _agent(
+        active=True,
+        current_call_start=5.0,
+        elapsed_seconds=0.0,
+    )
+    a.runtime.running_tools["c1"] = object()
+    a.runtime.cohort.add("c1")
+    s = render_status_pane(_as_agent(a))
+    assert s[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    assert s[1:] == " [5s 0↑ 0↓ 0↟ 0↡ $0.00]"
+
+
+@pytest.mark.usefixtures("patched_loop_time")
 def test_active_zero_elapsed_renders() -> None:
     a = _agent(active=True, current_call_start=8.0, elapsed_seconds=0.0)
     s = render_status_pane(_as_agent(a))
@@ -201,7 +235,7 @@ def test_active_zero_elapsed_renders() -> None:
 
 
 @pytest.mark.usefixtures("patched_loop_time")
-def test_compacting_branch_renders_spinner_and_prefix() -> None:
+def test_compacting_branch_renders_suffix_reason() -> None:
     a = _agent(
         current_compact_start=5.0,
         elapsed_seconds=0.0,
@@ -211,8 +245,51 @@ def test_compacting_branch_renders_spinner_and_prefix() -> None:
     )
     s = render_status_pane(_as_agent(a))
     assert s[0] in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    assert " [compacting] [" in s
-    assert s.endswith("[0s 10↑ 20↓ 0↟ 0↡ $0.05]")
+    assert s[1:] == " [0s 10↑ 20↓ 0↟ 0↡ $0.05; compacting.]"
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_active_wait_reason_appears_after_threshold() -> None:
+    a = _agent(active=True, current_call_start=-6.0)
+    assert (
+        render_status_pane(_as_agent(a))[1:]
+        == " [16s 0↑ 0↓ 0↟ 0↡ $0.00; waiting on model.]"
+    )
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_active_wait_reason_hidden_before_threshold() -> None:
+    a = _agent(active=True, current_call_start=0.0)
+    assert render_status_pane(_as_agent(a))[1:] == " [10s 0↑ 0↓ 0↟ 0↡ $0.00]"
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_tools_wait_reason() -> None:
+    a = _agent(active=True, current_call_start=-6.0)
+    a.runtime.running_tools["c1"] = object()
+    assert (
+        render_status_pane(_as_agent(a))[1:]
+        == " [16s 0↑ 0↓ 0↟ 0↡ $0.00; waiting on tools.]"
+    )
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_auth_gate_reason_is_immediate() -> None:
+    a = _agent(active=True, current_call_start=9.0)
+    a.runtime.inbox.gate_armed = True
+    assert (
+        render_status_pane(_as_agent(a))[1:]
+        == " [1s 0↑ 0↓ 0↟ 0↡ $0.00; waiting for input.]"
+    )
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_service_suspension_countdown_reason() -> None:
+    a = _agent(active=True, current_call_start=0.0, service_suspended_until=75.0)
+    assert (
+        render_status_pane(_as_agent(a))[1:]
+        == " [10s 0↑ 0↓ 0↟ 0↡ $0.00; retrying in 1m 5s.]"
+    )
 
 
 def test_real_agent_cost_tracker_is_compatible() -> None:

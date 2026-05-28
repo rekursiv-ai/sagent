@@ -166,6 +166,20 @@ class Skill:
     tool_id: str = "application/x-tool-skill"
     clearable_results: bool = False
     description: str = load_tool_description("Skill")
+
+    def __init__(self, *, restore_after_compact: bool = False) -> None:
+        """Configure post-compaction restore behavior.
+
+        Args:
+          restore_after_compact: When True, ``post_compact_restore``
+              re-prepends previously invoked skill bodies to history.
+              Defaults to False: skill bodies are dropped on macro-compact
+              and the agent re-invokes ``Skill`` on demand. The catalog
+              listing in the system prompt still surfaces triggers.
+
+        """
+        self.restore_after_compact = restore_after_compact
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -230,6 +244,10 @@ class Skill:
     ) -> None:
         """Re-attach previously invoked skill bodies after compaction.
 
+        No-op unless ``restore_after_compact=True`` was set at
+        construction. When disabled, skill bodies vanish on macro-compact
+        and the agent re-invokes ``Skill`` if it needs the workflow again.
+
         Args:
           history: Post-compaction history; mutated in place.
           tool_state: Active tool state; ``invoked_skills`` selects which
@@ -237,6 +255,8 @@ class Skill:
           budget_chars: Character budget cap across all reattached bodies.
 
         """
+        if not self.restore_after_compact:
+            return
         invoked = tool_state.invoked_skills
         if not invoked:
             return

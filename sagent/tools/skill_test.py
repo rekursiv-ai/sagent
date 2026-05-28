@@ -253,13 +253,27 @@ async def test_post_compact_restore_noop_without_invoked(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_post_compact_restore_reattaches_into_first_user(tmp_path: Path) -> None:
+async def test_post_compact_restore_default_disabled(tmp_path: Path) -> None:
+    """Default ``restore_after_compact=False`` drops bodies on compact."""
     _write_skill(tmp_path, "alpha", body="instr-body")
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill().post_compact_restore(history, state)
+    entry = history[0]
+    assert isinstance(entry, UserMessage)
+    assert entry.text == "hi"
+
+
+@pytest.mark.asyncio
+async def test_post_compact_restore_reattaches_into_first_user(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "alpha", body="instr-body")
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.invoked_skills.add("alpha")
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
+    await Skill(restore_after_compact=True).post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert "instr-body" in entry.text
@@ -273,7 +287,7 @@ async def test_post_compact_restore_skips_when_cwd_unset(tmp_path: Path) -> None
     state.bash_cwd = ""
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill().post_compact_restore(history, state)
+    await Skill(restore_after_compact=True).post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert entry.text == "hi"
@@ -287,7 +301,7 @@ async def test_post_compact_restore_truncates_huge_body(tmp_path: Path) -> None:
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill().post_compact_restore(history, state)
+    await Skill(restore_after_compact=True).post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert "(truncated)" in entry.text
@@ -302,7 +316,11 @@ async def test_post_compact_restore_budget_caps_total(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     # Budget caps total at ~one body; the second body is skipped.
-    await Skill().post_compact_restore(history, state, budget_chars=700)
+    await Skill(restore_after_compact=True).post_compact_restore(
+        history,
+        state,
+        budget_chars=700,
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     # Exactly one of the two skill bodies survives.

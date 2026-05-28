@@ -44,6 +44,7 @@ from sagent.repl.input_pane import (
     render_input_pane,
     spawn_repl_pump,
 )
+from sagent.repl.input_queues import InputQueues
 from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
@@ -56,7 +57,6 @@ from sagent.types.runtime import (
     RuntimeEvent,
     ToolResult,
     UserMessage,
-    UserQueuedMessage,
 )
 
 
@@ -89,19 +89,19 @@ async def run_repl(
             "input_pane": "bold",
         },
     )
-    queued_input: list[str] = []
+    queues = InputQueues()
     nav = NavState()
     with patch_stdout(raw=True):
         console = Console(stderr=True)
         session: PromptSession[str] = PromptSession(
-            functools.partial(render_input_pane, agent, queued_input),
+            functools.partial(render_input_pane, agent, queues),
             multiline=True,
             erase_when_done=True,
             history=FileHistory(str(history_path)),
             auto_suggest=AutoSuggestFromHistory(),
             bottom_toolbar=functools.partial(render_status_pane, agent),
             refresh_interval=0.2,
-            key_bindings=build_key_bindings(agent, queued_input, nav),
+            key_bindings=build_key_bindings(agent, queues, nav),
             enable_open_in_editor=False,
             style=style,
         )
@@ -109,14 +109,10 @@ async def run_repl(
         agent.runtime.observers.append(
             make_render_observer(printer, show_thinking=lambda: agent.show_thinking)
         )
-        agent.runtime.observers.append(
-            make_queued_input_committer(agent.runtime, queued_input)
-        )
+        agent.runtime.observers.append(make_input_queue_committer(agent, queues))
         pump_task = spawn_repl_pump(
             agent,
-            PromptToolkitInputSource(
-                session, queued_input=queued_input, console=console
-            ),
+            PromptToolkitInputSource(session, queues=queues, console=console),
             printer=printer,
         )
         replay_messages(agent, printer)
@@ -181,39 +177,15 @@ def _history_triggers_model_call(runtime: agent_runtime.AgentRuntime) -> bool:
     return bool(messages) and isinstance(messages[-1], (ToolResult, UserMessage))
 
 
-def make_queued_input_committer(
-    runtime: agent_runtime.AgentRuntime,
-    queued_input: list[str],
+def make_input_queue_committer(
+    agent: Agent,
+    queues: InputQueues,
 ) -> Callable[[RuntimeEvent], None]:
-    r"""Observer that commits the Tab-staged ``queued_input`` on ``ModelIdle``.
-
-    ``queued_input`` is the REPL-local Tab-staging buffer (see
-    :func:`repl.keybindings._kb_defer`). Entries accumulate locally
-    while the agent is busy; nothing is in the runtime until commit.
-    On ``ModelIdle`` (the agent's current round chain has settled),
-    the joined queue is pushed as a single ``UserQueuedMessage`` and
-    the local list is cleared. The runtime then drains
-    ``UserQueuedMessage`` at its next gate-section pass and fires a
-    fresh round answering the staged content.
-
-    Up-arrow can pop ``queued_input`` back into the buffer at any
-    point before this observer fires -- a true retract, since
-    nothing has been pushed to the runtime yet.
-
-    Args:
-      runtime: Runtime to push the ``UserQueuedMessage`` onto.
-      queued_input: REPL-local Tab-staging buffer.
-
-    Returns:
-      observer: Callable suitable for ``runtime.observers.append``.
-
-    """
+    """Observer that commits REPL-local queues at their lifecycle events."""
 
     def observer(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelIdle) and queued_input:
-            joined = "\n\n".join(queued_input)
-            queued_input.clear()
-            runtime.inbox.push_back(UserQueuedMessage(text=joined))
+        if isinstance(event, ModelIdle) and not queues.commit_urgent(agent):
+            queues.commit_deferred_on_idle(agent)
 
     return observer
 
