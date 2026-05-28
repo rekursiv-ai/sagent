@@ -180,7 +180,7 @@ class FakeAgent:
             return
         if job.kind == "detached":
             call_id = job.call_id or job.queue_id
-            self.runtime.detached.pop(call_id, None)
+            _ = self.runtime.discard_detached(call_id)
             self._forget_job_id(call_id)
         if not job.task.done():
             job.task.cancel()

@@ -780,6 +780,12 @@ class AgentRuntime:
         # signal is "transitioned from working to idle", not "exists
         # in idle state".
         self._was_idle: bool = True
+        # Wall-clock seconds at which a prior ``ModelServiceSuspended``
+        # scheduled the next retry. Read once by the model loop before
+        # the first ``send_with_retry`` and cleared; subsequent sends
+        # use live backoff. Populated by ``Agent.resume`` from the
+        # latest persisted suspension event.
+        self.resume_retry_at: float | None = None
 
     def _fully_drained(self) -> bool:
         """True iff the agent has no work to do and no gate is armed.
@@ -835,6 +841,26 @@ class AgentRuntime:
                 obs(event)
             except Exception:
                 logger.exception("observer raised on %s", type(event).__name__)
+
+    def discard_detached(self, call_id: str) -> asyncio.Task[None] | None:
+        """Unregister a detached tool task; return the dropped task, if any.
+
+        The runtime owns ``self.detached`` so outside callers (Agent
+        cancel verbs, test scaffolds) go through this method rather than
+        reaching into the dict. Cancelling the returned task remains the
+        caller's responsibility -- this method only severs the runtime's
+        reference so a subsequent ``DetachedResult`` for the same
+        ``call_id`` no longer fires the late-splice path.
+
+        Args:
+          call_id: Provider call id whose detached task should be dropped.
+
+        Returns:
+          task: The previously-registered task, or ``None`` when no task
+              was registered under ``call_id``.
+
+        """
+        return self.detached.pop(call_id, None)
 
     def context(self) -> ResolvedContext:
         """Return the provider-facing context resolved from the tape.
@@ -1329,9 +1355,23 @@ class AgentRuntime:
                                 )
                                 self.cohort.discard(cid)
                             else:
-                                logger.debug(
-                                    "runtime kill missed tool: call_id=%s", cid
-                                )
+                                # Already-detached tools are still owned by the
+                                # runtime; kill discards the registry entry and
+                                # cancels the live task so the late-splice path
+                                # cannot fire.
+                                task = self.discard_detached(cid)
+                                if task is not None:
+                                    logger.debug(
+                                        "runtime kill detached tool: call_id=%s",
+                                        cid,
+                                    )
+                                    if not task.done():
+                                        _ = task.cancel()
+                                else:
+                                    logger.debug(
+                                        "runtime kill missed tool: call_id=%s",
+                                        cid,
+                                    )
 
                         case Detach(call_id=cid):
                             if cid is None:
@@ -1894,10 +1934,22 @@ class AgentRuntime:
         )
         if not self.tape:
             return
-        # Mask covers every record on the tape so far. Every existing
-        # alive splice is absorbed, and the validator passes because
-        # no alive splice remains whose mask we'd be double-claiming.
-        mask = ((self.tape[0].ref, self.tape[-1].ref),)
+        # Mask covers every record on the tape so far, partitioned by
+        # session_id. A resumed session can carry tape refs from a
+        # different namespace (legacy ``""``, an earlier persisted
+        # ``session_id``, and the current one). The mask validator
+        # rejects single ranges that span session_ids, so emit one
+        # disjoint range per session_id that actually appears.
+        per_session: dict[str, list[TapeRef]] = {}
+        for record in self.tape:
+            per_session.setdefault(record.ref.session_id, []).append(record.ref)
+        mask = tuple(
+            (
+                min(refs, key=lambda r: r.ordinal),
+                max(refs, key=lambda r: r.ordinal),
+            )
+            for refs in per_session.values()
+        )
         self.append_splice(
             mask=mask,
             insert_after=None,

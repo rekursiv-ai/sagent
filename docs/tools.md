@@ -156,6 +156,16 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 
 `AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.
 
+Persistent subagents have a durable lifecycle. The parent session
+records each child's `kind=persistent_subagent` entry with a stable
+`run_id` and `session_dir`. Terminal states (`completed`, `failed`,
+`cancelled`) are written as new lifecycle records so a future resume
+knows which children should restart and which stay archived. Explicit
+cancellation via `BackgroundTask cancel persistent:<label>` or
+`/kill <label>` writes a `cancelled` record before shutting the child
+down; the implicit `Ctrl-D` / `/quit` path leaves running children
+resumeable. See [CLI](cli.md) for the slash target grammar.
+
 `AgentSend` sends text to a live named agent inbox, optionally after a delay.
 
 ## Background tasks

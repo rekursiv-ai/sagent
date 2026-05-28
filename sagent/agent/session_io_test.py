@@ -787,29 +787,29 @@ def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:
     assert kinds == ["meta", "history"]
 
 
+def _service_suspended(account: str | None = "default") -> ModelServiceSuspended:
+    """Build a persisted service-suspension fixture."""
+    return ModelServiceSuspended(
+        provider="OpenAISubscription",
+        auth="credentials",
+        account=account,
+        model_id="gpt-5.5",
+        retry_at=1_800_000_000.0,
+        delay_sec=14_868.0,
+        server_supplied=True,
+        error=ServiceErrorSnapshot(
+            type_name="RateLimitError",
+            message="limited",
+            status=429,
+            headers={"retry-after": "14868"},
+            body='{"error":"rate_limit"}',
+        ),
+    )
+
+
 def test_append_session_writes_model_service_suspended_event(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
-    append_session(
-        session_file,
-        runtime_events=[
-            ModelServiceSuspended(
-                provider="OpenAISubscription",
-                auth="credentials",
-                account="default",
-                model_id="gpt-5.5",
-                retry_at=1_800_000_000.0,
-                delay_sec=14_868.0,
-                server_supplied=True,
-                error=ServiceErrorSnapshot(
-                    type_name="RateLimitError",
-                    message="limited",
-                    status=429,
-                    headers={"retry-after": "14868"},
-                    body='{"error":"rate_limit"}',
-                ),
-            )
-        ],
-    )
+    append_session(session_file, runtime_events=[_service_suspended()])
 
     record = json.loads(session_file.read_text(encoding="utf-8"))
     assert record == {
@@ -831,6 +831,28 @@ def test_append_session_writes_model_service_suspended_event(tmp_path: Path) -> 
             "body": '{"error":"rate_limit"}',
         },
     }
+
+
+def test_load_session_decodes_model_service_suspended_event(tmp_path: Path) -> None:
+    append_session(tmp_path / "session.jsonl", runtime_events=[_service_suspended()])
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    meta, _, _ = loaded
+    assert meta.runtime_events == (_service_suspended(),)
+
+
+def test_model_service_suspended_account_none_round_trips(tmp_path: Path) -> None:
+    append_session(
+        tmp_path / "session.jsonl", runtime_events=[_service_suspended(None)]
+    )
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    meta, _, _ = loaded
+    assert meta.runtime_events == (_service_suspended(None),)
 
 
 def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> None:
@@ -868,6 +890,17 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         "tools": ["Read", "Edit"],
         "system": "system text",
         "notify_on_asleep": True,
+        "max_tool_call_rounds": None,
+        "max_request_tokens": None,
+        "max_response_tokens": None,
+        "thinking": None,
+        "thinking_state": None,
+        "effort": None,
+        "cache_ttl": "5m",
+        "service_tier": None,
+        "max_budget_usd": None,
+        "persistent_retry": False,
+        "provider_args": {},
         "timestamp": record["timestamp"],
     }
 
@@ -896,6 +929,79 @@ def test_load_persistent_agents_returns_latest_running_records(tmp_path: Path) -
     append_session(session_file, persistent_agents=[still_running])
 
     assert load_persistent_agents(tmp_path) == [still_running]
+
+
+def test_load_persistent_agents_ignores_all_terminal_states(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    running = PersistentAgentRecord(
+        label="fix-tools",
+        run_id="run-1",
+        session_dir=str(tmp_path / "children" / "run-1"),
+        state="running",
+        provider="OpenAISubscription",
+        auth="credentials",
+        account="default",
+        model_id="gpt-5.5",
+        tools=("Read",),
+        system="system text",
+        notify_on_asleep=True,
+    )
+    append_session(session_file, persistent_agents=[running])
+    for state in ("completed", "failed", "cancelled"):
+        append_session(
+            session_file,
+            persistent_agents=[dataclasses.replace(running, state=state)],
+        )
+
+    assert load_persistent_agents(tmp_path) == []
+
+
+def test_load_persistent_agents_rejects_empty_session_dir(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {
+            "kind": "persistent_agent",
+            "label": "fix-tools",
+            "run_id": "run-1",
+            "session_dir": "",
+            "state": "running",
+            "provider": "OpenAISubscription",
+            "auth": "credentials",
+            "account": None,
+            "model_id": "gpt-5.5",
+            "tools": ["Read"],
+            "system": "system text",
+            "notify_on_asleep": True,
+        },
+    )
+
+    assert load_persistent_agents(tmp_path) == []
+
+
+def test_persistent_agent_legacy_notify_on_asleep_defaults_true(tmp_path: Path) -> None:
+    session_dir = tmp_path / "children" / "run-1"
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {
+            "kind": "persistent_agent",
+            "label": "fix-tools",
+            "run_id": "run-1",
+            "session_dir": str(session_dir),
+            "state": "running",
+            "provider": "OpenAISubscription",
+            "auth": "credentials",
+            "account": None,
+            "model_id": "gpt-5.5",
+            "tools": ["Read"],
+            "system": "system text",
+        },
+    )
+
+    records = load_persistent_agents(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].notify_on_asleep is True
+    assert records[0].account is None
 
 
 def test_session_meta_round_trip() -> None:

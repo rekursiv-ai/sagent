@@ -124,6 +124,10 @@ class Bash:
                 },
             },
             "required": ["command"],
+            # ``run_as_fully_detached`` is a deliberate Python-only escape
+            # hatch (orphan subprocesses); strict additionalProperties keeps
+            # the LLM from invoking it via tool calls.
+            "additionalProperties": False,
         }
     )
 

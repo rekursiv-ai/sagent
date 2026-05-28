@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from typing import cast, override
 
+import time
+
 from sagent.repl.render import (
     HALT_MESSAGE,
     HELP_TEXT,
     RecordingPrinter,
     make_render_observer,
     render_tool_result,
+    service_suspended_text,
 )
 from sagent.types.exceptions import (
     AuthRefreshError,
@@ -228,6 +231,24 @@ def test_model_service_suspended_flushes_stream_and_renders_dim_line() -> None:
     assert "model service suspended" in p.dim_lines[0]
     assert "rate-limited" in p.dim_lines[0]
     assert "resumes at" in p.dim_lines[0]
+
+
+def test_service_suspended_text_short_wait_renders_relative_seconds() -> None:
+    """Short waits use ``resumes in Ns`` rather than wall-clock format."""
+    event = ModelServiceSuspended(
+        provider="anthropic",
+        auth="key",
+        account="default",
+        model_id="claude-test",
+        retry_at=time.time() + 12.0,
+        delay_sec=12.0,
+        server_supplied=False,
+        error=ServiceErrorSnapshot(type_name="Boom", message="500", status=500),
+    )
+    text = service_suspended_text(event)
+    assert "resumes in" in text
+    assert "resumes at" not in text
+    assert "temporarily blocked" in text
 
 
 def test_tool_label_flushes_stream() -> None:

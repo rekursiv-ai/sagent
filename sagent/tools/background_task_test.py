@@ -21,7 +21,10 @@ from sagent.agent.background import (
 from sagent.agent.state import agent_registry
 from sagent.lib.json import json_freeze
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
-from sagent.tools.background_task import BackgroundTask
+from sagent.tools.background_task import (
+    BackgroundTask,
+    cancel_persistent_subagent,
+)
 from sagent.tools.core import current_agent_var
 from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 from sagent.types.runtime import (
@@ -432,6 +435,55 @@ async def test_cancel_persistent_subagent_writes_cancelled_lifecycle(
     assert records[0]["state"] == "cancelled"
     assert records[0]["notify_on_asleep"] is False
     assert "persistent:child" not in parent.background
+
+
+@pytest.mark.asyncio
+async def test_cancel_persistent_subagent_helper_with_bg_entry() -> None:
+    """Unified helper writes lifecycle + clears bg + shuts down the child."""
+    with with_fake_agent() as agent:
+        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
+        child = _PersistentChild()
+        agent_registry["child"] = child
+        try:
+            agent.register_background(
+                "persistent:child",
+                BackgroundTaskEntry(
+                    task=task,
+                    tool_name="persistent-agent",
+                    queue_id="child",
+                    started=0.0,
+                    kind="persistent_subagent",
+                ),
+            )
+            cancelled = cancel_persistent_subagent(agent, "child")
+        finally:
+            agent_registry.pop("child", None)
+            _ = task.cancel()
+    assert cancelled is True
+    assert child.shutdown_calls == [True]
+    assert "persistent:child" not in agent.background
+
+
+@pytest.mark.asyncio
+async def test_cancel_persistent_subagent_helper_registry_only_fallback() -> None:
+    """Helper still shuts down a registered child even when no bg entry exists."""
+    with with_fake_agent() as agent:
+        child = _PersistentChild()
+        agent_registry["child"] = child
+        try:
+            cancelled = cancel_persistent_subagent(agent, "child")
+        finally:
+            agent_registry.pop("child", None)
+    assert cancelled is True
+    assert child.shutdown_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancel_persistent_subagent_helper_returns_false_when_missing() -> None:
+    """Helper reports failure when neither bg nor registry knows the label."""
+    with with_fake_agent() as agent:
+        cancelled = cancel_persistent_subagent(agent, "ghost")
+    assert cancelled is False
 
 
 @pytest.mark.asyncio

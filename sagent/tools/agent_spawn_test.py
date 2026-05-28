@@ -45,6 +45,7 @@ from sagent.types.runtime import (
     ChildEvent,
     ModelIdle,
     ModelServiceSuspended,
+    SaveSession,
     ServiceErrorSnapshot,
     ToolResult,
     UserMessage,
@@ -518,6 +519,39 @@ class _BoomAgent(Agent):
 
 
 @pytest.mark.asyncio
+async def test_persistent_run_writes_failed_lifecycle_record(
+    tmp_path: Path,
+) -> None:
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=tmp_path,
+    )
+    child = _BoomAgent(
+        model=StubProviderModel(responses=[AssistantMessage(text="x")]),
+        tools=[],
+    )
+
+    t = AgentSpawn()
+    with _parent_context(parent):
+        result = t._spawn_persistent(child, "doomed", "p")
+        assert not result.is_error
+        task = _persistent_tasks.get("doomed")
+        assert task is not None
+        await task
+
+    lifecycle = [
+        json.loads(line)
+        for line in (tmp_path / "session.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if "persistent_agent" in line
+    ]
+    assert lifecycle[-1]["label"] == "doomed"
+    assert lifecycle[-1]["state"] == "failed"
+
+
+@pytest.mark.asyncio
 async def test_persistent_run_logs_unhandled_exception(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -824,6 +858,94 @@ def test_forwarder_always_forwards_model_service_suspended() -> None:
 
 
 @pytest.mark.asyncio
+async def test_persistent_spawn_session_root_dir_uses_label_path(
+    tmp_path: Path,
+) -> None:
+    parent_dir = tmp_path / "parent"
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=parent_dir,
+    )
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+    )
+    spawn = AgentSpawn(session_root_dir=tmp_path / "children")
+
+    with _parent_context(parent):
+        result = spawn._spawn_persistent(child, "fix-tools", "do work")
+
+    task = _persistent_tasks.get("fix-tools")
+    spawned = agent_registry.get("fix-tools")
+    try:
+        assert not result.is_error
+        assert isinstance(spawned, Agent)
+        child_session_dir = spawned.session_dir
+        assert child_session_dir is not None
+        assert child_session_dir == tmp_path / "children" / "fix-tools"
+        spawned.runtime.append_history(UserMessage(text="persisted child message"))
+        spawned.runtime.publish(SaveSession())
+        assert (child_session_dir / "session.jsonl").exists()
+        lifecycle = [
+            json.loads(line)
+            for line in (parent_dir / "session.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if "persistent_agent" in line
+        ]
+        assert lifecycle[-1]["session_dir"] == str(tmp_path / "children" / "fix-tools")
+    finally:
+        if spawned is not None:
+            spawned.shutdown(force=True)
+        if task is not None:
+            _ = task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        agent_registry.pop("fix-tools", None)
+
+
+@pytest.mark.asyncio
+async def test_persistent_spawn_persists_base_system_without_ipc_rule(
+    tmp_path: Path,
+) -> None:
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=tmp_path,
+    )
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        tools=[],
+        system="base system prompt",
+    )
+    spawn = AgentSpawn()
+
+    with _parent_context(parent, label="parent-label"):
+        result = spawn._spawn_persistent(child, "fix-tools", "do work")
+
+    task = _persistent_tasks.get("fix-tools")
+    try:
+        assert not result.is_error
+        lifecycle = [
+            json.loads(line)
+            for line in (tmp_path / "session.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if "persistent_agent" in line
+        ]
+        assert lifecycle[-1]["system"] == "base system prompt"
+        assert "persistent agent" not in lifecycle[-1]["system"]
+    finally:
+        child.shutdown(force=True)
+        if task is not None:
+            _ = task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        agent_registry.pop("fix-tools", None)
+
+
+@pytest.mark.asyncio
 async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -> None:
     parent = Agent(
         model=StubProviderModel(responses=[AssistantMessage(text="root")]),
@@ -865,7 +987,7 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
         assert record["account"] == "default"
         assert record["model_id"] == "gpt-5.5"
         assert record["tools"] == []
-        assert record["system"] == child.system
+        assert record["system"] == child.base_system_spec
         assert record["notify_on_asleep"] is False
         assert record["session_dir"] == str(child.session_dir or "")
     finally:

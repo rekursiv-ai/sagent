@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.bash import (
     BASH_DEFAULT_TIMEOUT_MS,
@@ -139,6 +140,18 @@ def test_schema_hides_fully_detached_escape_hatch() -> None:
     assert isinstance(properties, Mapping)
     assert "run_in_background" not in properties
     assert "run_as_fully_detached" not in properties
+
+
+def test_schema_rejects_unknown_fields_from_llm() -> None:
+    """``additionalProperties: false`` makes validation reject LLM escape hatches."""
+    b = Bash()
+    err = validate_tool_input(
+        b.name,
+        b.directive_schema,
+        {"command": "true", "run_as_fully_detached": True},
+    )
+    assert err is not None
+    assert "run_as_fully_detached" in err or "Unexpected" in err
 
 
 def test_trim_bash_output_short_unchanged() -> None:

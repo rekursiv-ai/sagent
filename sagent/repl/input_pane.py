@@ -138,7 +138,7 @@ from sagent.repl.slash import (
     Thinking as SlashThinking,
     parse_slash,
 )
-from sagent.tools.background_task import shutdown_persistent_subagent
+from sagent.tools.background_task import cancel_persistent_subagent
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import (
     UserFacingError,
@@ -393,13 +393,8 @@ def _dispatch_kill(
 
 
 def _kill_persistent_subagent(agent: Agent, label: str) -> None:
-    """Cancel one persistent subagent through lifecycle-aware shutdown."""
-    job = agent.background.get(f"persistent:{label}")
-    if job is not None and job.kind == "persistent_subagent":
-        shutdown_persistent_subagent(agent, job)
-        agent.cancel_background(f"persistent:{label}")
-        return
-    agent_registry[label].shutdown(force=True)
+    """Cancel one persistent subagent through the unified graceful path."""
+    _ = cancel_persistent_subagent(agent, label)
 
 
 async def _dispatch(
