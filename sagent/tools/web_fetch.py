@@ -517,13 +517,16 @@ class HostAdapter(Protocol):
 
 
 class _RedditAdapter:
-    """Reddit threads via the JSON API; non-thread pages with old.reddit fallback."""
+    """Reddit threads via the JSON API; listings via JSON with feed fallback."""
 
     _THREAD_RE = re.compile(
         r"^https?://(?:\w+\.)?reddit\.com/r/\w+/comments/\w+",
     )
     _LISTING_RE = re.compile(
         r"^https?://(?:\w+\.)?reddit\.com/r/[^/?#]+/(?:new|hot|top|rising|controversial)?/?\.json(?:[?#].*)?$",
+    )
+    _FEED_RE = re.compile(
+        r"^https?://(?:\w+\.)?reddit\.com/r/[^/?#]+/(?:new|hot|top|rising|controversial)?/?\.rss(?:[?#].*)?$",
     )
 
     def matches(self, url: str) -> bool:
@@ -532,7 +535,7 @@ class _RedditAdapter:
         return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
     async def fetch(self, url: str) -> tuple[bytes, str]:
-        """Fetch a Reddit URL via JSON view or HTML with verification fallback."""
+        """Fetch a Reddit URL via JSON, feed, or HTML fallback."""
         if self._THREAD_RE.search(url):
             json_url = re.sub(
                 r"^(https?://)(?:\w+\.)?reddit\.com/",
@@ -544,8 +547,17 @@ class _RedditAdapter:
             body = await asyncio.to_thread(_safe_fetch, json_url)
             return body, _KIND_REDDIT
         if self._LISTING_RE.search(url):
+            try:
+                body = await asyncio.to_thread(_safe_fetch, url)
+                return body, _KIND_REDDIT_LISTING
+            except FetchError as e:
+                if e.status not in _FALLBACK_STATUSES:
+                    raise
+                feed = await asyncio.to_thread(_safe_fetch, self._feed_url(url))
+                return feed, _KIND_RSS
+        if self._FEED_RE.search(url):
             body = await asyncio.to_thread(_safe_fetch, url)
-            return body, _KIND_REDDIT_LISTING
+            return body, _KIND_RSS
 
         try:
             body = await asyncio.to_thread(_safe_fetch, url)
@@ -556,6 +568,13 @@ class _RedditAdapter:
         if _is_reddit_verification_page(body):
             return await self._fetch_old_reddit(url), _KIND_HTML
         return body, _KIND_HTML
+
+    @staticmethod
+    def _feed_url(raw_url: str) -> str:
+        """Return the Reddit feed URL equivalent of a JSON listing URL."""
+        parsed = urlparse(raw_url)
+        path = re.sub(r"/?\.json$", "/.rss", parsed.path)
+        return parsed._replace(path=path).geturl()
 
     @staticmethod
     async def _fetch_old_reddit(raw_url: str) -> bytes:
@@ -771,13 +790,7 @@ _RSS_CLUSTER_LINK_RE = re.compile(
 
 
 def _format_rss(body: bytes) -> str:
-    """Format an RSS 2.0 feed as readable markdown.
-
-    Each ``<item>`` becomes a section: the lead headline as an ``##``
-    heading with source and pub date, followed by bullet-listed sibling
-    stories parsed from the (Google-News-style) ``<ol>`` embedded in
-    the item's ``<description>``. Feeds without cluster descriptions
-    degrade to one heading per item.
+    """Format an RSS or Atom feed as readable markdown.
 
     Args:
       body: Raw feed XML.
@@ -790,25 +803,82 @@ def _format_rss(body: bytes) -> str:
         root = defusedxml.ElementTree.fromstring(body)
     except (ParseError, defusedxml.common.DefusedXmlException):
         return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
-    channel = root.find("channel") if root.tag == "rss" else root
+    if _local_name(root.tag) == "feed":
+        return _format_atom(root).rstrip()
+    channel = root.find("channel") if _local_name(root.tag) == "rss" else root
     if channel is None:
         return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
     lines: list[str] = []
-    feed_title = (channel.findtext("title") or "").strip()
+    feed_title = (_child_text(channel, "title") or "").strip()
     if feed_title:
         lines.append(f"# {feed_title}\n")
-    for item in channel.findall("item"):
+    for item in _children(channel, "item"):
         _append_rss_item(item, lines)
     return "\n".join(lines).rstrip()
 
 
+def _format_atom(feed: Element) -> str:
+    """Format an Atom feed as readable markdown."""
+    lines: list[str] = []
+    feed_title = (_child_text(feed, "title") or "").strip()
+    if feed_title:
+        lines.append(f"# {feed_title}\n")
+    for entry in _children(feed, "entry"):
+        _append_atom_entry(entry, lines)
+    return "\n".join(lines)
+
+
+def _append_atom_entry(entry: Element, lines: list[str]) -> None:
+    """Append one Atom entry to ``lines``."""
+    title = (_child_text(entry, "title") or "").strip()
+    author = _atom_author(entry)
+    updated = (
+        _child_text(entry, "updated") or _child_text(entry, "published") or ""
+    ).strip()
+    link = _atom_link(entry)
+    content = _atom_content(entry)
+    if title:
+        lines.append(f"## {title}")
+    meta_parts = [p for p in (author, updated) if p]
+    if meta_parts:
+        lines.append(" -- ".join(meta_parts))
+    if link:
+        lines.append(link)
+    if content:
+        lines.append(content[:500])
+    lines.append("")
+
+
+def _atom_author(entry: Element) -> str:
+    """Return the Atom author name, if present."""
+    author = _child(entry, "author")
+    if author is None:
+        return ""
+    return (_child_text(author, "name") or "").strip()
+
+
+def _atom_link(entry: Element) -> str:
+    """Return the first Atom link href, if present."""
+    for link in _children(entry, "link"):
+        href = link.attrib.get("href")
+        if href:
+            return href.strip()
+    return ""
+
+
+def _atom_content(entry: Element) -> str:
+    """Return cleaned Atom content or summary text."""
+    raw = _child_text(entry, "content") or _child_text(entry, "summary") or ""
+    return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(raw)).split())
+
+
 def _append_rss_item(item: Element, lines: list[str]) -> None:
     """Append one feed item (heading + meta + cluster bullets) to ``lines``."""
-    title = (item.findtext("title") or "").strip()
-    link = (item.findtext("link") or "").strip()
-    source_elem = item.find("source")
+    title = (_child_text(item, "title") or "").strip()
+    link = (_child_text(item, "link") or "").strip()
+    source_elem = _child(item, "source")
     source = (source_elem.text or "").strip() if source_elem is not None else ""
-    pub_date = (item.findtext("pubDate") or "").strip()
+    pub_date = (_child_text(item, "pubDate") or "").strip()
     if title:
         lines.append(f"## {title}")
     meta_parts = [p for p in (source, pub_date) if p]
@@ -817,11 +887,35 @@ def _append_rss_item(item: Element, lines: list[str]) -> None:
     if link:
         lines.append(link)
     # The first cluster entry duplicates the item title; siblings follow.
-    cluster = _parse_rss_cluster(item.findtext("description") or "")
+    cluster = _parse_rss_cluster(_child_text(item, "description") or "")
     for sibling_title, sibling_link, sibling_source in cluster[1:]:
         suffix = f" -- {sibling_source}" if sibling_source else ""
         lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")
     lines.append("")
+
+
+def _local_name(tag: str) -> str:
+    """Return an XML tag without its namespace."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _children(parent: Element, name: str) -> list[Element]:
+    """Return direct children with local tag name ``name``."""
+    return [child for child in list(parent) if _local_name(child.tag) == name]
+
+
+def _child(parent: Element, name: str) -> Element | None:
+    """Return the first direct child with local tag name ``name``."""
+    for child in list(parent):
+        if _local_name(child.tag) == name:
+            return child
+    return None
+
+
+def _child_text(parent: Element, name: str) -> str | None:
+    """Return text for the first direct child with local tag name ``name``."""
+    child = _child(parent, name)
+    return child.text if child is not None else None
 
 
 def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
