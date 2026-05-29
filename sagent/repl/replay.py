@@ -20,6 +20,7 @@ from sagent.repl.render import (
     render_tool_result,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     ToolResult,
@@ -62,7 +63,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
         assert isinstance(record, ReferrableTapeEvent)
         entry = record.event
         match entry:
-            case UserMessage(text=text):
+            case UserMessage(text=text) | AgentSendMessage(text=text):
                 rendered_messages += 1
                 printer.write_user_bar(text)
             case AssistantMessage(

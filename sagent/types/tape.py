@@ -57,6 +57,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields
 
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     CompactComplete,
     CompactFailed,
@@ -360,7 +361,7 @@ def _validate_payload(
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
-    prev_role: type[UserMessage | AssistantMessage] | None = None
+    prev_role: type[AgentSendMessage | UserMessage | AssistantMessage] | None = None
     for entry in payload:
         if isinstance(entry, AssistantMessage):
             if pending:
@@ -395,9 +396,10 @@ def _validate_payload(
                     f"unpaired tool_call id(s) in payload: {sorted(pending)}"
                     " (no matching ToolResult; not in paired_externally)",
                 )
-            if prev_role is UserMessage:
+            role = type(entry)
+            if prev_role is role:
                 raise InvalidPayloadError("payload violates role alternation")
-            prev_role = UserMessage
+            prev_role = role
     unmatched = pending - paired_externally
     if unmatched:
         raise InvalidPayloadError(

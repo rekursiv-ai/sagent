@@ -41,6 +41,7 @@ from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BytesMessage,
     CompactComplete,
@@ -195,6 +196,16 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
         }
+    if isinstance(entry, AgentSendMessage):
+        return {
+            "type": "agent_send",
+            "source": entry.source,
+            "text": entry.text,
+            "attachments": _atts_to_json(entry.attachments),
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+        }
     if isinstance(entry, AssistantMessage):
         return {
             "type": "assistant",
@@ -304,7 +315,10 @@ def _splice_from_json(
         for item in cast(list[object], raw_payload):
             if isinstance(item, dict):
                 entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(entry, (UserMessage, AssistantMessage, ToolResult)):
+                if isinstance(
+                    entry,
+                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                ):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
     paired: frozenset[str] = frozenset()
@@ -385,7 +399,10 @@ def _legacy_override_to_splice(
         for item in cast(list[object], raw_payload):
             if isinstance(item, dict):
                 entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(entry, (UserMessage, AssistantMessage, ToolResult)):
+                if isinstance(
+                    entry,
+                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                ):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
     paired: frozenset[str] = frozenset()
@@ -489,6 +506,13 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
     common = _common_kwargs(d)
     if t == "user":
         return UserMessage(
+            text=str(d.get("text") or ""),
+            attachments=_atts_from_json(d.get("attachments")),
+            **cast(dict[str, Any], common),
+        )
+    if t == "agent_send":
+        return AgentSendMessage(
+            source=str(d.get("source") or ""),
             text=str(d.get("text") or ""),
             attachments=_atts_from_json(d.get("attachments")),
             **cast(dict[str, Any], common),
@@ -1369,7 +1393,10 @@ def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:
     for record in tape:
         if isinstance(record, ReferrableTapeEvent):
             event = record.event
-            if isinstance(event, (UserMessage, AssistantMessage, ToolResult)):
+            if isinstance(
+                event,
+                (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+            ):
                 max_id = max(max_id, event.id)
         else:
             for entry in record.payload:

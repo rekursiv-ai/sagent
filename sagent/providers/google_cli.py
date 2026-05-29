@@ -54,6 +54,7 @@ from sagent.providers.lib.subproc import (
 )
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolResult,
     UserMessage,
@@ -956,7 +957,7 @@ def _serialize_prompt_blocks(
     max_image_dim: int,
 ) -> list[MutableJSON]:
     """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
-    if isinstance(entry, UserMessage):
+    if isinstance(entry, (AgentSendMessage, UserMessage)):
         return _user_prompt_blocks(entry, max_image_dim)
     assert isinstance(entry, ToolResult)
     raise RuntimeError(
@@ -964,7 +965,9 @@ def _serialize_prompt_blocks(
     )
 
 
-def _user_prompt_blocks(entry: UserMessage, max_image_dim: int) -> list[MutableJSON]:
+def _user_prompt_blocks(
+    entry: AgentSendMessage | UserMessage, max_image_dim: int
+) -> list[MutableJSON]:
     """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
     blocks: list[MutableJSON] = []
     if entry.text:

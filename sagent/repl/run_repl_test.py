@@ -45,8 +45,8 @@ from sagent.types.runtime import (
     RuntimeEvent,
     ToolCall,
     ToolResult,
+    UserDeferredMessage,
     UserMessage,
-    UserQueuedMessage,
 )
 
 
@@ -834,7 +834,7 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 
 @pytest.mark.asyncio
 async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> None:
-    """``ModelIdle`` with non-empty queue → coalesced ``UserQueuedMessage`` pushed; queue cleared."""
+    """``ModelIdle`` with non-empty queue → coalesced ``UserDeferredMessage`` pushed; queue cleared."""
     queues = InputQueues(
         deferred=[
             QueuedInputBlock(text="elephant"),
@@ -850,7 +850,7 @@ async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> Non
     pushed = await runtime.inbox.drain()
     assert len(pushed) == 1
     item = pushed[0]
-    assert isinstance(item, UserQueuedMessage)
+    assert isinstance(item, UserDeferredMessage)
     assert item.text == "elephant\n\nbanana\n\nchair"
 
 
@@ -891,7 +891,7 @@ async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
     assert not queues.has_any()
     pushed = await runtime.inbox.drain()
     assert len(pushed) == 1
-    assert isinstance(pushed[0], UserQueuedMessage)
+    assert isinstance(pushed[0], UserDeferredMessage)
     assert pushed[0].text == "were we implementing issue 25?"
 
 
@@ -931,14 +931,14 @@ class _TextOnlyModel:
 
 @pytest.mark.asyncio
 async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
-    """Integration: Tab-staged ``queued_input`` commits as ``UserQueuedMessage``
+    """Integration: Tab-staged ``queued_input`` commits as ``UserDeferredMessage``
     on ``ModelIdle`` and the local list clears.
 
     Wires the option-1 contract end-to-end: REPL stages locally via
     Tab (here we pre-populate the list to simulate that), the
     committer observer sees ``ModelIdle`` after the round answering
     the initial ``UserMessage`` settles, and pushes the coalesced
-    queue back as ``UserQueuedMessage``. The runtime then drains it
+    queue back as ``UserDeferredMessage``. The runtime then drains it
     at the next gate-section pass and fires a fresh round.
     """
     queues = InputQueues(

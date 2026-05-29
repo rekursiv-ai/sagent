@@ -1,5 +1,5 @@
-Create or overwrite a file.
+Create or overwrite a file. `content` becomes the entire file; any prior content is replaced.
 
-- Existing file: prior `Read` in this conversation required.
+- Use for: new files, complete rewrites.
 - Partial changes: use `Edit`.
-- No `*.md`/README unless asked. No emoji unless asked.
+- Read once before overwriting an existing file. Subsequent Writes don't need a re-Read.

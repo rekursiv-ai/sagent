@@ -40,6 +40,7 @@ from sagent.providers.lib.subproc import (
 )
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolResult,
     UserMessage,
@@ -740,7 +741,7 @@ def _build_anthropic_argv(
 
 def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
     """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
-    if isinstance(entry, UserMessage):
+    if isinstance(entry, (AgentSendMessage, UserMessage)):
         return _user_line(entry, max_image_dim)
     assert isinstance(entry, ToolResult)
     # Tool results never traverse stdin: the CLI's MCP client handled
@@ -750,7 +751,9 @@ def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
     )
 
 
-def _user_line(entry: UserMessage, max_image_dim: int) -> MutableJSON:
+def _user_line(
+    entry: AgentSendMessage | UserMessage, max_image_dim: int
+) -> MutableJSON:
     """Build a ``{"type":"user", ...}`` stdin line, attaching images inline."""
     image_attachments = [
         att for att in entry.attachments if att.descriptor.startswith("image/")

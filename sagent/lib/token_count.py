@@ -16,6 +16,7 @@ import json
 
 from sagent.lib.json import json_unfreeze
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolResult,
     UserMessage,
@@ -69,7 +70,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
 
 def _entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
     """Approximate tokens for one history entry across every wire surface."""
-    if isinstance(entry, UserMessage):
+    if isinstance(entry, (AgentSendMessage, UserMessage)):
         total = model.approx_text_tokens(entry.text)
         for att in entry.attachments:
             if att.descriptor.startswith("image/"):

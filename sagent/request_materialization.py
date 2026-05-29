@@ -8,6 +8,7 @@ import dataclasses
 
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
     ToolResult,
@@ -110,9 +111,18 @@ def _coalesce_adjacent_users(
 ) -> list[ModelContextEvent]:
     out: list[ModelContextEvent] = []
     for entry in messages:
-        if isinstance(entry, UserMessage) and out and isinstance(out[-1], UserMessage):
+        if (
+            isinstance(entry, (AgentSendMessage, UserMessage))
+            and out
+            and type(out[-1]) is type(entry)
+        ):
             prev = out[-1]
-            out[-1] = UserMessage(
+            if isinstance(entry, AgentSendMessage):
+                assert isinstance(prev, AgentSendMessage)
+            else:
+                assert isinstance(prev, UserMessage)
+            out[-1] = dataclasses.replace(
+                prev,
                 text=f"{prev.text}\n\n{entry.text}",
                 attachments=(*prev.attachments, *entry.attachments),
             )

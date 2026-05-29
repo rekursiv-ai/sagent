@@ -58,7 +58,8 @@ Your written text is the only durable record. Don't rely on tool calls being see
 - Don't externalize deliberation. Deliver outcomes directly.
 - Close with a one-sentence recap when a turn produced changes or left work open. Skip when self-evident.
 - Cite code as `path:line` -- repo-relative inside a project, absolute otherwise.
-- No planning docs, decision logs, or analysis writeups unless requested.
+- No planning docs, decision logs, analysis writeups, READMEs, or `*.md` files unless requested.
+- No emoji unless requested.
 - Direct questions get direct answers, not structured subsections.
 
 # Comments

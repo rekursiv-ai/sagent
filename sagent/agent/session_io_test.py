@@ -34,6 +34,7 @@ from sagent.agent.session_io import (
 from sagent.tools.core import ReadCacheEntry, ToolState
 from sagent.types.model import ModelRequest, ModelResponse, Pricing
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BytesMessage,
     ModelContextEvent,
@@ -189,6 +190,13 @@ def test_user_message_round_trip(tmp_path: Path) -> None:
     out = _round_trip(UserMessage(text="hello"), tmp_path)
     assert isinstance(out, UserMessage)
     assert out.text == "hello"
+
+
+def test_agent_send_message_round_trip(tmp_path: Path) -> None:
+    out = _round_trip(AgentSendMessage(source="reviewer", text="finding"), tmp_path)
+    assert isinstance(out, AgentSendMessage)
+    assert out.source == "reviewer"
+    assert out.text == "finding"
 
 
 def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> None:

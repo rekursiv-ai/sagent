@@ -53,6 +53,7 @@ from sagent.thinking import ThinkingState, resolve_thinking_command
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelIdle,
     RuntimeEvent,
@@ -176,7 +177,9 @@ def _publish_startup_idle_if_settled(runtime: agent_runtime.AgentRuntime) -> Non
 def _history_triggers_model_call(runtime: agent_runtime.AgentRuntime) -> bool:
     """Return True when persisted history already needs a model turn."""
     messages = runtime.context().messages
-    return bool(messages) and isinstance(messages[-1], (ToolResult, UserMessage))
+    return bool(messages) and isinstance(
+        messages[-1], (AgentSendMessage, UserMessage, ToolResult)
+    )
 
 
 def make_input_queue_committer(

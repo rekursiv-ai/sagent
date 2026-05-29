@@ -44,6 +44,7 @@ import bisect
 import logging
 
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
     ToolResult,
@@ -171,7 +172,10 @@ def resolve_context(
             segments[record.ref] = (
                 []
                 if record.ref in masked
-                or not isinstance(event, (UserMessage, AssistantMessage, ToolResult))
+                or not isinstance(
+                    event,
+                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                )
                 else [event]
             )
             order.append(record.ref)
@@ -232,7 +236,7 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
-    prev_role: type[UserMessage | AssistantMessage] | None = None
+    prev_role: type[AgentSendMessage | UserMessage | AssistantMessage] | None = None
     for entry in messages:
         if isinstance(entry, AssistantMessage):
             if pending:
@@ -260,9 +264,10 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                 raise InvalidContextError(
                     f"user message before tool results: pending {sorted(pending)}",
                 )
-            if prev_role is UserMessage:
+            role = type(entry)
+            if prev_role is role:
                 raise InvalidContextError("provider context violates role alternation")
-            prev_role = UserMessage
+            prev_role = role
     if pending:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(pending)}",

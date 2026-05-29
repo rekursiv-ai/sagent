@@ -53,6 +53,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     ToolResult,
@@ -1112,7 +1113,7 @@ def _build_messages(
     pending_tool_results: list[dict[str, object]] = []
 
     for entry in request.messages:
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (AgentSendMessage, UserMessage)):
             blocks = _user_blocks(entry, max_image_dim, max_image_bytes)
             # Coalesce: when a user message lands mid-cohort (preempt
             # with detached stubs), append its blocks into the same
@@ -1155,7 +1156,7 @@ def _build_messages(
 
 
 def _user_blocks(
-    entry: UserMessage,
+    entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
 ) -> list[object]:

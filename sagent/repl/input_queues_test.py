@@ -8,8 +8,8 @@ from sagent.agent.agent import Agent
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.types.runtime import (
     BytesMessage,
+    UserDeferredMessage,
     UserMessage,
-    UserQueuedMessage,
 )
 
 
@@ -63,7 +63,7 @@ def test_commit_deferred_preserves_attachments() -> None:
     agent = _FakeAgent()
     assert queues.commit_deferred_on_idle(cast(Agent, agent))
     pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserQueuedMessage)
+    assert isinstance(pushed, UserDeferredMessage)
     assert pushed.text == "read"
     assert pushed.attachments == (attachment,)
 

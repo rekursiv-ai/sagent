@@ -49,6 +49,7 @@ from sagent.types.runtime import (
     Compact,
     Recompact,
     RuntimeEvent,
+    UserDeferredMessage,
     UserMessage,
     UserQueuedMessage,
 )
@@ -461,7 +462,7 @@ async def test_dispatch_login_flushes_local_deferred_queue() -> None:
         _ = await _dispatch(a, SlashLogin(), None, queues=queues)
     assert not queues.has_any()
     assert any(
-        isinstance(item, UserQueuedMessage) and item.text == "retry after login"
+        isinstance(item, UserDeferredMessage) and item.text == "retry after login"
         for item in stub.runtime.inbox.items
     )
 

@@ -27,6 +27,7 @@ from sagent.repl.render import (
 from sagent.repl.render_diff import render_diff_detail
 from sagent.repl.tight_markdown import TightMarkdown
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelResponseThinking,
     ModelServiceSuspended,
@@ -276,5 +277,5 @@ def _render_child_item(printer: ConsolePrinter, item: object) -> None:
         printer.write_dim_line(service_suspended_text(item))
     elif isinstance(item, ToolResult):
         render_tool_result(printer, item)
-    elif isinstance(item, UserMessage):
+    elif isinstance(item, (AgentSendMessage, UserMessage)):
         printer.write_user_bar(item.text)

@@ -25,6 +25,9 @@ def _empty_headers() -> dict[str, str]:
 
 __all__ = [
     "AgentIdle",
+    "AgentSendDeferredMessage",
+    "AgentSendMessage",
+    "AgentSendQueuedMessage",
     "AssistantMessage",
     "BudgetReset",
     "BytesMessage",
@@ -64,6 +67,7 @@ __all__ = [
     "ToolResult",
     "ToolResultPartial",
     "Undetach",
+    "UserDeferredMessage",
     "UserMessage",
     "UserQueuedMessage",
     "reset_id_counter",
@@ -117,7 +121,21 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UserMessage(SessionMessage):
-    """User or system text the model should see."""
+    """Human-authored user-role text the model should see."""
+
+    text: str
+    """Plain-text content."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads sent alongside the text."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSendMessage(SessionMessage):
+    """Agent-authored user-role text the model should see."""
+
+    source: str
+    """Agent label that produced the message."""
 
     text: str
     """Plain-text content."""
@@ -210,10 +228,49 @@ class CompactFailed:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UserQueuedMessage:
-    """User context that doesn't preempt. Waits for cohort to finish."""
+    """Human-authored queued input that preempts at the next safe boundary."""
 
     text: str
-    """Plain-text content to merge into the next ``UserMessage``."""
+    """Plain-text content to commit as a ``UserMessage``."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads to merge alongside ``text``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserDeferredMessage:
+    """Human-authored input that waits for full model idle."""
+
+    text: str
+    """Plain-text content to commit as a ``UserMessage``."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads to merge alongside ``text``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSendQueuedMessage:
+    """Agent-authored queued input that preempts at the next safe boundary."""
+
+    source: str
+    """Agent label that produced the message."""
+
+    text: str
+    """Plain-text content to commit as an ``AgentSendMessage``."""
+
+    attachments: tuple[BytesMessage, ...] = ()
+    """Image/PDF payloads to merge alongside ``text``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSendDeferredMessage:
+    """Agent-authored input that waits for full model idle."""
+
+    source: str
+    """Agent label that produced the message."""
+
+    text: str
+    """Plain-text content to commit as an ``AgentSendMessage``."""
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads to merge alongside ``text``."""
@@ -528,7 +585,7 @@ class ChildDoneEvent:
     """Total USD cost attributable to the child."""
 
 
-type ModelContextEvent = UserMessage | AssistantMessage | ToolResult
+type ModelContextEvent = UserMessage | AgentSendMessage | AssistantMessage | ToolResult
 
 
 type RuntimeEvent = (
@@ -539,7 +596,11 @@ type RuntimeEvent = (
     | Detach
     | Undetach
     | UserMessage
+    | AgentSendMessage
     | UserQueuedMessage
+    | UserDeferredMessage
+    | AgentSendQueuedMessage
+    | AgentSendDeferredMessage
     | ModelSwitch
     | ModelSwitchRejected
     | BudgetReset
