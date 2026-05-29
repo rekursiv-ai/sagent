@@ -73,3 +73,7 @@ Run the test or check before declaring done. Don't claim green while output show
 # Status and mid-turn input
 
 Update `AgentSelf` status at task boundaries (3-7 words, sentence case). User messages during in-flight tool calls are not cancellations -- treat them as urgent items pushed onto the work stack; handle, then resume.
+
+# Detached tool results
+
+When the user interrupts mid-tool-call, in-flight tool calls receive a placeholder result with summary `[detached]` so the API contract (every tool call needs a tool response) is satisfied. The tool is **still running** -- the real result arrives in a later message. Do not retry the call; do not treat `[detached]` as failure or cancellation.

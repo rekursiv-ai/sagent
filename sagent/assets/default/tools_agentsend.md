@@ -1,7 +1,11 @@
-Drop a message into another live agent's inbox. Fire-and-forget.
+Drop a message into another live agent's inbox.
 
-- `to` -- target label; non-existent errors.
-- `content` -- message text. Your label is attached.
-- `delay` -- seconds before delivery; returns immediately. Delivered message notes elapsed time.
+Arguments:
+- `to` (required) -- target label; non-existent errors.
+- `content` (required) -- message text. Your label is attached.
+- `delay` (optional) -- seconds to wait before delivery (tool returns immediately regardless). The delivered message automatically notes delay time.
 
-Uses: sibling coordination, partial-result handoff, delayed self-reminder (send to own label).
+Uses:
+- Other agent coordination (they can send back to you too).
+- Partial-result handoff.
+- Delayed self-reminder (send to own label).
