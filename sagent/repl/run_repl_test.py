@@ -16,6 +16,7 @@ import pytest
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.state import AgentLike
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
@@ -703,9 +704,10 @@ async def test_do_login_relogin_error_writes_to_printer() -> None:
 
 def test_format_tasks_no_registry_header_only() -> None:
     agent = _FakeAgent()
+    empty: dict[str, AgentLike] = {}
     with patch(
         "sagent.repl.run_repl.agent_registry",
-        {},
+        empty,
     ):
         out = format_tasks(_as_agent(agent))
     assert out.startswith("sagent: 0 agent(s)")

@@ -14,7 +14,7 @@ import pytest
 
 from sagent.agent.agent import Agent as _RealAgent
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.state import agent_registry
+from sagent.agent.state import AgentLike, agent_registry
 from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -180,9 +180,10 @@ async def test_dispatch_halt_by_registry_label() -> None:
 async def test_dispatch_halt_unknown_agent_writes_error() -> None:
     a = _agent()
     p = RecordingPrinter()
+    empty: dict[str, AgentLike] = {}
     with patch(
         "sagent.repl.input_pane.agent_registry",
-        new={},
+        new=empty,
     ):
         _ = await _dispatch(a, SlashHalt(target="Other"), p)
     assert any("no matching subagents" in e for e in p.tool_errors)
@@ -603,9 +604,10 @@ async def test_dispatch_halt_routes_to_registered_persistent_agent() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
     a = _agent()
+    empty: dict[str, AgentLike] = {}
     with patch(
         "sagent.repl.input_pane.agent_registry",
-        new={},
+        new=empty,
     ):
         exit_ = await _dispatch(a, SlashHalt(target="ghost"), None)
     assert exit_ is False
