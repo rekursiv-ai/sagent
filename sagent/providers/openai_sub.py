@@ -116,6 +116,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     ToolResult,
@@ -853,7 +854,7 @@ def _build_input(request: ModelRequest) -> oai_responses.ResponseInputParam:
     ids = IdRemapper("fc_")
     items: oai_responses.ResponseInputParam = []
     for entry in request.messages:
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (AgentSendMessage, UserMessage)):
             items.append({"role": "user", "content": entry.text})
         elif isinstance(entry, AssistantMessage):
             _build_assistant_items(entry, items, ids)

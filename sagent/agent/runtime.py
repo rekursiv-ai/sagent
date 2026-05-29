@@ -243,6 +243,9 @@ from sagent.types.exceptions import (
 )
 from sagent.types.runtime import (
     AgentIdle,
+    AgentSendDeferredMessage,
+    AgentSendMessage,
+    AgentSendQueuedMessage,
     AssistantMessage,
     Clear,
     CohortComplete,
@@ -273,6 +276,7 @@ from sagent.types.runtime import (
     ToolResult,
     ToolResultPartial,
     Undetach,
+    UserDeferredMessage,
     UserMessage,
     UserQueuedMessage,
 )
@@ -412,7 +416,7 @@ def _sanitize_for_send(
             seen.add(entry.call_id)
         else:
             _flush_pending()
-            if out and isinstance(out[-1], UserMessage):
+            if out and isinstance(out[-1], type(entry)):
                 prior = out[-1]
                 out[-1] = dataclasses.replace(
                     prior,
@@ -604,6 +608,36 @@ class GatedDeque[T]:
         return count > baseline
 
 
+def _message_from_queued(
+    item: UserQueuedMessage
+    | UserDeferredMessage
+    | AgentSendQueuedMessage
+    | AgentSendDeferredMessage,
+) -> UserMessage | AgentSendMessage:
+    if isinstance(item, (AgentSendQueuedMessage, AgentSendDeferredMessage)):
+        return AgentSendMessage(
+            source=item.source,
+            text=item.text,
+            attachments=item.attachments,
+        )
+    return UserMessage(text=item.text, attachments=item.attachments)
+
+
+def _coalesce_user_side(
+    items: Sequence[UserMessage | AgentSendMessage],
+) -> UserMessage | AgentSendMessage:
+    first = items[0]
+    text = "\n\n".join(item.text for item in items)
+    attachments = sum((item.attachments for item in items), ())
+    if isinstance(first, AgentSendMessage):
+        return AgentSendMessage(
+            source=first.source,
+            text=text,
+            attachments=attachments,
+        )
+    return UserMessage(text=text, attachments=attachments)
+
+
 class Tool(Protocol):
     """Minimal tool interface.
 
@@ -770,7 +804,7 @@ class AgentRuntime:
         # follow-up round for the user's input fires immediately
         # ("type to redirect" UX during streaming, matching the
         # mid-cohort behavior of stub-and-detach).
-        self._mid_stream_queue: list[UserMessage] = []
+        self._mid_stream_queue: list[UserMessage | AgentSendMessage] = []
         # Detached-tool results whose splice failed (no placeholder
         # survived, typically post-``Clear``) AND a fresh cohort is in
         # flight. Held here until ``CohortComplete`` so the user-facing
@@ -1176,7 +1210,8 @@ class AgentRuntime:
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
         awaiting_user = False
-        queued: list[UserQueuedMessage] = []
+        queued: list[UserQueuedMessage | AgentSendQueuedMessage] = []
+        deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
 
         while True:
             try:
@@ -1490,17 +1525,27 @@ class AgentRuntime:
                                 self.publish(committed)
                             awaiting_user = False
 
-                        case UserQueuedMessage():
+                        case AgentSendMessage():
+                            if self.model_call is not None:
+                                self._mid_stream_queue.append(item)
+                            else:
+                                self._stop_all_tools(mode="detach")
+                                committed = self._append_or_coalesce_user(item)
+                                self.publish(committed)
+                            awaiting_user = False
+
+                        case UserQueuedMessage() | AgentSendQueuedMessage():
                             if awaiting_user:
-                                coalesced = UserMessage(
-                                    text=item.text,
-                                    attachments=item.attachments,
+                                committed = self._append_or_coalesce_user(
+                                    _message_from_queued(item)
                                 )
-                                committed = self._append_or_coalesce_user(coalesced)
                                 self.publish(committed)
                                 awaiting_user = False
                             else:
                                 queued.append(item)
+
+                        case UserDeferredMessage() | AgentSendDeferredMessage():
+                            deferred.append(item)
 
                         case ModelResponsePartial():
                             self.publish(item)
@@ -1783,21 +1828,16 @@ class AgentRuntime:
                     and self.model_call is None
                     and self.compact_task is None
                     and not self._should_call_model()
-                    and queued
+                    and (queued or deferred)
                 ):
-                    coalesced = UserMessage(
-                        text="\n\n".join(q.text for q in queued),
-                        attachments=sum(
-                            (q.attachments for q in queued),
-                            (),
-                        ),
-                    )
-                    committed = self._append_or_coalesce_user(coalesced)
-                    queued.clear()
-                    # Publish so observers (renderers, persistence, REPL queue
-                    # observers) see the commit. Without this, the user bar never
-                    # renders in ``console_pane``.
-                    self.publish(committed)
+                    if queued:
+                        for committed in self._commit_queued_user_side(queued):
+                            self.publish(committed)
+                        queued.clear()
+                    elif deferred:
+                        for committed in self._commit_queued_user_side(deferred):
+                            self.publish(committed)
+                        deferred.clear()
 
                 if (
                     not self.cohort
@@ -1872,7 +1912,7 @@ class AgentRuntime:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
-    def pending_mid_stream(self) -> Sequence[UserMessage]:
+    def pending_mid_stream(self) -> Sequence[UserMessage | AgentSendMessage]:
         """Snapshot of mid-stream ``UserMessage`` items awaiting drain.
 
         Buffered while ``model_call`` is in flight; drained into history
@@ -1893,7 +1933,7 @@ class AgentRuntime:
         messages = self.context().messages
         if not messages:
             return False
-        return isinstance(messages[-1], (UserMessage, ToolResult))
+        return isinstance(messages[-1], (UserMessage, AgentSendMessage, ToolResult))
 
     def _assert_alternation_invariant(self) -> None:
         """Repair HR-level orphans, validate; rescue if still broken.
@@ -2053,7 +2093,32 @@ class AgentRuntime:
                 strategy="orphan_tool_result_repair",
             )
 
-    def _append_or_coalesce_user(self, item: UserMessage) -> UserMessage:
+    def _commit_queued_user_side(
+        self,
+        items: Sequence[
+            UserQueuedMessage
+            | UserDeferredMessage
+            | AgentSendQueuedMessage
+            | AgentSendDeferredMessage
+        ],
+    ) -> list[UserMessage | AgentSendMessage]:
+        committed: list[UserMessage | AgentSendMessage] = []
+        group: list[UserMessage | AgentSendMessage] = []
+        for item in items:
+            message = _message_from_queued(item)
+            if group and type(message) is not type(group[-1]):
+                committed.append(
+                    self._append_or_coalesce_user(_coalesce_user_side(group))
+                )
+                group = []
+            group.append(message)
+        if group:
+            committed.append(self._append_or_coalesce_user(_coalesce_user_side(group)))
+        return committed
+
+    def _append_or_coalesce_user(
+        self, item: UserMessage | AgentSendMessage
+    ) -> UserMessage | AgentSendMessage:
         r"""Append ``item`` to history; return the committed entry.
 
         Anthropic-style chat APIs require user/assistant turn alternation.
@@ -2085,10 +2150,14 @@ class AgentRuntime:
         """
         resolved = self.context()
         messages = resolved.messages
-        if not messages or not isinstance(messages[-1], UserMessage):
+        if not messages or type(messages[-1]) is not type(item):
             self.append_history(item)
             return item
         tail = messages[-1]
+        if isinstance(item, AgentSendMessage):
+            assert isinstance(tail, AgentSendMessage)
+        else:
+            assert isinstance(tail, UserMessage)
         combined = dataclasses.replace(
             tail,
             text=f"{tail.text}\n\n{item.text}",
@@ -2175,7 +2244,7 @@ class AgentRuntime:
         self.cohort.clear()
         self._cohort_seen = False
 
-    def _drain_mid_stream_queue(self) -> UserMessage | None:
+    def _drain_mid_stream_queue(self) -> UserMessage | AgentSendMessage | None:
         r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
 
         Multiple ``UserMessage`` items received while ``model_call`` was in
@@ -2191,13 +2260,7 @@ class AgentRuntime:
         """
         if not self._mid_stream_queue:
             return None
-        coalesced = UserMessage(
-            text="\n\n".join(q.text for q in self._mid_stream_queue),
-            attachments=sum(
-                (q.attachments for q in self._mid_stream_queue),
-                (),
-            ),
-        )
+        coalesced = _coalesce_user_side(self._mid_stream_queue)
         self._mid_stream_queue.clear()
         return self._append_or_coalesce_user(coalesced)
 

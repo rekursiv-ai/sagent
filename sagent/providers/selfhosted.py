@@ -49,6 +49,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     UserMessage,
@@ -845,7 +846,7 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
     if request.system:
         messages.append({"role": "system", "content": request.system})
     for entry in request.messages:
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (AgentSendMessage, UserMessage)):
             messages.append({"role": "user", "content": entry.text})
         elif isinstance(entry, AssistantMessage):
             tool_calls_hf: list[MutableJSON] = [

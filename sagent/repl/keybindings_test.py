@@ -12,7 +12,7 @@ from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from sagent.agent.agent import Agent
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import NavState, build_key_bindings
-from sagent.types.runtime import UserMessage, UserQueuedMessage
+from sagent.types.runtime import UserDeferredMessage, UserMessage
 
 
 @dataclass(slots=True, kw_only=True)
@@ -266,7 +266,7 @@ def test_tab_awaiting_user_dispatches_queued_message_to_release_gate() -> None:
     assert queues.deferred == []
     assert len(agent.runtime.inbox.items) == 1
     pushed = agent.runtime.inbox.items[0]
-    assert isinstance(pushed, UserQueuedMessage)
+    assert isinstance(pushed, UserDeferredMessage)
     assert pushed.text == "after interrupt"
 
 

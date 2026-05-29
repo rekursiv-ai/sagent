@@ -10,7 +10,11 @@ from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools import agent_send as send_module
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.core import agent_label_var, agent_registry
-from sagent.types.runtime import ToolResult, UserMessage
+from sagent.types.runtime import (
+    AgentSendDeferredMessage,
+    AgentSendMessage,
+    ToolResult,
+)
 
 
 def test_metadata_basics() -> None:
@@ -112,7 +116,7 @@ async def test_run_delivers_message() -> None:
     # Drain the inbox -- the runtime's GatedDeque is async so use drain().
     items = await target.runtime.inbox.drain()
     assert any(
-        isinstance(i, UserMessage) and "hello" in i.text and "[from Me]" in i.text
+        isinstance(i, AgentSendMessage) and i.source == "Me" and i.text == "hello"
         for i in items
     )
 
@@ -155,9 +159,9 @@ def test_deliver_into_live_inbox() -> None:
     send_module._deliver(target, "Me", "ping", 7)
     drained = asyncio.new_event_loop().run_until_complete(target.runtime.inbox.drain())
     assert any(
-        isinstance(i, UserMessage)
-        and "ping" in i.text
-        and "[from Me, 7s ago]" in i.text
+        isinstance(i, AgentSendDeferredMessage)
+        and i.source == "Me"
+        and i.text == "ping"
         for i in drained
     )
 

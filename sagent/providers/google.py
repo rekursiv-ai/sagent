@@ -54,6 +54,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     UserMessage,
@@ -497,7 +498,7 @@ def _build_request(
     contents: list[MutableJSON] = []
     pending_tool_parts: list[MutableJSON] = []
     for entry in request.messages:
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (AgentSendMessage, UserMessage)):
             parts: list[MutableJSON] = []
             if entry.text:
                 parts.append({"text": entry.text})

@@ -16,6 +16,9 @@ from sagent.agent.runtime import Tool
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
     AgentIdle,
+    AgentSendDeferredMessage,
+    AgentSendMessage,
+    AgentSendQueuedMessage,
     AssistantMessage,
     BytesMessage,
     Clear,
@@ -45,6 +48,7 @@ from sagent.types.runtime import (
     ToolResult,
     ToolResultPartial,
     Undetach,
+    UserDeferredMessage,
     UserMessage,
     UserQueuedMessage,
     reset_id_counter,
@@ -239,6 +243,87 @@ def _assistant_texts(agent: agent_runtime.AgentRuntime) -> list[str]:
         for entry in agent.context().messages
         if isinstance(entry, AssistantMessage) and entry.text
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_send_queued_message_preserves_agent_history_type() -> None:
+    agent, collector = make_agent([AssistantMessage(text="reply")])
+    agent.inbox.push_back(AgentSendQueuedMessage(source="reviewer", text="finding"))
+
+    await run_with_quit(agent)
+
+    messages = agent.context().messages
+    assert isinstance(messages[0], AgentSendMessage)
+    assert messages[0].source == "reviewer"
+    assert messages[0].text == "finding"
+    assert isinstance(messages[1], AssistantMessage)
+    assert collector.has(ModelIdle)
+
+
+@pytest.mark.asyncio
+async def test_agent_send_queued_message_does_not_coalesce_with_user_message() -> None:
+    agent, collector = make_agent([AssistantMessage(text="reply")])
+    agent.inbox.push_back(AgentSendQueuedMessage(source="reviewer", text="finding"))
+    agent.inbox.push_back(UserQueuedMessage(text="my reply"))
+
+    await run_with_quit(agent)
+
+    messages = agent.context().messages
+    assert [type(message) for message in messages[:3]] == [
+        AgentSendMessage,
+        UserMessage,
+        AssistantMessage,
+    ]
+    assert isinstance(messages[0], AgentSendMessage)
+    assert messages[0].text == "finding"
+    assert isinstance(messages[1], UserMessage)
+    assert messages[1].text == "my reply"
+    assert collector.has(ModelIdle)
+
+
+@pytest.mark.asyncio
+async def test_deferred_messages_wait_until_model_idle() -> None:
+    agent, collector = make_agent(
+        [
+            AssistantMessage(text="first"),
+            AssistantMessage(text="deferred reply"),
+        ]
+    )
+    deferred_sent = False
+
+    def _send_deferred_on_first_agent_idle(event: RuntimeEvent) -> None:
+        nonlocal deferred_sent
+        if isinstance(event, AgentIdle) and not deferred_sent:
+            deferred_sent = True
+            agent.inbox.push_back(UserDeferredMessage(text="later"))
+            agent.inbox.push_back(
+                AgentSendDeferredMessage(source="reviewer", text="agent later")
+            )
+
+    def _quit_on_second_idle(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle) and deferred_sent:
+            agent.inbox.push_back(Quit())
+
+    agent.observers.append(_send_deferred_on_first_agent_idle)
+    agent.observers.append(_quit_on_second_idle)
+    agent.inbox.push_back(UserQueuedMessage(text="start"))
+
+    await run_until_quit(agent)
+
+    messages = agent.context().messages
+    assert [type(message) for message in messages] == [
+        UserMessage,
+        AssistantMessage,
+        UserMessage,
+        AgentSendMessage,
+        AssistantMessage,
+    ]
+    assert isinstance(messages[2], UserMessage)
+    assert messages[2].text == "later"
+    assert isinstance(messages[3], AgentSendMessage)
+    assert messages[3].source == "reviewer"
+    assert messages[3].text == "agent later"
+    assert collector.has(ModelIdle)
 
 
 @pytest.mark.asyncio

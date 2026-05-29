@@ -29,6 +29,7 @@ from sagent.types.exceptions import (
     UserFacingError,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BudgetReset,
     ChildDoneEvent,
@@ -305,7 +306,7 @@ class RenderObserver:
 
     def _dispatch(self, event: RuntimeEvent) -> None:
         match event:
-            case UserMessage(text=text):
+            case UserMessage(text=text) | AgentSendMessage(text=text):
                 self._flush_stream()
                 self._printer.write_user_bar(text)
             case ModelResponsePartial(text=text):
@@ -473,7 +474,7 @@ def _child_atomic_item(inner: RuntimeEvent) -> object | None:
         return inner
     if isinstance(inner, ModelServiceSuspended):
         return inner
-    if isinstance(inner, UserMessage):
+    if isinstance(inner, (AgentSendMessage, UserMessage)):
         return inner
     return None
 

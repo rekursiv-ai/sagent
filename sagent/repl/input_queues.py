@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 from sagent.types.runtime import (
     BytesMessage,
+    UserDeferredMessage,
     UserMessage,
-    UserQueuedMessage,
 )
 
 
@@ -130,7 +130,7 @@ class InputQueues:
         if not self.deferred:
             return False
         agent.runtime.inbox.push_back(
-            UserQueuedMessage(
+            UserDeferredMessage(
                 text=_join_text(self.deferred),
                 attachments=_join_attachments(self.deferred),
             )

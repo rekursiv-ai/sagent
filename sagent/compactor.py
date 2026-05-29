@@ -31,6 +31,7 @@ from sagent.types.model import (
     PromptTooLongError,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
     ToolResult,
@@ -77,7 +78,7 @@ _SKILL_BODY_ELIDED_NOTICE = (
 
 def _entry_chars(entry: ModelContextEvent) -> int:
     """Approximate character count of an entry's payload."""
-    if isinstance(entry, UserMessage):
+    if isinstance(entry, (AgentSendMessage, UserMessage)):
         return len(entry.text)
     if isinstance(entry, AssistantMessage):
         n = len(entry.text)
@@ -444,7 +445,7 @@ def _request_entries(groups: list[list[ModelContextEvent]]) -> list[ModelContext
     entries = [entry for group in groups for entry in group]
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
-    if entries and not isinstance(entries[0], UserMessage):
+    if entries and not isinstance(entries[0], (AgentSendMessage, UserMessage)):
         return [UserMessage(text="[earlier messages elided]"), *entries]
     return entries
 
@@ -574,9 +575,18 @@ def _coalesce_adjacent_users(
 ) -> tuple[ModelContextEvent, ...]:
     out: list[ModelContextEvent] = []
     for entry in payload:
-        if isinstance(entry, UserMessage) and out and isinstance(out[-1], UserMessage):
+        if (
+            isinstance(entry, (AgentSendMessage, UserMessage))
+            and out
+            and type(out[-1]) is type(entry)
+        ):
             prev = out[-1]
-            out[-1] = UserMessage(
+            if isinstance(entry, AgentSendMessage):
+                assert isinstance(prev, AgentSendMessage)
+            else:
+                assert isinstance(prev, UserMessage)
+            out[-1] = dataclasses.replace(
+                prev,
                 text=f"{prev.text}\n\n{entry.text}",
                 attachments=(*prev.attachments, *entry.attachments),
             )
@@ -653,7 +663,7 @@ def _group_history_by_round(
     groups: list[list[ModelContextEvent]] = []
     current: list[ModelContextEvent] = []
     for entry in history:
-        if isinstance(entry, UserMessage) and current:
+        if isinstance(entry, (AgentSendMessage, UserMessage)) and current:
             groups.append(current)
             current = [entry]
         else:
@@ -667,7 +677,7 @@ def _trailing_user_tail_len(history: list[ModelContextEvent]) -> int:
     """Count consecutive user messages at the end of ``history``."""
     count = 0
     for entry in reversed(history):
-        if not isinstance(entry, UserMessage):
+        if not isinstance(entry, (AgentSendMessage, UserMessage)):
             break
         count += 1
     return count
@@ -729,7 +739,7 @@ def _strip_attachments(
     """
     out: list[ModelContextEvent] = []
     for entry in history:
-        if isinstance(entry, UserMessage) and entry.attachments:
+        if isinstance(entry, (AgentSendMessage, UserMessage)) and entry.attachments:
             marked = _attach_markers(entry.text, entry.attachments)
             out.append(dataclasses.replace(entry, text=marked, attachments=()))
         elif isinstance(entry, ToolResult) and entry.attachments:

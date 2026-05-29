@@ -70,6 +70,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BytesMessage,
     ToolCall,
@@ -577,7 +578,7 @@ def build_messages(
     if request.system:
         messages.append({"role": "system", "content": request.system})
     for entry in request.messages:
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (AgentSendMessage, UserMessage)):
             _flush_images(messages, pending_images)
             messages.append(_build_user_message(entry, max_image_dim, max_image_bytes))
         elif isinstance(entry, AssistantMessage):
@@ -640,7 +641,7 @@ def _flush_images(messages: list[MutableJSON], pending: list[MutableJSON]) -> No
 
 
 def _build_user_message(
-    entry: UserMessage,
+    entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
 ) -> MutableJSON:

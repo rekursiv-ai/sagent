@@ -15,7 +15,11 @@ from sagent.tools.core import (
     load_tool_description,
     opt_int,
 )
-from sagent.types.runtime import ToolResult, UserMessage
+from sagent.types.runtime import (
+    AgentSendDeferredMessage,
+    AgentSendMessage,
+    ToolResult,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,11 +32,12 @@ def _deliver(
     delay: int,
 ) -> None:
     """Deliver a delayed message into the target's inbox."""
+    del delay
     if target is None:
         logger.warning("Delayed message to dead agent from %s", sender)
         return
     target.runtime.inbox.push_back(
-        UserMessage(text=f"[from {sender}, {delay}s ago]: {content}"),
+        AgentSendDeferredMessage(source=sender, text=content),
     )
 
 
@@ -163,7 +168,7 @@ class AgentSend:
             return ToolResult(call_id="", content=f"Scheduled for {to} in {delay}s.")
 
         target.runtime.inbox.push_back(
-            UserMessage(text=f"[from {sender}]: {content}"),
+            AgentSendMessage(source=sender, text=content),
         )
         # Soft nudge on undelayed self-send: legitimate self-messages
         # carry a ``delay`` (scheduled reminders). Without one, this is
