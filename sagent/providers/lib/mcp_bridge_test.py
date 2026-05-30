@@ -174,7 +174,10 @@ async def test_unknown_tool_path_returns_404() -> None:
             try:
                 urllib.request.urlopen(f"{base}/not-a-route", timeout=2)  # noqa: S310 -- local server probe
             except urllib.error.HTTPError as exc:
-                return exc.code
+                try:
+                    return exc.code
+                finally:
+                    exc.close()
             return 0
 
         code = await asyncio.to_thread(probe)
