@@ -421,7 +421,11 @@ def test_install_repl_logging_silences_stderr(
             f"REPL mode must not write to stderr; got {captured.err!r}"
         )
     finally:
+        current_handlers = list(root.handlers)
         root.handlers.clear()
+        for handler in current_handlers:
+            if handler not in saved_handlers:
+                handler.close()
         for h in saved_handlers:
             root.addHandler(h)
         logging.lastResort = saved_last_resort
