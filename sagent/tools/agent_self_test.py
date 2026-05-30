@@ -443,6 +443,67 @@ async def test_service_tier_listed_in_supported_diagnostics() -> None:
     assert "Service tier:" in result.content
 
 
+@dataclass(slots=True, kw_only=True)
+class LatencyStubModel(StubProviderModel):
+    """``StubProviderModel`` advertising a fast-latency mode."""
+
+    valid_latency_modes: tuple[str, ...] = ("fast",)
+
+
+@pytest.mark.asyncio
+async def test_latency_unsupported_when_model_lacks_capability() -> None:
+    agent = _make_agent()  # StubProviderModel.valid_latency_modes = ()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"latency": "fast"}})
+    assert result.is_error
+    assert "Unsupported model_options" in result.content
+
+
+@pytest.mark.asyncio
+async def test_latency_rejects_unknown_value() -> None:
+    agent = Agent(model=LatencyStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"latency": "turbo"}})
+    assert result.is_error
+    assert "latency" in result.content
+    assert "must be one of" in result.content
+
+
+@pytest.mark.asyncio
+async def test_latency_fast_applied() -> None:
+    agent = Agent(model=LatencyStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"latency": "fast"}})
+    assert not result.is_error
+    assert agent.latency == "fast"
+    assert "latency=fast" in result.content
+
+
+@pytest.mark.asyncio
+async def test_latency_null_clears() -> None:
+    agent = Agent(model=LatencyStubModel(), tools=[])
+    agent.latency = "fast"
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"latency": None}})
+    assert not result.is_error
+    assert agent.latency is None
+    assert "latency=unset" in result.content
+
+
+@pytest.mark.asyncio
+async def test_latency_listed_in_supported_diagnostics() -> None:
+    agent = Agent(model=LatencyStubModel(), tools=[])
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"diagnostics": True})
+    assert "latency" in result.content
+    assert "Latency:" in result.content
+
+
 @pytest.mark.asyncio
 async def test_max_response_tokens_exceeds_model_cap() -> None:
     agent = _make_agent()
@@ -524,6 +585,62 @@ async def test_account_default_string_is_preserved() -> None:
             result = await t.run({"model_id": "gpt-5", "account": "default"})
     assert not result.is_error
     build.assert_called_once_with("OpenAI", "env", account="default")
+
+
+@pytest.mark.asyncio
+async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
+    """Swapping to a smaller-window model must narrow the budget to fit.
+
+    Regression: the swap once rejected an oversized budget instead of
+    rescaling it down to the new model's window.
+    """
+    agent = _make_agent(
+        spec=ModelSpec(provider="StubP", auth="env", model_id="big", account=""),
+    )
+    # Agent's default budget tracks its current 100k-window model.
+    assert agent.budget.max_request_tokens == 100_000
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(
+        model_id="small", max_request_tokens=50_000
+    )
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ):
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"model_id": "small"})
+    assert not result.is_error, result.content
+    assert agent.model.model_id == "small"
+    assert agent.budget.max_request_tokens <= 50_000
+
+
+@pytest.mark.asyncio
+async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
+    """Combined ``model_id`` + ``max_request_tokens`` must succeed.
+
+    The patch lands both the swap and the explicit window in a single
+    call: ``swap_model`` rescales the budget to the new model first, then
+    the explicit cap is clamped on top, so no intermediate state exceeds
+    the new model's window.
+    """
+    agent = _make_agent(
+        spec=ModelSpec(provider="StubP", auth="env", model_id="big", account=""),
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(
+        model_id="small", max_request_tokens=50_000
+    )
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ):
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"model_id": "small", "max_request_tokens": 20_000})
+    assert not result.is_error, result.content
+    assert agent.model.model_id == "small"
+    assert agent.max_request_tokens == 20_000
 
 
 @pytest.mark.asyncio

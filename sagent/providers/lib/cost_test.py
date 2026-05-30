@@ -44,6 +44,30 @@ def test_compute_cost_total_is_sum() -> None:
     assert total == pytest.approx(in_c + out_c)
 
 
+def test_compute_cost_fast_applies_only_to_request_and_response() -> None:
+    # Fast mode surcharges request/response (Anthropic docs list only
+    # Input/Output fast rates); cache write/read stay at standard rates.
+    pricing = Pricing(
+        request=5.0,
+        response=25.0,
+        cache_write=6.25,
+        cache_read=0.5,
+        fast_request=10.0,
+        fast_response=50.0,
+    )
+    in_c, out_c, _ = compute_cost(
+        pricing,
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_creation=1_000_000,
+        cache_read=1_000_000,
+        fast=True,
+    )
+    # input = 1M*10 (fast) + 1M*6.25 (std cache_write) + 1M*0.5 (std cache_read)
+    assert in_c == pytest.approx(10.0 + 6.25 + 0.5)
+    assert out_c == pytest.approx(50.0)
+
+
 def test_model_profile_defaults() -> None:
     p = ModelProfile(max_request_tokens=1000, max_response_tokens=500)
     assert p.max_request_tokens == 1000

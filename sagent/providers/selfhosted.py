@@ -519,6 +519,11 @@ class SelfHostedModel:
         return ()
 
     @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """Self-hosted backends have no fast-latency path."""
+        return ()
+
+    @property
     def supports_context_management(self) -> bool:
         """Return whether context management is supported."""
         return False

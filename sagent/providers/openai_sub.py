@@ -89,6 +89,7 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
 
+from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
@@ -96,7 +97,10 @@ from sagent.providers.lib.cost import (
     Pricing,
     compute_cost,
 )
-from sagent.providers.lib.errors import StreamingResponseNotReadError
+from sagent.providers.lib.errors import (
+    StreamingResponseNotReadError,
+    find_response_not_read,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
@@ -697,6 +701,18 @@ class _OpenAISubModel(_OpenAIModel):
 
     @property
     @override
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """``latency="fast"`` maps to ``service_tier="priority"``.
+
+        Mirrors the Codex ``/fast`` slash command, which selects the
+        ``priority`` processing tier. Unlike Anthropic fast mode (a
+        separate ``speed="fast"`` inference-acceleration field), OpenAI's
+        fast path is purely a queue-priority tier.
+        """
+        return ("fast",)
+
+    @property
+    @override
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account authentication."""
         return True
@@ -784,11 +800,16 @@ class _OpenAISubModel(_OpenAIModel):
             "tools": _build_tools(request.tools) if request.tools else openai.omit,
             "reasoning": reasoning,
         }
-        if (
-            request.service_tier is not None
-            and request.service_tier in self.valid_service_tiers
-        ):
-            create_kwargs["service_tier"] = request.service_tier
+        tier = self.effective_service_tier(request)
+        if tier is not None:
+            create_kwargs["service_tier"] = tier
+        debug_log.trace(
+            "api_call",
+            kind="openai_responses",
+            model=self._model_id,
+            latency=request.latency,
+            service_tier=tier,
+        )
         try:
             try:
                 event_stream: AsyncResponseStream = cast(
@@ -812,10 +833,11 @@ class _OpenAISubModel(_OpenAIModel):
                 on_thinking=on_thinking,
             )
         except Exception as exc:
-            if _has_response_not_read_cause(exc):
+            not_read = find_response_not_read(exc)
+            if not_read is not None:
                 raise StreamingResponseNotReadError(
                     provider_name="OpenAI subscription",
-                    cause=_response_not_read_cause(exc),
+                    cause=not_read,
                 ) from exc
             if self.is_context_overflow(exc):
                 # The compactor's shrink-and-retry path keys off
@@ -835,25 +857,6 @@ class _OpenAISubModel(_OpenAIModel):
         if request.thinking == "enabled":
             return "high"
         return None
-
-
-def _response_not_read_cause(exc: BaseException) -> httpx.ResponseNotRead:
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        if isinstance(current, httpx.ResponseNotRead):
-            return current
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    raise AssertionError("unreachable: no ResponseNotRead in exception chain")
-
-
-def _has_response_not_read_cause(exc: BaseException) -> bool:
-    try:
-        _response_not_read_cause(exc)
-    except AssertionError:
-        return False
-    return True
 
 
 def _build_tools(
@@ -1014,6 +1017,11 @@ async def _consume_stream(
                         if resp.usage.input_tokens_details:
                             cache_read = resp.usage.input_tokens_details.cached_tokens
                     finish_reason = resp.status
+                    debug_log.trace(
+                        "api_response",
+                        kind="openai_responses",
+                        service_tier=getattr(resp, "service_tier", None),
+                    )
     except (asyncio.CancelledError, TimeoutError):
         await _close_stream(stream)
         raise

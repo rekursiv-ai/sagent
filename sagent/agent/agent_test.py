@@ -84,6 +84,7 @@ class StubModel:
     supports_effort: bool = False
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
@@ -561,14 +562,6 @@ def test_max_response_tokens_setter_accepts_within_limit() -> None:
     assert a.budget.max_response_tokens == 256
 
 
-def test_reset_budget_restores_model_defaults() -> None:
-    a = _build_agent()
-    a.max_request_tokens = 50_000  # under buffer+chars-per-token constraints
-    assert a.budget.max_request_tokens == 50_000
-    a.reset_budget()
-    assert a.budget.max_request_tokens == a.model.max_request_tokens
-
-
 def test_thinking_setter() -> None:
     a = _build_agent()
     a.thinking = "extended"
@@ -678,6 +671,35 @@ def test_service_tier_setter_accepts_when_model_supports() -> None:
     assert a.service_tier is None
 
 
+def test_latency_setter_rejects_when_model_lacks_support() -> None:
+    a = _build_agent()  # StubModel.valid_latency_modes = ()
+    with pytest.raises(ValueError, match="does not support latency"):
+        a.latency = "fast"
+
+
+def test_latency_setter_rejects_unknown_value() -> None:
+    model = StubModel(valid_latency_modes=("fast",))
+    a = _build_agent(model=model)
+    with pytest.raises(ValueError, match="latency must be one of"):
+        a.latency = "turbo"
+
+
+def test_latency_setter_accepts_when_model_supports() -> None:
+    model = StubModel(valid_latency_modes=("fast",))
+    a = _build_agent(model=model)
+    a.latency = "fast"
+    assert a.latency == "fast"
+    a.latency = None
+    assert a.latency is None
+
+
+def test_swap_model_clears_unsupported_latency() -> None:
+    a = _build_agent(model=StubModel(valid_latency_modes=("fast",)))
+    a.latency = "fast"
+    a.swap_model(StubModel(model_id="stub-2"))
+    assert a.latency is None
+
+
 def test_status_setter_round_trip() -> None:
     a = _build_agent()
     a.status = "busy"
@@ -755,18 +777,45 @@ def test_background_merges_detached_and_explicit() -> None:
         loop.close()
 
 
-def test_swap_model_rejects_smaller_request_window() -> None:
+def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
+    # Default budget == old model's max (the "whole window" case). Swapping
+    # to a smaller model clamps the budget down instead of raising.
     a = _build_agent()
-    smaller = StubModel(max_request_tokens=50)
-    with pytest.raises(ValueError, match="max_request_tokens"):
-        a.swap_model(smaller)
+    assert a.budget.max_request_tokens == a.model.max_request_tokens
+    a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
+    assert a.budget.max_request_tokens == 50_000
 
 
-def test_swap_model_rejects_smaller_response_window() -> None:
+def test_swap_model_grows_whole_window_budget_to_larger_model() -> None:
+    # A budget pinned at the old model's max follows the new model up.
     a = _build_agent()
-    smaller = StubModel(max_response_tokens=10)
-    with pytest.raises(ValueError, match="max_response_tokens"):
-        a.swap_model(smaller)
+    assert a.budget.max_request_tokens == a.model.max_request_tokens
+    a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
+    assert a.budget.max_request_tokens == 1_000_000
+
+
+def test_swap_model_preserves_pinned_budget_under_new_max() -> None:
+    # An explicitly lowered budget (below the old model's max) is preserved
+    # when it still fits the new model.
+    a = _build_agent()
+    a.max_request_tokens = 50_000
+    a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
+    assert a.budget.max_request_tokens == 50_000
+
+
+def test_swap_model_clamps_pinned_budget_over_new_max() -> None:
+    # An explicit budget that exceeds the new model's max is clamped down.
+    a = _build_agent()
+    a.max_request_tokens = 80_000
+    a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
+    assert a.budget.max_request_tokens == 50_000
+
+
+def test_swap_model_rescales_response_window_to_smaller_model() -> None:
+    a = _build_agent()
+    assert a.budget.max_response_tokens == a.model.max_response_tokens
+    a.swap_model(StubModel(model_id="small", max_response_tokens=256))
+    assert a.budget.max_response_tokens == 256
 
 
 def test_swap_model_replaces_model_and_inner_wrapper() -> None:
@@ -2400,6 +2449,7 @@ class _OverflowModel:
     supports_effort: bool = False
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
@@ -2477,6 +2527,7 @@ class _RawOverflowModel:
     supports_effort: bool = False
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
@@ -2659,6 +2710,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         supports_effort: bool = False
         supports_cache_control: bool = False
         valid_service_tiers: tuple[str, ...] = ()
+        valid_latency_modes: tuple[str, ...] = ()
         supports_context_management: bool = False
         supports_persistent_retry: bool = False
         supports_account_auth: bool = False

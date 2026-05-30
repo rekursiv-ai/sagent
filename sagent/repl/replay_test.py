@@ -40,6 +40,16 @@ class _StubTool:
 
 
 @dataclass(slots=True, kw_only=True)
+class _StubModelSpec:
+    """Minimum ``ModelSpec`` surface ``replay_messages`` consumes."""
+
+    provider: str
+    auth: str
+    model_id: str
+    account: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
 class _StubAgent:
     """Minimum surface ``replay_messages`` consumes."""
 
@@ -55,6 +65,12 @@ class _StubAgent:
     )
     total_cost_usd: float = 0.0
     show_thinking: bool = True
+    model_spec: _StubModelSpec | None = None
+    thinking: str | None = None
+    effort: str | None = None
+    cache_ttl: str = "5m"
+    service_tier: str | None = None
+    latency: str | None = None
 
 
 def _agent(
@@ -64,6 +80,12 @@ def _agent(
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
     show_thinking: bool = True,
+    model_spec: _StubModelSpec | None = None,
+    thinking: str | None = None,
+    effort: str | None = None,
+    cache_ttl: str = "5m",
+    service_tier: str | None = None,
+    latency: str | None = None,
 ) -> Agent:
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
     history_records = [
@@ -76,6 +98,12 @@ def _agent(
         tools_map=tools_map or {},
         total_cost_usd=total_cost_usd,
         show_thinking=show_thinking,
+        model_spec=model_spec,
+        thinking=thinking,
+        effort=effort,
+        cache_ttl=cache_ttl,
+        service_tier=service_tier,
+        latency=latency,
     )
     return cast("Agent", stub)
 
@@ -214,6 +242,38 @@ def test_replay_footer_without_cost() -> None:
     footer = p.lines[0]
     assert "$" not in footer
     assert "1 messages" in footer
+
+
+def test_replay_footer_includes_model_and_modes() -> None:
+    history: list[TapeEvent] = [UserMessage(text="hi")]
+    p = RecordingPrinter()
+    replay_messages(
+        _agent(
+            history=history,
+            model_spec=_StubModelSpec(
+                provider="OpenAISubscription",
+                auth="credentials",
+                model_id="gpt-5.5",
+                account="work",
+            ),
+            thinking="adaptive",
+            effort="high",
+            cache_ttl="1h",
+            service_tier="priority",
+            latency="fast",
+        ),
+        p,
+    )
+
+    footer = p.lines[0]
+    assert "OpenAISubscription/gpt-5.5" in footer
+    assert "auth=credentials" in footer
+    assert "account=work" in footer
+    assert "thinking=adaptive" in footer
+    assert "effort=high" in footer
+    assert "cache_ttl=1h" in footer
+    assert "service_tier=priority" in footer
+    assert "latency=fast" in footer
 
 
 def test_replay_uses_forward_tape_not_compacted_context_payload() -> None:

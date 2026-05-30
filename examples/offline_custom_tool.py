@@ -49,6 +49,7 @@ class ScriptedModel:
     supports_effort = False
     supports_cache_control = False
     valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
     supports_context_management = False
     supports_persistent_retry = False
     supports_account_auth = False

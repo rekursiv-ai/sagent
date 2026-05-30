@@ -29,6 +29,7 @@ from sagent.providers.anthropic import (
     context_betas,
     supports_native_context_management,
 )
+from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.types.model import (
     ModelRequest,
@@ -335,6 +336,7 @@ def _build_anthropic_message(
     output_tokens: int = 0,
     cache_creation: int = 0,
     cache_read: int = 0,
+    speed: str | None = None,
 ) -> object:
     """Return a duck-typed object mimicking ``anthropic.types.Message``."""
     # Use the real anthropic SDK classes via the lazy-imported module so
@@ -353,6 +355,7 @@ def _build_anthropic_message(
     usage.output_tokens = output_tokens
     usage.cache_creation_input_tokens = cache_creation
     usage.cache_read_input_tokens = cache_read
+    usage.speed = speed
     msg = MagicMock()
     msg.content = text_blocks
     msg.usage = usage
@@ -597,6 +600,52 @@ def test_anthropic_build_kwargs_omits_unknown_service_tier() -> None:
     assert "service_tier" not in kwargs
 
 
+def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
+    p = Anthropic.from_key("k")
+    assert p.model("claude-opus-4-8").valid_latency_modes == ("fast",)
+    assert p.model("claude-opus-4-8+1m").valid_latency_modes == ("fast",)
+    assert p.model("claude-haiku-4-5").valid_latency_modes == ()
+
+
+def test_anthropic_fast_latency_sets_speed_and_beta() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8")
+    req = ModelRequest(messages=[UserMessage(text="x")], latency="fast")
+    kwargs = m._build_kwargs(req, [])
+    body = cast(dict[str, object], kwargs["extra_body"])
+    assert body["speed"] == "fast"
+    headers = cast(dict[str, str], kwargs["extra_headers"])
+    assert "fast-mode-2026-02-01" in headers["anthropic-beta"].split(",")
+
+
+def test_anthropic_fast_latency_rejected_on_unsupported_model() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-haiku-4-5")
+    req = ModelRequest(messages=[UserMessage(text="x")], latency="fast")
+    with pytest.raises(ValueError, match="does not support fast mode"):
+        m._build_kwargs(req, [])
+
+
+def test_parse_response_bills_fast_when_server_reports_fast() -> None:
+    pricing = Pricing(request=5.0, response=25.0, fast_request=10.0, fast_response=50.0)
+    raw = _build_anthropic_message(
+        text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="fast"
+    )
+    resp = _parse_response(raw, pricing)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert resp.input_cost == 10.0
+    assert resp.output_cost == 50.0
+
+
+def test_parse_response_bills_standard_when_server_falls_back() -> None:
+    pricing = Pricing(request=5.0, response=25.0, fast_request=10.0, fast_response=50.0)
+    raw = _build_anthropic_message(
+        text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="standard"
+    )
+    resp = _parse_response(raw, pricing)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert resp.input_cost == 5.0
+    assert resp.output_cost == 25.0
+
+
 def test_anthropic_model_image_limits() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
@@ -753,6 +802,70 @@ def test_response_not_read_provider_error_preserves_retry_status() -> None:
 
     assert is_retryable(err, m) is True
     assert error_status(err) == 529
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_wraps_bare_response_not_read() -> None:
+    # A raw ``httpx.ResponseNotRead`` escaping mid-stream is neither an
+    # APIStatusError (so it dodges the overflow branch) nor a transport
+    # error (so the retry classifier deems it fatal). It must be wrapped
+    # in a user-facing error rather than surface as a bare exception.
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8")
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic._stream_impl",
+            AsyncMock(side_effect=httpx.ResponseNotRead()),
+        ),
+        pytest.raises(StreamingResponseNotReadError),
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_wraps_chained_response_not_read() -> None:
+    # The SDK can chain ``ResponseNotRead`` under another exception while
+    # formatting an error from an unread streaming body.
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8")
+    wrapped = RuntimeError("stream formatting failed")
+    wrapped.__cause__ = httpx.ResponseNotRead()
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic._stream_impl",
+            AsyncMock(side_effect=wrapped),
+        ),
+        pytest.raises(StreamingResponseNotReadError),
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_preserves_retryable_status_over_response_not_read() -> (
+    None
+):
+    # A retryable 429 whose APIStatusError happens to chain a
+    # ResponseNotRead must re-raise as the APIStatusError so the retry
+    # classifier still sees the 429 and retries -- NOT be converted into a
+    # fatal StreamingResponseNotReadError. The body-read crash is handled
+    # downstream in retry.py::_response_body_excerpt.
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8")
+    err = _api_status_error(429, "Rate limited")
+    err.__cause__ = httpx.ResponseNotRead()
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(anthropic_sdk.APIStatusError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+    assert raised.value.status_code == 429
+    assert not isinstance(raised.value, StreamingResponseNotReadError)
 
 
 @pytest.mark.asyncio

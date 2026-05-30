@@ -41,7 +41,13 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Pricing:
-    """Per-million-token prices in USD."""
+    """Per-million-token prices in USD.
+
+    ``fast_request`` / ``fast_response`` apply when the provider reports
+    that a request actually ran in fast mode (Anthropic ``usage.speed``
+    == ``"fast"``). The server is authoritative: a request opted in
+    that fell back to standard speed is billed at standard rates.
+    """
 
     request: float = 0.0
     """Price per million input tokens."""
@@ -54,6 +60,14 @@ class Pricing:
 
     cache_read: float = 0.0
     """Price per million tokens served from prompt cache."""
+
+    fast_request: float = 0.0
+    """Price per million input tokens when the server billed fast mode.
+    ``0.0`` (default) means fast mode isn't priced; callers should not
+    select fast pricing for this model."""
+
+    fast_response: float = 0.0
+    """Price per million output tokens when the server billed fast mode."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,6 +141,15 @@ class ModelRequest:
     ``Model.valid_service_tiers``). Providers without service-tier
     support ignore this field. ``None`` omits the hint so the API
     applies its own default."""
+
+    latency: str | None = None
+    """Cross-provider latency hint; currently only ``"fast"`` is defined.
+    Each provider maps it to its own wire field: Anthropic Opus 4.6/4.7/4.8
+    to ``speed="fast"`` (fast mode), OpenAI to ``service_tier="priority"``.
+    Providers without a fast path reject it at the ``Agent``/``AgentSelf``
+    boundary (the setter validates against ``Model.valid_latency_modes``);
+    a request that still reaches such a provider has it dropped. ``None``
+    requests the default."""
 
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""
@@ -266,6 +289,17 @@ class Model(Protocol):
         subscription only exposes ``"priority"``; Anthropic Messages
         exposes ``"auto"`` / ``"standard_only"``. An empty tuple means
         the request field is dropped.
+        """
+        ...
+
+    @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """Accepted ``latency`` values; empty when unsupported.
+
+        Anthropic Opus 4.6/4.7/4.8 (API + subscription transports) and
+        OpenAI (API + subscription) accept ``("fast",)``. The Anthropic
+        CLI transport and providers without a fast path return ``()``.
+        ``None`` is always implicitly valid and means default latency.
         """
         ...
 

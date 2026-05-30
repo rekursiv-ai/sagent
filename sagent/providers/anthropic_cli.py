@@ -303,6 +303,11 @@ class _AnthropicCLIModel:
         return ()
 
     @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """The CLI exposes no per-request latency knob; fast mode unsupported."""
+        return ()
+
+    @property
     def supports_context_management(self) -> bool:
         """``True``: the CLI itself rolls history under quota pressure."""
         return True

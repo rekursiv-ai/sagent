@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import override
+from typing import ClassVar, cast, override
 
 import asyncio
 import time
@@ -220,6 +220,26 @@ def test_extract_retry_after_invalid_seconds_header_falls_through() -> None:
     assert extract_retry_after(err) is None
 
 
+def test_extract_retry_after_absolute_epoch_treated_as_timestamp() -> None:
+    # Some servers/proxies send ``retry-after`` as an absolute Unix
+    # timestamp rather than RFC delta-seconds. Using it raw as a delay
+    # yields a ~56-year suspension; it must be converted to a delta.
+    reset = time.time() + 45.0
+    err = _HTTPError(_FakeResponse(429, {"retry-after": str(int(reset))}))
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert 40.0 <= delay <= 46.0
+
+
+def test_extract_retry_after_far_future_epoch_does_not_explode() -> None:
+    # Regression for the "retrying in 20602d" status-pane bug: a retry-after
+    # equal to the current epoch must not become a multi-decade delay.
+    err = _HTTPError(_FakeResponse(429, {"retry-after": str(int(time.time()))}))
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert delay < 60.0
+
+
 def test_extract_retry_after_anthropic_unified_reset() -> None:
     reset = time.time() + 30.0
     err = _HTTPError(
@@ -363,6 +383,27 @@ async def test_send_with_retry_retries_exhausted() -> None:
 @pytest.mark.asyncio
 async def test_send_with_retry_429_raises_rate_limit_when_not_persistent() -> None:
     err = _HTTPError(_FakeResponse(429, {"retry-after": "5"}))
+    model = _ScriptedModel(stream_responses=[err])
+    with pytest.raises(RateLimitError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=3,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_429_with_unread_streaming_body_still_classified() -> (
+    None
+):
+    # End-to-end regression for the transcript bug: a 429 whose response is
+    # an unread streaming body (`.text`/`.content` raise ResponseNotRead)
+    # must still be classified as a rate limit -- the diagnostics body-read
+    # must not let ResponseNotRead escape and turn a retryable error fatal.
+    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
     model = _ScriptedModel(stream_responses=[err])
     with pytest.raises(RateLimitError):
         _ = await send_with_retry(
@@ -642,6 +683,41 @@ def test_service_error_snapshot_allowlists_forensic_fields() -> None:
     }
     assert snapshot.body.startswith("bucket details")
     assert len(snapshot.body) == 500
+
+
+class _UnreadStreamingResponse:
+    """Mimics an httpx streaming response whose body was never read.
+
+    ``.text`` / ``.content`` raise ``ResponseNotRead``, reproducing the
+    transcript failure where Anthropic reported a ``rate_limit_error`` via
+    an in-band SSE ``error`` event on a 200 stream and the SDK attached the
+    unread streaming response to the resulting ``APIStatusError``.
+    """
+
+    status_code: ClassVar[int] = 429
+    headers: ClassVar[dict[str, str]] = {"request-id": "req-1", "retry-after": "5"}
+
+    @property
+    def text(self) -> str:
+        raise httpx.ResponseNotRead
+
+    @property
+    def content(self) -> bytes:
+        raise httpx.ResponseNotRead
+
+
+def test_service_error_snapshot_survives_unread_streaming_body() -> None:
+    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
+    snapshot = service_error_snapshot(err)
+    assert snapshot.status == 429
+    assert snapshot.body == ""
+    assert snapshot.headers["request-id"] == "req-1"
+
+
+def test_error_diagnostics_survives_unread_streaming_body() -> None:
+    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
+    diag = error_diagnostics(err)
+    assert "status=429" in diag
 
 
 def test_error_diagnostics_no_response_returns_empty() -> None:

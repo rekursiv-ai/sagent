@@ -48,7 +48,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
-from sagent.lib import token_count
+from sagent.lib import debug_log, token_count
 from sagent.lib.json import (
     MutableJSON,
     MutableJSONValue,
@@ -287,6 +287,39 @@ class OpenAICompatModel:
         return ()
 
     @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """OpenAI-compat vendors expose no fast-latency path."""
+        return ()
+
+    def effective_service_tier(self, request: ModelRequest) -> str | None:
+        """Resolve the wire ``service_tier``, folding in ``latency="fast"``.
+
+        OpenAI has no separate fast-mode field; the fast path is just the
+        ``priority`` processing tier. ``latency="fast"`` therefore maps to
+        ``service_tier="priority"`` and wins over an explicit
+        ``service_tier`` when both are set.
+
+        Cost note: OpenAI's per-tier pricing is not modeled here (no public
+        per-tier rate data wired into ``Pricing``), so a ``priority``
+        request is currently billed at the model's standard rates. Anthropic
+        fast mode, by contrast, is server-authoritative via ``usage.speed``.
+
+        Args:
+          request: Outgoing model request.
+
+        Returns:
+          tier: Service tier to send, or ``None`` to omit the field.
+
+        """
+        if request.latency == "fast" and "fast" in self.valid_latency_modes:
+            return "priority"
+        if request.service_tier is not None and (
+            request.service_tier in self.valid_service_tiers
+        ):
+            return request.service_tier
+        return None
+
+    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return False
@@ -433,17 +466,27 @@ class OpenAICompatModel:
             },
         )
         if request.max_response_tokens is not None:
-            body["max_tokens"] = request.max_response_tokens
+            # OpenAI reasoning models (gpt-5 / o-series) reject ``max_tokens``
+            # with a 400 and require ``max_completion_tokens``; the same model
+            # set is gated by ``supports_effort``. Other compat vendors
+            # (Moonshot, MiniMax, DashScope) still take ``max_tokens``.
+            field = "max_completion_tokens" if self.supports_effort else "max_tokens"
+            body[field] = request.max_response_tokens
         if stream:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
         if request.effort is not None and self.supports_effort:
             body["reasoning_effort"] = request.effort
-        if (
-            request.service_tier is not None
-            and request.service_tier in self.valid_service_tiers
-        ):
-            body["service_tier"] = request.service_tier
+        tier = self.effective_service_tier(request)
+        if tier is not None:
+            body["service_tier"] = tier
+        debug_log.trace(
+            "api_call",
+            kind="openai_chat",
+            model=self._model_id,
+            latency=request.latency,
+            service_tier=tier,
+        )
         if request.tools:
             body["tools"] = cast(
                 MutableJSONValue,

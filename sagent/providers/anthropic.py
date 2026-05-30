@@ -54,6 +54,10 @@ from sagent.providers.lib.cost import (
     Pricing,
     compute_cost,
 )
+from sagent.providers.lib.errors import (
+    StreamingResponseNotReadError,
+    find_response_not_read,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.types.model import (
@@ -100,13 +104,41 @@ _CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
 _CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
 _REDACT_THINKING_BETA = "redact-thinking-2026-02-12"
+_FAST_MODE_BETA = "fast-mode-2026-02-01"
 _DEFAULT_API_TARGET_INPUT_TOKENS = 40_000
+
+# Models whose Pricing carries non-zero fast-mode rates AND whose API
+# accepts ``speed="fast"``. Same set on both API-key and subscription
+# transports; the CLI transport can't pass the knob.
+_FAST_MODE_MODELS = frozenset(
+    {
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+    }
+)
+
+
+def supports_fast_mode(model_id: str) -> bool:
+    """True when the model accepts ``speed="fast"`` on the Anthropic API.
+
+    Anthropic fast mode is an inference-acceleration feature: it runs the
+    same weights through a faster serving path for higher output
+    tokens/sec, at premium pricing, and is wire-distinct from the
+    ``service_tier`` capacity hint (both can be set on one request). This
+    differs from OpenAI, which has no separate fast field -- its fast path
+    is just ``service_tier="priority"``. The cross-provider ``latency``
+    hint hides that asymmetry from callers.
+    """
+    return _strip_context_tag(model_id) in _FAST_MODE_MODELS
+
 
 # Models that support server-side ``clear_tool_uses_20250919``. Per
 # Anthropic docs: Sonnet 4/4.5, Haiku 4.5, Opus 4/4.1/4.5. We treat
 # the +1m variants identically (same base model).
 _CONTEXT_MANAGEMENT_MODELS = frozenset(
     {
+        "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-opus-4-5",
@@ -212,11 +244,30 @@ def build_context_management(
 #
 # To add a new model: check the Anthropic docs for context window
 # and max output tokens, then add a ModelProfile + pricing entry.
+# Opus 4.8 fast mode is $10/$50 per MTok (2x standard). Opus 4.6 and
+# 4.7 fast mode is $30/$150 per MTok (6x standard). All Opus models
+# share the same standard rate so we keep one base ``_OPUS`` and split
+# only the fast-mode rates. ``_OPUS`` (4.8 fast rates) is also reused by
+# non-fast Opus models (e.g. 4.5); that is safe because billing keys on
+# the server's ``usage.speed=="fast"`` and those models have
+# ``valid_latency_modes=()`` so they never request -- nor are billed --
+# fast.
+# Source: https://docs.anthropic.com/en/docs/build-with-claude/fast-mode
 _OPUS = Pricing(
     request=5.0,
     response=25.0,
     cache_write=6.25,
     cache_read=0.5,
+    fast_request=10.0,
+    fast_response=50.0,
+)
+_OPUS_FAST_4_6_7 = Pricing(
+    request=5.0,
+    response=25.0,
+    cache_write=6.25,
+    cache_read=0.5,
+    fast_request=30.0,
+    fast_response=150.0,
 )
 _SONNET = Pricing(
     request=3.0,
@@ -241,7 +292,7 @@ class Anthropic:
     """
 
     # Latest model we roll to when ``model_id`` is None. Bump on release.
-    DEFAULT_MODEL = "claude-opus-4-7+1m"
+    DEFAULT_MODEL = "claude-opus-4-8+1m"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
     # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
@@ -250,29 +301,42 @@ class Anthropic:
     # sonnet-4.5 / haiku-4.5 (4.83). Pure-English content tokenizes higher;
     # these defaults err toward overcount for mixed agent traffic, which is
     # the safe direction for the compaction trigger.
+    # opus-4-8 inherits 4-7's value (2.83) pending its own measurement.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "claude-opus-4-7": ModelProfile(
+        "claude-opus-4-8": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            chars_per_token=2.83,
+        ),
+        "claude-opus-4-8+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_OPUS,
+            chars_per_token=2.83,
+        ),
+        "claude-opus-4-7": ModelProfile(
+            max_request_tokens=200_000,
+            max_response_tokens=128_000,
+            pricing=_OPUS_FAST_4_6_7,
             chars_per_token=2.83,
         ),
         "claude-opus-4-7+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
-            pricing=_OPUS,
+            pricing=_OPUS_FAST_4_6_7,
             chars_per_token=2.83,
         ),
         "claude-opus-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
-            pricing=_OPUS,
+            pricing=_OPUS_FAST_4_6_7,
             chars_per_token=3.66,
         ),
         "claude-opus-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
-            pricing=_OPUS,
+            pricing=_OPUS_FAST_4_6_7,
             chars_per_token=3.66,
         ),
         "claude-opus-4-5": ModelProfile(
@@ -761,6 +825,18 @@ class _AnthropicModel:
         return ("auto", "standard_only")
 
     @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """``latency="fast"`` maps to ``speed="fast"`` on supported Opus models.
+
+        Anthropic fast mode is a distinct inference-acceleration field
+        (sent via ``extra_body`` plus the ``fast-mode-2026-02-01`` beta),
+        orthogonal to ``service_tier`` -- both can be set on one request.
+        OpenAI, by contrast, has no separate field; there ``latency="fast"``
+        resolves to ``service_tier="priority"``.
+        """
+        return ("fast",) if supports_fast_mode(self._model_id) else ()
+
+    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return self._provider.server_side_context_management
@@ -956,6 +1032,29 @@ class _AnthropicModel:
         if body is not None:
             kwargs["extra_body"] = body
         headers = self._provider.extra_headers(self._model_id)
+        if request.latency == "fast":
+            # ``speed`` is a first-class parameter only on the SDK's beta
+            # endpoints (``beta.messages.*``); the stream path here is a
+            # custom raw POST to ``/v1/messages`` (see ``_raw_message_stream``),
+            # so we inject ``speed`` via ``extra_body`` plus the research-
+            # preview beta header. That is the wire-equivalent of calling
+            # ``beta.messages.create(speed="fast", betas=[...])`` -- do not
+            # drop this injection without moving the stream onto the beta SDK.
+            # Reject early on unsupported models so the agent is told rather
+            # than silently billed standard speed.
+            if not supports_fast_mode(self._model_id):
+                raise ValueError(
+                    f"Model {self._model_id!r} does not support fast mode "
+                    f"(latency='fast').",
+                )
+            body = cast(dict[str, object], kwargs.get("extra_body") or {})
+            body["speed"] = "fast"
+            kwargs["extra_body"] = body
+            betas = headers.get("anthropic-beta", "")
+            beta_list = [b for b in betas.split(",") if b]
+            if _FAST_MODE_BETA not in beta_list:
+                beta_list.append(_FAST_MODE_BETA)
+            headers = {**headers, "anthropic-beta": ",".join(beta_list)}
         if headers:
             kwargs["extra_headers"] = headers
         return kwargs
@@ -1002,6 +1101,8 @@ class _AnthropicModel:
         messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
         sdk = await self._provider.get_sdk()
         kwargs = self._build_kwargs(request, messages)
+        extra_body = cast(Mapping[str, object], kwargs.get("extra_body") or {})
+        extra_headers = cast(Mapping[str, str], kwargs.get("extra_headers") or {})
         debug_log.trace(
             "api_call",
             kind="stream",
@@ -1010,6 +1111,8 @@ class _AnthropicModel:
             n_messages=len(messages),
             n_tools=len(kwargs.get("tools") or []),  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- kwargs.tools always list
             thinking=kwargs.get("thinking"),
+            speed=extra_body.get("speed"),
+            fast_beta=_FAST_MODE_BETA in extra_headers.get("anthropic-beta", ""),
         )
         try:
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
@@ -1021,6 +1124,12 @@ class _AnthropicModel:
             )
             raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
         except anthropic.APIStatusError as e:
+            # Do NOT wrap a status-bearing error as StreamingResponseNotReadError
+            # even when it chains a ResponseNotRead: that would turn a
+            # retryable 429/529 fatal. The status carries the retry signal;
+            # the unread-body crash is handled downstream in
+            # ``retry.py::_response_body_excerpt``. Let the error re-raise so
+            # the classifier sees the status.
             if not _is_prompt_too_long_text(str(e), error_body=_api_status_body(e)):
                 raise
             debug_log.trace_error(
@@ -1037,6 +1146,17 @@ class _AnthropicModel:
                 system_preview=str(kwargs.get("system", ""))[:400],
             )
             _raise_if_prompt_too_long(e)
+            raise
+        except Exception as e:
+            # A bare or non-status ``ResponseNotRead`` (directly or chained)
+            # is neither an APIStatusError (so the overflow branch misses
+            # it) nor a transport error (so the retry classifier deems it
+            # fatal); re-wrap into a user-facing error with remediation.
+            not_read = find_response_not_read(e)
+            if not_read is not None:
+                raise StreamingResponseNotReadError(
+                    provider_name="Anthropic", cause=not_read
+                ) from e
             raise
         resp = _parse_response(raw, self._profile.pricing)
         self._last_response_time = time.time()
@@ -1465,12 +1585,25 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
 
     cache_write = getattr(raw.usage, "cache_creation_input_tokens", 0) or 0
     cache_read = getattr(raw.usage, "cache_read_input_tokens", 0) or 0
+    # Server-authoritative: a request that opted into fast mode but fell
+    # back to standard speed reports ``usage.speed == "standard"`` and is
+    # billed at standard rates.
+    served_fast = getattr(raw.usage, "speed", None) == "fast"
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
         raw.usage.input_tokens,
         raw.usage.output_tokens,
         cache_write,
         cache_read,
+        fast=served_fast,
+    )
+    debug_log.trace(
+        "api_response",
+        kind="anthropic",
+        usage_speed=getattr(raw.usage, "speed", None),
+        billed_fast=served_fast,
+        input_cost=in_cost,
+        output_cost=out_cost,
     )
     return ModelResponse(
         message=message,
