@@ -64,6 +64,11 @@ BASH_MAX_TIMEOUT_MS = 600_000
 _BACKGROUND_PROCESSES: list[subprocess.Popen[bytes]] = []
 
 
+def reap_background_processes() -> None:
+    """Reap completed detached Bash children retained for lifetime tracking."""
+    _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
+
+
 def _render_bash_description(text: str) -> str:
     """Substitute Sagent's static bash timeout values into prompt text."""
     return (
@@ -274,7 +279,7 @@ def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
+    reap_background_processes()
     _BACKGROUND_PROCESSES.append(proc)
     logger.info("Fully detached process started: pid=%d", proc.pid)
     return f"(running in background, pid={proc.pid})"

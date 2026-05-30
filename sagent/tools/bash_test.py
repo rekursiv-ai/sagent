@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import asyncio
+
 import pytest
 
 from sagent.lib.tool_validation import validate_tool_input
@@ -20,6 +22,7 @@ from sagent.tools.bash import (
     _render_bash_description,
     _suppress_oserror,
     _trim_bash_output,
+    reap_background_processes,
 )
 from sagent.tools.core import ToolState
 from sagent.tools.lib.bash import Node
@@ -251,6 +254,8 @@ async def test_run_as_fully_detached_returns_pid(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await b.run({"command": "sleep 0.01", "run_as_fully_detached": True})
+    await asyncio.sleep(0.02)
+    reap_background_processes()
     assert "background" in result.content
     assert "pid=" in result.content
 
