@@ -76,6 +76,7 @@ class _NoopModel:
     supports_effort: bool = False
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False

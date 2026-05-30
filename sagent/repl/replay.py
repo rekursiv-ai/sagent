@@ -4,7 +4,7 @@ Resumed sessions display the same scrollback the live REPL produces:
 user messages as bars, model responses as Markdown, thinking blocks
 as the dim "Thinking" preface, tool labels via each tool's own
 ``summary(args)``, tool results via the shared :func:`render_tool_result`.
-Closes with a single ``── resumed · N messages · $X ──`` footer.
+Closes with a single footer containing count, spend, model, and modes.
 
 Live and replay both go through ``Printer`` + ``render_tool_result``;
 adding a new render concern lights up in both paths automatically.
@@ -89,9 +89,34 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                 render_tool_result(printer, entry)
             case _:
                 render_event(entry)
+    parts = ["resumed", f"{rendered_messages} messages"]
     cost = float(agent.total_cost_usd)
-    cost_str = f" · ${cost:.2f}" if cost > 0 else ""
-    printer.write_line(f"── resumed · {rendered_messages} messages{cost_str} ──")
+    if cost > 0:
+        parts.append(f"${cost:.2f}")
+    parts.extend(_mode_parts(agent))
+    printer.write_line(f"── {' · '.join(parts)} ──")
+
+
+def _mode_parts(agent: Agent) -> list[str]:
+    """Return model and non-default mode fragments for the resume footer."""
+    parts: list[str] = []
+    spec = agent.model_spec
+    if spec is not None:
+        parts.append(f"{spec.provider}/{spec.model_id}")
+        parts.append(f"auth={spec.auth}")
+        if spec.account:
+            parts.append(f"account={spec.account}")
+    if agent.thinking is not None:
+        parts.append(f"thinking={agent.thinking}")
+    if agent.effort is not None:
+        parts.append(f"effort={agent.effort}")
+    if agent.cache_ttl != "5m":
+        parts.append(f"cache_ttl={agent.cache_ttl}")
+    if agent.service_tier is not None:
+        parts.append(f"service_tier={agent.service_tier}")
+    if agent.latency is not None:
+        parts.append(f"latency={agent.latency}")
+    return parts
 
 
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:

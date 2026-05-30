@@ -20,7 +20,10 @@ import pytest
 from sagent.lib.json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.cost import ModelProfile, Pricing
-from sagent.providers.lib.errors import StreamingResponseNotReadError
+from sagent.providers.lib.errors import (
+    StreamingResponseNotReadError,
+    find_response_not_read,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai_sub import (
     OpenAISubscription,
@@ -29,7 +32,6 @@ from sagent.providers.openai_sub import (
     _build_tool_result_item,
     _build_tools,
     _consume_stream,
-    _has_response_not_read_cause,
     _jwt_claim,
     _jwt_exp,
     _jwt_payload,
@@ -487,6 +489,19 @@ def test_subscription_valid_service_tiers_priority_only() -> None:
     assert m.valid_service_tiers == ("priority",)
 
 
+def test_subscription_valid_latency_modes_fast() -> None:
+    m = _make_provider().model("gpt-5.5")
+    assert m.valid_latency_modes == ("fast",)
+
+
+def test_subscription_fast_latency_resolves_to_priority_tier() -> None:
+    m = _make_provider().model("gpt-5.5")
+    tier = m.effective_service_tier(
+        ModelRequest(messages=[UserMessage(text="x")], latency="fast")
+    )
+    assert tier == "priority"
+
+
 def test_subscription_context_overflow_detection() -> None:
     m = _make_provider().model("gpt-5.5")
     assert m.is_context_overflow(RuntimeError("context_length_exceeded")) is True
@@ -777,7 +792,7 @@ class TestStreamResponseNotRead:
         err = RuntimeError("SDK failed")
         err.__context__ = httpx.ResponseNotRead()
 
-        assert _has_response_not_read_cause(err) is True
+        assert find_response_not_read(err) is not None
 
 
 class TestStreamAuthRetry:

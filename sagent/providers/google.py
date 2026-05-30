@@ -279,6 +279,11 @@ class _GeminiModel:
         return ()
 
     @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """Gemini API exposes no fast-latency path."""
+        return ()
+
+    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return False

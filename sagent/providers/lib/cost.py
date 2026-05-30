@@ -38,6 +38,8 @@ def compute_cost(
     output_tokens: int,
     cache_creation: int = 0,
     cache_read: int = 0,
+    *,
+    fast: bool = False,
 ) -> tuple[float, float, float]:
     """Compute token costs in USD.
 
@@ -51,6 +53,10 @@ def compute_cost(
       output_tokens: Output token count.
       cache_creation: Tokens written to prompt cache.
       cache_read: Tokens read from prompt cache.
+      fast: When True, bill non-cached request/response at the
+          ``fast_request`` / ``fast_response`` rates. The caller must
+          gate this on the server's authoritative speed report (e.g.
+          Anthropic ``usage.speed == "fast"``).
 
     Returns:
       input_cost: Input cost in USD (including cache components).
@@ -58,10 +64,15 @@ def compute_cost(
       total_cost: Sum of input and output costs.
 
     """
+    # Fast mode surcharges only request/response: Anthropic's fast-mode
+    # pricing table lists Input/Output rates and no separate cache rates,
+    # so cache write/read stay at standard rates here.
+    request_rate = pricing.fast_request if fast else pricing.request
+    response_rate = pricing.fast_response if fast else pricing.response
     input_cost = (
-        input_tokens * pricing.request
+        input_tokens * request_rate
         + cache_creation * pricing.cache_write
         + cache_read * pricing.cache_read
     ) / 1_000_000
-    output_cost = output_tokens * pricing.response / 1_000_000
+    output_cost = output_tokens * response_rate / 1_000_000
     return input_cost, output_cost, input_cost + output_cost

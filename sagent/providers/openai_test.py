@@ -109,6 +109,46 @@ def test_openai_build_body_omits_unset_service_tier() -> None:
     assert "service_tier" not in body
 
 
+def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
+    # gpt-5 / o-series reject ``max_tokens`` (400 unsupported_parameter);
+    # they require ``max_completion_tokens``.
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
+        stream=False,
+    )
+    assert body["max_completion_tokens"] == 42
+    assert "max_tokens" not in body
+
+
+def test_openai_valid_latency_modes_fast() -> None:
+    p = OpenAI.from_key("k")
+    assert p.model("gpt-5.5").valid_latency_modes == ("fast",)
+
+
+def test_openai_fast_latency_maps_to_priority_tier() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], latency="fast"),
+        stream=False,
+    )
+    assert body["service_tier"] == "priority"
+
+
+def test_openai_fast_latency_overrides_explicit_service_tier() -> None:
+    p = OpenAI.from_key("k")
+    m = p.model("gpt-5.5")
+    body = m._build_body(
+        ModelRequest(
+            messages=[UserMessage(text="x")], latency="fast", service_tier="flex"
+        ),
+        stream=False,
+    )
+    assert body["service_tier"] == "priority"
+
+
 def test_openai_build_body_omits_unknown_service_tier() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-5.5")

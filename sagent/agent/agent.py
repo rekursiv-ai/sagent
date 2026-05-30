@@ -197,6 +197,7 @@ class Agent:
         self._effort = effort
         self._cache_ttl: str = "5m"
         self._service_tier: str | None = None
+        self._latency: str | None = None
         self.persistent_retry = persistent_retry
         self._max_budget_usd = max_budget_usd
         self.last_compact_error: Exception | None = None
@@ -322,10 +323,6 @@ class Agent:
                 f" {self.model.max_response_tokens:,}",
             )
         self._budget = dataclasses.replace(self._budget, max_response_tokens=value)
-
-    def reset_budget(self) -> None:
-        """Reset budget to model-derived defaults."""
-        self._budget = types.model.ContextBudget.from_model(self.model)
 
     @property
     def thinking_state(self) -> ThinkingState | None:
@@ -475,6 +472,37 @@ class Agent:
                     f"service_tier must be one of {quoted}, got {value!r}",
                 )
         self._service_tier = value
+
+    @property
+    def latency(self) -> str | None:
+        """Cross-provider latency hint (``"fast"``), or ``None`` when unset."""
+        return self._latency
+
+    @latency.setter
+    def latency(self, value: str | None) -> None:
+        """Set the latency hint; rejected when the model lacks a fast path.
+
+        Args:
+          value: ``"fast"`` to request the provider's fast path, or
+              ``None`` to clear.
+
+        Raises:
+          ValueError: If the model exposes no latency modes or ``value``
+              is not one of the accepted modes.
+
+        """
+        if value is not None:
+            valid = self.model.valid_latency_modes
+            if not valid:
+                raise ValueError(
+                    f"Model {self.model.model_id!r} does not support latency.",
+                )
+            if value not in valid:
+                quoted = ", ".join(repr(t) for t in valid)
+                raise ValueError(
+                    f"latency must be one of {quoted}, got {value!r}",
+                )
+        self._latency = value
 
     @property
     def session_id(self) -> str:
@@ -639,6 +667,7 @@ class Agent:
         )
         rebuilt.cache_ttl = self.cache_ttl
         rebuilt.service_tier = self.service_tier
+        rebuilt.latency = self.latency
         rebuilt._persistent = persistent
         return rebuilt
 
@@ -658,23 +687,23 @@ class Agent:
           model: New rich provider model.
           spec: Optional spec recording how the model was built.
 
-        Raises:
-          ValueError: Explicit budget exceeds the new model's limits.
-
         """
         if model is self.model:
             return
-        if self._budget.max_request_tokens > model.max_request_tokens:
-            raise ValueError(
-                f"budget.max_request_tokens={self._budget.max_request_tokens:,}"
-                f" exceeds new model's {model.max_request_tokens:,}",
-            )
-        if self._budget.max_response_tokens > model.max_response_tokens:
-            raise ValueError(
-                f"budget.max_response_tokens={self._budget.max_response_tokens:,}"
-                f" exceeds new model's {model.max_response_tokens:,}",
-            )
         old = self.model
+        self._budget = dataclasses.replace(
+            self._budget,
+            max_request_tokens=_rescaled_window(
+                self._budget.max_request_tokens,
+                old_max=old.max_request_tokens,
+                new_max=model.max_request_tokens,
+            ),
+            max_response_tokens=_rescaled_window(
+                self._budget.max_response_tokens,
+                old_max=old.max_response_tokens,
+                new_max=model.max_response_tokens,
+            ),
+        )
         self.model = model
         self.model_spec = spec
         self._agent_model.set_inner(model)
@@ -687,6 +716,8 @@ class Agent:
             self._effort = None
         if not model.valid_service_tiers:
             self._service_tier = None
+        if not model.valid_latency_modes:
+            self._latency = None
         if not model.supports_cache_control:
             self._cache_ttl = "5m"
         if spec is not None:
@@ -1553,6 +1584,29 @@ def _compact_failure_error(
     return last_err
 
 
+def _rescaled_window(current: int, *, old_max: int, new_max: int) -> int:
+    """Rescale one budget window to a model swap.
+
+    The budget follows the model rather than persisting across swaps: a
+    budget left at the old model's ceiling (the "use the whole window"
+    default) snaps to the new ceiling, while an explicitly pinned smaller
+    value is preserved and only clamped down when it overflows the new
+    model.
+
+    Args:
+      current: Active budget window before the swap.
+      old_max: Outgoing model's ceiling for this window.
+      new_max: Incoming model's ceiling for this window.
+
+    Returns:
+      window: Budget window sized for the new model.
+
+    """
+    if current >= old_max:
+        return new_max
+    return min(current, new_max)
+
+
 def _resolve_target_spec(
     spec: types.model.ModelSpec,
     *,
@@ -1730,6 +1784,7 @@ class _AgentModel:
         rich_service_tier = (
             self._agent.service_tier if self._inner.valid_service_tiers else None
         )
+        rich_latency = self._agent.latency if self._inner.valid_latency_modes else None
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             fresh_system = self._agent.system_prompt()
@@ -1743,6 +1798,7 @@ class _AgentModel:
                     effort=rich_effort,
                     cache_ttl=self._agent.cache_ttl,
                     service_tier=rich_service_tier,
+                    latency=rich_latency,
                 ),
                 tool_result_budget_chars=self._agent.budget.message_budget_chars,
             )

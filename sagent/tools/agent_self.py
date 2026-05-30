@@ -251,6 +251,9 @@ class _PatchPlan:
     service_tier: str | None | object = _UNSET
     """OpenAI service-tier hint; ``_UNSET`` means leave unchanged."""
 
+    latency: str | None | object = _UNSET
+    """Cross-provider latency hint; ``_UNSET`` means leave unchanged."""
+
     max_request_tokens: int | None = None
     """New per-request input budget; ``None`` to keep."""
 
@@ -337,6 +340,7 @@ def _build_patch_plan(
     thinking = cast(bool | None, options.get("thinking"))
     cache_ttl = cast(str | None, options.get("cache_ttl"))
     service_tier = options.get("service_tier", _UNSET)
+    latency = options.get("latency", _UNSET)
     has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
     if has_explicit_limits:
         limits = _plan_limits(agent, target_model, d)
@@ -352,6 +356,7 @@ def _build_patch_plan(
         effort=options.get("effort", _UNSET),
         cache_ttl=cache_ttl,
         service_tier=service_tier,
+        latency=latency,
         max_request_tokens=limits.get("max_request_tokens"),
         max_response_tokens=limits.get("max_response_tokens"),
         context=context,
@@ -366,13 +371,9 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         agent.status = plan.status
         parts.append(f"status={plan.status}")
     if plan.model is not None:
-        new_model = plan.model.model
-        budget = agent.budget
-        if (
-            budget.max_request_tokens > new_model.max_request_tokens
-            or budget.max_response_tokens > new_model.max_response_tokens
-        ):
-            agent.reset_budget()
+        # ``swap_model`` rescales the budget to the new model's window
+        # (whole-window budgets follow the new ceiling; pinned values clamp
+        # down), so any explicit per-call limits below land within range.
         agent.swap_model(plan.model.model, spec=plan.model.spec)
         parts.append(f"model={plan.model.label}")
         if not plan.model.model.supports_effort and agent.effort is not None:
@@ -384,6 +385,9 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         if not plan.model.model.valid_service_tiers and agent.service_tier is not None:
             agent.service_tier = None
             parts.append("service_tier=unset (unsupported)")
+        if not plan.model.model.valid_latency_modes and agent.latency is not None:
+            agent.latency = None
+            parts.append("latency=unset (unsupported)")
     if plan.thinking is not None:
         agent.thinking = "adaptive" if plan.thinking else None
         parts.append(f"thinking={'on' if plan.thinking else 'off'}")
@@ -398,6 +402,10 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         service_tier = cast(str | None, plan.service_tier)
         agent.service_tier = service_tier
         parts.append(f"service_tier={service_tier or 'unset'}")
+    if plan.latency is not _UNSET:
+        latency = cast(str | None, plan.latency)
+        agent.latency = latency
+        parts.append(f"latency={latency or 'unset'}")
     if plan.max_request_tokens is not None:
         agent.max_request_tokens = plan.max_request_tokens
         parts.append(f"max_request_tokens={agent.max_request_tokens:,}")
@@ -579,6 +587,20 @@ def _plan_model_options(
                 is_error=True,
             )
         planned["service_tier"] = value
+    if "latency" in options:
+        value = options["latency"]
+        valid = model.valid_latency_modes
+        if value is not None and value not in valid:
+            quoted = ", ".join(repr(t) for t in valid) or "(none)"
+            return types.runtime.ToolResult(
+                call_id="",
+                content=(
+                    f"model_options.latency for {model.model_id} must"
+                    f" be one of {quoted} or null, got {value!r}."
+                ),
+                is_error=True,
+            )
+        planned["latency"] = value
     return planned
 
 
@@ -594,6 +616,9 @@ def _supported_model_options(model: types.model.Model) -> dict[str, str]:
     tiers = model.valid_service_tiers
     if tiers:
         supported["service_tier"] = " | ".join(repr(t) for t in tiers)
+    modes = model.valid_latency_modes
+    if modes:
+        supported["latency"] = " | ".join(repr(m) for m in modes)
     return supported
 
 
@@ -815,6 +840,9 @@ def _agent_option_lines(agent: Agent) -> list[str]:
     service_tier = agent.service_tier or "unset"
     if not agent.model.valid_service_tiers:
         service_tier = "unsupported"
+    latency = agent.latency or "unset"
+    if not agent.model.valid_latency_modes:
+        latency = "unsupported"
     supported = _supported_model_options(agent.model)
     supported_text = ", ".join(f"{k}: {v}" for k, v in supported.items()) or "none"
     return [
@@ -822,6 +850,7 @@ def _agent_option_lines(agent: Agent) -> list[str]:
         f"Thinking:           {thinking}",
         f"Effort:             {effort}",
         f"Service tier:       {service_tier}",
+        f"Latency:            {latency}",
         f"Supported model_options: {supported_text}",
     ]
 

@@ -147,7 +147,7 @@ def extract_retry_after(error: Exception) -> float | None:
     val = headers.get("retry-after")
     if val is not None:
         try:
-            return float(val)
+            return _retry_after_seconds(float(val))
         except (ValueError, TypeError):
             pass
     reset = headers.get("anthropic-ratelimit-unified-reset")
@@ -157,6 +157,28 @@ def extract_retry_after(error: Exception) -> float | None:
         except (ValueError, TypeError):
             pass
     return None
+
+
+# A ``Retry-After`` delta this large is implausible; values at or above it
+# are an absolute Unix timestamp (epoch seconds), which some servers and
+# proxies send instead of RFC 7231 delta-seconds. ~1 year in seconds; any
+# real epoch (~1.8e9) clears it while no sane backoff approaches it.
+_RETRY_AFTER_EPOCH_THRESHOLD_SEC = 365 * 24 * 60 * 60
+
+
+def _retry_after_seconds(value: float) -> float:
+    """Interpret a numeric ``Retry-After`` as a delay, converting epochs.
+
+    Args:
+      value: Parsed ``retry-after`` number (delta-seconds or epoch).
+
+    Returns:
+      delay_sec: Non-negative seconds to wait.
+
+    """
+    if value >= _RETRY_AFTER_EPOCH_THRESHOLD_SEC:
+        return max(0.0, value - time.time())
+    return max(0.0, value)
 
 
 def error_diagnostics(error: Exception) -> str:
@@ -448,13 +470,24 @@ def _diagnostic_headers(headers: object) -> dict[str, str]:
 
 
 def _response_body_excerpt(response: object) -> str:
-    """Return up to ``_BODY_EXCERPT_CHARS`` of a response body, never raising."""
+    """Return up to ``_BODY_EXCERPT_CHARS`` of a response body, never raising.
+
+    ``httpx.Response.text`` / ``.content`` are properties that raise
+    ``httpx.ResponseNotRead`` when the body of a *streaming* response was
+    never read -- which happens when an error carries a streaming response
+    (e.g. Anthropic reports a ``rate_limit_error`` via an in-band SSE
+    ``error`` event on a 200 stream). ``getattr`` does not suppress an
+    exception raised inside the property, so the access itself is guarded.
+    """
     if response is None:
         return ""
-    text = getattr(response, "text", None)
-    if isinstance(text, str):
-        return text[:_BODY_EXCERPT_CHARS]
-    raw = getattr(response, "content", None)
+    try:
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            return text[:_BODY_EXCERPT_CHARS]
+        raw = getattr(response, "content", None)
+    except httpx.ResponseNotRead:
+        return ""
     if isinstance(raw, (bytes, bytearray)):
         try:
             return raw[:_BODY_EXCERPT_CHARS].decode("utf-8", errors="replace")
