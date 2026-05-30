@@ -59,8 +59,8 @@ async def test_read_json_line_skips_non_json_when_requested() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_read_json_line_raises_on_malformed_when_strict() -> None:
-    """Default (``skip_non_json=False``) raises ``ValueError`` on a non-JSON line."""
+async def test_read_json_line_raises_transport_error_on_malformed_when_strict() -> None:
+    """Protocol garbage on stdout is a subprocess transport failure."""
     proc = Subproc(
         [
             "python3",
@@ -69,7 +69,7 @@ async def test_read_json_line_raises_on_malformed_when_strict() -> None:
         ]
     )
     await proc.start()
-    with pytest.raises(ValueError, match="non-JSON line"):
+    with pytest.raises(SubprocessTransportError, match="non-JSON line"):
         _ = await proc.read_json_line()
     await proc.close()
 

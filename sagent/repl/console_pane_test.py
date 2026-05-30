@@ -63,6 +63,39 @@ def test_write_user_bar_includes_payload() -> None:
     assert "hello there" in buf.getvalue()
 
 
+def test_write_agent_bar_body_not_dim() -> None:
+    """``write_agent_bar`` body must render at normal brightness.
+
+    The ``[from <source>]:`` prefix is dim cyan to mark the
+    attribution as machinery. The body itself should NOT be dim --
+    it's the substantive message and must read with the same weight
+    as a normal user/agent reply. Today the body inherits the dim
+    attribute from the prefix's Text style merge, so the entire line
+    reads as background output.
+    """
+    buf = io.StringIO()
+    con = Console(
+        file=buf,
+        width=80,
+        force_terminal=True,
+        color_system="truecolor",
+        highlight=False,
+    )
+    printer = ConsolePrinter(con)
+    printer.write_agent_bar("reviewer", "important payload")
+    out = buf.getvalue()
+    # ANSI ``\x1b[2`` enables dim; the body span must not carry it.
+    # Split on the prefix's closing ``[0m`` reset; the body span follows.
+    _prefix, _, after = out.partition("[from reviewer]: ")
+    # The body characters should NOT be wrapped in a dim-on span.
+    # Look for the dim attribute on the body's opening ANSI block.
+    body_open = after.split("important")[0]
+    assert "\x1b[2" not in body_open.split("\x1b[0m")[-1], (
+        f"agent-bar body inherits dim from prefix style; body opening"
+        f" sequence: {body_open!r}"
+    )
+
+
 def test_write_tool_label_indents_each_line() -> None:
     printer, buf = _printer()
     printer.write_tool_label("step 1\nstep 2")

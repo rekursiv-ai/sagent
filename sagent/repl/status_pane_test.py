@@ -264,6 +264,29 @@ def test_active_wait_reason_hidden_before_threshold() -> None:
 
 
 @pytest.mark.usefixtures("patched_loop_time")
+def test_active_wait_reason_per_turn_not_session_total() -> None:
+    """The 15s wait-reason threshold applies to the CURRENT turn only.
+
+    After many short turns, cumulative ``elapsed_seconds`` will exceed
+    the threshold even when the fresh turn just started -- the user
+    would see "waiting on model." from second 0 of every subsequent
+    turn. Correct behavior: hide the reason until the CURRENT call has
+    been in flight for >=15s, regardless of session-total time.
+    """
+    # 100s of prior session activity already banked; current turn 1s in.
+    a = _agent(
+        active=True,
+        elapsed_seconds=100.0,
+        current_call_start=9.0,
+    )
+    s = render_status_pane(_as_agent(a))
+    assert "waiting on model." not in s, (
+        "wait reason fired on cumulative session time, not current-turn time;"
+        f" got {s!r}"
+    )
+
+
+@pytest.mark.usefixtures("patched_loop_time")
 def test_tools_wait_reason() -> None:
     a = _agent(active=True, current_call_start=-6.0)
     a.runtime.running_tools["c1"] = object()

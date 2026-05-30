@@ -24,6 +24,7 @@ from sagent.agent.agent import (
     ActivityTracker,
     Agent,
     SystemPromptArg,
+    _AgentTool,
     _resolve_target_spec,
 )
 from sagent.agent.background import (
@@ -1619,6 +1620,109 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_run_bg_propagates_external_cancellation() -> None:
+    """``_AgentTool._run_bg`` must re-raise ``CancelledError`` on outer cancel.
+
+    Today the handler swallows ``CancelledError`` unconditionally: if
+    ``job_id not in agent.background`` it returns; otherwise it posts a
+    "[cancelled]" ``ToolResult`` and returns. Neither path re-raises.
+    An asyncio task that catches ``CancelledError`` without re-raising
+    breaks the cancel chain -- the parent (e.g. event-loop shutdown)
+    thinks the child finished normally.
+
+    Test: cancel the ``_run_bg`` task from outside while the job IS
+    registered. The task must not exit normally -- it must propagate
+    the cancellation.
+    """
+    tool_started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class _BlockingTool:
+        name: str = "blocker"
+        tool_id: str = "application/x-tool-blocker"
+        description: str = ""
+        directive_schema: JSON = _STUB_SCHEMA
+        clearable_results: bool = False
+
+        def summary(self, args: Mapping[str, object]) -> str:
+            del args
+            return ""
+
+        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+            del result
+            return None
+
+        def prompt(self) -> str:
+            return ""
+
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            del args
+            tool_started.set()
+            await release.wait()  # never released
+            return types.runtime.ToolResult(call_id="", content="unreached")
+
+    a = _build_agent()
+    wrapped = _AgentTool(_BlockingTool(), a)
+    job_id = "job-bg-1"
+    task = asyncio.create_task(wrapped._run_bg("call-1", job_id, {}, 0.0))
+    a.register_background(
+        job_id,
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="blocker",
+            queue_id=job_id,
+            call_id="call-1",
+            started=0.0,
+            kind="tool",
+        ),
+    )
+    await tool_started.wait()
+    # External cancel while job_id is still registered.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_activity_current_call_start_resets_on_each_model_call() -> None:
+    """Mid-chain ``ModelCallStarted`` must reset ``current_call_start``.
+
+    Round chain: ``ModelCallStarted`` (call 1) → tools → ``ModelCallStarted``
+    (call 2). The status pane reads ``now - current_call_start`` to decide
+    whether to surface "waiting on model.". If ``current_call_start`` is
+    not reset on call 2, the pane shows the entire chain's elapsed time,
+    not the current call's -- "waiting on model." appears the instant
+    call 2 starts even if it just began.
+    """
+    a = _build_agent()
+    a.publish(types.runtime.ModelCallStarted())
+    t1 = a.activity.current_call_start
+    assert t1 > 0
+    await asyncio.sleep(0.02)
+    # Mid-chain tool-bearing response: spinner keeps ticking; the next
+    # ``ModelCallStarted`` is the start of a new call.
+    a.publish(
+        types.runtime.ModelResponseComplete(
+            message=types.runtime.AssistantMessage(
+                text="",
+                tool_calls=(types.runtime.ToolCall(id="t1", name="Bash", args={}),),
+            )
+        )
+    )
+    await asyncio.sleep(0.02)
+    a.publish(types.runtime.ModelCallStarted())
+    t2 = a.activity.current_call_start
+    assert t2 > t1, (
+        "second ModelCallStarted must restamp current_call_start so the"
+        " status pane measures the current call's age, not the whole"
+        f" round chain; got t1={t1!r} t2={t2!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_activity_current_compact_start_resets_on_compact_complete() -> None:
     """``CompactComplete`` clears ``activity.current_compact_start``."""
     a = _build_agent()
@@ -3126,7 +3230,12 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     task.cancel()
-    await asyncio.wait_for(task, timeout=1.0)
+    # The job is still in the registry (no ``kill_tool``-style pop),
+    # so the cancellation is treated as an external cascade: ``_run_bg``
+    # posts a ``[cancelled]`` ``DetachedResult`` AND re-raises so the
+    # cancel chain reaches the scheduler.
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
     items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=1.0)
     detached = [
         item for item in items if isinstance(item, types.runtime.DetachedResult)
@@ -3467,6 +3576,88 @@ async def test_stream_rebuilds_system_per_request() -> None:
         pass
     assert call_count > pre_run_count
     assert model.received[-1].system == f"sys-v{call_count}"
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_cli_publish_var_to_runtime_publish() -> None:
+    """``_AgentModel.stream`` exposes ``runtime.publish`` via ``cli_publish_var``.
+
+    The CLI MCP bridge reads this var to surface ``ToolLabel`` for
+    subprocess-driven tool calls. The agent layer is the seam that
+    wires the publisher; without the ``ContextVar.set`` around
+    ``send_with_retry``, the bridge silently no-ops and the REPL never
+    announces CLI tool calls.
+
+    Asserts the visible behavior: invoking the captured publisher
+    delivers the event to the runtime's observer list, just as
+    calling ``runtime.publish`` would. ``is``-comparison fails for
+    bound methods (each ``.publish`` access mints a fresh wrapper),
+    so we verify via fan-out instead.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingModel(StubModel):
+        seen: list[Callable[[types.runtime.RuntimeEvent], None] | None] = field(
+            default_factory=list
+        )
+
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            on_text: object = None,
+            on_thinking: object = None,
+        ) -> types.model.ModelResponse:
+            self.seen.append(agent_runtime.cli_publish_var.get())
+            return await super().stream(request, on_text, on_thinking)
+
+    model = _RecordingModel()
+    a = _build_agent(model=model)
+    observed: list[types.runtime.RuntimeEvent] = []
+    a.runtime.observers.append(observed.append)
+    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+        pass
+
+    assert model.seen, "model.stream was never invoked"
+    publish = model.seen[0]
+    assert publish is not None, (
+        "cli_publish_var was unset during the model call; the agent layer"
+        " must ``set`` it before invoking ``send_with_retry``"
+    )
+    sentinel = types.runtime.ToolLabel(call_id="probe", text="probe")
+    publish(sentinel)
+    assert sentinel in observed, (
+        "captured publisher did not fan out to the runtime's observers;"
+        " the var must hold ``runtime.publish`` (or an equivalent that"
+        " reaches the same observer list), not an arbitrary callable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_resets_cli_publish_var_after_request() -> None:
+    """``_AgentModel.stream`` restores ``cli_publish_var`` to its prior value.
+
+    Without the ``finally`` reset, the publisher leaks to whatever
+    coroutine the agent layer hands control to next (another model
+    call, a compaction, a subagent), routing its bridge-driven tool
+    labels to the wrong runtime.
+    """
+
+    def sentinel(_ev: types.runtime.RuntimeEvent) -> None:
+        return None
+
+    token = agent_runtime.cli_publish_var.set(sentinel)
+    try:
+        model = StubModel()
+        a = _build_agent(model=model)
+        async for _ in a.run(types.runtime.UserMessage(text="hi")):
+            pass
+        assert agent_runtime.cli_publish_var.get() is sentinel, (
+            "cli_publish_var leaked past the model call; the agent layer"
+            " must reset to the pre-call value in a finally block"
+        )
+    finally:
+        agent_runtime.cli_publish_var.reset(token)
 
 
 def test_subagent_inherits_root_cost_tracker() -> None:

@@ -96,7 +96,7 @@ class Text:
 class Defer:
     """User typed ``/defer <text>`` (or pressed Tab on a non-empty buffer);
     dispatch as a non-preempting ``UserQueuedMessage`` that drains at
-    ``ModelIdle``.
+    ``AgentIdle``.
 
     Lets the user inject content that should be processed *after* the
     agent's current round chain completes, without preempting in-flight

@@ -13,6 +13,7 @@ from sagent.request_materialization import (
 )
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
     ToolResult,
@@ -237,6 +238,77 @@ def test_materialize_request_reuses_message_materialization() -> None:
     assert isinstance(result, ToolResult)
     assert ELIDED_TOOL_RESULT_TAG in result.content
     assert materialized.system == "sys"
+
+
+def test_agent_send_message_receives_from_prefix() -> None:
+    """AgentSendMessage.text is prefixed with ``[from <source>]: `` in provider view."""
+    messages = [AgentSendMessage(source="Alice", text="hello")]
+    materialized = materialize_messages(messages)
+    result = materialized[0]
+    assert isinstance(result, AgentSendMessage)
+    assert result.text == "[from Alice]: hello"
+
+
+def test_agent_send_different_sources_must_not_coalesce_under_one_source() -> None:
+    """Adjacent AgentSends from DIFFERENT sources must keep their identity.
+
+    Current behavior: ``_coalesce_adjacent_users`` merges adjacent
+    AgentSendMessages by type, taking the FIRST source. Bob's message
+    becomes attributed to Alice in the structured ``source`` field.
+    The textual prefix saves the model-visible attribution, but any
+    downstream consumer that reads ``message.source`` (e.g. provider
+    serializers that emit OpenAI's ``name`` field) attributes both
+    sends to Alice. Either don't coalesce across sources, or surface
+    a multi-source marker.
+    """
+    messages = [
+        AgentSendMessage(source="alice", text="from alice"),
+        AgentSendMessage(source="bob", text="from bob"),
+    ]
+    materialized = materialize_messages(messages)
+    # Either keep them separate, or invent a multi-source marker --
+    # whatever we do, the structured field must not silently claim
+    # one sender owns the other's content.
+    if len(materialized) == 1:
+        merged = materialized[0]
+        assert isinstance(merged, AgentSendMessage)
+        # Bob is in the text, so the source field cannot be a bare
+        # "alice" without misleading downstream consumers.
+        assert merged.source != "alice" or "bob" not in merged.text, (
+            f"merged AgentSend's source={merged.source!r} attributes"
+            f" mixed content to alice alone; text={merged.text!r}"
+        )
+    else:
+        # Acceptable alternative: each sender retains its own message.
+        sources = [m.source for m in materialized if isinstance(m, AgentSendMessage)]
+        assert sources == ["alice", "bob"]
+
+
+def test_agent_send_adjacent_coalesce_preserves_per_sender_prefix() -> None:
+    """Adjacent AgentSendMessages from the same source coalesce with prefixes intact."""
+    messages = [
+        AgentSendMessage(source="Alice", text="first"),
+        AgentSendMessage(source="Alice", text="second"),
+    ]
+    materialized = materialize_messages(messages)
+    assert len(materialized) == 1
+    result = materialized[0]
+    assert isinstance(result, AgentSendMessage)
+    assert result.text == "[from Alice]: first\n\n[from Alice]: second"
+
+
+def test_agent_send_prefix_applied_under_budget_path() -> None:
+    """``[from <source>]: `` prefix is applied when tool-result budget is active."""
+    call = ToolCall(id="c1", name="Bash", args={})
+    messages = [
+        AgentSendMessage(source="Bob", text="go"),
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="c1", content="ok"),
+    ]
+    materialized = materialize_messages(messages, tool_result_budget_chars=10)
+    first = materialized[0]
+    assert isinstance(first, AgentSendMessage)
+    assert first.text == "[from Bob]: go"
 
 
 def _visible_tool_result_chars(messages: Sequence[object]) -> int:

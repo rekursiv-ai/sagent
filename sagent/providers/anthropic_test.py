@@ -12,6 +12,7 @@ import anthropic as anthropic_sdk
 import httpx
 import pytest
 
+from sagent.agent.retry import error_status, is_retryable
 from sagent.lib.json import MutableJSON
 from sagent.providers.anthropic import (
     Anthropic,
@@ -20,6 +21,7 @@ from sagent.providers.anthropic import (
     _guard_stream_interrupt,
     _is_prompt_too_long_text,
     _parse_response,
+    _raw_message_stream,
     _strip_context_tag,
     _tool_result_block,
     _tool_use_block,
@@ -384,6 +386,29 @@ def test_parse_response_tool_call_extracted() -> None:
     assert resp.stop_reason == "model_tool_use"
 
 
+def test_parse_response_drops_placeholder_tool_name() -> None:
+    """Tool blocks whose name is not a valid identifier are filtered out.
+
+    Anthropic's API server injects its tool-use spec into the model's
+    hidden context when tools are registered. When the user asks the
+    model to dump its context, the model echoes the spec verbatim, and
+    the API parses that echo as a structured ``tool_use`` block with
+    ``name="$FUNCTION_NAME"`` (or other template placeholders). Without
+    this guard, ``runtime._run_tool_and_post`` emits a visible
+    "Unknown tool: $FUNCTION_NAME" and the unmatched tool_use poisons
+    history for the next request.
+    """
+    raw = _build_anthropic_message(
+        tool_calls=(
+            ("toolu_real", "Bash", {"cmd": "ls"}),
+            ("toolu_bad", "$FUNCTION_NAME", {}),
+        ),
+        stop_reason="tool_use",
+    )
+    resp = _parse_response(raw, Pricing())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    assert [c.name for c in resp.message.tool_calls] == ["Bash"]
+
+
 def test_parse_response_cache_tokens_split_correctly() -> None:
     raw = _build_anthropic_message(
         input_tokens=1000,
@@ -604,6 +629,15 @@ class _BodyError(Exception):
         super().__init__("x")
 
 
+class _ResponseNotReadStatusError(Exception):
+    """Exception mirroring SDK status metadata plus ResponseNotRead cause."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__("Anthropic streaming request failed")
+        self.__cause__ = httpx.ResponseNotRead()
+
+
 def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text() -> (
     None
 ):
@@ -646,6 +680,79 @@ async def test_anthropic_stream_uses_structured_overflow_body() -> None:
         pytest.raises(PromptTooLongError),
     ):
         await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+
+@pytest.mark.asyncio
+async def test_anthropic_raw_stream_reads_status_error_body() -> None:
+    p = Anthropic.from_key("k")
+    sdk = await p.get_sdk()
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Request size exceeds model context window",
+            },
+        },
+    )
+    with (
+        patch.object(sdk._client, "send", AsyncMock(return_value=response)),
+        pytest.raises(anthropic_sdk.APIStatusError) as raised,
+    ):
+        await _raw_message_stream(
+            sdk,
+            {
+                "model": "claude-opus-4-7",
+                "messages": [],
+                "max_tokens": 1,
+            },
+        )
+
+    assert raised.value.body == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Request size exceeds model context window",
+        },
+    }
+    assert raised.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_status_body_overflow_triggers_prompt_too_long() -> None:
+    p = Anthropic.from_key("k")
+    sdk = await p.get_sdk()
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Request size exceeds model context window",
+            },
+        },
+    )
+    with (
+        patch.object(sdk._client, "send", AsyncMock(return_value=response)),
+        patch.object(p, "get_sdk", AsyncMock(return_value=sdk)),
+    ):
+        m = p.model("claude-opus-4-7")
+        with pytest.raises(PromptTooLongError):
+            await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+
+def test_response_not_read_provider_error_preserves_retry_status() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _ResponseNotReadStatusError(529)
+
+    assert is_retryable(err, m) is True
+    assert error_status(err) == 529
 
 
 @pytest.mark.asyncio

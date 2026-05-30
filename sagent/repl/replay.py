@@ -63,9 +63,12 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
         assert isinstance(record, ReferrableTapeEvent)
         entry = record.event
         match entry:
-            case UserMessage(text=text) | AgentSendMessage(text=text):
+            case UserMessage(text=text):
                 rendered_messages += 1
                 printer.write_user_bar(text)
+            case AgentSendMessage(source=source, text=text):
+                rendered_messages += 1
+                printer.write_agent_bar(source, text)
             case AssistantMessage(
                 text=text,
                 thinking_blocks=blocks,

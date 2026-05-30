@@ -15,9 +15,15 @@ from mcp.types import ImageContent, TextContent
 
 import pytest
 
+from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import JSON
 from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.types.runtime import BytesMessage, ToolResult
+from sagent.types.runtime import (
+    BytesMessage,
+    RuntimeEvent,
+    ToolLabel,
+    ToolResult,
+)
 from sagent.types.tools import Tool
 
 
@@ -319,6 +325,52 @@ async def test_call_tool_keeps_provider_scoped_empty_result_contract() -> None:
         assert len(blocks) == 1
         assert isinstance(blocks[0], TextContent)
         assert blocks[0].text == ""
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_call_tool_publishes_tool_label_when_cli_publish_var_is_set() -> None:
+    """When ``cli_publish_var`` is wired the bridge fires a ``ToolLabel``.
+
+    CLI providers don't surface tool calls through the runtime's
+    cohort path; the renderer would never see ``ToolLabel`` for an
+    AnthropicCLI / GoogleCLI turn without the bridge bridging the gap.
+    """
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
+    await bridge.start()
+    try:
+        events: list[RuntimeEvent] = []
+        token = cli_publish_var.set(events.append)
+        try:
+            blocks = await bridge._call_tool("Echo", {"text": "hi"})
+        finally:
+            cli_publish_var.reset(token)
+        assert any(isinstance(e, ToolLabel) for e in events), (
+            f"expected a ``ToolLabel`` from the bridge; got {events!r}"
+        )
+        # And the tool still ran and returned its content.
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text == "echo: hi"
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_call_tool_silent_when_cli_publish_var_unset() -> None:
+    """Without ``cli_publish_var`` set, the bridge doesn't reach for one.
+
+    Guarantees the publish path is opt-in -- a headless or non-REPL
+    caller (no runtime publisher) doesn't see surprise mutations.
+    """
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
+    await bridge.start()
+    try:
+        blocks = await bridge._call_tool("Echo", {"text": "hi"})
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text == "echo: hi"
     finally:
         await bridge.stop()
 

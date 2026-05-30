@@ -2247,6 +2247,102 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_await_user_releases_on_agent_send_message() -> None:
+    """AWAIT_USER gate releases when an AgentSendMessage arrives.
+
+    Before the fix, ``AWAIT_USER = Await((UserMessage, UserQueuedMessage, Quit))``
+    excluded ``AgentSendMessage``, so a halted agent would block forever on an
+    incoming inter-agent message. This test fails without the AWAIT_USER fix.
+    """
+    agent, _ = make_agent([AssistantMessage(text="after agent send")])
+    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+
+    async def send_agent_message_later() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(AgentSendMessage(source="Sender", text="unblock"))
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        send_agent_message_later(),
+    )
+
+    messages = agent.context().messages
+    assert any(
+        isinstance(m, AgentSendMessage) and m.source == "Sender" and m.text == "unblock"
+        for m in messages
+    ), (
+        f"AgentSendMessage must reach history after releasing AWAIT_USER; got {messages!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_await_user_releases_on_user_deferred_message() -> None:
+    """AWAIT_USER must release on ``UserDeferredMessage`` too.
+
+    The REPL Tab path pushes ``UserDeferredMessage`` when the user is
+    staging input on a halted agent (gate armed). If the gate's
+    accepted-types tuple excludes the deferred variants, the message
+    sits in the inbox forever -- the user typed something to release
+    the halt and nothing happens.
+    """
+    agent, _ = make_agent([AssistantMessage(text="after deferred")])
+    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+
+    async def send_deferred_later() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(UserDeferredMessage(text="staged after halt"))
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        send_deferred_later(),
+    )
+
+    messages = agent.context().messages
+    assert any(
+        isinstance(m, UserMessage) and "staged after halt" in m.text for m in messages
+    ), (
+        "UserDeferredMessage must release AWAIT_USER and reach history"
+        f" as a UserMessage; got {messages!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_await_user_releases_on_agent_send_deferred_message() -> None:
+    """AWAIT_USER must release on ``AgentSendDeferredMessage`` too.
+
+    Same shape as the user-side case: an inter-agent deferred reply
+    arriving while the parent is halted must release the gate.
+    """
+    agent, _ = make_agent([AssistantMessage(text="after agent deferred")])
+    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+
+    async def send_deferred_later() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(
+            AgentSendDeferredMessage(source="Sender", text="agent deferred")
+        )
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        send_deferred_later(),
+    )
+
+    messages = agent.context().messages
+    assert any(
+        isinstance(m, AgentSendMessage)
+        and m.source == "Sender"
+        and "agent deferred" in m.text
+        for m in messages
+    ), (
+        "AgentSendDeferredMessage must release AWAIT_USER and reach history"
+        f" as an AgentSendMessage; got {messages!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_queued_message_waits_for_cohort() -> None:
     """UserQueuedMessage doesn't preempt; model sees it after tools complete."""
     tool_started = asyncio.Event()
@@ -2355,6 +2451,54 @@ async def test_clear_discards_queued_messages() -> None:
     assert not any(
         isinstance(t, UserMessage) and "should be lost" in t.text
         for t in agent.context().messages
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_clear_discards_deferred_messages() -> None:
+    """Clear must wipe ``UserDeferredMessage`` too -- not just queued.
+
+    Today ``Clear`` calls ``queued.clear()`` but leaves the local
+    ``deferred`` list untouched. A deferred message staged before the
+    Clear surfaces in the fresh conversation, contradicting "clear =
+    wipe history, start over."
+    """
+    first_turn = asyncio.Event()
+    agent, _collector = make_agent(
+        [
+            AssistantMessage(text="before"),
+            AssistantMessage(text="fresh"),
+        ]
+    )
+
+    def _on_first(event: RuntimeEvent) -> None:
+        del event
+        first_turn.set()
+
+    agent.observers.append(_on_first)
+    agent.inbox.push_back(UserMessage(text="go"))
+    agent.inbox.push_back(UserDeferredMessage(text="should be lost too"))
+
+    async def clear_then_resume() -> None:
+        await first_turn.wait()
+        agent.inbox.push_back(Clear())
+        await asyncio.sleep(0)
+        agent.inbox.push_back(UserMessage(text="new start"))
+        await asyncio.sleep(0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        clear_then_resume(),
+    )
+
+    assert not any(
+        isinstance(t, UserMessage) and "should be lost too" in t.text
+        for t in agent.context().messages
+    ), (
+        "Clear left a pre-Clear UserDeferredMessage to surface in the"
+        " fresh conversation; clear must symmetrically wipe deferred"
     )
 
 

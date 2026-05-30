@@ -16,10 +16,12 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 import asyncio
 import base64
+import contextlib
+import json
 import logging
 import os
 import re
@@ -27,13 +29,22 @@ import time
 
 
 if TYPE_CHECKING:
+    from anthropic._models import FinalRequestOptions
+    from anthropic._streaming import AsyncStream
+    from anthropic.lib.streaming import AsyncMessageStream
+    from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
+
     import anthropic
+    import httpx
 
     import sagent.lib.image as image_lib
 else:
     from sagent.lib.lazy_import import lazy_import
 
     anthropic = lazy_import("anthropic")  # 569ms cold
+    httpx = lazy_import("httpx")  # 168ms cold
+    AsyncMessageStream = lazy_import("anthropic.lib.streaming").AsyncMessageStream
+    AsyncStream = lazy_import("anthropic._streaming").AsyncStream
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log, token_count
@@ -65,6 +76,25 @@ from sagent.types.tools import Tool
 logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
+
+
+class _AnthropicTransportClient(Protocol):
+    async def send(self, request: httpx.Request, *, stream: bool) -> httpx.Response: ...
+
+
+class _AnthropicRawStreamSDK(Protocol):
+    _client: _AnthropicTransportClient
+
+    def _build_request(self, options: FinalRequestOptions) -> httpx.Request: ...
+
+    def _make_status_error(
+        self,
+        err_msg: str,
+        *,
+        body: object,
+        response: httpx.Response,
+    ) -> anthropic.APIStatusError: ...
+
 
 _CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
@@ -1025,7 +1055,8 @@ async def _stream_impl(
     Routes ``text_delta`` events to ``on_text`` and ``thinking_delta``
     events to ``on_thinking`` as they arrive.
     """
-    async with sdk.messages.stream(**kwargs) as s:  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
+    stream = await _raw_message_stream(sdk, kwargs)
+    async with AsyncMessageStream(stream, output_format=anthropic.NOT_GIVEN) as s:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _STREAM_IDLE_TIMEOUT
         async with asyncio.timeout_at(deadline) as watchdog:
@@ -1042,6 +1073,76 @@ async def _stream_impl(
                 elif delta_type == "thinking_delta" and on_thinking is not None:
                     on_thinking(delta.thinking)
             return await s.get_final_message()
+
+
+async def _raw_message_stream(
+    sdk: anthropic.AsyncAnthropic,
+    kwargs: dict[str, object],
+) -> AsyncStream[RawMessageStreamEvent]:
+    body = {key: value for key, value in kwargs.items() if not _is_request_option(key)}
+    body["stream"] = True
+    body = {
+        key: value
+        for key, value in body.items()
+        if not isinstance(value, anthropic.NotGiven)
+    }
+    options = _final_request_options(kwargs, body)
+    raw_sdk = cast(_AnthropicRawStreamSDK, sdk)
+    request = _build_raw_anthropic_request(raw_sdk, options)
+    response = await _send_raw_anthropic_request(raw_sdk, request)
+    if response.status_code >= 400:
+        await _raise_anthropic_status_error(raw_sdk, response)
+    return AsyncStream(
+        cast_to=cast(
+            "type[RawMessageStreamEvent]", anthropic.types.RawMessageStreamEvent
+        ),
+        response=response,
+        client=sdk,
+    )
+
+
+def _final_request_options(
+    kwargs: dict[str, object],
+    body: dict[str, object],
+) -> FinalRequestOptions:
+    return anthropic._models.FinalRequestOptions.construct(  # noqa: SLF001 -- SDK request builder is the only way to preserve auth/default headers while reading stream errors safely.
+        method="post",
+        url="/v1/messages",
+        json_data=body,
+        headers=cast(Any, kwargs.get("extra_headers")),
+        extra_json=cast(Any, kwargs.get("extra_body")),
+        timeout=cast(Any, kwargs.get("timeout", anthropic.NOT_GIVEN)),
+    )
+
+
+def _build_raw_anthropic_request(
+    sdk: _AnthropicRawStreamSDK,
+    options: FinalRequestOptions,
+) -> httpx.Request:
+    return sdk._build_request(options)  # noqa: SLF001 -- only the SDK request builder preserves auth/default headers for raw stream error handling.
+
+
+async def _send_raw_anthropic_request(
+    sdk: _AnthropicRawStreamSDK,
+    request: httpx.Request,
+) -> httpx.Response:
+    return await sdk._client.send(request, stream=True)  # noqa: SLF001 -- raw stream status handling must use the SDK-owned authenticated client.
+
+
+async def _raise_anthropic_status_error(
+    sdk: _AnthropicRawStreamSDK,
+    response: httpx.Response,
+) -> None:
+    body_text = (await response.aread()).decode(errors="replace")
+    body: object = body_text
+    with contextlib.suppress(json.JSONDecodeError):
+        body = json.loads(body_text)
+    message = body_text or f"Error code: {response.status_code}"
+    raise sdk._make_status_error(message, body=body, response=response)  # noqa: SLF001 -- provider must preserve the SDK's status exception taxonomy.
+
+
+def _is_request_option(key: str) -> bool:
+    return key in {"extra_headers", "extra_body", "extra_query", "timeout"}
 
 
 def _cache_mark(ttl: str) -> dict[str, str]:
@@ -1306,6 +1407,18 @@ def _flush_tool_results(
     pending.clear()
 
 
+def _is_valid_tool_name(name: str) -> bool:
+    """Return True when ``name`` is a plausible registered tool name.
+
+    Filters template placeholders the model can echo back from the
+    Anthropic server's injected tool-use spec (e.g. ``$FUNCTION_NAME``,
+    ``$TOOL_NAME``). Real registered tools always have Python-identifier
+    names; ``$FUNCTION_NAME`` is not an identifier so ``isidentifier()``
+    alone rejects it.
+    """
+    return name.isidentifier()
+
+
 def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResponse:
     """Convert Anthropic Message to ModelResponse with AssistantMessage."""
     text_parts: list[str] = []
@@ -1316,6 +1429,21 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
         if isinstance(block, anthropic.types.TextBlock):
             text_parts.append(block.text)
         elif isinstance(block, anthropic.types.ToolUseBlock):
+            if not _is_valid_tool_name(block.name):
+                # Anthropic's API injects its tool-use spec (containing
+                # ``$FUNCTION_NAME`` etc.) into the model's hidden
+                # context when tools are registered. If the user asks
+                # the model to dump its context, the model echoes the
+                # spec verbatim and the server re-parses that echo as a
+                # real ``tool_use`` block. Without this filter the
+                # unmatched call leaks to ``_run_tool_and_post``
+                # ("Unknown tool") and the orphan tool_use poisons the
+                # next request (Anthropic HTTP 400).
+                logger.warning(
+                    "anthropic: skipping tool_use with placeholder name %r",
+                    block.name,
+                )
+                continue
             tool_calls.append(
                 ToolCall(
                     id=block.id,

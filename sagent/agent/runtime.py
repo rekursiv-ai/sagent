@@ -303,6 +303,19 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_call_id", default=""
 )
 
+
+# ``cli_publish_var`` is set by ``_AgentModel.stream`` before invoking
+# a CLI provider whose tool loop happens inside its subprocess. The
+# MCP bridge (``providers.lib.mcp_bridge``) reads this var when it
+# receives a ``call_tool`` request and synthesises a ``ToolLabel``
+# event so the REPL renderer surfaces CLI tool calls the same way it
+# does API-driven ones. API providers don't read the var; the bridge
+# only exists for CLI transports. Default ``None`` makes the lookup
+# safe in non-CLI code paths.
+cli_publish_var: contextvars.ContextVar[Callable[[RuntimeEvent], None] | None] = (
+    contextvars.ContextVar("cli_publish", default=None)
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -447,7 +460,17 @@ class Await:
     """Event classes that satisfy the gate (``Quit`` always does)."""
 
 
-AWAIT_USER = Await((UserMessage, UserQueuedMessage, Quit))
+AWAIT_USER = Await(
+    (
+        UserMessage,
+        UserQueuedMessage,
+        UserDeferredMessage,
+        AgentSendMessage,
+        AgentSendQueuedMessage,
+        AgentSendDeferredMessage,
+        Quit,
+    )
+)
 
 
 class GatedDeque[T]:
@@ -815,11 +838,12 @@ class AgentRuntime:
         # ``AgentIdle`` is edge-triggered: published once when the
         # runtime is about to block on an empty inbox with no work
         # in flight, then suppressed until the next ``drain()`` returns
-        # items. Initialized to ``True`` so cold start (drained but
-        # never having processed anything) does NOT publish -- the
-        # signal is "transitioned from working to idle", not "exists
-        # in idle state".
-        self._was_idle: bool = True
+        # items. Initialized to ``False`` so a cold-start REPL where
+        # the user pre-staged a deferred block before any work ever
+        # ran sees an initial ``AgentIdle`` and flushes the queue.
+        # The signal is "agent is now idle and accepting input"; that
+        # is true at the very first ``run_forever`` iteration too.
+        self._was_idle: bool = False
         # Wall-clock seconds at which a prior ``ModelServiceSuspended``
         # scheduled the next retry. Read once by the model loop before
         # the first ``send_with_retry`` and cleared; subsequent sends
@@ -828,8 +852,53 @@ class AgentRuntime:
         self.resume_retry_at: float | None = None
         self.service_suspended_until: float | None = None
 
+    @property
+    def is_idle(self) -> bool:
+        """True iff a freshly pushed user-side message would drain now.
+
+        Companion to :meth:`_fully_drained` but with a different
+        contract -- they are intentionally NOT equivalent:
+
+        * :meth:`_fully_drained` answers "should the runtime publish
+          ``AgentIdle``?" -- the strict invariant guarding the
+          edge-triggered publish at the top of every ``run_forever``
+          iteration. It excludes detached background work because the
+          agent is not fully done until those land.
+
+        * ``is_idle`` answers "can a REPL keybinding push a queued
+          block to the inbox now and expect the gate to fire it?".
+          Detached background tools are irrelevant to this -- the
+          model-call gate fires on ``not self.cohort``, not
+          ``not self.detached`` -- so the predicate omits ``detached``.
+          ``inbox.empty()`` and ``_should_call_model()`` are also
+          omitted: both flip on the very push the caller is about to
+          make.
+
+        Adding ``detached`` to this predicate would break REPL
+        responsiveness: every time a tool ran in the background, Tab
+        and Up-Enter would refuse to dispatch.
+
+        Snapshot at call time. The caller must read this and act on it
+        within the same synchronous block (no intervening ``await``);
+        asyncio's cooperative scheduling guarantees no other coroutine
+        runs during.
+        """
+        return (
+            self.model_call is None
+            and self.compact_task is None
+            and not self.cohort
+            and not self.running_tools
+            and not self._mid_stream_queue
+            and not self.inbox.gate_armed
+        )
+
     def _fully_drained(self) -> bool:
         """True iff the agent has no work to do and no gate is armed.
+
+        Companion to :attr:`is_idle` -- this is the strict
+        ``AgentIdle``-publish gate; ``is_idle`` is the looser
+        "REPL can push input now" predicate. See ``is_idle``'s
+        docstring for the contract difference.
 
         Sources of work checked:
 
@@ -847,6 +916,15 @@ class AgentRuntime:
           event type (e.g. ``AWAIT_USER`` after ``Halt`` /
           ``ModelResponseError``). Semantically "parked on a particular
           event," not "idle."
+        * ``_should_call_model()`` -- history tail wants a model turn.
+          The end-of-iteration gate will fire one this pass; we are
+          about to be busy, not idle. **This is the only source that
+          resolves the tape** (via ``self.context()``). The cost is
+          one cached lookup in the hot path because the gate sections
+          below call ``self.context()`` already; a future change to
+          ``_should_call_model`` that bypasses the cache (or to the
+          tape resolver that invalidates per call) would shift this
+          predicate from O(1) to O(tape).
 
         Local ``run_forever`` state (``awaiting_user``, ``queued``) is
         not consulted directly: ``awaiting_user`` correlates with
@@ -868,6 +946,7 @@ class AgentRuntime:
             and not self.detached
             and not self._mid_stream_queue
             and not self.inbox.gate_armed
+            and not self._should_call_model()
         )
 
     def publish(self, event: RuntimeEvent) -> None:
@@ -1331,6 +1410,7 @@ class AgentRuntime:
                             self.detached.clear()
                             self._pending_detached_user.clear()
                             queued.clear()
+                            deferred.clear()
                             self._mid_stream_queue.clear()
                             self.append_clear()
                             self.inbox.push_front(

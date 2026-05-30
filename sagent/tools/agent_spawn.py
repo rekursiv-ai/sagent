@@ -1079,6 +1079,15 @@ class _ChildForwarder:
             # AgentIdle at most once per idle transition, so we get one
             # push per idle, not per round.
             #
+            # Boot suppression: the runtime publishes its first
+            # ``AgentIdle`` at the top of the first ``run_forever``
+            # iteration -- i.e. before the child has done any work.
+            # An empty history is the unambiguous marker of that
+            # transition; without this guard, every fresh persistent
+            # child immediately spams the parent with a useless
+            # "[child is idle]" before processing its seeded prompt.
+            if not self._child.history:
+                return
             # Carry the child's last assistant text so a child that
             # replied with plain assistant text instead of AgentSend
             # still reaches the parent's model context. Without this,
@@ -1149,11 +1158,59 @@ def _build_forwarder(
 def _last_assistant_result(
     history: list[ModelContextEvent],
 ) -> ToolResult:
-    """Return the child's last assistant message as a ``ToolResult``."""
+    """Return the child's most recent outbound reply as a ``ToolResult``.
+
+    Walks back to the most recent ``AssistantMessage``. If that turn
+    has an ``AgentSend`` tool call, returns its ``content`` arg --
+    otherwise returns the turn's text (even when empty).
+
+    The one-step lookback is needed because ``AgentSend`` is a tool
+    call: dispatching it leaves a ``ToolResult`` at history tail,
+    which triggers a mandatory follow-up model round whose short
+    acknowledgement ("Done.") would otherwise shadow the real payload
+    at idle-publish time. When the last turn is text-only AND the
+    immediately-prior assistant turn has an ``AgentSend``, the prior
+    content is the substantive reply -- the trailing turn is the ack.
+
+    Older ``AgentSend``s further back are not surfaced: the child has
+    moved on past them; returning ancient content would feed the
+    parent a stale message.
+    """
+    last_assistant: AssistantMessage | None = None
+    prior_assistant: AssistantMessage | None = None
     for m in reversed(history):
-        if isinstance(m, AssistantMessage):
-            return ToolResult(call_id="", content=m.text)
-    return ToolResult(call_id="", content="")
+        if not isinstance(m, AssistantMessage):
+            continue
+        if last_assistant is None:
+            last_assistant = m
+        else:
+            prior_assistant = m
+            break
+    if last_assistant is None:
+        return ToolResult(call_id="", content="")
+    last_send = _last_agent_send_content(last_assistant)
+    if last_send is not None:
+        return ToolResult(call_id="", content=last_send)
+    if not last_assistant.tool_calls and prior_assistant is not None:
+        prior_send = _last_agent_send_content(prior_assistant)
+        if prior_send is not None:
+            return ToolResult(call_id="", content=prior_send)
+    return ToolResult(call_id="", content=last_assistant.text)
+
+
+def _last_agent_send_content(message: AssistantMessage) -> str | None:
+    """Return the most recent non-empty ``AgentSend`` ``content`` in ``message``.
+
+    Walks the assistant turn's tool_calls in reverse so two parallel
+    ``AgentSend`` calls surface the LAST one (the child's most recent
+    intent), not the first.
+    """
+    for tc in reversed(message.tool_calls):
+        if tc.name == "AgentSend":
+            content = tc.args.get("content", "")
+            if isinstance(content, str) and content:
+                return content
+    return None
 
 
 def _augment_system_for_persistent(

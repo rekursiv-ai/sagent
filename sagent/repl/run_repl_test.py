@@ -8,6 +8,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 
@@ -20,6 +21,11 @@ from sagent.agent.state import AgentLike
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
+from sagent.repl.keybindings import (
+    NavState,
+    _kb_defer,
+    _kb_submit,
+)
 from sagent.repl.render import (
     RecordingPrinter,
     make_render_observer,
@@ -27,7 +33,7 @@ from sagent.repl.render import (
 from sagent.repl.run_repl import (
     _background_tasks_for_repl_cancel,
     _parse_model_args,
-    _publish_startup_idle_if_settled,
+    _subagent_phase,
     do_login,
     do_switch_model,
     do_switch_thinking,
@@ -37,6 +43,7 @@ from sagent.repl.run_repl import (
 )
 from sagent.types.model import ModelSpec
 from sagent.types.runtime import (
+    AgentIdle,
     AssistantMessage,
     ModelContextEvent,
     ModelIdle,
@@ -162,7 +169,7 @@ def test_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
         return later_error
 
     agent.runtime.before_tool_spawn = _later
-    observer(ModelIdle())
+    observer(AgentIdle())
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
@@ -425,7 +432,7 @@ def test_do_switch_model_no_spec_writes_error() -> None:
     agent = _FakeAgent(model_spec=None)
     printer = RecordingPrinter()
     do_switch_model(_as_agent(agent), "", printer)
-    assert any("no model spec" in line for line in printer.lines)
+    assert any("no model spec" in line for line in printer.slash_blocks)
     assert agent.swap_calls == []
 
 
@@ -435,7 +442,7 @@ def test_do_switch_model_empty_args_shows_status() -> None:
     do_switch_model(_as_agent(agent), "", printer)
     assert any(
         "provider=Anthropic" in line and "model=claude-opus-4-7" in line
-        for line in printer.lines
+        for line in printer.slash_blocks
     )
     assert agent.swap_calls == []
 
@@ -444,7 +451,7 @@ def test_do_switch_model_shlex_parse_error() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_model(_as_agent(agent), 'unclosed "quote', printer)
-    assert any("parse error" in line for line in printer.lines)
+    assert any("parse error" in line for line in printer.slash_blocks)
     assert agent.swap_calls == []
 
 
@@ -452,7 +459,7 @@ def test_do_switch_model_unknown_flag_writes_error() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_model(_as_agent(agent), "--bogus x", printer)
-    assert any("unknown flag" in line for line in printer.lines)
+    assert any("unknown flag" in line for line in printer.slash_blocks)
     assert agent.swap_calls == []
 
 
@@ -473,7 +480,7 @@ def test_do_switch_model_success_delegates_to_change_model() -> None:
             "account": None,
         }
     ]
-    assert any("claude-sonnet-4-6" in line for line in printer.lines)
+    assert any("claude-sonnet-4-6" in line for line in printer.slash_blocks)
 
 
 def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
@@ -500,7 +507,7 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
     ]
     assert any(
         "Anthropic/claude-opus-4-7 -> Google/gemini-3-pro" in line
-        for line in printer.lines
+        for line in printer.slash_blocks
     )
 
 
@@ -514,7 +521,7 @@ def test_do_switch_model_change_model_error_writes_to_printer() -> None:
         return_value=None,
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
-    assert any("no credentials" in line for line in printer.lines)
+    assert any("no credentials" in line for line in printer.slash_blocks)
 
 
 def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
@@ -594,7 +601,7 @@ def test_do_switch_thinking_rejects_models_without_thinking() -> None:
     agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert "does not support thinking" in printer.lines[0]
+    assert "does not support thinking" in printer.slash_blocks[0]
     assert agent.change_model_calls == []
 
 
@@ -610,7 +617,7 @@ def test_do_switch_thinking_show_errors_from_off() -> None:
     agent = _FakeAgent(thinking_state="off-hide", thinking=None, show_thinking=False)
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "show", printer)
-    assert "cannot show" in printer.lines[0]
+    assert "cannot show" in printer.slash_blocks[0]
     assert agent.change_model_calls == []
 
 
@@ -634,7 +641,7 @@ def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "redact", printer)
-    assert "does not support redacted thinking" in printer.lines[0]
+    assert "does not support redacted thinking" in printer.slash_blocks[0]
     assert agent.change_model_calls == []
 
 
@@ -655,7 +662,7 @@ def test_do_switch_thinking_rebuild_failure_preserves_state() -> None:
     assert agent.thinking_state == "adaptive-show"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is True
-    assert "rebuild failed" in printer.lines[0]
+    assert "rebuild failed" in printer.slash_blocks[0]
 
 
 def test_do_switch_thinking_show_errors_from_redact() -> None:
@@ -670,7 +677,7 @@ def test_do_switch_thinking_show_errors_from_redact() -> None:
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "show", printer)
-    assert "cannot show" in printer.lines[0]
+    assert "cannot show" in printer.slash_blocks[0]
     assert agent.change_model_calls == []
 
 
@@ -679,7 +686,7 @@ async def test_do_login_no_spec_writes_error() -> None:
     agent = _FakeAgent(model_spec=None)
     printer = RecordingPrinter()
     await do_login(_as_agent(agent), printer)
-    assert any("no model spec" in line for line in printer.lines)
+    assert any("no model spec" in line for line in printer.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -689,7 +696,7 @@ async def test_do_login_success_delegates_to_relogin() -> None:
     printer = RecordingPrinter()
     await do_login(_as_agent(agent), printer)
     assert agent.relogin_calls == 1
-    assert any("re-authenticated" in line for line in printer.lines)
+    assert any("re-authenticated" in line for line in printer.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -699,7 +706,7 @@ async def test_do_login_relogin_error_writes_to_printer() -> None:
     agent.relogin_side_effect = RuntimeError("oauth failed")
     printer = RecordingPrinter()
     await do_login(_as_agent(agent), printer)
-    assert any("oauth failed" in line for line in printer.lines)
+    assert any("oauth failed" in line for line in printer.slash_blocks)
 
 
 def test_format_tasks_no_registry_header_only() -> None:
@@ -835,8 +842,8 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 
 
 @pytest.mark.asyncio
-async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> None:
-    """``ModelIdle`` with non-empty queue → coalesced ``UserDeferredMessage`` pushed; queue cleared."""
+async def test_make_input_queue_committer_pushes_deferred_on_agent_idle() -> None:
+    """``AgentIdle`` with non-empty queue → coalesced ``UserDeferredMessage`` pushed; queue cleared."""
     queues = InputQueues(
         deferred=[
             QueuedInputBlock(text="elephant"),
@@ -847,7 +854,7 @@ async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> Non
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = make_input_queue_committer(cast(Agent, holder), queues)
-    observer(ModelIdle())
+    observer(AgentIdle())
     assert not queues.has_any()
     pushed = await runtime.inbox.drain()
     assert len(pushed) == 1
@@ -856,31 +863,35 @@ async def test_make_input_queue_committer_pushes_deferred_on_model_idle() -> Non
     assert item.text == "elephant\n\nbanana\n\nchair"
 
 
-def test_make_input_queue_committer_ignores_non_idle_events() -> None:
-    """Non-``ModelIdle`` events leave ``queued_input`` and the inbox untouched."""
+def test_make_input_queue_committer_ignores_non_agent_idle_events() -> None:
+    """Non-``AgentIdle`` events leave ``queued_input`` and the inbox untouched."""
     queues = InputQueues(deferred=[QueuedInputBlock(text="elephant")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = make_input_queue_committer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
+    observer(ModelIdle())
     assert [b.text for b in queues.deferred] == ["elephant"]
     assert runtime.inbox._queue.empty()
 
 
-def test_make_input_queue_committer_ignores_idle_when_empty() -> None:
-    """``ModelIdle`` with an empty queue is a no-op (no spurious push)."""
+def test_make_input_queue_committer_ignores_agent_idle_when_empty() -> None:
+    """``AgentIdle`` with an empty queue is a no-op (no spurious push)."""
     queues = InputQueues()
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = make_input_queue_committer(cast(Agent, holder), queues)
-    observer(ModelIdle())
+    observer(AgentIdle())
     assert runtime.inbox._queue.empty()
 
 
 @pytest.mark.asyncio
-async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
-    """Resume starts already idle, so emit one idle edge for queue flushers."""
+async def test_startup_idle_flushes_staged_queue_on_first_agent_idle() -> None:
+    """At REPL startup the runtime naturally emits ``AgentIdle`` before its first
+    blocking drain, so pre-staged deferred blocks are flushed without any
+    synthetic startup pulse.
+    """
     queues = InputQueues(
         deferred=[QueuedInputBlock(text="were we implementing issue 25?")]
     )
@@ -888,27 +899,51 @@ async def test_startup_idle_flushes_staged_queue_when_already_idle() -> None:
     holder = _RuntimeHolder(runtime=runtime)
     runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
 
-    _publish_startup_idle_if_settled(runtime)
+    flushed = asyncio.Event()
 
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, AgentIdle) and not queues.has_any():
+            flushed.set()
+            runtime.inbox.push_back(Quit())
+
+    runtime.observers.append(_watch)
+    await asyncio.wait_for(runtime.run_forever(), timeout=2.0)
+
+    assert flushed.is_set()
     assert not queues.has_any()
-    pushed = await runtime.inbox.drain()
-    assert len(pushed) == 1
-    assert isinstance(pushed[0], UserDeferredMessage)
-    assert pushed[0].text == "were we implementing issue 25?"
 
 
-def test_startup_idle_does_not_fire_when_history_needs_model() -> None:
-    """Startup idle pulse must not mask a pending model-triggering turn."""
+@pytest.mark.asyncio
+async def test_startup_idle_not_fired_when_history_needs_model() -> None:
+    """An incoming user message fires the model BEFORE ``AgentIdle``.
+
+    Setup: inbox already holds a ``UserMessage`` (the user typed
+    something). The runtime drains it, fires the model, completes the
+    round. Only after that round (with no follow-up work) does the
+    runtime idle and publish ``AgentIdle``. The committer must not see
+    ``AgentIdle`` before ``ModelIdle`` -- otherwise the deferred queue
+    would flush prematurely.
+    """
     queues = InputQueues(deferred=[QueuedInputBlock(text="for later")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    runtime.append_history(UserMessage(text="answer this first"))
     runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
+    runtime.inbox.push_back(UserMessage(text="answer this first"))
 
-    _publish_startup_idle_if_settled(runtime)
+    order: list[type] = []
 
-    assert [b.text for b in queues.deferred] == ["for later"]
-    assert runtime.inbox._queue.empty()
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, (ModelIdle, AgentIdle)):
+            order.append(type(event))
+            if isinstance(event, AgentIdle):
+                runtime.inbox.push_back(Quit())
+
+    runtime.observers.append(_watch)
+    await asyncio.wait_for(runtime.run_forever(), timeout=2.0)
+
+    # ``ModelIdle`` must precede ``AgentIdle`` -- the deferred queue
+    # was not flushed before the model handled the active user message.
+    assert order[:2] == [ModelIdle, AgentIdle]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -929,6 +964,173 @@ class _TextOnlyModel:
         for ch in self.text:
             on_text(ch)
         return AssistantMessage(text=self.text)
+
+
+def _make_kb_event(text: str) -> MagicMock:
+    """Build a prompt-toolkit key event whose buffer holds ``text``.
+
+    The harness drives ``_kb_submit`` / ``_kb_defer`` directly rather
+    than through the prompt-toolkit dispatcher; the handlers only
+    touch ``event.current_buffer.text`` / ``.cursor_position`` /
+    ``.reset()`` / ``.append_to_history()``.
+    """
+    buf = MagicMock()
+    buf.text = text
+    buf.cursor_position = len(text)
+    buf.document.text_before_cursor = text
+    buf.document.text = text
+    buf.history.get_strings.return_value = []
+    event = MagicMock()
+    event.current_buffer = buf
+    return event
+
+
+async def _wait_for(
+    predicate: Callable[[], bool],
+    *,
+    timeout_sec: float = 2.0,
+) -> None:
+    """Yield to the event loop until ``predicate`` is True or timeout."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while not predicate():
+        if loop.time() >= deadline:
+            return
+        await asyncio.sleep(0)
+
+
+@contextlib.asynccontextmanager
+async def _running_runtime(
+    runtime: agent_runtime.AgentRuntime,
+):
+    """Start ``run_forever`` and tear it down on exit.
+
+    Lets the test push to the inbox at any point and wait on predicates
+    against history; ``Quit`` is pushed at exit to drain the engine.
+    """
+    task = asyncio.create_task(runtime.run_forever())
+    try:
+        yield
+    finally:
+        runtime.inbox.push_back(Quit())
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
+
+
+def _harness_runtime() -> tuple[
+    agent_runtime.AgentRuntime, _RuntimeHolder, InputQueues
+]:
+    """Build a runtime + queues + committer wired together."""
+    queues = InputQueues()
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    holder = _RuntimeHolder(runtime=runtime)
+    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
+    return runtime, holder, queues
+
+
+def _history_user_texts(runtime: agent_runtime.AgentRuntime) -> list[str]:
+    return [m.text for m in runtime.context().messages if isinstance(m, UserMessage)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_enter_at_cursor_zero_fresh_session_reaches_history() -> None:
+    """Enter on a fresh session: ``UserMessage`` reaches history."""
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    async with _running_runtime(runtime):
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("hi"))
+        await _wait_for(lambda: "hi" in _history_user_texts(runtime))
+    assert "hi" in _history_user_texts(runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_tab_at_cursor_zero_fresh_session_drains_to_history() -> None:
+    """Tab on a fresh session: deferred drains via the initial ``AgentIdle``."""
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    async with _running_runtime(runtime):
+        _kb_defer(cast(Agent, holder), queues, nav, _make_kb_event("for later"))
+        await _wait_for(lambda: "for later" in _history_user_texts(runtime))
+    assert "for later" in _history_user_texts(runtime), (
+        "deferred queue must drain on the first AgentIdle of a fresh session"
+    )
+
+
+async def _wait_until_idle(idle_events: list[type]) -> None:
+    """Yield until at least one ``AgentIdle`` has been observed."""
+    await _wait_for(lambda: AgentIdle in idle_events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
+    """Tab AFTER a completed model turn: deferred must still drain.
+
+    The bug class: ``_was_idle`` flips True after the first AgentIdle,
+    then stays True. Tab without ``gate_armed`` stages to the deferred
+    queue but no further ``AgentIdle`` fires, so the text is stuck.
+    This is the wider variant of bug #2 the cold-start fix missed.
+    """
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    idle_events: list[type] = []
+    runtime.observers.append(
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+    )
+    async with _running_runtime(runtime):
+        # First turn: user types, model answers, agent idles. Wait for
+        # the AgentIdle event so we know the runtime is truly settled
+        # (not just mid-stream with "first" already appended).
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("first"))
+        await _wait_until_idle(idle_events)
+        idle_events.clear()
+        # Now agent is fully idle and ``_was_idle=True``. Tab a deferred
+        # block. Without the fix, nothing wakes the drain.
+        _kb_defer(cast(Agent, holder), queues, nav, _make_kb_event("after idle tab"))
+        await _wait_for(lambda: "after idle tab" in _history_user_texts(runtime))
+    assert "after idle tab" in _history_user_texts(runtime), (
+        "Tab after a completed turn must still drain; the deferred queue"
+        " is stuck because no AgentIdle re-fires on an already-idle runtime"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_enter_at_cursor_one_after_idle_dispatches_via_urgent() -> None:
+    """Enter at cursor>0 on a fully-idle agent: text reaches history.
+
+    Setup: Tab stages "draft", Up lifts it (cursor=1, snapshot captured),
+    Enter at cursor=1 commits via ``replace_from_navigation`` with
+    ``lane="urgent"``. The committed urgent block must drain so "draft"
+    appears in history. Today the urgent queue waits for ``AgentIdle``
+    too, so on a fully-idle agent it's stuck.
+    """
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    idle_events: list[type] = []
+    runtime.observers.append(
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+    )
+    async with _running_runtime(runtime):
+        # Settle the runtime: warm-up turn, then wait for full idle.
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("warm up"))
+        await _wait_until_idle(idle_events)
+        idle_events.clear()
+
+        # Simulate Tab → Up → Enter: stage deferred, capture nav snapshot,
+        # then commit-via-navigation with lane="urgent".
+        queues.stage_deferred("draft")
+        nav.begin([QueuedInputBlock(text="draft")], "", urgent_count=0)
+        # Now Enter at cursor>0 — drives _kb_submit through the nav path.
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("draft"))
+
+        await _wait_for(lambda: "draft" in _history_user_texts(runtime))
+    assert "draft" in _history_user_texts(runtime), (
+        "Enter at cursor>0 on idle agent must dispatch the committed"
+        " urgent-lane content; today nothing wakes the drain"
+    )
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1335,210 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         f" 'completed late' into history; saw history:"
         f" {[type(m).__name__ for m in runtime.context().messages]}"
     )
+
+
+def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
+    """Return a BackgroundTaskEntry with kind='persistent_subagent'."""
+    task = MagicMock()
+    task.done.return_value = False
+    task.cancelled.return_value = False
+    return BackgroundTaskEntry(
+        task=task,
+        tool_name="AgentSpawn",
+        queue_id=queue_id,
+        started=0.0,
+        kind="persistent_subagent",
+        hidden=False,
+        delay_sec=0.0,
+    )
+
+
+def _make_runtime(
+    *,
+    model_call: object = None,
+    compact_task: object = None,
+    cohort: set[str] | None = None,
+    gate_armed: bool = False,
+) -> MagicMock:
+    rt = MagicMock()
+    rt.model_call = model_call
+    rt.compact_task = compact_task
+    rt.cohort = cohort if cohort is not None else set()
+    rt.inbox = MagicMock()
+    rt.inbox.gate_armed = gate_armed
+    return rt
+
+
+def test_subagent_phase_stopped_when_task_done() -> None:
+    task = MagicMock()
+    task.done.return_value = True
+    task.cancelled.return_value = False
+    task.exception.return_value = None
+    job = BackgroundTaskEntry(
+        task=cast("asyncio.Task[object]", task),
+        tool_name="AgentSpawn",
+        queue_id="child-1",
+        started=0.0,
+        kind="persistent_subagent",
+        hidden=False,
+        delay_sec=0.0,
+    )
+    assert _subagent_phase(job) == "stopped"
+
+
+def test_format_tasks_non_persistent_job_crashed_shows_errored() -> None:
+    """A non-persistent background job that crashed must NOT show
+    "completed" -- the operator needs to tell a crash from a graceful
+    finish, same as the persistent-subagent ``_subagent_phase`` path.
+    """
+    agent = _FakeAgent()
+    task = MagicMock()
+    task.done.return_value = True
+    task.cancelled.return_value = False
+    task.exception.return_value = RuntimeError("boom")
+    crashed_job = BackgroundTaskEntry(
+        task=cast("asyncio.Task[object]", task),
+        tool_name="Bash",
+        queue_id="job-x",
+        started=0.0,
+        kind="tool",
+        hidden=False,
+        delay_sec=0.0,
+    )
+    other = MagicMock()
+    other.work = None
+    other.background = {"job-x": crashed_job}
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"agent-0": other},
+    ):
+        out = format_tasks(_as_agent(agent))
+    assert "errored" in out, (
+        f"crashed background job must surface as 'errored', not"
+        f" 'completed'; got {out!r}"
+    )
+
+
+def test_subagent_phase_errored_when_task_crashed() -> None:
+    """A persistent subagent that crashed must NOT show as plain 'stopped'.
+
+    Operators need to tell a graceful exit from a crash. Conflating
+    both under "stopped" hides failures behind UI parity with normal
+    completion.
+    """
+    task = MagicMock()
+    task.done.return_value = True
+    task.cancelled.return_value = False
+    task.exception.return_value = RuntimeError("boom")
+    job = BackgroundTaskEntry(
+        task=cast("asyncio.Task[object]", task),
+        tool_name="AgentSpawn",
+        queue_id="child-crashed",
+        started=0.0,
+        kind="persistent_subagent",
+        hidden=False,
+        delay_sec=0.0,
+    )
+    assert _subagent_phase(job) == "errored", (
+        f"crashed persistent subagent must be distinguishable from a"
+        f" graceful exit; got {_subagent_phase(job)!r}"
+    )
+
+
+def test_subagent_phase_running_when_child_not_in_registry() -> None:
+    job = _make_subagent_job("missing-child")
+    empty_registry: dict[str, object] = {}
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        empty_registry,
+    ):
+        assert _subagent_phase(job) == "running"
+
+
+def test_subagent_phase_running_when_child_has_no_runtime() -> None:
+    job = _make_subagent_job("child-no-rt")
+    child = MagicMock(spec=[])  # no 'runtime' attribute
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-no-rt": child},
+    ):
+        assert _subagent_phase(job) == "running"
+
+
+def test_subagent_phase_running_when_model_call_active() -> None:
+    job = _make_subagent_job("child-1")
+    child = MagicMock()
+    child.runtime = _make_runtime(model_call=MagicMock())
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-1": child},
+    ):
+        assert _subagent_phase(job) == "running"
+
+
+def test_subagent_phase_compacting_when_compact_task_active() -> None:
+    job = _make_subagent_job("child-1")
+    child = MagicMock()
+    child.runtime = _make_runtime(compact_task=MagicMock())
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-1": child},
+    ):
+        assert _subagent_phase(job) == "compacting"
+
+
+def test_subagent_phase_tool_wait_when_cohort_nonempty() -> None:
+    job = _make_subagent_job("child-1")
+    child = MagicMock()
+    child.runtime = _make_runtime(cohort={"call-1"})
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-1": child},
+    ):
+        assert _subagent_phase(job) == "tool-wait"
+
+
+def test_subagent_phase_gate_armed() -> None:
+    job = _make_subagent_job("child-1")
+    child = MagicMock()
+    child.runtime = _make_runtime(gate_armed=True)
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-1": child},
+    ):
+        assert _subagent_phase(job) == "gate-armed"
+
+
+def test_subagent_phase_idle_when_all_fields_quiet() -> None:
+    """All-quiet child runtime must show 'idle', not 'running' (the bug)."""
+    job = _make_subagent_job("child-1")
+    child = MagicMock()
+    child.runtime = _make_runtime()
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"child-1": child},
+    ):
+        assert _subagent_phase(job) == "idle"
+
+
+def test_format_tasks_persistent_subagent_shows_idle_phase() -> None:
+    """``format_tasks`` must display 'idle' for a quiet persistent subagent."""
+    agent = _FakeAgent()
+    job = _make_subagent_job("child-1")
+    parent = MagicMock()
+    parent.work = None
+    parent.background = {"child-1": job}
+    child = MagicMock()
+    child.work = None
+    child.background = {}
+    child.runtime = _make_runtime()
+    with patch(
+        "sagent.repl.run_repl.agent_registry",
+        {"parent": parent, "child-1": child},
+    ):
+        out = format_tasks(_as_agent(agent))
+    assert "idle" in out
+    assert "parent/child-1" in out
 
 
 if __name__ == "__main__":

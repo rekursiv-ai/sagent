@@ -37,7 +37,11 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.repl.input_queues import InputQueues, QueuedInputBlock
+from sagent.repl.input_queues import (
+    InputQueues,
+    Lane,
+    QueuedInputBlock,
+)
 from sagent.types.runtime import UserMessage
 
 
@@ -122,7 +126,7 @@ def build_key_bindings(
 
 
 def _commit_queued_and_restore(
-    queues: InputQueues, nav: NavState, buf_text: str
+    queues: InputQueues, nav: NavState, buf_text: str, *, lane: Lane = "deferred"
 ) -> str:
     """Commit ``buf_text`` to queue + restore snapshot; return restored buffer.
 
@@ -140,6 +144,11 @@ def _commit_queued_and_restore(
       preserves the original queue and adds the navigated/edited
       content as a new block.
 
+    ``lane`` carries the caller's intent: Enter passes ``"urgent"`` so
+    the committed block dispatches at the next chat-safe boundary; Tab
+    keeps the default ``"deferred"`` so a Tab-during-navigation still
+    defers.
+
     The snapshot is cleared and the snapshot-input is returned so the
     caller can restore the buffer to the user's pre-navigation typing.
     """
@@ -148,6 +157,7 @@ def _commit_queued_and_restore(
         buf_text,
         edit_mode=nav.cursor == 1 and bool(nav.snapshot_queue),
         urgent_count=nav.snapshot_urgent_count,
+        lane=lane,
     )
     restored = nav.snapshot_input
     nav.end()
@@ -191,9 +201,20 @@ def _kb_submit(
         buf.reset()
         return
     if nav.cursor > 0:
-        restored = _commit_queued_and_restore(queues, nav, text)
+        restored = _commit_queued_and_restore(queues, nav, text, lane="urgent")
+        # No ``buf.append_to_history()`` / ``buf.reset()`` here -- the
+        # nav-Enter contract restores the user's pre-navigation typing
+        # to the buffer. The committed text was lifted from a queued
+        # block (already in history's queue lane), not freshly typed;
+        # appending it to prompt-toolkit history would double-record
+        # navigation echoes. Resetting would discard the restored
+        # snapshot.
         buf.text = restored
         buf.cursor_position = len(buf.text)
+        # An already-idle runtime won't fire another ``AgentIdle`` to
+        # drain the freshly-staged urgent block, so push it now.
+        if agent.runtime.is_idle:
+            queues.commit_urgent(agent)
         return
     if (
         agent.runtime.model_call is not None
@@ -218,8 +239,8 @@ def _kb_defer(
     At ``cursor == 0`` (no navigation): the text is appended to the
     deferred queue and the buffer is cleared. ``make_input_queue_committer``
     in :mod:`repl.run_repl` commits deferred input as a single
-    ``UserQueuedMessage`` on ``ModelIdle``; an already-armed user gate is
-    released immediately because no future ``ModelIdle`` will arrive.
+    ``UserQueuedMessage`` on ``AgentIdle``; an already-armed user gate is
+    released immediately because no future ``AgentIdle`` will arrive.
 
     At ``cursor > 0`` (navigation active): same commit path as Enter --
     queue gets ``snapshot_queue + [buffer]`` and the buffer is restored
@@ -236,7 +257,11 @@ def _kb_defer(
         buf.cursor_position = len(buf.text)
         return
     queues.stage_deferred(text)
-    if agent.runtime.inbox.gate_armed:
+    # An already-idle runtime won't fire another ``AgentIdle`` to drain
+    # the freshly-staged block, so push it now. An armed user gate
+    # (post-Halt) also needs an immediate push because the gate will
+    # release on the deferred message itself.
+    if agent.runtime.inbox.gate_armed or agent.runtime.is_idle:
         queues.commit_deferred_on_idle(agent)
     buf.append_to_history()
     buf.reset()

@@ -60,9 +60,11 @@ else:
     uvicorn = lazy_import("uvicorn")
 
 from sagent.agent.background import split_bg_args
+from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import json_unfreeze
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
+from sagent.types.runtime import ToolLabel
 from sagent.types.tools import Tool
 
 
@@ -237,6 +239,21 @@ class ToolsBridge:
                     text=f"[Error] {validation_error}",
                 )
             ]
+        # Surface a ``ToolLabel`` so the REPL renderer announces the
+        # call even though the CLI's subprocess (not the sagent runtime)
+        # drives the tool loop. The runtime's ``cli_publish_var`` is
+        # set by ``_AgentModel.stream`` for the lifetime of one
+        # provider call; reading it here gives the bridge a publisher
+        # without threading a callback through the model API. ``call_id``
+        # is left empty: the renderer ignores it and the bridge has no
+        # access to the upstream provider's tool-call id anyway.
+        publish = cli_publish_var.get()
+        if publish is not None:
+            try:
+                label = tool.summary(clean_args)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                label = tool.name
+            publish(ToolLabel(call_id="", text=label))
         try:
             result = await tool.run(cast(Mapping[str, object], clean_args))
         except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to MCP error content; server cancellation remains uncaught.

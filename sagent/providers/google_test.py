@@ -20,6 +20,7 @@ from sagent.types.model import (
     ModelRequest,
     Pricing,
     PromptTooLongError,
+    StreamInterruptedError,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -203,7 +204,7 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
 async def test_google_stream_routes_thought_parts_to_thinking() -> None:
     sse_body = (
         b'data: {"candidates":[{"content":{"parts":[{"text":"thinking",'
-        b'"thought":true},{"text":"answer"}]}}],'
+        b'"thought":true},{"text":"answer"}]},"finishReason":"STOP"}],'
         b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}\n\n'
     )
     thinking_chunks: list[str] = []
@@ -250,10 +251,33 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
-    with caplog.at_level(logging.WARNING, logger="sagent.providers.google"):
-        resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
-    assert resp.message.text == "ok"
+    with (
+        caplog.at_level(logging.WARNING, logger="sagent.providers.google"),
+        pytest.raises(StreamInterruptedError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert raised.value.response.message.text == "ok"
     assert any("malformed JSON chunk" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> None:
+    sse_body = b'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(StreamInterruptedError) as raised:
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert raised.value.response.message.text == "partial"
 
 
 @pytest.mark.asyncio

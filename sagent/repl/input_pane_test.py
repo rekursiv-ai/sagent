@@ -45,6 +45,7 @@ from sagent.repl.slash import (
     Unknown as SlashUnknown,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     Clear,
     Compact,
     Recompact,
@@ -173,7 +174,7 @@ async def test_dispatch_halt_by_registry_label() -> None:
     ):
         _ = await _dispatch(a, SlashHalt(target="fix-tools"), p)
     assert child_stub.halted == 1
-    assert "[/halt fix-tools] halted" in p.lines
+    assert "[/halt fix-tools] halted" in p.slash_blocks
 
 
 @pytest.mark.asyncio
@@ -196,7 +197,7 @@ async def test_dispatch_kill_job_id() -> None:
     p = RecordingPrinter()
     _ = await _dispatch(a, SlashKill(target="job-1"), p)
     assert stub.killed == ["job-1"]
-    assert any("cancelled job-1" in line for line in p.lines)
+    assert any("cancelled job-1" in line for line in p.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -211,7 +212,7 @@ async def test_dispatch_kill_namespaced_subagent_job() -> None:
     ):
         _ = await _dispatch(a, SlashKill(target="fix-tools/job-1"), p)
     assert child_stub.killed == ["job-1"]
-    assert "[/kill fix-tools/job-1] cancelled" in p.lines
+    assert "[/kill fix-tools/job-1] cancelled" in p.slash_blocks
 
 
 @pytest.mark.asyncio
@@ -221,7 +222,7 @@ async def test_dispatch_kill_all() -> None:
     p = RecordingPrinter()
     _ = await _dispatch(a, SlashKill(target="all"), p)
     assert stub.killed_all == 1
-    assert any("cancelled all" in line for line in p.lines)
+    assert any("cancelled all" in line for line in p.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -243,7 +244,7 @@ async def test_dispatch_kill_persistent_subagent() -> None:
     ):
         _ = await _dispatch(a, SlashKill(target="fix-tools"), p)
     assert child_stub.shutdown_calls == [True]
-    assert "[/kill fix-tools] cancelled" in p.lines
+    assert "[/kill fix-tools] cancelled" in p.slash_blocks
 
 
 @pytest.mark.asyncio
@@ -253,7 +254,7 @@ async def test_dispatch_clear_pushes_clear_event() -> None:
     p = RecordingPrinter()
     _ = await _dispatch(a, SlashClear(), p)
     assert any(isinstance(i, Clear) for i in stub.runtime.inbox.items)
-    assert any("history cleared" in line for line in p.lines)
+    assert any("history cleared" in line for line in p.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -264,7 +265,7 @@ async def test_dispatch_compact_pushes_compact_with_args() -> None:
     _ = await _dispatch(a, SlashCompact(args="hints"), p)
     pushed = stub.runtime.inbox.items
     assert any(isinstance(i, Compact) and i.args == "hints" for i in pushed)
-    assert any("/compact" in line for line in p.lines)
+    assert any("/compact" in line for line in p.slash_blocks)
 
 
 @pytest.mark.asyncio
@@ -272,7 +273,7 @@ async def test_dispatch_compact_no_args_no_note() -> None:
     a = _agent()
     p = RecordingPrinter()
     _ = await _dispatch(a, SlashCompact(args=""), p)
-    line = next(line for line in p.lines if "/compact" in line)
+    line = next(line for line in p.slash_blocks if "/compact" in line)
     assert "(" not in line
 
 
@@ -346,7 +347,7 @@ async def test_dispatch_send_sends_user_message_to_child() -> None:
         isinstance(item, UserMessage) and item.text == "continue"
         for item in child_stub.runtime.inbox.items
     )
-    assert "[/send fix-tools] sent" in p.lines
+    assert "[/send fix-tools] sent" in p.slash_blocks
 
 
 @pytest.mark.asyncio
@@ -620,9 +621,11 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     cohort: set[str] = field(default_factory=set)
-    _mid_stream_queue: list[UserMessage] = field(default_factory=list)
+    _mid_stream_queue: list[UserMessage | AgentSendMessage] = field(
+        default_factory=list
+    )
 
-    def pending_mid_stream(self) -> tuple[UserMessage, ...]:
+    def pending_mid_stream(self) -> tuple[UserMessage | AgentSendMessage, ...]:
         return tuple(self._mid_stream_queue)
 
 
@@ -673,6 +676,28 @@ def test_render_input_pane_shows_mid_stream_queue() -> None:
     queue_parts = [t[1] for t in fp if t[0] == "class:queued_input_pane"]
     assert queue_parts, (
         f"expected at least one ``queued_input_pane``-styled segment; got {list(fp)!r}"
+    )
+
+
+def test_render_input_pane_hides_agent_sourced_mid_stream() -> None:
+    """``AgentSendMessage`` in the mid-stream buffer is NOT rendered.
+
+    Queue/pending state is for the human's own input -- the user only
+    needs to see what they typed and might still edit. Agent-to-agent
+    traffic (``AgentSendMessage`` arriving mid-stream and getting
+    buffered onto ``_mid_stream_queue``) must not surface as
+    ``pending: ...`` in the input pane.
+    """
+    fake = _FakeAgent()
+    fake.runtime._mid_stream_queue = [
+        UserMessage(text="user-pending"),
+        AgentSendMessage(source="reviewer", text="agent-payload"),
+    ]
+    fp = render_input_pane(_as_real_agent(fake), InputQueues())
+    rendered = "".join(t[1] for t in fp)
+    assert "pending: user-pending" in rendered
+    assert "agent-payload" not in rendered, (
+        f"AgentSendMessage must not appear in input pane; got {rendered!r}"
     )
 
 

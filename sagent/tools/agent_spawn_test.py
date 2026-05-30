@@ -47,6 +47,7 @@ from sagent.types.runtime import (
     ModelServiceSuspended,
     SaveSession,
     ServiceErrorSnapshot,
+    ToolCall,
     ToolResult,
     UserMessage,
 )
@@ -109,6 +110,93 @@ def test_last_assistant_result_finds_last() -> None:
 def test_last_assistant_result_empty_history() -> None:
     r = _last_assistant_result([])
     assert r.content == ""
+
+
+def test_last_assistant_result_two_agent_sends_returns_last() -> None:
+    """Two AgentSends in the same turn -- return the most recent one.
+
+    The child emitted two sends in parallel; the last one in tool-call
+    order is the most recent message the child wanted to deliver.
+    Returning the first one buries the more current content.
+    """
+    history = [
+        UserMessage(text="kick"),
+        AssistantMessage(
+            tool_calls=(
+                ToolCall(
+                    id="t1",
+                    name="AgentSend",
+                    args={"to": "parent", "content": "first send"},
+                ),
+                ToolCall(
+                    id="t2",
+                    name="AgentSend",
+                    args={"to": "parent", "content": "second send"},
+                ),
+            ),
+        ),
+        ToolResult(call_id="t1", content="ok"),
+        ToolResult(call_id="t2", content="ok"),
+        AssistantMessage(text="Done."),
+    ]
+    r = _last_assistant_result(list(history))
+    assert r.content == "second send", (
+        f"two-AgentSends-in-one-turn must return the last send (most"
+        f" recent intent), not the first; got {r.content!r}"
+    )
+
+
+def test_last_assistant_result_does_not_return_stale_agent_send() -> None:
+    """An ancient ``AgentSend`` content must NOT shadow a newer text turn.
+
+    The child made an AgentSend in turn 1, then moved on and produced
+    a new text-only assistant reply in turn N. The "most recent reply"
+    is turn N, not turn 1's AgentSend. The walk must stop at the most
+    recent assistant turn, not scan the whole history for any
+    AgentSend ever.
+    """
+    history = [
+        UserMessage(text="kick"),
+        AssistantMessage(
+            tool_calls=(
+                ToolCall(
+                    id="t1",
+                    name="AgentSend",
+                    args={"to": "parent", "content": "OLD AGENTSEND"},
+                ),
+            ),
+        ),
+        ToolResult(call_id="t1", content="ok"),
+        AssistantMessage(text="Done."),
+        UserMessage(text="another kick"),
+        AssistantMessage(text="real recent reply"),
+    ]
+    r = _last_assistant_result(list(history))
+    assert r.content == "real recent reply", (
+        f"stale AgentSend shadowed the actual most recent reply; got {r.content!r}"
+    )
+
+
+def test_last_assistant_result_returns_empty_for_empty_last_text() -> None:
+    """If the most recent assistant turn has empty text, return empty --
+    don't skip back to an older non-empty turn.
+
+    The blocking-spawn caller uses this as the child's reply. If the
+    child finished with an empty turn (e.g. only thinking blocks or
+    only non-AgentSend tool calls), the right return is empty -- not
+    ancient content from a much earlier turn that the child has since
+    moved past.
+    """
+    history = [
+        AssistantMessage(text="old answer the user has since moved past"),
+        UserMessage(text="follow-up"),
+        AssistantMessage(text=""),
+    ]
+    r = _last_assistant_result(list(history))
+    assert r.content == "", (
+        "fallback must respect the actual most-recent assistant turn;"
+        f" returning {r.content!r} surfaces stale content"
+    )
 
 
 def test_metadata_basics() -> None:
@@ -758,14 +846,32 @@ def test_forwarder_notify_on_asleep_false_skips_inbox_push() -> None:
     )
 
 
-def test_forwarder_notify_on_asleep_true_pushes_one_user_message() -> None:
-    """notify_on_asleep=True: one AgentIdle -> one UserMessage on parent.
-
-    With no assistant message in the child's history yet, the payload
-    falls back to the bare ``[<label> is idle]`` form.
+def test_forwarder_notify_on_asleep_true_suppresses_boot_idle() -> None:
+    """AgentIdle on a child with EMPTY history is the boot state, not a
+    busy→idle transition. The forwarder must NOT push a notification
+    until the child has done at least one turn -- otherwise every
+    freshly-spawned persistent child spams the parent with a useless
+    "[child is idle]" the moment it starts.
     """
     parent = _make_parent()
     fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
+
+    fwd(AgentIdle())
+
+    assert parent.runtime.inbox.empty(), (
+        "boot AgentIdle (empty child history) leaked into parent inbox"
+    )
+
+
+def test_forwarder_notify_on_asleep_true_pushes_after_first_turn() -> None:
+    """notify_on_asleep=True: AgentIdle AFTER the child has produced
+    history pushes a UserMessage. This is the real busy→idle edge.
+    """
+    parent = _make_parent()
+    child = _make_parent()
+    child.runtime.append_history(UserMessage(text="kick off"))
+    child.runtime.append_history(AssistantMessage(text="reply"))
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
 
     fwd(AgentIdle())
 
@@ -773,7 +879,7 @@ def test_forwarder_notify_on_asleep_true_pushes_one_user_message() -> None:
     assert queue.qsize() == 1
     msg = queue.get_nowait()
     assert isinstance(msg, UserMessage)
-    assert msg.text == "[child is idle]"
+    assert msg.text == "[child is idle] reply"
 
 
 def test_forwarder_notify_on_asleep_includes_last_assistant_text() -> None:
@@ -798,16 +904,60 @@ def test_forwarder_notify_on_asleep_includes_last_assistant_text() -> None:
     assert msg.text == "[child is idle] hello parent"
 
 
-def test_forwarder_notify_on_asleep_one_push_per_event() -> None:
-    """Each AgentIdle is independently translated; edge-trigger lives in
-    the runtime (which we trust), not the forwarder.
+def test_forwarder_notify_on_asleep_prefers_agent_send_content() -> None:
+    """When child's last reply was an ``AgentSend`` to the parent, the
+    idle payload carries that content -- not the subsequent ack/"Done."
+    assistant turn that fires after the mandatory follow-up round.
 
-    Validates the forwarder is stateless w.r.t. AgentIdle -- it pushes on
-    every event the runtime delivers, relying on the runtime's
-    ``_was_idle`` flag to control cadence.
+    Mechanism: ``AgentSend`` is a tool call. After the child's tool
+    dispatches it, a ``ToolResult`` sits at history tail and triggers
+    a second model call (per ``_should_call_model``); the child's
+    answering text ("Done.") becomes the most recent assistant message.
+    The idle payload's old behavior was to ferry that ack into the
+    parent's inbox, dropping the actual report carried in
+    ``AgentSend.args["content"]``.
     """
     parent = _make_parent()
-    fwd = _make_forwarder(parent, "child", notify_on_asleep=True)
+    child = _make_parent()
+    child.runtime.append_history(UserMessage(text="user kicked off"))
+    child.runtime.append_history(
+        AssistantMessage(
+            tool_calls=(
+                ToolCall(
+                    id="t1",
+                    name="AgentSend",
+                    args={"to": "parent", "content": "report body"},
+                ),
+            ),
+        )
+    )
+    child.runtime.append_history(ToolResult(call_id="t1", content="Delivered"))
+    child.runtime.append_history(AssistantMessage(text="Done."))
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
+
+    fwd(AgentIdle())
+
+    queue = parent.runtime.inbox._queue
+    assert queue.qsize() == 1
+    msg = queue.get_nowait()
+    assert isinstance(msg, UserMessage)
+    assert msg.text == "[child is idle] report body", (
+        f"forwarder must surface AgentSend content, not the ack 'Done.'; got {msg.text!r}"
+    )
+
+
+def test_forwarder_notify_on_asleep_one_push_per_event_after_first_turn() -> None:
+    """Each AgentIdle after the child has history is independently
+    translated; edge-trigger lives in the runtime, not the forwarder.
+
+    The forwarder is stateless w.r.t. AgentIdle ONCE the boot
+    suppression has passed (child history non-empty). Each runtime-
+    delivered AgentIdle then produces one inbox push.
+    """
+    parent = _make_parent()
+    child = _make_parent()
+    child.runtime.append_history(AssistantMessage(text="real reply"))
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=True, child=child)
 
     fwd(AgentIdle())
     fwd(AgentIdle())

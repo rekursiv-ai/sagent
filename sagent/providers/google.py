@@ -51,6 +51,7 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     PromptTooLongError,
+    StreamInterruptedError,
     TokenCount,
 )
 from sagent.types.runtime import (
@@ -735,7 +736,7 @@ async def _consume_gemini_stream(
     if malformed_chunks and not parsed_chunks:
         raise ValueError("Google stream returned only malformed JSON chunks.")
 
-    return _build_response(
+    response = _build_response(
         text="".join(text_chunks),
         thinking="".join(thinking_chunks),
         tool_calls=tool_calls,
@@ -743,6 +744,9 @@ async def _consume_gemini_stream(
         finish_reason=finish_reason,
         pricing=pricing,
     )
+    if finish_reason is None:
+        raise StreamInterruptedError(response)
+    return response
 
 
 def _build_response(

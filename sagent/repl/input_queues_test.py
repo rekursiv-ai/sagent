@@ -42,6 +42,43 @@ def test_replace_from_navigation_preserves_urgent_edit_lane() -> None:
     assert queues.deferred == []
 
 
+def test_replace_from_navigation_urgent_lane_keeps_committed_block_urgent() -> None:
+    """Enter-during-navigation (``lane="urgent"``) stages the committed
+    text on the urgent lane even when ``urgent_count == 0``.
+
+    Without an explicit lane the helper used to hardcode ``stage_deferred``,
+    which meant a user who navigated up, edited, and pressed Enter saw
+    their input parked behind the deferred queue's ``AgentIdle`` drain
+    instead of dispatching urgent-style at the next chat-safe boundary.
+    """
+    queues = InputQueues()
+    queues.replace_from_navigation(
+        (QueuedInputBlock(text="history-1"),),
+        "edited",
+        edit_mode=True,
+        urgent_count=0,
+        lane="urgent",
+    )
+    assert [b.text for b in queues.urgent] == ["edited"]
+    assert queues.deferred == []
+
+
+def test_replace_from_navigation_deferred_lane_is_default() -> None:
+    """Tab-during-navigation (``lane="deferred"``, the default) keeps
+    the historical Tab semantics: text lands on the deferred lane.
+    """
+    queues = InputQueues()
+    queues.replace_from_navigation(
+        (QueuedInputBlock(text="snap"),),
+        "tabbed",
+        edit_mode=False,
+        urgent_count=0,
+    )
+    assert queues.urgent == [QueuedInputBlock(text="snap")] or queues.urgent == []
+    # Tab fallthrough lands in deferred.
+    assert any(b.text == "tabbed" for b in queues.deferred)
+
+
 def test_commit_urgent_preserves_attachments() -> None:
     attachment = BytesMessage(data=b"img", descriptor="image/png")
     queues = InputQueues(

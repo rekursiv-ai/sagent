@@ -72,6 +72,33 @@ class ConsolePrinter:
         """Render full-width dark-gray user-message bar."""
         print_user_bar(self.console, text)
 
+    def write_agent_bar(self, source: str, text: str) -> None:
+        """Render an inter-agent message attributed to its source.
+
+        Visually distinct from the user bar (which is the live human's
+        input) so the reader can tell at a glance who said what. The
+        ``[from <source>]:`` prefix is dim cyan to mark the
+        attribution as machinery; the body is rendered with a hard
+        ``reset`` so it doesn't inherit the prefix's dim attribute
+        and reads at normal weight.
+        """
+        prefix = f"[from {source}]: "
+        for line in (text or "").splitlines() or [""]:
+            self.console.print(
+                Text(prefix, style="dim cyan") + Text(line, style="reset")
+            )
+
+    def write_slash_block(self, text: str) -> None:
+        """Render slash-command output as a tool-call-like block.
+
+        Same dim-italic family as ``write_tool_label`` so the reader
+        sees slash dispatches as machinery (not user text), but without
+        the two-space indent -- slash output is at the top level of
+        the user's interaction stream, not under a model turn.
+        """
+        for line in (text or "").splitlines() or [""]:
+            self.console.print(Text(line, style="dim"))
+
     def write_tool_label(self, text: str) -> None:
         """Render dim multi-line tool-call label."""
         for line in (text or "").splitlines() or [""]:
@@ -277,5 +304,7 @@ def _render_child_item(printer: ConsolePrinter, item: object) -> None:
         printer.write_dim_line(service_suspended_text(item))
     elif isinstance(item, ToolResult):
         render_tool_result(printer, item)
-    elif isinstance(item, (AgentSendMessage, UserMessage)):
+    elif isinstance(item, AgentSendMessage):
+        printer.write_agent_bar(item.source, item.text)
+    elif isinstance(item, UserMessage):
         printer.write_user_bar(item.text)

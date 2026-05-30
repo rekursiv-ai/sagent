@@ -63,7 +63,18 @@ def render_status_pane(agent: Agent) -> str:
         f" {format_count(tokens.cache_read_tokens)}↡"
         f" ${cost:.2f}"
     )
-    reason = _wait_reason(agent, elapsed) if _has_live_activity(agent) else ""
+    # The wait-reason threshold is per-turn, not session-cumulative:
+    # users want "waiting on model." to appear when the CURRENT call has
+    # been in flight too long, not because total session time crossed
+    # a threshold that resets at session boundaries only.
+    current_turn_elapsed = (
+        asyncio.get_running_loop().time() - activity.current_call_start
+        if activity.active
+        else 0.0
+    )
+    reason = (
+        _wait_reason(agent, current_turn_elapsed) if _has_live_activity(agent) else ""
+    )
     bracket = f"[{metrics}{f'; {reason}' if reason else ''}]"
     if activity.current_compact_start > 0.0:
         live_delta = asyncio.get_running_loop().time() - activity.current_compact_start

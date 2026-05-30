@@ -26,6 +26,7 @@ from sagent.bin.cli import (
     _parse_cli_args,
     _parse_stream_json,
     _provider_kwargs,
+    _resolve_allow_providers,
     _resolve_cli_thinking_state,
     _resolve_session_dir,
     _resume_label,
@@ -588,6 +589,42 @@ def test_parse_allow_providers_unknown_exits() -> None:
     """Unknown provider names exit with a clear error."""
     with pytest.raises(SystemExit) as exc:
         _parse_allow_providers("Anthropic,FooBar")
+    assert exc.value.code == 1
+
+
+def test_resolve_allow_providers_does_not_union_default_primary() -> None:
+    """Default (non-explicit) ``--provider`` does not widen the allow-list.
+
+    Otherwise narrowing ``--allow-providers`` without changing
+    ``--provider`` would silently re-admit the default provider.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _resolve_allow_providers(
+            "Anthropic",
+            primary="OpenAI",
+            primary_explicit=False,
+        )
+    assert exc.value.code == 1
+
+
+def test_resolve_allow_providers_no_dup_when_already_present() -> None:
+    """Idempotent: explicit primary already in CSV is a no-op."""
+    out = _resolve_allow_providers(
+        "Anthropic,OpenAI",
+        primary="Anthropic",
+        primary_explicit=True,
+    )
+    assert out == ("Anthropic", "OpenAI")
+
+
+def test_resolve_allow_providers_rejects_unknown_explicit_primary() -> None:
+    """Unknown explicit primary still fails ``_parse_allow_providers`` validation."""
+    with pytest.raises(SystemExit) as exc:
+        _resolve_allow_providers(
+            "Anthropic,OpenAI",
+            primary="NopeNotReal",
+            primary_explicit=True,
+        )
     assert exc.value.code == 1
 
 
