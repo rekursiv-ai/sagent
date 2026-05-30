@@ -62,9 +62,16 @@ class InputQueues:
         self.deferred.clear()
 
     def render_blocks(self) -> list[str]:
-        """Return labelled queue blocks for the input pane."""
+        """Return labelled queue blocks for the input pane.
+
+        Urgent blocks render bare: they dispatch at the next chat-safe
+        boundary so the user does not need a label to know what will
+        happen. Deferred blocks keep their ``deferred:`` prefix because
+        they wait for an explicit cue and the label is the only
+        in-pane signal that the text won't auto-send.
+        """
         return [
-            *(f"urgent: {block.text}" for block in self.urgent),
+            *(block.text for block in self.urgent),
             *(f"deferred: {block.text}" for block in self.deferred),
         ]
 
