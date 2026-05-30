@@ -68,9 +68,9 @@ Tab
 
 Tab stages the buffer in the deferred queue (REPL-local). The
 ``make_input_queue_committer`` observer commits deferred blocks as a
-single ``UserQueuedMessage`` on ``ModelIdle``. If the runtime is already
+single ``UserQueuedMessage`` on ``AgentIdle``. If the runtime is already
 awaiting user input, Tab commits immediately because no future
-``ModelIdle`` will release the gate.
+``AgentIdle`` will release the gate.
 
 Urgent/deferred queues are local draft state. Up-arrow's lift is a true
 retract because the queued text has not entered runtime history.
@@ -296,7 +296,7 @@ def _dispatch_send(action: SlashSend, printer: Printer | None) -> None:
         else:
             target.runtime.inbox.push_back(UserMessage(text=action.content))
             if printer is not None:
-                printer.write_line(f"[/send {label}] sent")
+                printer.write_slash_block(f"[/send {label}] sent")
 
 
 def _dispatch_target_control(
@@ -367,7 +367,7 @@ def _dispatch_halt(
     for label in targets:
         agent_registry[label].halt()
         if printer is not None:
-            printer.write_line(f"[/halt {label}] halted")
+            printer.write_slash_block(f"[/halt {label}] halted")
 
 
 def _dispatch_kill(
@@ -379,7 +379,7 @@ def _dispatch_kill(
     if action.target == "all":
         agent.kill_all_tools()
         if printer is not None:
-            printer.write_line("[/kill] cancelled all tool tasks")
+            printer.write_slash_block("[/kill] cancelled all tool tasks")
         return
     owner, sep, job_id = action.target.partition("/")
     if sep:
@@ -387,18 +387,18 @@ def _dispatch_kill(
         if target is not None:
             target.kill_tool(job_id)
             if printer is not None:
-                printer.write_line(f"[/kill {owner}/{job_id}] cancelled")
+                printer.write_slash_block(f"[/kill {owner}/{job_id}] cancelled")
             return
     targets = _resolve_targets(action.target)
     if targets:
         for label in targets:
             _kill_persistent_subagent(agent, label)
             if printer is not None:
-                printer.write_line(f"[/kill {label}] cancelled")
+                printer.write_slash_block(f"[/kill {label}] cancelled")
         return
     agent.kill_tool(action.target)
     if printer is not None:
-        printer.write_line(f"[/kill] cancelled {action.target}")
+        printer.write_slash_block(f"[/kill] cancelled {action.target}")
 
 
 def _kill_persistent_subagent(agent: Agent, label: str) -> None:
@@ -426,19 +426,19 @@ async def _dispatch(
     if isinstance(action, SlashClear):
         agent.runtime.inbox.push_back(Clear())
         if printer is not None:
-            printer.write_line("[/clear] history cleared")
+            printer.write_slash_block("[/clear] history cleared")
         return False
     if isinstance(action, SlashCompact):
         agent.runtime.inbox.push_back(Compact(args=action.args))
         if printer is not None:
             note = f" ({action.args})" if action.args else ""
-            printer.write_line(f"[/compact] queued{note}")
+            printer.write_slash_block(f"[/compact] queued{note}")
         return False
     if isinstance(action, SlashRecompact):
         agent.runtime.inbox.push_back(Recompact(args=action.args))
         if printer is not None:
             note = f" ({action.args})" if action.args else ""
-            printer.write_line(f"[/recompact] queued{note}")
+            printer.write_slash_block(f"[/recompact] queued{note}")
         return False
     if isinstance(action, SlashModelSwitch):
         _run_repl.do_switch_model(agent, action.args, printer)
@@ -547,7 +547,16 @@ def render_input_pane(agent: Agent, queues: InputQueues) -> FormattedText:
 
     """
     blocks = queues.render_blocks()
-    blocks.extend(f"pending: {m.text}" for m in agent.runtime.pending_mid_stream())
+    # Only surface human-typed pending items. ``_mid_stream_queue``
+    # also buffers ``AgentSendMessage`` arriving while the model is
+    # streaming, but agent-to-agent payloads are runtime plumbing the
+    # user can't edit or retract -- they don't belong in the queue
+    # preview meant for staged human input.
+    blocks.extend(
+        f"pending: {m.text}"
+        for m in agent.runtime.pending_mid_stream()
+        if isinstance(m, UserMessage)
+    )
     parts: list[tuple[str, str]] = []
     if blocks:
         parts.append(("class:queued_input_pane", "\n\n".join(blocks)))

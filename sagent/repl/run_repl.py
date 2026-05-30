@@ -35,7 +35,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
-from sagent.agent import runtime as agent_runtime
+from sagent.agent.background import BackgroundTaskEntry
 from sagent.providers import infer_provider
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
@@ -53,12 +53,9 @@ from sagent.thinking import ThinkingState, resolve_thinking_command
 from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
-    AgentSendMessage,
+    AgentIdle,
     AssistantMessage,
-    ModelIdle,
     RuntimeEvent,
-    ToolResult,
-    UserMessage,
 )
 
 
@@ -119,7 +116,6 @@ async def run_repl(
             printer=printer,
         )
         replay_messages(agent, printer)
-        _publish_startup_idle_if_settled(agent.runtime)
         if agent.status:
             printer.set_terminal_title(agent.status)
         elif agent.name:
@@ -162,26 +158,6 @@ def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]
     ]
 
 
-def _publish_startup_idle_if_settled(runtime: agent_runtime.AgentRuntime) -> None:
-    """Publish an initial idle edge when the REPL starts already settled."""
-    if (
-        runtime.model_call is None
-        and runtime.compact_task is None
-        and not runtime.cohort
-        and not runtime.inbox.gate_armed
-        and not _history_triggers_model_call(runtime)
-    ):
-        runtime.publish(ModelIdle())
-
-
-def _history_triggers_model_call(runtime: agent_runtime.AgentRuntime) -> bool:
-    """Return True when persisted history already needs a model turn."""
-    messages = runtime.context().messages
-    return bool(messages) and isinstance(
-        messages[-1], (AgentSendMessage, UserMessage, ToolResult)
-    )
-
-
 def make_input_queue_committer(
     agent: Agent,
     queues: InputQueues,
@@ -216,7 +192,7 @@ def _commit_local_queues(
     agent: Agent,
     queues: InputQueues,
 ) -> None:
-    if isinstance(event, ModelIdle) and not queues.commit_urgent(agent):
+    if isinstance(event, AgentIdle) and not queues.commit_urgent(agent):
         queues.commit_deferred_on_idle(agent)
 
 
@@ -441,19 +417,10 @@ def format_tasks(agent: Agent) -> str:
         tag = " (self)" if other is agent else ""
         lines.append(f"  {label}{tag:<8s}  fg={fg} bg={bg_n}")
         for job in visible_bg:
-            phase = (
-                "cancelled"
-                if job.task.cancelled()
-                else (
-                    "completed"
-                    if job.task.done()
-                    else (
-                        "sleeping"
-                        if job.delay_sec > 0 and (now - job.started) < job.delay_sec
-                        else "running"
-                    )
-                )
-            )
+            if job.kind == "persistent_subagent":
+                phase = _subagent_phase(job)
+            else:
+                phase = _generic_job_phase(job, now)
             lines.append(
                 f"    bg: {label}/{job.queue_id:<10s}  {job.tool_name:<16s}  "
                 f"{phase:<10s}  {now - job.started:.0f}s"
@@ -467,10 +434,77 @@ def format_tasks(agent: Agent) -> str:
     return header
 
 
+def _generic_job_phase(job: BackgroundTaskEntry, now: float) -> str:
+    """Phase label for non-persistent-subagent bg jobs.
+
+    ``"errored"`` distinguishes crashes from graceful ``"completed"``;
+    parallels :func:`_subagent_phase`'s same distinction so both bg-row
+    families surface failures the same way.
+    """
+    if job.task.cancelled():
+        return "cancelled"
+    if job.task.done():
+        try:
+            exc = job.task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            exc = None
+        return "errored" if exc is not None else "completed"
+    if job.delay_sec > 0 and (now - job.started) < job.delay_sec:
+        return "sleeping"
+    return "running"
+
+
+def _subagent_phase(job: BackgroundTaskEntry) -> str:
+    """Return a lifecycle label for a persistent-subagent bg-job row.
+
+    Reads child runtime state directly -- safe because asyncio is
+    single-threaded and ``format_tasks`` contains no ``await``.
+
+    Args:
+      job: The ``BackgroundTaskEntry`` for the persistent subagent.
+
+    Returns:
+      phase: One of ``"idle"``, ``"running"``, ``"compacting"``,
+          ``"tool-wait"``, ``"gate-armed"``, ``"errored"``, or
+          ``"stopped"``.
+
+    """
+    if job.task.done():
+        # Distinguish crash from graceful exit so the operator can
+        # tell whether a missing child was intentional.
+        try:
+            exc = job.task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            exc = None
+        return "errored" if exc is not None else "stopped"
+    child = agent_registry.get(job.queue_id)
+    if child is None:
+        return "running"
+    rt = getattr(child, "runtime", None)
+    if rt is None:
+        return "running"
+    if getattr(rt, "model_call", None) is not None:
+        return "running"
+    if getattr(rt, "compact_task", None) is not None:
+        return "compacting"
+    if getattr(rt, "cohort", None):
+        return "tool-wait"
+    inbox = getattr(rt, "inbox", None)
+    if inbox is not None and inbox.gate_armed:
+        return "gate-armed"
+    return "idle"
+
+
 def _write(printer: Printer | None, line: str) -> None:
-    """Forward ``line`` to ``printer.write_line`` when a printer is wired."""
+    """Forward ``line`` to ``printer.write_slash_block`` when a printer is wired.
+
+    Slash-command output (``/model``, ``/thinking``, ``/login``,
+    ``/tasks``) renders as machinery, not user text -- dim, no user
+    bar -- so the operator can tell at a glance which lines are
+    REPL infrastructure vs. agent dialogue.
+    """
     if printer is not None:
-        printer.write_line(line)
+        printer.write_slash_block(line)
 
 
 _FLAG_PROVIDER = ("--provider", "-p")

@@ -20,6 +20,7 @@ import pytest
 from sagent.lib.json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai_sub import (
     OpenAISubscription,
@@ -28,14 +29,15 @@ from sagent.providers.openai_sub import (
     _build_tool_result_item,
     _build_tools,
     _consume_stream,
+    _has_response_not_read_cause,
     _jwt_claim,
     _jwt_exp,
     _jwt_payload,
     _parse_tool_arguments,
     _subscription_profile,
 )
-from sagent.types.exceptions import AuthRefreshError
-from sagent.types.model import ModelRequest
+from sagent.types.exceptions import AuthRefreshError, UserFacingError
+from sagent.types.model import ModelRequest, StreamInterruptedError
 from sagent.types.runtime import (
     AssistantMessage,
     ToolCall,
@@ -131,6 +133,50 @@ class _CompletedResponse:
     id: str = "resp_123"
     status: str = "completed"
     usage: object | None = None
+
+
+class _ResponseErrorEvent:
+    """Small stand-in for OpenAI's stream error event."""
+
+    code: str = "rate_limit"
+    message: str = "too many requests"
+    param: str = "input"
+
+
+class _FailedEvent:
+    """Small stand-in for OpenAI's failed terminal event."""
+
+    def __init__(self) -> None:
+        self.response = _FailedResponse()
+
+
+class _FailedResponse:
+    """Small stand-in for a failed OpenAI response payload."""
+
+    id: str = "resp_failed"
+    status: str = "failed"
+    error = type(
+        "Error",
+        (),
+        {"code": "server_error", "message": "backend failed"},
+    )()
+    incomplete_details = None
+
+
+class _IncompleteEvent:
+    """Small stand-in for OpenAI's incomplete terminal event."""
+
+    def __init__(self) -> None:
+        self.response = _IncompleteResponse()
+
+
+class _IncompleteResponse:
+    """Small stand-in for an incomplete OpenAI response payload."""
+
+    id: str = "resp_incomplete"
+    status: str = "incomplete"
+    error = None
+    incomplete_details = type("Incomplete", (), {"reason": "max_output_tokens"})()
 
 
 def _stub_request_messages(
@@ -468,8 +514,16 @@ async def _reasoning_effort_for(request: ModelRequest) -> str:
     provider = _make_provider()
     sdk = MagicMock()
     sdk.responses = MagicMock()
-    sdk.responses.create = AsyncMock(return_value=_DelayedStream([], delay_sec=0.0))
-    with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
+    sdk.responses.create = AsyncMock(
+        return_value=_DelayedStream([_CompletedEvent()], delay_sec=0.0)
+    )
+    with (
+        patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
+        patch(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        ),
+    ):
         model = provider.model("gpt-5.5")
         await model.stream(request)
     await_args = sdk.responses.create.await_args
@@ -685,6 +739,47 @@ class TestEnsureValidRace:
         assert provider._refresh_token == _FRESH_REFRESH
 
 
+class TestStreamResponseNotRead:
+    """Unread SDK streaming errors must not leak raw httpx exceptions."""
+
+    @pytest.mark.anyio
+    async def test_create_response_not_read_is_user_facing(self) -> None:
+        provider = _make_provider(expires_at=time.time() + 3600)
+        sdk = MagicMock()
+        sdk.responses = MagicMock()
+        sdk.responses.create = AsyncMock(side_effect=httpx.ResponseNotRead())
+
+        with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
+            model = provider.model("gpt-5.5")
+            with pytest.raises(StreamingResponseNotReadError) as raised:
+                await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+        assert not isinstance(raised.value, httpx.ResponseNotRead)
+        assert "OpenAI subscription streaming request failed" in str(raised.value)
+
+    @pytest.mark.anyio
+    async def test_wrapped_response_not_read_is_user_facing(self) -> None:
+        provider = _make_provider(expires_at=time.time() + 3600)
+        sdk = MagicMock()
+        sdk.responses = MagicMock()
+        err = RuntimeError("SDK failed")
+        err.__cause__ = httpx.ResponseNotRead()
+        sdk.responses.create = AsyncMock(side_effect=err)
+
+        with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
+            model = provider.model("gpt-5.5")
+            with pytest.raises(StreamingResponseNotReadError) as raised:
+                await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+        assert "OpenAI subscription streaming request failed" in str(raised.value)
+
+    def test_response_not_read_context_is_detected(self) -> None:
+        err = RuntimeError("SDK failed")
+        err.__context__ = httpx.ResponseNotRead()
+
+        assert _has_response_not_read_cause(err) is True
+
+
 class TestStreamAuthRetry:
     """Mid-call 401 must trigger ``handle_auth_error`` + one-shot retry.
 
@@ -789,6 +884,97 @@ class TestStreamIdleTimeout:
 
         assert response.message.text == "hello"
         assert response.message_id == "resp_123"
+
+    @pytest.mark.anyio
+    async def test_truncated_stream_raises_interrupted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            _TextDeltaEvent,
+        )
+        stream = _DelayedStream([_TextDeltaEvent("partial")], delay_sec=0.0)
+
+        with pytest.raises(StreamInterruptedError) as raised:
+            await _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            )
+
+        assert raised.value.response.message.text == "partial"
+        assert raised.value.response.stop_reason == "model_finished"
+
+    @pytest.mark.anyio
+    async def test_response_error_event_is_user_facing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseErrorEvent",
+            _ResponseErrorEvent,
+        )
+        stream = _DelayedStream([_ResponseErrorEvent()], delay_sec=0.0)
+
+        with pytest.raises(UserFacingError) as raised:
+            await _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            )
+
+        msg = str(raised.value)
+        assert "too many requests" in msg
+        assert "code=rate_limit" in msg
+        assert "param=input" in msg
+
+    @pytest.mark.anyio
+    async def test_response_failed_event_is_user_facing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseFailedEvent",
+            _FailedEvent,
+        )
+        stream = _DelayedStream([_FailedEvent()], delay_sec=0.0)
+
+        with pytest.raises(UserFacingError) as raised:
+            await _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            )
+
+        msg = str(raised.value)
+        assert "status=failed" in msg
+        assert "response_id=resp_failed" in msg
+        assert "code=server_error" in msg
+        assert "backend failed" in msg
+
+    @pytest.mark.anyio
+    async def test_response_incomplete_event_is_user_facing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseIncompleteEvent",
+            _IncompleteEvent,
+        )
+        stream = _DelayedStream([_IncompleteEvent()], delay_sec=0.0)
+
+        with pytest.raises(UserFacingError) as raised:
+            await _consume_stream(
+                stream,
+                pricing=Pricing(),
+                on_text=None,
+                on_thinking=None,
+            )
+
+        msg = str(raised.value)
+        assert "status=incomplete" in msg
+        assert "response_id=resp_incomplete" in msg
+        assert "reason=max_output_tokens" in msg
 
     @pytest.mark.anyio
     async def test_stream_routes_reasoning_deltas_to_thinking(

@@ -151,7 +151,8 @@ class Subproc:
           obj: Decoded JSON object, or ``None`` on EOF.
 
         Raises:
-          ValueError: A line failed to parse and ``skip_non_json`` is False.
+          SubprocessTransportError: A protocol line failed to parse and
+              ``skip_non_json`` is False.
 
         """
         while True:
@@ -170,7 +171,9 @@ class Subproc:
                 if skip_non_json:
                     logger.debug("skipping malformed stdout: %s", line[:120])
                     continue
-                raise ValueError(f"non-JSON line on stdout: {line[:200]!r}") from exc
+                raise SubprocessTransportError(
+                    f"non-JSON line on stdout: {line[:200]!r}: {self._diagnostic()}"
+                ) from exc
             if isinstance(obj, dict):
                 return cast(MutableJSON, obj)
             logger.debug("skipping non-object JSON: %s", line[:120])

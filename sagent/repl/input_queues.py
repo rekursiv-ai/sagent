@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from sagent.types.runtime import (
     BytesMessage,
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from sagent.agent.agent import Agent
+
+
+type Lane = Literal["urgent", "deferred"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -31,7 +34,7 @@ class InputQueues:
     """User-editable REPL input queues.
 
     ``urgent`` is Enter-created input that should run at the next chat-safe
-    boundary. ``deferred`` is Tab-created input that waits for ``ModelIdle``.
+    boundary. ``deferred`` is Tab-created input that waits for ``AgentIdle``.
     """
 
     urgent: list[QueuedInputBlock] = field(default_factory=list)
@@ -83,18 +86,30 @@ class InputQueues:
         *,
         edit_mode: bool,
         urgent_count: int = 0,
+        lane: Lane = "deferred",
     ) -> None:
-        """Replace queue contents after Up/Down navigation commit."""
+        """Replace queue contents after Up/Down navigation commit.
+
+        ``lane`` is the caller's commit intent: Enter passes
+        ``"urgent"`` so the committed block dispatches at the next
+        chat-safe boundary; Tab keeps the default ``"deferred"`` so
+        navigation-from-tab still defers. When ``edit_mode`` is True
+        and ``urgent_count > 0`` the lifted block was already urgent
+        and stays urgent regardless of ``lane``.
+        """
         self.clear()
         if edit_mode and nav_queue:
             attachments = nav_queue[0].attachments
-            if urgent_count:
+            if urgent_count or lane == "urgent":
                 self.stage_urgent(text, attachments)
             else:
                 self.stage_deferred(text, attachments)
             return
         self.restore_from_snapshot(nav_queue, urgent_count=urgent_count)
-        self.stage_deferred(text)
+        if lane == "urgent":
+            self.stage_urgent(text)
+        else:
+            self.stage_deferred(text)
 
     def restore_from_snapshot(
         self, nav_queue: Sequence[QueuedInputBlock], *, urgent_count: int = 0

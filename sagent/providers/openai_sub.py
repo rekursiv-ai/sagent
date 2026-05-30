@@ -96,6 +96,7 @@ from sagent.providers.lib.cost import (
     Pricing,
     compute_cost,
 )
+from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
@@ -108,11 +109,13 @@ from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
 from sagent.types.exceptions import (
     AuthRefreshError,
+    UserFacingError,
 )
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     PromptTooLongError,
+    StreamInterruptedError,
     TokenCount,
 )
 from sagent.types.runtime import (
@@ -809,6 +812,11 @@ class _OpenAISubModel(_OpenAIModel):
                 on_thinking=on_thinking,
             )
         except Exception as exc:
+            if _has_response_not_read_cause(exc):
+                raise StreamingResponseNotReadError(
+                    provider_name="OpenAI subscription",
+                    cause=_response_not_read_cause(exc),
+                ) from exc
             if self.is_context_overflow(exc):
                 # The compactor's shrink-and-retry path keys off
                 # PromptTooLongError; leaking raw SDK errors makes outer
@@ -827,6 +835,25 @@ class _OpenAISubModel(_OpenAIModel):
         if request.thinking == "enabled":
             return "high"
         return None
+
+
+def _response_not_read_cause(exc: BaseException) -> httpx.ResponseNotRead:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, httpx.ResponseNotRead):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    raise AssertionError("unreachable: no ResponseNotRead in exception chain")
+
+
+def _has_response_not_read_cause(exc: BaseException) -> bool:
+    try:
+        _response_not_read_cause(exc)
+    except AssertionError:
+        return False
+    return True
 
 
 def _build_tools(
@@ -919,6 +946,7 @@ async def _consume_stream(
     cache_read = 0
     message_id = ""
     finish_reason: str | None = None
+    completed = False
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
@@ -966,7 +994,18 @@ async def _consume_stream(
                                 args=cast(Mapping[str, object], args),
                             )
                         )
+                elif isinstance(event, oai_responses.ResponseErrorEvent):
+                    raise _openai_stream_event_error(event)
+                elif isinstance(
+                    event,
+                    (
+                        oai_responses.ResponseFailedEvent,
+                        oai_responses.ResponseIncompleteEvent,
+                    ),
+                ):
+                    raise _openai_stream_response_error(event.response)
                 elif isinstance(event, oai_responses.ResponseCompletedEvent):
+                    completed = True
                     resp = event.response
                     message_id = resp.id
                     if resp.usage:
@@ -979,6 +1018,70 @@ async def _consume_stream(
         await _close_stream(stream)
         raise
 
+    response = _build_stream_response(
+        text_parts=text_parts,
+        thinking_parts=thinking_parts,
+        tool_calls=tool_calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read=cache_read,
+        finish_reason=finish_reason,
+        message_id=message_id,
+        pricing=pricing,
+    )
+    if not completed:
+        await _close_stream(stream)
+        raise StreamInterruptedError(response)
+    return response
+
+
+def _openai_stream_event_error(event: object) -> UserFacingError:
+    code = getattr(event, "code", None)
+    param = getattr(event, "param", None)
+    message = getattr(event, "message", "OpenAI subscription stream error")
+    details = ["OpenAI subscription stream error"]
+    if isinstance(code, str) and code:
+        details.append(f"code={code}")
+    if isinstance(param, str) and param:
+        details.append(f"param={param}")
+    details.append(str(message))
+    return UserFacingError(": ".join(details))
+
+
+def _openai_stream_response_error(response: object) -> UserFacingError:
+    response_id = getattr(response, "id", "")
+    status = getattr(response, "status", "")
+    error = getattr(response, "error", None)
+    message = getattr(error, "message", None) if error is not None else None
+    code = getattr(error, "code", None) if error is not None else None
+    incomplete = getattr(response, "incomplete_details", None)
+    reason = getattr(incomplete, "reason", None) if incomplete is not None else None
+    details = ["OpenAI subscription stream ended without completion"]
+    if isinstance(status, str) and status:
+        details.append(f"status={status}")
+    if isinstance(response_id, str) and response_id:
+        details.append(f"response_id={response_id}")
+    if isinstance(code, str) and code:
+        details.append(f"code={code}")
+    if isinstance(reason, str) and reason:
+        details.append(f"reason={reason}")
+    if isinstance(message, str) and message:
+        details.append(message)
+    return UserFacingError(": ".join(details))
+
+
+def _build_stream_response(
+    *,
+    text_parts: list[str],
+    thinking_parts: list[str],
+    tool_calls: list[ToolCall],
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    finish_reason: str | None,
+    message_id: str,
+    pricing: Pricing,
+) -> ModelResponse:
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
     in_cost, out_cost, total_cost = compute_cost(

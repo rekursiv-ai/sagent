@@ -103,6 +103,8 @@ class Printer(Protocol):
     def write_chunk(self, text: str) -> None: ...
     def write_markdown(self, text: str) -> None: ...
     def write_user_bar(self, text: str) -> None: ...
+    def write_agent_bar(self, source: str, text: str) -> None: ...
+    def write_slash_block(self, text: str) -> None: ...
     def write_tool_label(self, text: str) -> None: ...
     def write_tool_error(self, text: str) -> None: ...
     def write_tool_summary(self, text: str) -> None: ...
@@ -136,6 +138,12 @@ class RecordingPrinter:
 
     user_bars: list[str]
     """``write_user_bar`` payloads."""
+
+    agent_bars: list[tuple[str, str]]
+    """``write_agent_bar`` payloads as ``(source, text)`` tuples."""
+
+    slash_blocks: list[str]
+    """``write_slash_block`` payloads."""
 
     tool_labels: list[str]
     """``write_tool_label`` payloads."""
@@ -173,6 +181,8 @@ class RecordingPrinter:
         self.chunks = []
         self.markdowns = []
         self.user_bars = []
+        self.agent_bars = []
+        self.slash_blocks = []
         self.tool_labels = []
         self.tool_errors = []
         self.tool_summaries = []
@@ -198,6 +208,12 @@ class RecordingPrinter:
 
     def write_user_bar(self, text: str) -> None:
         self.user_bars.append(text)
+
+    def write_agent_bar(self, source: str, text: str) -> None:
+        self.agent_bars.append((source, text))
+
+    def write_slash_block(self, text: str) -> None:
+        self.slash_blocks.append(text)
 
     def write_tool_label(self, text: str) -> None:
         self.tool_labels.append(text)
@@ -306,9 +322,12 @@ class RenderObserver:
 
     def _dispatch(self, event: RuntimeEvent) -> None:
         match event:
-            case UserMessage(text=text) | AgentSendMessage(text=text):
+            case UserMessage(text=text):
                 self._flush_stream()
                 self._printer.write_user_bar(text)
+            case AgentSendMessage(source=source, text=text):
+                self._flush_stream()
+                self._printer.write_agent_bar(source, text)
             case ModelResponsePartial(text=text):
                 self._feed_stream(text)
             case ModelResponseThinking(text=text):
@@ -498,5 +517,5 @@ sagent commands
   /send     <target> <text>   send to subagent target: label, glob, {a,b}, /re/
   /halt     [<target>]        halt self or matching subagents (Ctrl+C)
   /kill     <qid|all|target>  cancel tool task(s) or matching subagents
-  /defer    <text>            send as deferred (non-preempting); drains at ModelIdle\
+  /defer    <text>            send as deferred (non-preempting); drains at AgentIdle\
 """

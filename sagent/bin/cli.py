@@ -579,6 +579,38 @@ def _parse_allow_providers(spec: str) -> tuple[str, ...]:
     return parsed
 
 
+def _resolve_allow_providers(
+    spec: str,
+    *,
+    primary: str,
+    primary_explicit: bool,
+) -> tuple[str, ...]:
+    """Parse ``--allow-providers`` and union an explicit ``--provider``.
+
+    The structural invariant is "primary provider is in the allow-set";
+    enforcing it implicitly when the user typed ``--provider`` removes
+    the redundant double-naming. The default-primary path keeps the
+    hard error so a narrowed allow-list isn't silently re-widened.
+    """
+    parsed = _parse_allow_providers(spec)
+    if primary_explicit and primary not in parsed:
+        candidate = (*parsed, primary)
+        # Validate the unioned primary against the known provider list
+        # by routing it back through ``_parse_allow_providers`` rather
+        # than duplicating the check; on unknown ``primary`` this
+        # surfaces the same error and exit code the user would see for
+        # any other unknown entry in the CSV.
+        return _parse_allow_providers(",".join(candidate))
+    if primary not in parsed:
+        sys.stderr.write(
+            f"Error: --provider={primary!r} is not in"
+            f" --allow-providers {list(parsed)}; widen the allow"
+            " list or pick an allowed provider.\n"
+        )
+        sys.exit(1)
+    return parsed
+
+
 def _build_provider_model(
     args: argparse.Namespace,
     thinking_state: ThinkingState | None,
@@ -1143,14 +1175,11 @@ def main() -> None:
         loaded_session = load_session(Path(session_dir), {})
         if loaded_session is not None:
             _apply_resume_model_defaults(args, loaded_session[0])
-    allow_providers = _parse_allow_providers(args.allow_providers)
-    if args.provider not in allow_providers:
-        sys.stderr.write(
-            f"Error: --provider={args.provider!r} is not in"
-            f" --allow-providers {list(allow_providers)}; widen the allow"
-            " list or pick an allowed provider.\n"
-        )
-        sys.exit(1)
+    allow_providers = _resolve_allow_providers(
+        args.allow_providers,
+        primary=args.provider,
+        primary_explicit=bool(getattr(args, "provider_explicit", False)),
+    )
     try:
         thinking_state = _resolve_cli_thinking_state(args)
         provider, model, resolved_auth = _build_provider_model(args, thinking_state)

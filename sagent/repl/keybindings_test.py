@@ -31,6 +31,15 @@ class _FakeRuntime:
     model_call: object = None
     compact_task: object = None
 
+    @property
+    def is_idle(self) -> bool:
+        return (
+            self.model_call is None
+            and self.compact_task is None
+            and not self.cohort
+            and not self.inbox.gate_armed
+        )
+
 
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
@@ -235,14 +244,25 @@ def test_enter_with_trailing_backslash_inserts_newline_no_dispatch() -> None:
     assert agent.runtime.inbox.items == []
 
 
-def test_tab_idle_stages_deferred_input_until_model_idle_edge() -> None:
+def test_tab_idle_immediately_commits_to_inbox() -> None:
+    """Tab on a fully-idle agent commits the deferred block immediately.
+
+    The runtime won't fire another ``AgentIdle`` to drain a staged
+    block when ``_was_idle`` is already True, so the keybinding pushes
+    the ``UserDeferredMessage`` directly to the inbox in the idle case.
+    """
     agent = _idle_agent()
     queues = InputQueues()
     kb = _build(agent, queues)
     buf = _fake_buf("for later")
     _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert [b.text for b in queues.deferred] == ["for later"]
-    assert agent.runtime.inbox.items == []
+    assert queues.deferred == [], (
+        f"deferred should drain to inbox on idle Tab; staged: {queues.deferred!r}"
+    )
+    assert len(agent.runtime.inbox.items) == 1
+    pushed = agent.runtime.inbox.items[0]
+    assert isinstance(pushed, UserDeferredMessage)
+    assert pushed.text == "for later"
 
 
 def test_tab_busy_stages_locally_does_not_dispatch() -> None:
@@ -303,9 +323,11 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
 
     Tab stages "hello". Up lifts it into the buffer (cursor=1, snapshot
     captured). Enter at cursor>0 commits the buffer as a queued block
-    and restores the snapshot's buffer (empty in this case). Net
-    result: queue holds ["hello"] again, runtime untouched -- the user
-    walked through navigation without losing anything.
+    on the URGENT lane (because Enter is always urgent-intent) and
+    restores the snapshot's buffer (empty in this case). Net result:
+    queue holds urgent ["hello"], runtime untouched -- the user walked
+    through navigation without losing anything and the committed block
+    will dispatch at the next chat-safe boundary.
     """
     agent = _busy_agent()
     queues = InputQueues()
@@ -330,9 +352,10 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
 
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     # Enter at cursor==1 (Case 1, edit-mode): the lifted queue content
-    # is replacing the original queue. No doubling. Snapshot input
-    # (empty) is restored to the buffer. No runtime push.
-    assert [b.text for b in queues.deferred] == ["hello"]
+    # is replacing the original queue on the urgent lane. No doubling.
+    # Snapshot input (empty) is restored to the buffer. No runtime push.
+    assert [b.text for b in queues.urgent] == ["hello"]
+    assert queues.deferred == []
     assert buf.text == ""
     assert nav.cursor == 0
     assert agent.runtime.inbox.items == []
@@ -565,9 +588,11 @@ def test_enter_after_navigation_commits_buffer_and_restores() -> None:
 
     Mirrors "now: enter, appends to queued" from the contract. The
     user scrolled into history (cursor>1), then Enter commits the
-    (possibly edited) history entry as a new queued block. The
+    (possibly edited) history entry as a new urgent-lane block. The
     snapshot queue is preserved (NOT replaced) because the user
-    "scrolled past" rather than edited the queue.
+    "scrolled past" rather than edited the queue. The original queued
+    block is restored on the deferred lane; the freshly-committed
+    block lands on the urgent lane because Enter is urgent-intent.
     """
     nav = NavState()
     queues = InputQueues(deferred=[QueuedInputBlock(text="original")])
@@ -581,9 +606,12 @@ def test_enter_after_navigation_commits_buffer_and_restores() -> None:
     assert buf.text == "latest"
     assert nav.cursor == 2
 
-    # Enter: commit "latest" as queued block, restore "typed-before-up".
+    # Enter: commit "latest" as an urgent block, restore original
+    # snapshot queue on the deferred lane, restore "typed-before-up"
+    # to the buffer.
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert [b.text for b in queues.deferred] == ["original", "latest"]
+    assert [b.text for b in queues.deferred] == ["original"]
+    assert [b.text for b in queues.urgent] == ["latest"]
     assert buf.text == "typed-before-up"
     assert nav.cursor == 0
 
@@ -713,6 +741,27 @@ def test_ctrl_c_pulls_urgent_queue_into_editor() -> None:
     assert agent.halt_calls == 1
     assert buf.text == "what is happening?"
     assert not queues.urgent
+
+
+def test_ctrl_c_busy_preserves_deferred_queue() -> None:
+    """Ctrl+C during busy work must not silently discard Tab-staged deferred input.
+
+    The user staged the deferred message FOR LATER. Halting the active
+    turn doesn't invalidate "for later." Preserving deferred matches
+    urgent's preservation (lifted to buffer) -- the asymmetry would
+    confuse: Ctrl+C keeps urgent but drops deferred? Both are user
+    input; both deserve to survive a halt.
+    """
+    agent = _busy_agent()
+    queues = InputQueues(deferred=[QueuedInputBlock(text="for the next round")])
+    kb = _build(agent, queues)
+    buf = _fake_buf("")
+    _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert agent.halt_calls == 1
+    assert [b.text for b in queues.deferred] == ["for the next round"], (
+        f"Ctrl+C must not discard deferred queue during busy halt;"
+        f" got deferred={queues.deferred!r}"
+    )
 
 
 def test_ctrl_c_halts_during_cohort() -> None:

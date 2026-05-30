@@ -62,12 +62,13 @@ def materialize_messages(
 
     """
     if tool_result_budget_chars <= 0:
-        return list(messages)
+        return _coalesce_adjacent_users(_label_agent_sends(messages))
+    labelled = list(_label_agent_sends(messages))
     used = 0
     keep_calls: set[str] = set()
     out_reversed: list[ModelContextEvent] = []
-    for idx in range(len(messages) - 1, -1, -1):
-        entry = messages[idx]
+    for idx in range(len(labelled) - 1, -1, -1):
+        entry = labelled[idx]
         if isinstance(entry, ToolResult):
             content = entry.content
             if used + len(content) <= tool_result_budget_chars:
@@ -106,6 +107,30 @@ def materialize_messages(
     return _coalesce_adjacent_users(reversed(out_reversed))
 
 
+def _label_agent_sends(
+    messages: Iterable[ModelContextEvent],
+) -> Iterable[ModelContextEvent]:
+    """Prepend ``[from <source>]: `` to each ``AgentSendMessage`` text.
+
+    Applies the sender label before coalescing so that adjacent messages
+    from different agents retain per-sender attribution after merging.
+    Idempotent: a text already starting with this entry's own
+    ``[from <source>]: `` prefix is left unchanged. Without this guard,
+    re-materializing previously-materialized history (e.g. after a
+    compactor rewrite) would compound prefixes into
+    ``[from X]: [from X]: ...``.
+    """
+    for entry in messages:
+        if isinstance(entry, AgentSendMessage):
+            prefix = f"[from {entry.source}]: "
+            if entry.text.startswith(prefix):
+                yield entry
+            else:
+                yield dataclasses.replace(entry, text=f"{prefix}{entry.text}")
+        else:
+            yield entry
+
+
 def _coalesce_adjacent_users(
     messages: Iterable[ModelContextEvent],
 ) -> list[ModelContextEvent]:
@@ -115,6 +140,7 @@ def _coalesce_adjacent_users(
             isinstance(entry, (AgentSendMessage, UserMessage))
             and out
             and type(out[-1]) is type(entry)
+            and _same_source(out[-1], entry)
         ):
             prev = out[-1]
             if isinstance(entry, AgentSendMessage):
@@ -129,6 +155,19 @@ def _coalesce_adjacent_users(
         else:
             out.append(entry)
     return out
+
+
+def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
+    """Return True iff two user-side entries share their sender identity.
+
+    ``UserMessage`` carries no sender field (all are the human), so any
+    two are same-source. ``AgentSendMessage`` carries ``source``; merging
+    across different sources would silently re-attribute one agent's
+    content to another.
+    """
+    if isinstance(left, AgentSendMessage) and isinstance(right, AgentSendMessage):
+        return left.source == right.source
+    return True
 
 
 def _assistant_has_payload(entry: AssistantMessage) -> bool:

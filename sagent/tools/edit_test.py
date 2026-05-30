@@ -152,6 +152,31 @@ async def test_edit_stale_file_errors(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_chain_three_edits_no_staleness(tmp_path: Path) -> None:
+    # Three sequential Edits on the same file must chain cleanly: each
+    # Edit's mark_written re-stamps mtime+content so the next Edit's
+    # check_stale returns False without an interleaved Read.
+    f = tmp_path / "a.txt"
+    f.write_text("v0\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        agent.tool_state.mark_read(str(f), content="v0\n")
+        r1 = await edit.run(
+            {"file_path": str(f), "old_string": "v0", "new_string": "v1"}
+        )
+        r2 = await edit.run(
+            {"file_path": str(f), "old_string": "v1", "new_string": "v2"}
+        )
+        r3 = await edit.run(
+            {"file_path": str(f), "old_string": "v2", "new_string": "v3"}
+        )
+    for r in (r1, r2, r3):
+        assert not r.is_error, r.content
+        assert "modified since read" not in r.content
+    assert f.read_text() == "v3\n"
+
+
+@pytest.mark.asyncio
 async def test_edit_preserves_mode(tmp_path: Path) -> None:
     f = tmp_path / "a.txt"
     f.write_text("foo\n")

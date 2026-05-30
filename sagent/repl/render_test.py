@@ -19,6 +19,7 @@ from sagent.types.exceptions import (
     ContextOverflowError,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BudgetReset,
     ChildDoneEvent,
@@ -88,6 +89,26 @@ def test_user_message_flushes_stream_then_writes_bar() -> None:
     # Flush should emit the buffered text as markdown, then bar.
     assert p.markdowns == ["incomplete"]
     assert p.user_bars == ["hello"]
+
+
+def test_agent_send_message_routes_to_agent_bar_with_source() -> None:
+    """Incoming ``AgentSendMessage`` renders attributed to its source.
+
+    Conflating it with ``UserMessage`` (the prior behavior) hid the
+    sender label from the human UI: the parent had no visual cue
+    distinguishing "user typed this" from "child agent sent this".
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(AgentSendMessage(source="reviewer", text="report body"))
+    assert p.agent_bars == [("reviewer", "report body")], (
+        f"AgentSendMessage must route to write_agent_bar with the source"
+        f" label; got agent_bars={p.agent_bars!r} user_bars={p.user_bars!r}"
+    )
+    assert p.user_bars == [], (
+        "AgentSendMessage must NOT fall through to write_user_bar -- the"
+        " user bar is reserved for the live human's input"
+    )
 
 
 def test_model_switch_rejected_emits_error_without_halt() -> None:
