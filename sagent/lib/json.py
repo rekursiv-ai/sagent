@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping, MutableSequence, Sequence
-from types import MappingProxyType
-from typing import cast, overload
+from dataclasses import fields, is_dataclass
+from datetime import datetime
+from enum import Enum
+from functools import cache
+from pathlib import Path
+from types import MappingProxyType, UnionType
+from typing import Self, cast, get_args, get_origin, get_type_hints, overload
+from uuid import UUID
+
+import base64
 
 
 type JSONScalar = str | int | float | bool | None
@@ -336,3 +344,164 @@ def int_val(v: object, default: int) -> int:
         except ValueError:
             return default
     return default
+
+
+# -- Dataclass <-> JSON codec -------------------------------------------------
+#
+# A generic, type-hint-driven codec for frozen dataclasses of value types
+# (the shape used for things stored whole in a JSONB column). It handles
+# nested dataclasses, tuples/lists, dicts, and the scalar special-cases JSON
+# cannot represent natively: ``bytes`` (base64), ``Path`` / ``UUID`` (str),
+# ``datetime`` (ISO 8601), and ``Enum`` (its value).
+#
+# Every encoded dataclass carries a ``"__type__"`` tag (its class name) so a
+# union-typed field decodes without guessing which member it is. Decode is
+# driven by the *resolved* type hints (``get_type_hints``), never by string
+# matching, so aliases and forward refs work.
+
+_TYPE_TAG = "__type__"
+
+
+@cache
+def _hints(cls: type) -> Mapping[str, object]:
+    """Resolved type hints for ``cls`` (forward refs included), cached."""
+    return get_type_hints(cls)
+
+
+def _union_members(annotation: object) -> dict[str, type]:
+    """For a union of dataclasses, map each member's name to its class."""
+    return {
+        m.__name__: m
+        for m in get_args(annotation)
+        if isinstance(m, type) and is_dataclass(m)
+    }
+
+
+def dataclass_to_json(obj: object) -> JSON:
+    """Encode a dataclass instance to a tagged JSON object.
+
+    Recurses into nested dataclasses, tuples/lists, and dicts; encodes
+    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum`` to JSON-safe
+    forms. The result carries a ``"__type__"`` tag naming the class.
+    """
+    if not is_dataclass(obj) or isinstance(obj, type):
+        raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
+    out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
+    for f in fields(obj):
+        out[f.name] = _encode(getattr(obj, f.name))
+    return out
+
+
+def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
+    """Rebuild a dataclass of type ``cls`` from a JSON object.
+
+    Decoding is driven by ``cls``'s resolved type hints, so each field is
+    parsed against its real annotation (nested dataclass, union, tuple,
+    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum``, or scalar).
+    The ``"__type__"`` tag is ignored here (the caller already chose ``cls``).
+    """
+    hints = _hints(cls)
+    kwargs: dict[str, object] = {}
+    for name, raw in data.items():
+        if name == _TYPE_TAG or name not in hints:
+            continue
+        kwargs[name] = _decode(hints[name], raw)
+    return cls(**kwargs)
+
+
+def _encode(value: object) -> JSONValue:
+    if is_dataclass(value) and not isinstance(value, type):
+        return dataclass_to_json(value)
+    if isinstance(value, bool | int | float | str) or value is None:
+        return value
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return cast(JSONValue, value.value)
+    if isinstance(value, Mapping):
+        return {
+            str(k): _encode(v) for k, v in cast(Mapping[object, object], value).items()
+        }
+    if isinstance(value, Sequence):  # tuple / list (str/bytes handled above)
+        return [_encode(v) for v in value]
+    raise TypeError(f"cannot encode {type(value).__name__} to JSON")
+
+
+def _decode(annotation: object, raw: object) -> object:
+    ann = _strip_optional(_resolve_alias(annotation))
+    origin = get_origin(ann)
+    # Nested dataclass.
+    if isinstance(ann, type) and is_dataclass(ann):
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"expected object for {ann.__name__}, got {raw!r}")
+        return dataclass_from_json(ann, cast(Mapping[str, object], raw))
+    # Union of dataclasses: pick the member by the encoded ``__type__`` tag.
+    if isinstance(ann, UnionType) or origin is UnionType:
+        members = _union_members(cast(object, ann))
+        if members and isinstance(raw, Mapping):
+            raw_map = cast("Mapping[str, object]", raw)
+            tag = raw_map.get(_TYPE_TAG)
+            member: type | None = members.get(tag) if isinstance(tag, str) else None
+            if member is not None:
+                # ``member`` is a runtime ``type`` with no static parameter, so
+                # the generic return is Unknown; the value is correct.
+                return dataclass_from_json(member, raw_map)  # pyright: ignore[reportUnknownVariableType]
+    # Homogeneous tuple / list.
+    if origin in (tuple, list) and isinstance(raw, list):
+        args = get_args(ann)
+        elem: object = args[0] if args else object
+        decoded = [_decode(elem, v) for v in cast("list[object]", raw)]
+        return tuple(decoded) if origin is tuple else decoded
+    # Scalar special-cases.
+    if ann is bytes and isinstance(raw, str):
+        return base64.b64decode(raw)
+    if ann is Path and isinstance(raw, str):
+        return Path(raw)
+    if ann is UUID and isinstance(raw, str):
+        return UUID(raw)
+    if ann is datetime and isinstance(raw, str):
+        return datetime.fromisoformat(raw)
+    if isinstance(ann, type) and issubclass(ann, Enum):
+        return ann(raw)
+    # ``raw`` is JSON-decoded; its static type is partially unknown after the
+    # isinstance chain above, but a passthrough scalar is the right value.
+    return raw  # pyright: ignore[reportUnknownVariableType]
+
+
+def _resolve_alias(annotation: object) -> object:
+    """Unwrap a PEP-695 ``type X = ...`` alias to its underlying type."""
+    value = getattr(annotation, "__value__", None)
+    return value if value is not None else annotation
+
+
+def _strip_optional(annotation: object) -> object:
+    """Reduce ``T | None`` to ``T`` for decode dispatch; leave others alone."""
+    if isinstance(annotation, UnionType) or get_origin(annotation) is UnionType:
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return non_none[0]
+    return annotation
+
+
+class JsonCodec:
+    """Mixin: tagged dataclass <-> JSON via :func:`dataclass_to_json`.
+
+    Mix into a frozen dataclass of value types to get ``to_json`` /
+    ``from_json``. Encoding tags each instance with its class name, so a
+    union-typed field round-trips without a hand-written dispatcher.
+    """
+
+    def to_json(self) -> JSON:
+        """Encode this dataclass to a tagged JSON object."""
+        return dataclass_to_json(self)
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, object]) -> Self:
+        """Rebuild from a JSON object produced by :meth:`to_json`."""
+        return dataclass_from_json(cls, data)
