@@ -237,10 +237,10 @@ class Agent:
         self._max_budget_usd = max_budget_usd
         self.last_compact_error: Exception | None = None
         # Cache-inclusive input-token count from the most recent response
-        # (input + cache_creation + cache_read), used as the proactive
-        # compaction trigger -- provider ground truth, the way claude-code,
-        # codex, and gemini-cli all gate. ``0`` until the first response, when
-        # the gate falls back to a client-side estimate of the next request.
+        # (input + cache_creation + cache_read), used as the anchor of the
+        # proactive compaction trigger -- provider ground truth rather than a
+        # client estimate. ``0`` until the first response, when the gate falls
+        # back to a client-side estimate of the next request.
         self._last_input_tokens: int = 0
 
         self.cost_tracker = CostTracker()
@@ -1009,6 +1009,14 @@ class Agent:
         the next refresh returns 400 -- so ``/login`` would appear to
         succeed but the auth error would keep firing.
 
+        Finally, recovers an in-flight call that is wedged in a
+        service-suspension backoff: the retry loop sleeps on a single
+        uninterruptible ``asyncio.sleep`` until ``retry_at``, so fresh
+        credentials would otherwise sit unused for the rest of that
+        (possibly multi-hour) wait. ``Halt`` cancels the sleeping call and
+        returns control to the user, and the stale suspension timestamp is
+        cleared so the status pane stops showing "retrying in ...".
+
         Raises:
           ValueError: ``model_spec`` is unset, the provider class is
               unknown, or the provider has no ``login`` classmethod.
@@ -1027,6 +1035,12 @@ class Agent:
         live_provider = getattr(self.model, "_provider", None)
         if isinstance(live_provider, types.providers.AuthReloadable):
             await live_provider.handle_auth_error()
+        # Break a wedged service-suspension sleep so the new credentials
+        # take effect immediately instead of after the old ``retry_at``.
+        self.runtime.service_suspended_until = None
+        self.runtime.resume_retry_at = None
+        if self.runtime.model_call is not None:
+            self.runtime.inbox.push_back(types.runtime.Halt())
 
     def system_prompt(self) -> str:
         """Assemble the full system prompt (system + tool contributions).
@@ -1664,11 +1678,12 @@ class Agent:
         the runtime's lean ``Compactor`` protocol does not expose) to the
         synchronous ``compact_now`` path used for overflow recovery.
 
-        The trigger uses ``_last_input_tokens`` -- the provider's exact
-        cache-inclusive count for the most recent response -- as ground
-        truth, the same way claude-code, codex, and gemini-cli gate. Only
-        the first request of a process (or a resume) has no such count; it
-        falls back to a client-side ``approx_request_tokens`` estimate.
+        The trigger anchors on ``_last_input_tokens`` -- the provider's
+        exact cache-inclusive count for the most recent response -- as
+        ground truth, plus a client-side estimate of entries appended
+        since that response. Only the first request of a process (or a
+        resume) has no such count; it falls back entirely to a
+        ``approx_request_tokens`` estimate of the pending request.
 
         Args:
           history: Pre-compaction history snapshot. ``compact_now``
@@ -1705,10 +1720,18 @@ class Agent:
                     tool_result_budget_chars=self.budget.message_budget_chars,
                 )
             )
-        if not await self._agent_compactor.should_compact(
-            input_tokens=used,
+        else:
+            # ``_last_input_tokens`` is the provider's count for the LAST
+            # request -- it does not include entries appended since (this
+            # turn's tool results, interleaved user messages). Add a
+            # client-side estimate of those so the gate reflects the request
+            # about to be sent, not the previous one; without it the
+            # proactive gate lags one turn behind the growing context.
+            used += self._tokens_appended_since_last_response(history, model)
+        if not self._agent_compactor.should_compact(
+            current_tokens=used,
             max_request_tokens=self.max_request_tokens,
-            max_response_tokens=self.max_response_tokens,
+            system_tokens=model.approx_text_tokens(self.system_prompt()),
         ):
             self.compaction_state.compact_failures = 0
             return True
@@ -1732,6 +1755,40 @@ class Agent:
                 self.last_compact_error = _context_overflow_error()
             return False
         return await self.compact_now()
+
+    def _tokens_appended_since_last_response(
+        self,
+        history: Sequence[types.runtime.ModelContextEvent],
+        model: types.model.Model,
+    ) -> int:
+        """Estimate tokens of entries appended after the last model response.
+
+        ``_last_input_tokens`` covers the prompt as of the last
+        ``AssistantMessage`` (the response the provider counted). Entries
+        after it -- this turn's tool results and any interleaved user
+        messages -- are not yet reflected. Estimate just those, with no
+        system/tools (already in the anchor), so the proactive gate sees
+        the full request about to be sent rather than the previous one.
+        """
+        last_assistant = next(
+            (
+                idx
+                for idx in range(len(history) - 1, -1, -1)
+                if isinstance(history[idx], types.runtime.AssistantMessage)
+            ),
+            None,
+        )
+        if last_assistant is None:
+            return 0
+        since = history[last_assistant + 1 :]
+        if not since:
+            return 0
+        return model.approx_request_tokens(
+            materialize_request(
+                types.model.ModelRequest(messages=list(since)),
+                tool_result_budget_chars=self.budget.message_budget_chars,
+            )
+        )
 
     async def compact_now(self) -> bool:
         """Synchronous compact path used by ``_AgentModel`` for overflow recovery.
@@ -2294,6 +2351,14 @@ class _AgentTool:
             self._inner.name, self._inner.directive_schema, clean_args
         )
         if validation_error is not None:
+            # Publish a label even on validation failure so scrollback stays
+            # consistent with every other tool outcome (each is preceded by a
+            # dim tool-call line). The label renders as a plain dim line, not a
+            # "running" indicator. Use the tool name rather than ``summary``:
+            # the args failed validation, so ``summary`` may choke on them.
+            self._agent.runtime.publish(
+                types.runtime.ToolLabel(call_id=call_id, text=self._inner.name),
+            )
             return types.runtime.ToolResult(
                 call_id=call_id,
                 content=validation_error,
@@ -2475,11 +2540,11 @@ class _AgentCompactor:
         self._inner = inner
         self._agent = agent
 
-    async def should_compact(
+    def should_compact(
         self,
-        input_tokens: int,
+        current_tokens: int,
         max_request_tokens: int,
-        max_response_tokens: int = 0,
+        system_tokens: int = 0,
     ) -> bool:
         """Delegate to the inner compactor.
 
@@ -2490,10 +2555,10 @@ class _AgentCompactor:
         directly to gate proactive compaction ahead of each provider
         call.
         """
-        return await self._inner.should_compact(
-            input_tokens=input_tokens,
+        return self._inner.should_compact(
+            current_tokens=current_tokens,
             max_request_tokens=max_request_tokens,
-            max_response_tokens=max_response_tokens,
+            system_tokens=system_tokens,
         )
 
     async def compact(
@@ -2582,36 +2647,59 @@ class _AgentCompactor:
         # exceeds the agent's input budget, partition the payload
         # oldest-first and re-run the producer per partition until the
         # resolved view fits. Same budget the proactive gate uses:
-        # ``max_request - max_response - buffer``. Without this, the
-        # next provider call sees the same overflow that triggered
-        # compaction and the overflow-recovery loop wedges.
+        # ``max_request - max_response - buffer`` against the AGENT's
+        # ``max_request_tokens`` (which a user may have lowered below the
+        # model cap), matching the willRetriggerNextTurn check below so a
+        # payload cannot skip scrunch yet be flagged as already over
+        # threshold. Without this, the next provider call sees the same
+        # overflow that triggered compaction and the recovery loop wedges.
         target = (
-            self._agent.model.max_request_tokens
+            self._agent.max_request_tokens
             - self._agent.max_response_tokens
             - self._agent.budget.buffer_tokens
         )
-        try:
-            payload_tokens_for_scrunch = self._agent.model.approx_request_tokens(
-                materialize_request(
-                    types.model.ModelRequest(
-                        messages=payload,
-                        system=cached_system or None,
-                        tools=cached_tools or None,
+        # A degenerate budget (response + buffer >= window) leaves no room
+        # to scrunch into; ``scrunch_to_fit`` rejects a non-positive
+        # partition cap. Skip rather than raise -- the willRetriggerNextTurn
+        # annotation below still flags the payload as oversized.
+        if target > 0:
+            try:
+                payload_tokens_for_scrunch = self._agent.model.approx_request_tokens(
+                    materialize_request(
+                        types.model.ModelRequest(
+                            messages=payload,
+                            system=cached_system or None,
+                            tools=cached_tools or None,
+                        ),
+                        tool_result_budget_chars=(
+                            self._agent.budget.message_budget_chars
+                        ),
                     ),
-                    tool_result_budget_chars=self._agent.budget.message_budget_chars,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
-            types.exceptions.log_exception_or_warning(
-                logger, "pre-scrunch token estimate failed; skipping scrunch", exc
-            )
-        else:
-            if payload_tokens_for_scrunch > target:
-                payload = await self._scrunch_payload(
-                    payload=payload,
-                    mint_ref=mint_ref,
-                    target_input_tokens=target,
                 )
+            except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
+                types.exceptions.log_exception_or_warning(
+                    logger, "pre-scrunch token estimate failed; skipping scrunch", exc
+                )
+            else:
+                if payload_tokens_for_scrunch > target:
+                    payload = await self._scrunch_payload(
+                        payload=payload,
+                        mint_ref=mint_ref,
+                        target_input_tokens=target,
+                    )
+                    # Scrunch re-runs the producer per partition and may
+                    # emit a fresh ``AssistantMessage`` whose tool_calls
+                    # have no local ``ToolResult``. Re-repair so the final
+                    # payload keeps the wire-pairing invariant the pre-scrunch
+                    # repair established; otherwise ``unpaired_call_ids``
+                    # below would declare those ids ``paired_externally``
+                    # with no real external partner and the next provider
+                    # call would 400.
+                    payload = _repair_compact_payload(payload)
+                    if not payload or isinstance(
+                        payload[-1], types.runtime.AssistantMessage
+                    ):
+                        payload.append(types.runtime.UserMessage(text="[continuation]"))
 
         # ``willRetriggerNextTurn`` prediction: ask the inner compactor
         # whether the new payload would already cross its own
@@ -2635,10 +2723,10 @@ class _AgentCompactor:
                     tool_result_budget_chars=self._agent.budget.message_budget_chars,
                 ),
             )
-            would_retrigger = await self._inner.should_compact(
-                input_tokens=payload_tokens,
+            would_retrigger = self._inner.should_compact(
+                current_tokens=payload_tokens,
                 max_request_tokens=self._agent.max_request_tokens,
-                max_response_tokens=self._agent.max_response_tokens,
+                system_tokens=self._agent.model.approx_text_tokens(cached_system),
             )
             if would_retrigger:
                 msg = (
@@ -2650,8 +2738,10 @@ class _AgentCompactor:
                 fallback_reason = (
                     f"{fallback_reason}; {msg}" if fallback_reason else msg
                 )
-        except (TypeError, ValueError) as exc:
-            logger.debug("willRetriggerNextTurn estimate skipped: %s", exc)
+        except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; a failed retrigger probe must not abort an otherwise-successful compaction (matches the sibling estimate blocks above)
+            types.exceptions.log_exception_or_warning(
+                logger, "willRetriggerNextTurn estimate skipped; continuing", exc
+            )
 
         if (
             tuple(payload) == override.payload

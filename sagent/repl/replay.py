@@ -23,6 +23,7 @@ from sagent.repl.render import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    CompactStarted,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -87,10 +88,18 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                 )
             continue
         assert isinstance(record, ReferrableTapeEvent)
+        # ``CompactStarted`` is a live, in-progress marker -- it renders as
+        # "[compacting history…]". On resume the compaction it announced has
+        # already completed (its ``CompactComplete`` follows in the tape), so
+        # replaying it prints a misleading "compacting" line into static
+        # scrollback. The completion summary is the durable record; drop the
+        # transient start marker in both masked and non-masked ranges.
+        if isinstance(record.event, CompactStarted):
+            continue
         if record.ref in masked:
-            # Non-payload runtime markers (CompactStarted etc.) inside a
-            # masked range still surface -- they are dispatch-only events,
-            # not the masked conversation content.
+            # Non-payload runtime markers inside a masked range still surface
+            # -- they are dispatch-only events, not the masked conversation
+            # content.
             if not isinstance(
                 record.event,
                 (UserMessage, AgentSendMessage, AssistantMessage, ToolResult),

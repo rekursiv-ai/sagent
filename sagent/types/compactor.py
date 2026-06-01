@@ -41,18 +41,20 @@ class Compactor(Protocol):
     form, threading ``custom_instructions`` from agent state.
     """
 
-    async def should_compact(
+    def should_compact(
         self,
-        input_tokens: int,
+        current_tokens: int,
         max_request_tokens: int,
-        max_response_tokens: int = 0,
+        system_tokens: int = 0,
     ) -> bool:
         """Decide whether the conversation should be compacted now.
 
         Args:
-          input_tokens: Estimated current input token count.
+          current_tokens: Current context size -- the provider's exact last
+              request total plus an estimate of entries appended since.
           max_request_tokens: Budget cap for input tokens.
-          max_response_tokens: Reserved output tokens (subtracted from cap).
+          system_tokens: Estimated system-prompt tokens -- incompressible
+              overhead excluded from both window and request.
 
         Returns:
           should: True when compaction should run before the next call.
