@@ -46,6 +46,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
+    from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.key_binding import KeyPressEvent
 
     from sagent.agent.agent import Agent
@@ -130,24 +131,21 @@ def _commit_queued_and_restore(
 ) -> str:
     """Commit ``buf_text`` to queue + restore snapshot; return restored buffer.
 
-    Shared helper for Enter and Tab at ``cursor > 0``. Two semantic
-    cases:
+    Shared helper for Enter and Tab at ``cursor > 0``.
 
-    - Case 1 at ``cursor == 1`` (user lifted the queue and is *editing*
-      it; "up once -> dequeue"): the queue is *replaced* with
-      ``[buf_text]``. The lifted-then-edited content overwrites the
-      original queue. Without this, hitting Enter after a no-op Up
-      would duplicate the queue's content into ``[queue, queue]``.
-    - All other ``cursor > 0`` states (user *scrolled past* into
-      history, or Case 2 has no queue to edit): the queue becomes
-      ``snapshot_queue + [buf_text]`` -- a true extension that
-      preserves the original queue and adds the navigated/edited
-      content as a new block.
+    Cursor / edit_mode / lane truth table::
 
-    ``lane`` carries the caller's intent: Enter passes ``"urgent"`` so
-    the committed block dispatches at the next chat-safe boundary; Tab
-    keeps the default ``"deferred"`` so a Tab-during-navigation still
-    defers.
+        cursor  snapshot_queue  derived edit_mode  case
+        1       non-empty       True               edit-in-place (replace head)
+        1       empty           False              extension (Case 2 fallback)
+        >1      *               False              extension (scrolled past)
+
+    Lane mapping::
+
+        caller  lane         result
+        Enter   "urgent"     committed block dispatches at next chat-safe
+                             boundary
+        Tab     "deferred"   navigation-from-tab still defers
 
     The snapshot is cleared and the snapshot-input is returned so the
     caller can restore the buffer to the user's pre-navigation typing.
@@ -162,6 +160,26 @@ def _commit_queued_and_restore(
     restored = nav.snapshot_input
     nav.end()
     return restored
+
+
+def _restore_navigation_snapshot(
+    queues: InputQueues, nav: NavState, buf: Buffer
+) -> None:
+    """Restore queue + buffer from the nav snapshot; clear nav state.
+
+    Shared by the whitespace-Enter / whitespace-Tab paths: the user
+    cleared their edit while navigating, so treat it as a "cancel my
+    edit" gesture -- the same effect as a final Down at ``cursor == 1``.
+    Without this, the snapshot would strand: cursor stays at 1 forever
+    and the lifted queue blocks disappear.
+    """
+    queues.restore_from_snapshot(
+        nav.snapshot_queue, urgent_count=nav.snapshot_urgent_count
+    )
+    snapshot_input = nav.snapshot_input
+    nav.end()
+    buf.text = snapshot_input
+    buf.cursor_position = len(snapshot_input)
 
 
 def _kb_submit(
@@ -198,6 +216,12 @@ def _kb_submit(
     if not text:
         return
     if not stripped:
+        # Whitespace-only Enter: during navigation, "discard my edit" --
+        # restore the snapshot (queue + buffer text) so the lifted blocks
+        # don't strand. Outside navigation, just clear the stale spaces.
+        if nav.cursor > 0:
+            _restore_navigation_snapshot(queues, nav, buf)
+            return
         buf.reset()
         return
     if nav.cursor > 0:
@@ -221,7 +245,10 @@ def _kb_submit(
         and not agent.runtime.cohort
         and not agent.runtime.inbox.gate_armed
     ):
-        queues.stage_urgent(text)
+        # prompt-toolkit does not surface pasted attachments today;
+        # pass the empty tuple explicitly so a future input source that
+        # threads them through cannot silently drop them here.
+        queues.stage_urgent(text, attachments=())
     else:
         agent.runtime.inbox.push_back(UserMessage(text=text))
     buf.append_to_history()
@@ -237,9 +264,9 @@ def _kb_defer(
     """Tab handler: stage buffer for deferred dispatch.
 
     At ``cursor == 0`` (no navigation): the text is appended to the
-    deferred queue and the buffer is cleared. ``make_input_queue_committer``
+    deferred queue and the buffer is cleared. ``install_input_queue_committer``
     in :mod:`repl.run_repl` commits deferred input as a single
-    ``UserQueuedMessage`` on ``AgentIdle``; an already-armed user gate is
+    ``UserDeferredMessage`` on ``AgentIdle``; an already-armed user gate is
     released immediately because no future ``AgentIdle`` will arrive.
 
     At ``cursor > 0`` (navigation active): same commit path as Enter --
@@ -250,6 +277,11 @@ def _kb_defer(
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
+        # Whitespace-only Tab: during navigation, treat as "discard my edit"
+        # and restore the snapshot. Outside navigation, no-op (Tab on an
+        # empty buffer has never staged anything).
+        if nav.cursor > 0:
+            _restore_navigation_snapshot(queues, nav, buf)
         return
     if nav.cursor > 0:
         restored = _commit_queued_and_restore(queues, nav, text)
@@ -407,28 +439,43 @@ def _kb_history_prefix_fwd(event: KeyPressEvent) -> None:
 
 
 def _kb_open_editor(event: KeyPressEvent) -> None:
-    """Open the current buffer in ``$EDITOR`` (Ctrl+X Ctrl+E)."""
+    """Open the current buffer in ``$EDITOR`` (Ctrl+X Ctrl+E).
+
+    Blocks the prompt-toolkit event loop until the editor exits --
+    prompt-toolkit's ``open_in_editor`` shells out synchronously. The
+    REPL renderer and the underlying agent loop both pause for the
+    editor session; this is the documented prompt-toolkit behavior, not
+    a defect to work around here.
+    """
     event.current_buffer.open_in_editor()
 
 
 def _kb_ctrl_c(agent: Agent, queues: InputQueues, event: KeyPressEvent) -> None:
     """Halt the active turn; never exit the REPL.
 
-    Idle path clears the input buffer (standard terminal convention --
-    abandon the line you were composing). To exit the REPL use Ctrl+D
-    or ``/quit``.
+    Busy path halts and stages any composed buffer text as one more
+    urgent block: typing during a halt is user intent we cannot drop.
+    Urgent blocks already in the queue stay in the queue verbatim so
+    their attachments survive (concatenating ``.text`` into the buffer
+    would lose them). Idle path clears the input buffer (standard
+    terminal convention -- abandon the line you were composing). To
+    exit the REPL use Ctrl+D or ``/quit``.
+
+    The "busy" predicate here is ``agent.work or agent.runtime.cohort``
+    -- ``agent.work`` covers ``model_call`` and ``compact_task``. Enter
+    (``_kb_submit``) uses the narrower ``agent.runtime.model_call``
+    instead because Enter's queue-staging rule fires only while the
+    model is streaming, not during compaction or tool fan-out.
     """
+    buf = event.current_buffer
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()
-        if queues.urgent:
-            event.current_buffer.text = "\n\n".join(
-                block.text for block in queues.urgent
-            )
-            event.current_buffer.cursor_position = len(event.current_buffer.text)
-            queues.urgent.clear()
+        if buf.text:
+            queues.stage_urgent(buf.text)
+            buf.reset()
         return
     queues.clear()
-    event.current_buffer.reset()
+    buf.reset()
 
 
 def _kb_suspend(event: KeyPressEvent) -> None:

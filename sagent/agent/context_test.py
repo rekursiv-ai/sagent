@@ -21,6 +21,7 @@ from sagent.agent.context import (
     validate_context,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
     ToolCall,
@@ -97,15 +98,30 @@ def test_validate_context_rejects_consecutive_assistants() -> None:
         validate_context([_assistant("a"), _assistant("b")])
 
 
+def test_validate_context_rejects_user_message_then_agent_send() -> None:
+    """UserMessage + AgentSendMessage both serialize as user role on wire."""
+    with pytest.raises(InvalidContextError, match="alternation"):
+        validate_context(
+            [UserMessage(text="u1"), AgentSendMessage(source="A", text="u2")],
+        )
+
+
+def test_validate_context_rejects_agent_send_then_user_message() -> None:
+    """Reverse cross-type adjacency also violates user-role alternation."""
+    with pytest.raises(InvalidContextError, match="alternation"):
+        validate_context(
+            [AgentSendMessage(source="A", text="u1"), UserMessage(text="u2")],
+        )
+
+
 # --- Resolver: visibility and masking ----------------------------------
 
 
 def test_empty_tape_resolves_to_empty_messages() -> None:
-    """An empty tape renders no messages, version 0, no discontinuity."""
+    """An empty tape renders no messages and version 0."""
     resolved = resolve_context([])
     assert resolved.messages == []
     assert resolved.version == 0
-    assert resolved.discontinuity is False
 
 
 def test_history_only_tape_renders_in_tape_order() -> None:
@@ -393,37 +409,13 @@ def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
     assert len(alive) == 2_000
 
 
-# --- Version & discontinuity -------------------------------------------
+# --- Version -----------------------------------------------------------
 
 
 def test_version_equals_tape_length() -> None:
     """``version`` reports the number of tape records."""
     tape = [_hr(0, _user("a")), _hr(1, _user("b"))]
     assert resolve_context(tape).version == 2
-
-
-def test_discontinuity_is_false_when_prior_is_none() -> None:
-    """With no ``prior``, discontinuity defaults to False."""
-    resolved = resolve_context([_hr(0, _user("a"))])
-    assert resolved.discontinuity is False
-
-
-def test_discontinuity_is_false_on_pure_history_append() -> None:
-    """Appending HRs to a tape does not flag discontinuity."""
-    tape1 = [_hr(0, _user("a"))]
-    first = resolve_context(tape1)
-    tape2 = [*tape1, _hr(1, _user("b"))]
-    second = resolve_context(tape2, prior=first)
-    assert second.discontinuity is False
-
-
-def test_discontinuity_is_true_when_splice_changes_visible_prefix() -> None:
-    """A new splice that edits an earlier position flags discontinuity."""
-    tape1 = [_hr(0, _user("a")), _hr(1, _user("b"))]
-    first = resolve_context(tape1)
-    tape2 = [*tape1, _splice(2, mask=((_ref(0), _ref(0)),), payload=(_user("A"),))]
-    second = resolve_context(tape2, prior=first)
-    assert second.discontinuity is True
 
 
 def test_resolved_context_returns_independent_message_list() -> None:

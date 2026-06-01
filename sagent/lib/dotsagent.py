@@ -37,16 +37,21 @@ def walk_up(cwd: Path) -> list[Path]:
 def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
     """Strip YAML frontmatter, return (metadata_dict, body).
 
-    On parse error or missing frontmatter, returns ``({}, raw)``.
+    Whenever the ``---``-delimited block is structurally present the
+    delimiters are stripped from ``body``, regardless of whether the
+    payload parses to a dict. A missing frontmatter block returns
+    ``({}, raw)`` unchanged. A UTF-8 BOM at the very start is consumed
+    so frontmatter still matches.
 
     Args:
       raw: Raw file content potentially prefixed with YAML frontmatter.
 
     Returns:
-      metadata: Parsed YAML frontmatter dict, or empty dict if absent/invalid.
-      body: File body with frontmatter stripped.
+      metadata: Parsed YAML frontmatter dict, or empty dict if invalid.
+      body: File body with frontmatter stripped when present.
 
     """
+    raw = raw.removeprefix("\ufeff")
     m = _FRONTMATTER_RE.match(raw)
     if m is None:
         return {}, raw
@@ -54,7 +59,7 @@ def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
     try:
         parsed = yaml.safe_load(m.group(1))
     except yaml.YAMLError:
-        return {}, raw
+        return {}, body
     if not isinstance(parsed, dict):
         return {}, body
     return cast(dict[str, Any], parsed), body

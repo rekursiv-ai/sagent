@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import asyncio
 import contextlib
+import inspect
 import logging
 
 import pytest
@@ -105,6 +106,10 @@ class StubTool:
     def name(self) -> str:
         return self._name
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         self.call_count += 1
@@ -124,6 +129,10 @@ class FailingTool:
     def name(self) -> str:
         return self._name
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         raise RuntimeError(self.error)
@@ -141,12 +150,10 @@ class ScriptedModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_thinking
+        del history, on_thinking
         idx = self._call_idx
         self._call_idx += 1
         if self.fail_on_call is not None and idx == self.fail_on_call:
@@ -261,7 +268,13 @@ async def test_agent_send_queued_message_preserves_agent_history_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_send_queued_message_does_not_coalesce_with_user_message() -> None:
+async def test_agent_send_queued_message_coalesces_with_user_message() -> None:
+    """AgentSend + User adjacents merge into one user-role wire entry.
+
+    Both serialize as user role on the wire; back-to-back user-role
+    turns violate Anthropic-style alternation. The merged entry adopts
+    the agent type so the ``source`` attribution survives.
+    """
     agent, collector = make_agent([AssistantMessage(text="reply")])
     agent.inbox.push_back(AgentSendQueuedMessage(source="reviewer", text="finding"))
     agent.inbox.push_back(UserQueuedMessage(text="my reply"))
@@ -269,15 +282,14 @@ async def test_agent_send_queued_message_does_not_coalesce_with_user_message() -
     await run_with_quit(agent)
 
     messages = agent.context().messages
-    assert [type(message) for message in messages[:3]] == [
+    assert [type(message) for message in messages[:2]] == [
         AgentSendMessage,
-        UserMessage,
         AssistantMessage,
     ]
     assert isinstance(messages[0], AgentSendMessage)
-    assert messages[0].text == "finding"
-    assert isinstance(messages[1], UserMessage)
-    assert messages[1].text == "my reply"
+    assert messages[0].source == "reviewer"
+    assert "finding" in messages[0].text
+    assert "my reply" in messages[0].text
     assert collector.has(ModelIdle)
 
 
@@ -311,18 +323,20 @@ async def test_deferred_messages_wait_until_model_idle() -> None:
     await run_until_quit(agent)
 
     messages = agent.context().messages
+    # ``later`` (UserDeferredMessage) and ``agent later``
+    # (AgentSendDeferredMessage) coalesce into a single wire user-role
+    # turn; the merged entry adopts the agent type to preserve source.
     assert [type(message) for message in messages] == [
         UserMessage,
         AssistantMessage,
-        UserMessage,
         AgentSendMessage,
         AssistantMessage,
     ]
-    assert isinstance(messages[2], UserMessage)
-    assert messages[2].text == "later"
-    assert isinstance(messages[3], AgentSendMessage)
-    assert messages[3].source == "reviewer"
-    assert messages[3].text == "agent later"
+    merged = messages[2]
+    assert isinstance(merged, AgentSendMessage)
+    assert merged.source == "reviewer"
+    assert "later" in merged.text
+    assert "agent later" in merged.text
     assert collector.has(ModelIdle)
 
 
@@ -485,6 +499,10 @@ async def test_user_message_detaches_running_tools() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -536,12 +554,10 @@ async def test_halt_cancels_model_waits_for_user() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_thinking
+            del history, on_thinking
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -602,12 +618,10 @@ async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_thinking
+            del history, on_thinking
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -693,12 +707,10 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             model_started.set()
             await asyncio.sleep(10.0)
             return AssistantMessage(text="unreachable")
@@ -974,6 +986,10 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             await asyncio.sleep(0.1)
@@ -1064,7 +1080,15 @@ async def test_detached_result_splices_when_parent_is_reemitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detached_result_after_compaction_barrier_surfaces_fallback() -> None:
+async def test_detached_result_after_compaction_barrier_drops_silently() -> None:
+    """Compaction barrier without preserved AM drops late DetachedResult.
+
+    The barrier masked the placeholder and didn't preserve the parent
+    assistant in its payload, so the late tool result has no valid
+    splice slot. Surfacing a synthetic ``[Tool t1 completed]``
+    ``UserMessage`` post-compaction would inject stale tool noise into
+    the now-summarized session. Drop the result instead.
+    """
     agent, _ = make_agent([])
     agent.append_history(UserMessage(text="go"))
     agent.append_history(
@@ -1091,10 +1115,12 @@ async def test_detached_result_after_compaction_barrier_surfaces_fallback() -> N
     fallbacks = [
         entry
         for entry in agent.context().messages
-        if isinstance(entry, UserMessage)
-        and "[Tool t1 completed]\nlate result" in entry.text
+        if isinstance(entry, UserMessage) and "[Tool t1 completed]" in entry.text
     ]
-    assert len(fallbacks) == 1
+    assert not fallbacks, (
+        f"stale tool-completion fallback leaked past compaction barrier;"
+        f" messages={agent.context().messages!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1111,9 +1137,9 @@ async def test_compaction_absorbs_detached_splices_landing_during_await() -> Non
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             mask = ((tape[0].ref, tape[-1].ref),)
             compact_started.set()
             await release_compact.wait()
@@ -1221,6 +1247,33 @@ def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
     assert placeholder_ref not in agent.context().origins
 
 
+def test_splice_detached_result_replaces_prior_detached_splice() -> None:
+    """A second detached result for the same call_id replaces the first.
+
+    Repro for SAGENT-REV-001: the first splice indexes the new TR into
+    ``_placeholder_refs`` keyed on the splice's own ref. The second
+    detached result lookup found a ``ContextSplice`` (not a
+    ``ReferrableTapeEvent``) and bailed before reaching the
+    splice-the-splice fallback, leaving the first replacement permanent.
+    """
+    agent, _ = make_agent([])
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="c1", name="t", args={}),))
+    )
+    agent.append_history(ToolResult(call_id="c1", content="[detached]"))
+
+    first = agent._splice_detached_result(ToolResult(call_id="c1", content="first"))
+    second = agent._splice_detached_result(ToolResult(call_id="c1", content="second"))
+
+    assert first is not None
+    assert second is not None
+    tool_results = [
+        m.content for m in agent.context().messages if isinstance(m, ToolResult)
+    ]
+    assert tool_results == ["second"]
+
+
 def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
     agent, _ = make_agent([])
     agent.append_history(UserMessage(text="first"))
@@ -1287,6 +1340,10 @@ async def test_splice_wakes_model_after_round_ended() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -1404,6 +1461,10 @@ async def test_detached_completion_during_next_cohort_no_interleave() -> None:
         def name(self) -> str:
             return "t1"
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             t1_started.set()
@@ -1415,6 +1476,10 @@ async def test_detached_completion_during_next_cohort_no_interleave() -> None:
         @property
         def name(self) -> str:
             return "t2"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -1515,6 +1580,10 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
         def name(self) -> str:
             return "t1"
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             t1_started.set()
@@ -1577,6 +1646,10 @@ async def test_undetach_gates_model() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -1626,9 +1699,9 @@ async def test_compact_rewrites_history() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
@@ -1698,6 +1771,42 @@ def test_widen_barrier_mask_preserves_mask_gaps() -> None:
     assert widened.mask == ((refs[0], refs[0]), (refs[2], refs[3]))
 
 
+def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
+    """Refs from multiple sessions widen into per-session ranges.
+
+    Legacy resumed tapes carry refs from both the empty ``""`` session id
+    namespace and a later persisted id. Sorting all refs by ordinal and
+    treating them as one contiguous range produces a single
+    ``(from, to)`` whose endpoints straddle two session_ids --
+    ``_validate_mask_disjoint`` rejects with "mask range crosses session
+    ids" and ``dataclasses.replace`` inside ``widen_barrier_mask``
+    wedges the runtime at compact time.
+    """
+    legacy = TapeRef(session_id="", ordinal=0)
+    legacy_b = TapeRef(session_id="", ordinal=1)
+    persisted = TapeRef(session_id="sess-2", ordinal=2)
+    tape: tuple[TapeRecord, ...] = (
+        ReferrableTapeEvent(ref=legacy, event=UserMessage(text="legacy a")),
+        ReferrableTapeEvent(ref=legacy_b, event=AssistantMessage(text="legacy b")),
+        ReferrableTapeEvent(ref=persisted, event=UserMessage(text="new")),
+    )
+    override = ContextSplice(
+        ref=TapeRef(session_id="sess-2", ordinal=3),
+        mask=((legacy, legacy),),
+        insert_after=None,
+        payload=(UserMessage(text="summary"),),
+        strategy="summary",
+    )
+
+    widened = agent_runtime.widen_barrier_mask(override, tape)
+
+    # Each session contributes one range; none crosses session_id.
+    for r_from, r_to in widened.mask:
+        assert r_from.session_id == r_to.session_id, (
+            f"mask range crosses session: ({r_from}, {r_to})"
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_late_model_response_complete_during_compaction_is_ignored() -> None:
@@ -1711,9 +1820,9 @@ async def test_late_model_response_complete_during_compaction_is_ignored() -> No
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             compact_started.set()
             await release_compact.wait()
             return _summary_override(
@@ -1771,9 +1880,9 @@ async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> Non
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             mask: tuple[tuple[TapeRef, TapeRef], ...] = (
                 ((tape[0].ref, tape[-1].ref),) if tape else ()
             )
@@ -1859,12 +1968,10 @@ async def test_user_facing_error_logged_without_traceback(
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             raise AuthRefreshError("session expired. Run /login.")
 
     agent = agent_runtime.AgentRuntime(model=AuthFailingModel())
@@ -1913,12 +2020,10 @@ async def test_plain_exception_logged_with_traceback(
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             raise RuntimeError("unexpected")
 
     agent = agent_runtime.AgentRuntime(model=BoomModel())
@@ -1981,6 +2086,10 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             assert self.runtime is not None
@@ -1994,12 +2103,10 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -2111,12 +2218,10 @@ async def test_run_cancellation_removes_observer_and_stops_driver() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             model_started.set()
             await release_model.wait()
             return AssistantMessage(text="too late")
@@ -2355,6 +2460,10 @@ async def test_queued_message_waits_for_cohort() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -2516,6 +2625,10 @@ async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -2568,6 +2681,10 @@ async def test_detach_all_tools() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -2675,6 +2792,10 @@ async def test_no_cohort_complete_on_user_preemption() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -2716,6 +2837,10 @@ async def test_no_cohort_complete_on_halt() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -2730,12 +2855,10 @@ async def test_no_cohort_complete_on_halt() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_thinking
+            del history, on_thinking
             idx = self._i
             self._i += 1
             msg = (
@@ -2789,6 +2912,10 @@ async def test_no_cohort_complete_on_kill_all() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -2831,6 +2958,10 @@ async def test_no_cohort_complete_on_detach_all() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -2893,9 +3024,9 @@ async def test_compact_clears_queued_messages() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
@@ -2969,6 +3100,10 @@ async def test_tool_result_call_id_stamped_when_empty() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             # Tool returns with empty call_id, populated diff/hint/summary.
@@ -3016,6 +3151,10 @@ async def test_tool_result_call_id_matching_call_preserved() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -3167,9 +3306,9 @@ async def test_compact_failure_posts_compact_failed_event() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del tape, context, model, mint_ref, args
+            del tape, context, model, mint_ref, custom_instructions
             raise RuntimeError("compactor broke")
 
         def maintain(
@@ -3210,9 +3349,9 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del tape, context, model, args
+            del tape, context, model, custom_instructions
             return _summary_override(
                 [UserMessage(text="[fallback]\n\ncontinue")],
                 mint_ref,
@@ -3262,9 +3401,9 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del tape, context, model, mint_ref, args
+            del tape, context, model, mint_ref, custom_instructions
             raise RuntimeError("compactor broke")
 
         def maintain(
@@ -3313,9 +3452,9 @@ async def test_compact_while_compacting_is_dropped() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             call_count["n"] += 1
             compact_started.set()
             await release.wait()
@@ -3415,6 +3554,136 @@ async def test_clear_after_compact_task_done_waits_for_compact_complete() -> Non
 
 
 @pytest.mark.asyncio
+async def test_append_splice_indexes_preserved_payload_anchors() -> None:
+    """``append_splice`` payload AM/TR entries register call_id anchors.
+
+    A compactor that preserves an ``AssistantMessage(tool_calls=...)``
+    in its barrier payload (e.g. paired_externally because a tool is
+    still detached) must register the parent-assistant ref against the
+    splice ref so a late ``DetachedResult`` can splice into the
+    preserved slot rather than falling back to a synth ``UserMessage``.
+    """
+    agent, _ = make_agent([])
+    # Pre-state: tool was running, an assistant with tool_calls existed
+    # and got placeholder paired -- both wiped by the barrier below.
+    am_ref = agent.append_history(
+        AssistantMessage(
+            tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
+        ),
+    )
+    placeholder_ref = agent.append_history(
+        ToolResult(call_id="c1", content="[detached]"),
+    )
+    # Compactor preserves the AM in its payload with paired_externally.
+    splice_ref = agent.append_splice(
+        mask=((am_ref, placeholder_ref),),
+        insert_after=None,
+        payload=(
+            AssistantMessage(
+                tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
+            ),
+        ),
+        strategy="compact_preserve",
+        paired_externally=frozenset({"c1"}),
+    )
+    # Anchor must now point at the splice's payload AM.
+    assert agent._parent_assistant_refs.get("c1") == splice_ref
+    """``Clear`` wipes anchors; a late ``DetachedResult`` must not appear.
+
+    The legacy fallback synthesizes a ``[Tool ... completed]``
+    ``UserMessage`` when no splice slot is found. After ``Clear``, the
+    runtime intentionally wiped history and parent-assistant refs; the
+    fallback would inject a stale tool-completion line into the now
+    empty session. Drop the late result instead.
+    """
+    agent, _collector = make_agent([])
+    # Simulate a pre-Clear assistant + detached placeholder that get
+    # wiped by Clear before the detached task finishes.
+    agent.append_history(
+        AssistantMessage(
+            tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
+        ),
+    )
+    agent.append_history(
+        ToolResult(call_id="c1", content="[detached]"),
+    )
+    agent.append_clear()
+    # Pre-condition: anchors must be empty post-Clear.
+    assert "c1" not in agent._parent_assistant_refs
+    agent.inbox.push_back(
+        DetachedResult(result=ToolResult(call_id="c1", content="late result")),
+    )
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=2.0)
+
+    # No synth UserMessage carrying ``[Tool c1 completed]`` survives.
+    user_messages = [m for m in agent.context().messages if isinstance(m, UserMessage)]
+    assert not any("Tool c1 completed" in m.text for m in user_messages), (
+        f"stale tool completion notice leaked into cleared session;"
+        f" messages={agent.context().messages!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_and_post_suppresses_complete_when_generation_bumped() -> None:
+    """``_compact_generation`` bump after spawn must suppress CompactComplete.
+
+    Halt/Clear bump ``_compact_generation`` and publish CompactFailed.
+    The in-flight compactor task that resumes from its await point
+    after the bump must NOT push a second terminal event
+    (CompactComplete) into the inbox -- otherwise observers see both
+    CompactFailed and CompactComplete for the same compaction.
+    """
+    summary = [UserMessage(text="[summary]")]
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _DelayedCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            entered.set()
+            await release.wait()
+            return _summary_override(list(summary), mint_ref, tape=tape)
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            tools: dict[str, Tool],
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    agent, _ = make_agent([])
+    agent.compactor = _DelayedCompactor()
+
+    task = asyncio.create_task(agent._compact_and_post(""))
+    # Wait until the compactor is suspended at ``release.wait`` so the
+    # generation we bump comes after ``_compact_and_post`` captured it.
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+    # Simulate Halt bumping the generation while the compactor is suspended.
+    agent._compact_generation += 1
+    # Now let the compactor finish; the task should refuse to push
+    # CompactComplete because its captured generation is stale.
+    release.set()
+    await task
+
+    drained = agent.inbox.drain_nowait()
+    assert all(not isinstance(item, CompactComplete) for item in drained), (
+        f"stale CompactComplete must be suppressed; inbox={drained!r}"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_compact_cancels_running_model_call() -> None:
     """A Compact event while the model is streaming cancels the model call."""
@@ -3429,12 +3698,10 @@ async def test_compact_cancels_running_model_call() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -3453,9 +3720,9 @@ async def test_compact_cancels_running_model_call() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             return _summary_override(list(summary), mint_ref, tape=tape)
 
         def maintain(
@@ -3536,6 +3803,10 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -3549,9 +3820,9 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del model, args
+            del model, custom_instructions
             compact_blocked.set()
             await asyncio.sleep(10.0)
             return _summary_override(list(context), mint_ref, tape=tape)
@@ -3599,12 +3870,10 @@ async def test_thinking_chunk_published() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text
+            del history, on_text
             on_thinking("step 1")
             return AssistantMessage(text="ok")
 
@@ -3635,6 +3904,10 @@ async def test_tool_result_partial_published() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -3673,6 +3946,10 @@ async def test_quit_cancels_running_tool_tasks() -> None:
         @property
         def name(self) -> str:
             return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
@@ -3722,6 +3999,23 @@ def test_reset_id_counter_changes_next_id() -> None:
     assert m.id >= 1000
 
 
+def test_reset_id_counter_is_monotonic() -> None:
+    """Concurrent resumes share the counter; reseeds never rewind.
+
+    Resume A advances the counter to 200, resume B tries to seed at 50.
+    The counter must stay at >=200 so A's already-issued ids never
+    collide with future appends from B.
+    """
+    reset_id_counter(200)
+    first = UserMessage(text="post-A").id
+    assert first >= 200
+    reset_id_counter(50)  # simulate B's resume seeding below current
+    second = UserMessage(text="post-B").id
+    assert second > first, (
+        f"reset_id_counter must be monotonic; first={first} second={second}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_gated_deque_push_front_preserves_existing_items() -> None:
     """push_front with prior items keeps them after the new prefix."""
@@ -3732,6 +4026,21 @@ async def test_gated_deque_push_front_preserves_existing_items() -> None:
 
     items = await dq.drain()
     assert items == ["X", "Y", "a", "b"]
+
+
+def test_gated_deque_push_front_rejects_items_before_await() -> None:
+    """A45: ``Await`` must be the first arg of ``push_front`` when present.
+
+    The gate baseline snapshots only the pre-existing queue contents. A
+    non-``Await`` item passed before ``Await`` in the same call would
+    go uncounted, so the gate would release on the first NEW gate-type
+    item even though the early arg already satisfied the wait. Reject
+    the misuse at the boundary.
+    """
+    dq: agent_runtime.GatedDeque[object] = agent_runtime.GatedDeque()
+    user = UserMessage(text="oops")
+    with pytest.raises(AssertionError, match="Await must be the first"):
+        dq.push_front(user, agent_runtime.Await((UserMessage,)))
 
 
 @pytest.mark.asyncio
@@ -3785,12 +4094,10 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -3862,12 +4169,10 @@ class _LifecycleModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_text, on_thinking
+        del history, on_text, on_thinking
         idx = self._i
         self._i += 1
         if idx == 0:
@@ -3919,9 +4224,40 @@ def _assert_exactly_one_surface(
 
 @pytest.mark.asyncio
 async def test_pending_detached_user_flush_publishes_coalesced_history_entry() -> None:
-    """Detached fallback flush publishes the committed coalesced entry."""
+    """Detached fallback flush publishes the committed coalesced entry.
+
+    Both t0 and t1 have a parent assistant ref (so the late
+    ``DetachedResult`` isn't dropped per the post-Clear / post-Compact
+    rule), but their placeholders are masked by an unrelated barrier,
+    forcing the visibility-fail fallback to ``_pending_detached_user``.
+    The flush at ``CohortComplete`` coalesces both into one UserMessage
+    so a follow-up round sees them after the in-flight cohort closes.
+    """
     agent, collector = make_agent([AssistantMessage(text="unused")])
     agent.append_history(UserMessage(text="go"))
+    # t0 / t1 AMs land on the tape (registering parent anchors).
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    placeholder_t1 = agent.append_history(
+        ToolResult(call_id="t1", content="[detached]"),
+    )
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t0", name="echo", args={}),))
+    )
+    placeholder_t0 = agent.append_history(
+        ToolResult(call_id="t0", content="[detached]"),
+    )
+    # Mask the two placeholders WITHOUT touching the AMs -- the splice's
+    # visibility check then rejects the late DetachedResult and the
+    # fallback path fires.
+    agent.append_splice(
+        mask=((placeholder_t1, placeholder_t1), (placeholder_t0, placeholder_t0)),
+        insert_after=None,
+        payload=(),
+        strategy="test_mask_placeholders",
+    )
+    # Now stage the cohort that delays the fallback flush.
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="t2", name="echo", args={}),))
     )
@@ -4238,6 +4574,36 @@ class TestUserMessageAlternation:
         assert isinstance(tail, UserMessage)
         assert tail.text == "a\n\nb\n\nc"
 
+    def test_append_or_coalesce_user_merges_cross_type(self) -> None:
+        """UserMessage tail + AgentSend incoming merge into a single user turn."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="u"))
+        agent._append_or_coalesce_user(
+            AgentSendMessage(source="A", text="a"),
+        )
+        messages = agent.context().messages
+        assert len(messages) == 1, (
+            f"cross-type user/agent-send must coalesce; got {messages!r}"
+        )
+        tail = messages[-1]
+        assert isinstance(tail, (UserMessage, AgentSendMessage))
+        assert "u" in tail.text
+        assert "a" in tail.text
+
+    def test_append_or_coalesce_user_merges_agent_send_then_user(self) -> None:
+        """AgentSend tail + UserMessage incoming also coalesces."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(AgentSendMessage(source="A", text="a"))
+        agent._append_or_coalesce_user(UserMessage(text="u"))
+        messages = agent.context().messages
+        assert len(messages) == 1, (
+            f"cross-type agent-send/user must coalesce; got {messages!r}"
+        )
+        tail = messages[-1]
+        assert isinstance(tail, (UserMessage, AgentSendMessage))
+        assert "u" in tail.text
+        assert "a" in tail.text
+
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
@@ -4266,12 +4632,10 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_text, on_thinking
+            del on_text, on_thinking
             self.call_histories.append(list(history))
             return AssistantMessage(text="ok")
 
@@ -4348,12 +4712,10 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4439,6 +4801,10 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -4453,12 +4819,10 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4546,12 +4910,10 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4630,6 +4992,10 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -4643,12 +5009,10 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4732,12 +5096,10 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4804,12 +5166,10 @@ async def test_halt_then_queued_message_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             if len(self.call_histories) == 1:
                 stream_started.set()
@@ -5118,6 +5478,10 @@ async def test_agent_idle_suppressed_while_detached_running() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             await release.wait()
@@ -5189,9 +5553,9 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             await release.wait()
             return _summary_override(list(summary), mint_ref, tape=tape)
 
@@ -5273,9 +5637,9 @@ async def test_halt_cancels_running_compaction() -> None:
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del tape, context, model, mint_ref, args
+            del tape, context, model, mint_ref, custom_instructions
             compact_started.set()
             await asyncio.get_running_loop().create_future()
             raise AssertionError("unreachable")
@@ -5314,9 +5678,9 @@ async def test_clear_cancels_running_compaction_without_adopting_result() -> Non
             context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
-            args: str = "",
+            custom_instructions: str | None = None,
         ) -> ContextSplice:
-            del context, model, args
+            del context, model, custom_instructions
             compact_started.set()
             await release_compact.wait()
             return _summary_override(
@@ -5365,12 +5729,10 @@ async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_text, on_thinking
+            del history, on_text, on_thinking
             model_started.set()
             await release_model.wait()
             return AssistantMessage(text="never delivered")
@@ -5435,12 +5797,10 @@ async def test_agent_idle_suppressed_while_mid_stream_queue_nonempty() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del history, system, tools, on_thinking
+            del history, on_thinking
             idx = self.call_idx
             self.call_idx += 1
             if idx == 0:
@@ -5712,6 +6072,202 @@ class TestGateRepairsInvalidContext:
             elif isinstance(entry, ToolResult):
                 pending.discard(entry.call_id)
         assert not pending, f"unpaired tool_use(s) at end: {pending}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_stop_tool_kill_carries_parent_id_to_synth_result() -> None:
+    """`_stop_tool` must stamp the parent assistant ``id`` on its synth result.
+
+    Other ToolResult append sites carry ``parent_id`` (1666, 1698,
+    _run_tool_and_post). Without parent_id here, UI / consumer code
+    that keys on parent_id sees the killed-tool placeholder as orphan.
+    """
+    slow = StubTool(_name="slow", response="done", delay_sec=10.0)
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(ToolCall(id="k1", name="slow", args={}),),
+            ),
+            AssistantMessage(text="ack"),
+        ],
+        tools=[slow],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def kill_after_dispatch() -> None:
+        await asyncio.sleep(0.05)
+        agent.inbox.push_back(Kill(call_id="k1"))
+
+    await asyncio.gather(
+        run_with_quit(agent, timeout_sec=3.0),
+        kill_after_dispatch(),
+    )
+    messages = agent.context().messages
+    parent_assistant = next(
+        m for m in messages if isinstance(m, AssistantMessage) and m.tool_calls
+    )
+    cancelled = next(
+        m for m in messages if isinstance(m, ToolResult) and m.call_id == "k1"
+    )
+    assert cancelled.content == "[cancelled]"
+    assert cancelled.parent_id == parent_assistant.id, (
+        f"expected parent_id={parent_assistant.id}, got {cancelled.parent_id}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_reraises_engine_task_crash() -> None:
+    """``AgentRuntime.run`` must re-raise crashes the engine task captured.
+
+    Without re-raise, ``done.wait()`` returns when ``run_forever`` exits
+    via exception and the caller sees a clean partial history instead
+    of the real failure.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    boom = RuntimeError("engine wedged")
+
+    async def run_forever_then_crash() -> None:
+        # Publish ``ModelIdle`` so ``done.wait()`` returns, then crash so
+        # the finally block in ``run()`` sees ``task.exception() is boom``.
+        agent.publish(ModelIdle())
+        raise boom
+
+    agent.run_forever = run_forever_then_crash  # ty: ignore[invalid-assignment] -- monkeypatch run_forever on the instance so the engine task surfaces a crash for CR-060
+
+    with pytest.raises(RuntimeError, match="engine wedged"):
+        _ = await agent.run(UserMessage(text="go"))
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_does_not_raise_on_clean_completion() -> None:
+    """No engine crash → no re-raise; the regression guard for CR-060."""
+    agent, _ = make_agent([AssistantMessage(text="hi")])
+    history = await agent.run(UserMessage(text="hello"))
+    assert any(isinstance(e, AssistantMessage) and e.text == "hi" for e in history)
+
+
+# --- A40: _sanitize_for_send pairs tool calls with results and interrupts --
+
+
+def test_sanitize_for_send_pairs_every_tool_call_with_a_result() -> None:
+    """All ``ToolCall`` ids declared by an ``AssistantMessage`` must have
+    a matching ``ToolResult`` after sanitization. A missing pair is
+    filled with a synthetic ``[interrupted]`` placeholder so the wire
+    payload stays valid.
+    """
+    am = AssistantMessage(
+        tool_calls=tuple(
+            ToolCall(id=f"c{idx}", name="x", args={}) for idx in range(50)
+        ),
+    )
+    # Only half the results show up; the rest must be filled.
+    results = [ToolResult(call_id=f"c{idx}", content="ok") for idx in range(25)]
+    out = agent_runtime._sanitize_for_send([am, *results, UserMessage(text="done")])
+    seen_ids = {e.call_id for e in out if isinstance(e, ToolResult)}
+    assert seen_ids == {f"c{idx}" for idx in range(50)}
+    interrupted = [
+        e for e in out if isinstance(e, ToolResult) and e.content == "[interrupted]"
+    ]
+    assert len(interrupted) == 25
+
+
+def test_sanitize_for_send_drops_duplicate_tool_results() -> None:
+    """A repeated ``ToolResult`` for the same ``call_id`` must collapse to
+    a single entry; the second copy is silently dropped.
+    """
+    am = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
+    tr = ToolResult(call_id="c1", content="ok")
+    dup = ToolResult(call_id="c1", content="other")
+    out = agent_runtime._sanitize_for_send([am, tr, dup])
+    results = [e for e in out if isinstance(e, ToolResult)]
+    assert len(results) == 1
+    assert results[0].content == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_same_file_rew_run_sequentially_others_parallel() -> None:
+    """Same-file Read/Edit/Write calls in one cohort run sequentially, in
+    submission order; calls touching other files still run in parallel.
+
+    Each call records ``(call_id, "start")`` then yields the event loop
+    (``asyncio.sleep``) then ``(call_id, "finish")``. If the runtime
+    dispatched the cohort as concurrent tasks (the pre-fix behavior),
+    two same-file calls interleave: both ``start`` before either
+    ``finish``. Grouping same-file calls into one sequential coroutine
+    forces ``start``/``finish`` to nest per call.
+    """
+    order: list[tuple[str, str]] = []
+
+    @dataclass(kw_only=True, slots=True)
+    class TracingTool:
+        _name: str
+        groups: bool
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            if not self.groups:
+                return None
+            return str(args.get("file_path", "")) or None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            cid = str(args.get("cid", ""))
+            order.append((cid, "start"))
+            await asyncio.sleep(0.01)
+            order.append((cid, "finish"))
+            return ToolResult(call_id="", content="ok")
+
+    same = "grouped_target"
+    other = "other_target"
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall(
+                        id="e1",
+                        name="Edit",
+                        args={"file_path": same, "cid": "e1"},
+                    ),
+                    ToolCall(
+                        id="e2",
+                        name="Edit",
+                        args={"file_path": same, "cid": "e2"},
+                    ),
+                    ToolCall(
+                        id="b1",
+                        name="Bash",
+                        args={"file_path": other, "cid": "b1"},
+                    ),
+                ),
+            ),
+            AssistantMessage(text="done"),
+        ],
+        tools=[
+            TracingTool(_name="Edit", groups=True),
+            TracingTool(_name="Bash", groups=False),
+        ],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    await run_with_quit(agent, timeout_sec=3.0)
+
+    # Same-file Edits: e1 fully precedes e2 (sequential, submission order).
+    assert order.index(("e1", "finish")) < order.index(("e2", "start")), order
+    # Different-file Bash runs in parallel: it starts before the same-file
+    # group drains (it interleaves with e1/e2 rather than waiting).
+    assert ("b1", "start") in order[: order.index(("e2", "finish")) + 1], order
+
+
+def test_runtime_has_no_dead_system_param() -> None:
+    # ``AgentRuntime.system`` was write-only -- never read by any model call
+    # (the system prompt threads live via ``Agent.system_prompt()``). Guard
+    # against re-introducing the dead constructor parameter and field.
+    params = inspect.signature(agent_runtime.AgentRuntime.__init__).parameters
+    assert "system" not in params
 
 
 if __name__ == "__main__":

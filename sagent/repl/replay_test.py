@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from sagent.lib.compaction import MICROCOMPACTED_ARGS_KEY
+from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
 from sagent.types.runtime import (
@@ -276,7 +276,15 @@ def test_replay_footer_includes_model_and_modes() -> None:
     assert "latency=fast" in footer
 
 
-def test_replay_uses_forward_tape_not_compacted_context_payload() -> None:
+def test_replay_renders_resolved_view_after_compaction_splice() -> None:
+    """Replay walks the mask-resolved view: masked originals hidden, payload shown.
+
+    Per F107: the live REPL is what the model sees going forward -- the
+    compacted context -- so a resumed session must render that same
+    resolved view, not the raw tape. Originals covered by an alive
+    splice's mask vanish; the splice's payload renders via the same
+    match ladder.
+    """
     original_user = ReferrableTapeEvent(
         ref=TapeRef(session_id="t", ordinal=0),
         event=UserMessage(text="original question"),
@@ -313,9 +321,13 @@ def test_replay_uses_forward_tape_not_compacted_context_payload() -> None:
         p,
     )
 
-    assert p.user_bars == ["original question"]
-    assert p.markdowns == ["original answer"]
-    assert "summary payload" not in "".join(p.user_bars + p.markdowns)
+    # Masked originals are gone from scrollback.
+    assert "original question" not in p.user_bars
+    assert "original answer" not in p.markdowns
+    # Splice payload renders via the same match ladder.
+    assert "summary payload" in p.user_bars
+    # CompactStarted / CompactComplete are ReferrableTapeEvent's events,
+    # not masked, so their dim lines still surface.
     assert p.dim_lines == [
         "[compacting history…]",
         "[compaction complete: ~100 → ~10 tokens, 1 entries]",

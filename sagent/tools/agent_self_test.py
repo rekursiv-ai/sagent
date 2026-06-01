@@ -19,6 +19,7 @@ from sagent.types.model import (
     ModelResponse,
     ModelSpec,
     Pricing,
+    TokenCount,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -293,15 +294,34 @@ async def test_model_swap_without_spec_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_change_auth_without_model_id_errors() -> None:
+async def test_model_change_auth_without_model_id_preserves_current_model() -> None:
+    """Auth-only swap reuses the current model_id rather than erroring.
+
+    Mirrors REPL ``/model --auth sub`` semantics (see
+    ``repl/run_repl_test.py::test_parse_model_args_flag_auth``) so the
+    tool surface and the slash command behave the same way. Without
+    this, an agent that wants to bounce between subscription and API
+    auth has to re-spell its model_id on every swap -- an LLM
+    foot-gun.
+    """
     agent = _make_agent(
         spec=ModelSpec(provider="StubP", auth="env", model_id="stub-1", account=""),
     )
     t = AgentSelf()
-    with _active(agent):
+    with (
+        _active(agent),
+        patch(
+            "sagent.tools.agent_self.build_provider",
+        ) as bp,
+    ):
+        bp.return_value = MagicMock(model=MagicMock(return_value=StubProviderModel()))
         result = await t.run({"auth": "new"})
-    assert result.is_error
-    assert "model_id is required" in result.content
+    assert not result.is_error, result.content
+    assert agent.model_spec is not None
+    assert agent.model_spec.auth == "new"
+    assert agent.model_spec.model_id == "stub-1", (
+        f"auth-only swap must preserve model_id; got {agent.model_spec.model_id!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -351,23 +371,41 @@ async def test_diagnostics_catalog_models_no_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_diagnostics_includes_stats_lines_when_present() -> None:
+async def test_diagnostics_reports_live_cost_tracker_state() -> None:
+    """``diagnostics`` reads ``cost_tracker`` + ``num_tool_call_rounds``.
+
+    Regression guard for the pre-existing dead ``ToolState.stats``
+    contract (``docs/private/agent_v4_review.md`` P1): diagnostics now
+    pulls directly from the single cost store, so a real model response
+    surfaces in the output without any separate publisher step.
+    """
     agent = _make_agent()
-    agent.tool_state.stats = {
-        "num_tool_call_rounds": 2,
-        "max_request_tokens": 50,
-        "max_response_tokens": 5,
-        "input_tokens": 10,
-        "total_input_tokens": 20,
-        "total_output_tokens": 30,
-        "cache_creation_tokens": 0,
-        "cache_read_tokens": 0,
-        "total_cost_usd": 0.42,
-    }
+    agent.max_request_tokens = 50_000
+    agent.max_response_tokens = 5_000
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(
+            input_tokens=10_000,
+            output_tokens=30,
+            cache_creation_tokens=7,
+            cache_read_tokens=3,
+        ),
+        total_cost=0.42,
+    )
+    agent.cost_tracker.record(response, model_id="stub-1")
+    agent.activity.num_tool_call_rounds = 2
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"diagnostics": True})
-    assert "Tool call rounds:" in result.content
+    assert "No stats yet" not in result.content
+    assert "Tool call rounds:   2" in result.content
+    assert "Max request tokens:   50,000" in result.content
+    assert "Max response tokens:  5,000" in result.content
+    assert "Input tokens:       10,000 (20.0% of max request)" in result.content
+    assert "Total input tokens: 10,000" in result.content
+    assert "Total output tokens:30" in result.content
+    assert "Cache creation:     7" in result.content
+    assert "Cache read:         3" in result.content
     assert "Total cost (USD):   $0.42" in result.content
 
 
@@ -644,6 +682,50 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_swap_clears_effort_and_reports_unset() -> None:
+    """Swap to a model that lacks effort support; report the auto-clear.
+
+    ``Agent.swap_model`` zeroes ``effort`` / ``thinking`` / ``service_tier``
+    when the new model lacks the capability. ``_commit_patch_plan``'s
+    "(unsupported)" line then has to fire so the LLM knows *why* its
+    setting disappeared. The bug: ``_commit_patch_plan`` inspected the
+    fields *after* swap, by which point ``swap_model`` had already
+    cleared them -- silencing every report. Snapshot before swap.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class EffortStubModel(StubProviderModel):
+        supports_effort: bool = True
+
+    agent = Agent(
+        model=EffortStubModel(model_id="rich-stub"),
+        tools=[],
+        model_spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="rich-stub",
+            account="",
+        ),
+    )
+    agent.effort = "high"
+    assert agent.effort == "high"
+    # Target model lacks effort/thinking/service-tier (``MockModelCaps``
+    # defaults). Swap must clear ``effort`` AND mention it in the result.
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ):
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"model_id": "plain-stub"})
+    assert not result.is_error, result.content
+    assert agent.effort is None
+    assert "effort=unset" in result.content
+
+
+@pytest.mark.asyncio
 async def test_model_id_change_unknown_provider_errors() -> None:
     agent = _make_agent(
         spec=ModelSpec(
@@ -706,6 +788,77 @@ async def test_provider_switch_rejected_when_outside_allow_list() -> None:
     assert result.is_error
     assert "not in the allowed list" in result.content
     assert "Anthropic" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attr", ["max_request_tokens", "max_response_tokens"])
+async def test_token_limit_rejects_non_integer_float(attr: str) -> None:
+    """Schema declares ``type: integer``; runtime must reject 1.9.
+
+    Pre-fix ``int(1.9) → 1`` and the spawn silently accepted the
+    rounded request. A float here is a directive error.
+    """
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({attr: 1.9})
+    assert result.is_error
+    assert "integer" in result.content
+
+
+@pytest.mark.asyncio
+async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> None:
+    # Swap from a fully-capable model to a plain one: thinking / service_tier /
+    # latency must each be cleared AND reported "(unsupported)". The snapshot is
+    # read before swap, so a post-swap read would silence every report -- this
+    # guards the thinking/service_tier/latency axes the effort test does not.
+    @dataclass(slots=True, kw_only=True)
+    class RichStubModel(StubProviderModel):
+        supports_thinking: bool = True
+        valid_service_tiers: tuple[str, ...] = ("priority",)
+        valid_latency_modes: tuple[str, ...] = ("fast",)
+
+    agent = Agent(
+        model=RichStubModel(model_id="rich-stub"),
+        tools=[],
+        model_spec=ModelSpec(
+            provider="OpenAISubscription",
+            auth="credentials",
+            model_id="rich-stub",
+            account="",
+        ),
+    )
+    agent.thinking = "adaptive"
+    agent.service_tier = "priority"
+    agent.latency = "fast"
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
+    with patch(
+        "sagent.tools.agent_self.build_provider",
+        return_value=fake_provider,
+    ):
+        t = AgentSelf()
+        with _active(agent):
+            result = await t.run({"model_id": "plain-stub"})
+    assert not result.is_error, result.content
+    assert agent.thinking is None
+    assert agent.service_tier is None
+    assert agent.latency is None
+    assert "thinking=off (unsupported)" in result.content
+    assert "service_tier=unset (unsupported)" in result.content
+    assert "latency=unset (unsupported)" in result.content
+
+
+@pytest.mark.asyncio
+async def test_model_options_latency_null_clear_accepted_without_fast_support() -> None:
+    # Clearing latency (null) must be accepted even on a model with no fast
+    # mode; only a non-null unsupported value should error. The unknown-key
+    # gate must recognize ``latency`` regardless of capability.
+    agent = _make_agent()
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"model_options": {"latency": None}})
+    assert not result.is_error, result.content
 
 
 if __name__ == "__main__":

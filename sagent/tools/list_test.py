@@ -97,6 +97,17 @@ async def test_list_missing_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_max_results_zero_errors(tmp_path: Path) -> None:
+    # Schema declares minimum=1; the runtime must reject 0/negative
+    # rather than returning an empty listing that looks like an empty
+    # directory.
+    (tmp_path / "a.txt").write_text("")
+    result = await _run_list({"path": str(tmp_path), "max_results": 0}, tmp_path)
+    assert result.is_error
+    assert "max_results" in result.content
+
+
+@pytest.mark.asyncio
 async def test_list_not_a_directory(tmp_path: Path) -> None:
     f = tmp_path / "x.txt"
     f.write_text("v")

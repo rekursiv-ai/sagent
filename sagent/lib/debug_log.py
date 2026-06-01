@@ -112,12 +112,21 @@ def role_sequence(messages: Sequence[object]) -> list[str]:
     return out
 
 
+_RESERVED_KEYS = frozenset({"ts", "event"})
+
+
 def _write(event: str, data: dict[str, object]) -> None:
-    """Append a JSON record to the debug log file."""
+    """Append a JSON record to the debug log file.
+
+    User-supplied keys that collide with reserved record keys (``ts``,
+    ``event``) are dropped so sloppy callers cannot silently overwrite
+    the timestamp or event name and corrupt downstream log analysis.
+    """
     try:
         path = log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"ts": time.time(), "event": event, **data}
+        safe = {k: v for k, v in data.items() if k not in _RESERVED_KEYS}
+        record = {"ts": time.time(), "event": event, **safe}
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
     except Exception:  # noqa: BLE001, S110 -- debug logging must never crash callers; there's no safer channel to report the failure to

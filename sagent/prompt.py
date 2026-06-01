@@ -14,7 +14,6 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import cache
 from pathlib import Path
 
 import logging
@@ -31,6 +30,7 @@ from sagent.tools.core import (
     recipe_dict,
     recipe_list,
 )
+from sagent.types.model import base_model_id
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,13 @@ logger = logging.getLogger(__name__)
 _GIT = shutil.which("git") or "git"
 
 
-@cache
 def _load_static() -> str:
-    """Load the recipe's base static prompt with placeholders substituted."""
+    """Load the recipe's base static prompt with placeholders substituted.
+
+    Not cached here -- ``set_recipe`` swaps the underlying yaml, and the
+    asset reader is already fast enough that an extra read per request
+    is cheaper than reasoning about cache invalidation.
+    """
     sp = recipe_dict("system_prompt")
     base = sp.get("base", "")
     if not base:
@@ -57,13 +61,12 @@ _MODEL_INFO: dict[str, tuple[str, str]] = {
     "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
     "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
     "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
-    "claude-haiku-4-5-20251001": ("Claude Haiku 4.5", "February 2025"),
+    "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
 }
 
 
-@cache
 def _is_git_repo(cwd: str) -> bool:
-    """Check if cwd is inside a git repo (cached per directory)."""
+    """Check if cwd is inside a git repo (uncached: ``git init`` flips this)."""
     try:
         result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
             [_GIT, "rev-parse", "--is-inside-work-tree"],
@@ -78,7 +81,6 @@ def _is_git_repo(cwd: str) -> bool:
     return result.returncode == 0
 
 
-@cache
 def _is_git_worktree(cwd: str) -> bool:
     """True if cwd is a git worktree (not the primary checkout)."""
     try:
@@ -113,7 +115,6 @@ _WORKTREE_LINE = (
 _WINDOWS_SHELL_SUFFIX = " (prefer Unix shell conventions — /dev/null, forward slashes)"
 
 
-@cache
 def _load_env_template() -> str:
     """Load the environment template from the active recipe."""
     sp = recipe_dict("system_prompt")
@@ -143,7 +144,10 @@ def environment(model_id: str) -> str:
     """
     cwd = get_tool_state().bash_cwd
     is_git = _is_git_repo(cwd)
-    marketing, cutoff = _MODEL_INFO.get(model_id, (model_id, "unknown"))
+    # Context-window variants share their base model's metadata; key the
+    # lookup on the canonical base id so ``claude-opus-4-8+1m`` resolves to
+    # its base entry instead of falling back to "unknown".
+    marketing, cutoff = _MODEL_INFO.get(base_model_id(model_id), (model_id, "unknown"))
     shell_name = _shell_name(os.environ.get("SHELL", "unknown"))
     on_windows = platform.system() == "Windows"
     shell_line = shell_name + (_WINDOWS_SHELL_SUFFIX if on_windows else "")
@@ -182,13 +186,7 @@ def build_system(
 
     """
     d = build_system_dict(model_id, custom=custom, include_memory=include_memory)
-    parts: list[str] = []
-    for v in d.values():
-        if isinstance(v, str):
-            parts.append(v)
-        else:
-            parts.append(v())
-    return "\n\n".join(parts)
+    return "\n\n".join(v() for v in d.values())
 
 
 _DEFAULT_SECTIONS: tuple[str, ...] = (
@@ -215,13 +213,15 @@ def build_system_dict(
     custom: str = "",
     *,
     include_memory: bool = True,
-) -> dict[str, str | Callable[[], str]]:
+) -> dict[str, Callable[[], str]]:
     """Assemble core scaffolding for the system prompt.
 
     Returns only the feature-agnostic sections (static, environment,
-    AGENTS.md walk, memory, optional user instructions). The
-    environment section is a callable re-evaluated each model request,
-    so the working directory stays current after ``cd``.
+    AGENTS.md walk, memory, optional user instructions). Every value is
+    a zero-arg callable re-evaluated per request: this keeps the
+    working directory, recipe state, AGENTS.md edits, and memory index
+    current across long-lived runs without forcing callers to branch on
+    the value shape.
 
     The active recipe (see ``tools.core.set_recipe``) controls which
     sections are emitted via ``system_prompt.sections``. Authoring a
@@ -234,13 +234,13 @@ def build_system_dict(
       include_memory: Whether to include persistent project memory.
 
     Returns:
-      sections: Ordered dict of section name to string or callable.
+      sections: Ordered dict of section name to zero-arg callable.
 
     """
     enabled = _enabled_sections()
-    sections: dict[str, str | Callable[[], str]] = {}
+    sections: dict[str, Callable[[], str]] = {}
     if "static" in enabled:
-        sections["static"] = _load_static()
+        sections["static"] = _load_static
     if "environment" in enabled:
         sections["environment"] = lambda: environment(model_id)
     if "agents_md" in enabled:
@@ -263,5 +263,5 @@ def build_system_dict(
             get_tool_state().bash_cwd
         )
     if custom and "user_instructions" in enabled:
-        sections["user_instructions"] = f"# User instructions\n{custom}"
+        sections["user_instructions"] = lambda: f"# User instructions\n{custom}"
     return sections

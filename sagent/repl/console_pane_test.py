@@ -7,6 +7,7 @@ import io
 from rich.console import Console
 
 from sagent.repl.console_pane import ConsolePrinter
+from sagent.repl.render import ChildItem
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponseThinking,
@@ -119,10 +120,18 @@ def test_write_tool_error_first_line_carries_glyph() -> None:
     assert "      more" in out
 
 
-def test_write_tool_error_blank_is_noop() -> None:
+def test_write_tool_error_blank_renders_placeholder() -> None:
+    """REPL-028: empty error body still surfaces a placeholder line.
+
+    Silently dropping the call would let upstream report a failure that
+    leaves no trace on the operator's screen.
+    """
     printer, buf = _printer()
     printer.write_tool_error("")
-    assert buf.getvalue() == ""
+    assert "<no error message>" in buf.getvalue()
+    printer, buf = _printer()
+    printer.write_tool_error("\n  \n")
+    assert "<no error message>" in buf.getvalue()
 
 
 def test_write_tool_summary_carries_arrow_glyph() -> None:
@@ -190,7 +199,7 @@ def test_write_child_block_empty_items_is_noop() -> None:
 
 def test_write_child_block_renders_assistant_text() -> None:
     printer, buf = _printer()
-    items: list[object] = [AssistantMessage(text="child output")]
+    items: list[ChildItem] = [AssistantMessage(text="child output")]
     printer.write_child_block("Agent_0", items)
     out = buf.getvalue()
     assert "child output" in out
@@ -199,7 +208,7 @@ def test_write_child_block_renders_assistant_text() -> None:
 
 def test_write_child_block_renders_tool_label() -> None:
     printer, buf = _printer()
-    items: list[object] = [ToolLabel(call_id="c1", text="Bash")]
+    items: list[ChildItem] = [ToolLabel(call_id="c1", text="Bash")]
     printer.write_child_block("Agent_1", items)
     out = buf.getvalue()
     assert "Bash" in out
@@ -207,7 +216,7 @@ def test_write_child_block_renders_tool_label() -> None:
 
 def test_write_child_block_renders_thinking() -> None:
     printer, buf = _printer()
-    items: list[object] = [ModelResponseThinking(text="hmm")]
+    items: list[ChildItem] = [ModelResponseThinking(text="hmm")]
     printer.write_child_block("Agent_2", items)
     out = buf.getvalue()
     assert "hmm" in out
@@ -215,7 +224,7 @@ def test_write_child_block_renders_thinking() -> None:
 
 def test_write_child_block_renders_tool_result_summary() -> None:
     printer, buf = _printer()
-    items: list[object] = [
+    items: list[ChildItem] = [
         ToolResult(call_id="c1", content="ok", summary="one line"),
     ]
     printer.write_child_block("Agent_3", items)
@@ -225,18 +234,39 @@ def test_write_child_block_renders_tool_result_summary() -> None:
 
 def test_write_child_block_renders_user_message() -> None:
     printer, buf = _printer()
-    items: list[object] = [UserMessage(text="user note")]
+    items: list[ChildItem] = [UserMessage(text="user note")]
     printer.write_child_block("Agent_4", items)
     out = buf.getvalue()
     assert "user note" in out
 
 
-def test_write_child_block_ignores_unknown_item_type() -> None:
-    printer, buf = _printer()
-    # ``int`` is not a child-block item type; ``_render_child_item`` skips it.
-    printer.write_child_block("Agent_X", [42])
-    # Nothing written.
-    assert buf.getvalue() == ""
+def test_rich_still_emits_ansi_full_reset_pinning() -> None:
+    r"""Pin Rich's ``\x1b[0m`` reset emission used by ``_dim_baseline``.
+
+    ``_dim_baseline`` (private helper in ``console_pane``) re-applies the
+    dim attribute after every Rich-emitted full reset by string-replacing
+    ``\x1b[0m`` -> ``\x1b[0m\x1b[2m``. If a future Rich release
+    switches to attribute-specific resets (e.g. ``\x1b[39;49m``) or
+    drops the trailing reset entirely, the dim baseline would silently
+    leak past per-span styles. Fail here so the regression surfaces in
+    test rather than at runtime in the child-block renderer.
+    """
+    buf = io.StringIO()
+    con = Console(
+        file=buf,
+        width=40,
+        force_terminal=True,
+        color_system="truecolor",
+        highlight=False,
+        no_color=False,
+    )
+    con.print("[bold red]styled[/]")
+    rendered = buf.getvalue()
+    assert "\x1b[0m" in rendered, (
+        "Rich no longer emits \\x1b[0m full resets after styled spans;"
+        " _dim_baseline's rewrite is now a no-op. Update the helper to"
+        " match the new reset shape."
+    )
 
 
 if __name__ == "__main__":

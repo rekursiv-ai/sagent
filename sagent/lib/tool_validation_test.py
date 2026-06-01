@@ -163,6 +163,32 @@ def test_validate_tool_input_valid_passes() -> None:
     assert validate_tool_input("Echo", schema, {"msg": "hi"}) is None
 
 
+def test_validate_tool_input_caps_accepted_keys_list() -> None:
+    """Schemas with very many props don't dump an unbounded key list."""
+    props = {f"k{i}": {"type": "string"} for i in range(200)}
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": props,
+            "additionalProperties": False,
+        }
+    )
+    err = validate_tool_input("Big", schema, {"bogus": 1})
+    assert err is not None
+    accepts_line = next(
+        (line for line in err.splitlines() if line.startswith("Big accepts:")),
+        None,
+    )
+    assert accepts_line is not None
+    # The accepted-keys advertisement must be bounded.
+    assert "and " in accepts_line
+    assert "more" in accepts_line
+    backtick_count = accepts_line.count("`")
+    assert backtick_count <= 2 * 50, (
+        f"unbounded keys advertisement: {backtick_count // 2} keys listed"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 

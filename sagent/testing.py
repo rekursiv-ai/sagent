@@ -46,12 +46,23 @@ from sagent.types.runtime import (
 
 
 class MockModelCaps:
-    """Base capability flags for test model mocks.
+    """Base capability flags and helpers for **provider** ``Model`` mocks.
 
-    Provides the Model protocol's property/method stubs so individual
-    test files only need to add response logic. Does NOT satisfy the
-    full Model protocol alone — concrete mocks must add ``model_id``,
-    ``max_request_tokens``, ``buffer``, and ``stream``.
+    Subclasses build mocks that satisfy the rich provider
+    ``types.model.Model`` Protocol (``stream(request, ...) ->
+    ModelResponse``). This base supplies the static capability flags
+    (``supports_*``, ``max_*``) and the token-estimation helpers every
+    provider mock needs; subclasses only have to add ``model_id``,
+    ``max_request_tokens``, ``buffer``, and ``stream``. The method
+    bodies here are the trivial deterministic defaults a unit test
+    almost always wants; override per test as needed.
+
+    Distinct from ``_NullModel`` in this module, which satisfies the
+    leaner **runtime** ``agent.runtime.Model`` Protocol that
+    ``AgentRuntime(model=...)`` consumes. The agent layer's
+    ``_AgentModel`` (``agent/agent.py:1645``) bridges the rich provider
+    surface to the lean runtime surface; tests pick whichever side they
+    actually exercise.
     """
 
     max_response_tokens: int = 8_192
@@ -100,17 +111,22 @@ class MockModelCaps:
 
 
 class _NullModel:
-    """No-op ``Model`` for tests that never need a real model call."""
+    """No-op runtime ``Model`` for tests that never hit model dispatch.
+
+    Satisfies the lean ``agent.runtime.Model`` Protocol (the one
+    ``AgentRuntime(model=...)`` accepts), not the rich provider
+    ``types.model.Model``. Returns an empty ``AssistantMessage`` so a
+    runtime that does end up calling ``stream`` makes forward progress
+    instead of raising.
+    """
 
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_text, on_thinking
+        del history, on_text, on_thinking
         return AssistantMessage(text="")
 
 
@@ -156,11 +172,19 @@ class FakeAgent:
 
     @property
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
-        """Read view of explicit and detached background entries."""
+        """Read view of explicit and detached background entries.
+
+        Mirrors ``Agent.background`` (``agent/agent.py:570-586``) -- the
+        merged view is rebuilt per access; the returned
+        ``BackgroundTaskEntry`` for a detached call is a fresh value
+        each call and is **not** identity-stable across reads. Tests
+        that need to track the same entry across multiple ``background``
+        reads should pin by ``queue_id`` / ``call_id``, not by ``is``.
+        """
         merged: dict[str, BackgroundTaskEntry] = {}
         for call_id, task in self.runtime.detached.items():
             name, started = self._tool_registry.get(call_id, ("?", time.time()))
-            job_id = self._job_id_for_call(call_id)
+            job_id = self.job_id_for_call(call_id)
             merged[job_id] = BackgroundTaskEntry(
                 task=task,
                 tool_name=name,
@@ -191,28 +215,61 @@ class FakeAgent:
         self._bg[job_id] = entry
 
     def halt(self) -> None:
-        """Stub for ``AgentLike.halt``; published as a ``Halt`` runtime event."""
-        self.runtime.publish(Halt())
+        """Queue a ``Halt`` runtime event (mirrors ``Agent.halt``).
+
+        Pushes to ``runtime.inbox`` rather than publishing directly so
+        the observer list is reserved for events the runtime itself
+        publishes; tests that assert "runtime emitted Halt" can then
+        distinguish runtime-sourced halts from this stub call.
+        """
+        self.runtime.inbox.push_back(Halt())
 
     def kill_tool(self, qid: str) -> None:
-        """Cancel one outstanding tool task by human job id or call id."""
+        """Cancel one outstanding tool task by human job id or call id.
+
+        ``qid`` may be either id; ``cancel_background`` resolves either
+        form via its ``_bg`` / ``background`` lookups, while the queued
+        ``Kill`` carries the resolved provider ``call_id`` so the
+        runtime's tool dispatch handler matches its registry key.
+        Mirrors ``Agent.kill_tool`` (``agent/agent.py:887-896``).
+        """
         call_id = self._call_id_for_job(qid)
         self.cancel_background(qid)
         self.runtime.inbox.push_back(Kill(call_id=call_id))
 
     def kill_all_tools(self) -> None:
-        """Cancel every visible explicit background tool job."""
+        """Cancel every visible explicit background tool job.
+
+        Filter (``kind == "tool" and not job.hidden``) matches the real
+        Agent's ``_cancel_all_background`` (``agent/agent.py:1329-1333``),
+        which ``Agent.kill_all_tools`` (``agent/agent.py:898-901``)
+        delegates to. Detached and persistent-subagent jobs survive --
+        ``shutdown(force=True)`` is the broader sweep.
+        """
         for job_id, job in tuple(self._bg.items()):
             if job.kind == "tool" and not job.hidden:
-                self._cancel_background(job_id)
+                self.cancel_background(job_id)
         self.runtime.inbox.push_back(Kill())
 
-    def _cancel_background(self, job_id: str) -> None:
-        """Cancel and forget one explicit background job."""
-        self.cancel_background(job_id)
+    def shutdown(self, *, force: bool = False) -> None:
+        """Stub for ``AgentLike.shutdown``; queue a quit event."""
+        if force:
+            self.kill_all_tools()
+        self.runtime.inbox.push_back(Quit())
 
-    def _job_id_for_call(self, call_id: str) -> str:
-        """Return the stable human job id for a provider call id."""
+    def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:
+        """Return all captured events that are instances of ``cls``."""
+        return [e for e in self.events if isinstance(e, cls)]
+
+    def job_id_for_call(self, call_id: str) -> str:
+        """Return the stable human job id for a provider call id, minting on miss.
+
+        Asymmetric with ``_call_id_for_job`` by design: a provider call
+        id always wants a stable display id, so the lookup mints one on
+        miss; a display id without a known call id falls back to itself
+        (the runtime's id space is the same shape as the human one).
+        Mirrors ``Agent.job_id_for_call``.
+        """
         job_id = self._job_ids_by_call_id.get(call_id)
         if job_id is not None:
             return job_id
@@ -231,19 +288,13 @@ class FakeAgent:
         if job_id is not None:
             self._call_ids_by_job_id.pop(job_id, None)
 
-    def shutdown(self, *, force: bool = False) -> None:
-        """Stub for ``AgentLike.shutdown``; queue a quit event."""
-        if force:
-            self.kill_all_tools()
-        self.runtime.inbox.push_back(Quit())
-
-    def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:
-        """Return all captured events that are instances of ``cls``."""
-        return [e for e in self.events if isinstance(e, cls)]
-
 
 @contextmanager
-def with_fake_agent(*, tool_state: ToolState | None = None) -> Generator[FakeAgent]:
+def with_fake_agent(
+    *,
+    tool_state: ToolState | None = None,
+    agent: FakeAgent | None = None,
+) -> Generator[FakeAgent]:
     """Install a ``FakeAgent`` in ``current_agent_var`` for the block.
 
     Pairs ``FakeAgent`` with ``tool_state_context`` so tools that call
@@ -251,18 +302,24 @@ def with_fake_agent(*, tool_state: ToolState | None = None) -> Generator[FakeAge
     call ``current_agent_var.get()`` see the fake agent.
 
     Args:
-      tool_state: Optional pre-built ``ToolState``. When omitted, a
-          fresh empty ``ToolState`` is used.
+      tool_state: Optional pre-built ``ToolState``. Ignored when
+          ``agent`` is supplied (the supplied agent's state wins). When
+          both are omitted, a fresh empty ``ToolState`` is used.
+      agent: Optional pre-built ``FakeAgent``. Use this to inject a
+          custom runtime/model or to preserve fake state across nested
+          ``with_fake_agent`` blocks. When omitted, a fresh
+          ``FakeAgent`` is constructed (from ``tool_state`` if given).
 
     Yields:
       agent: The active ``FakeAgent`` for the block.
 
     """
-    fake = FakeAgent(tool_state=tool_state) if tool_state else FakeAgent()
-    agent_token = current_agent_var.set(fake)
-    state_token = tool_state_var.set(fake.tool_state)
+    if agent is None:
+        agent = FakeAgent(tool_state=tool_state) if tool_state else FakeAgent()
+    agent_token = current_agent_var.set(agent)
+    state_token = tool_state_var.set(agent.tool_state)
     try:
-        yield fake
+        yield agent
     finally:
         tool_state_var.reset(state_token)
         current_agent_var.reset(agent_token)

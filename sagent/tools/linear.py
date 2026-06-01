@@ -252,6 +252,11 @@ class Linear:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: independent network call, no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Dispatch the requested Linear operation.
 

@@ -80,7 +80,10 @@ class OpenAI(OpenAICompat):
     # pricing URL.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         "gpt-5.5": ModelProfile(
-            max_request_tokens=1_050_000,
+            # 1M-token context window (922K input / 128K output) per
+            # https://developers.openai.com/api/docs/models/gpt-5.5 -- the
+            # 272K figure in OpenAI's docs is a pricing tier, not a hard cap.
+            max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=Pricing(
                 request=5.0,

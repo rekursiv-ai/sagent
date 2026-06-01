@@ -11,6 +11,7 @@ import re
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
+    file_lock_key,
     get_file_write_lock,
     get_tool_state,
     load_tool_description,
@@ -41,6 +42,19 @@ class Write:
             "required": ["file_path", "content"],
         }
     )
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Serialize same-file Read/Edit/Write within a cohort.
+
+        Args:
+          args: Directive carrying ``file_path``.
+
+        Returns:
+          key: Canonical path, or ``None`` when no path was supplied.
+
+        """
+        path = resolve_tool_path(str(args.get("file_path", "")))
+        return file_lock_key(path) if path else None
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.

@@ -17,6 +17,7 @@ import re
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.json import JSON, bool_val, json_freeze
 from sagent.tools.core import (
+    file_lock_key,
     get_file_write_lock,
     get_tool_state,
     load_tool_description,
@@ -125,6 +126,19 @@ class Edit:
                 replace_all,
             )
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Serialize same-file Read/Edit/Write within a cohort.
+
+        Args:
+          args: Directive carrying ``file_path``.
+
+        Returns:
+          key: Canonical path, or ``None`` when no path was supplied.
+
+        """
+        path = resolve_tool_path(str(args.get("file_path", "")))
+        return file_lock_key(path) if path else None
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this edit.
 
@@ -206,7 +220,18 @@ class Edit:
             return err
         p = Path(file_path)
         state = get_tool_state()
-        text = p.read_text(encoding="utf-8")
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            size = p.stat().st_size
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"[Non-UTF-8 file: {file_path} ({size} bytes)."
+                    " Use Bash with an explicit decoder to inspect or rewrite.]"
+                ),
+                is_error=True,
+            )
         count = text.count(old_string)
         if count == 0:
             return ToolResult(

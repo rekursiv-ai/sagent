@@ -129,21 +129,25 @@ class TestFrontmatter:
             "---\npaths:\n  - '**/*.py'\n  - 'src/**'\n---\nc\n"
         )
         files = agents_md._discover(tmp_path, cfg)
-        assert files[0].globs == ["**/*.py", "src"]
+        # ``src/**`` is preserved verbatim; the recursive-glob suffix is
+        # part of the matcher contract, not a typo for the bare dir name.
+        assert files[0].globs == ["**/*.py", "src/**"]
 
     def test_paths_star_star_dropped(
         self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
     ) -> None:
+        """Bare ``**`` matches everything, so it's equivalent to no constraint."""
         _ = (tmp_path / "AGENTS.md").write_text("---\npaths:\n  - '**'\n---\nc\n")
         files = agents_md._discover(tmp_path, cfg)
         assert files[0].globs == []
 
-    def test_trailing_star_star_stripped(
+    def test_recursive_glob_preserved(
         self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
     ) -> None:
+        """``src/**`` is preserved verbatim (regression: used to collapse to ``src``)."""
         _ = (tmp_path / "AGENTS.md").write_text("---\npaths:\n  - 'src/**'\n---\nc\n")
         files = agents_md._discover(tmp_path, cfg)
-        assert files[0].globs == ["src"]
+        assert files[0].globs == ["src/**"]
 
 
 class TestHtmlComments:
@@ -213,7 +217,7 @@ class TestIncludes:
 
 class TestFormat:
     def test_empty(self) -> None:
-        assert agents_md._format_for_prompt([]) == ""
+        assert agents_md._format_for_prompt([], agents_md._DEFAULT_PREAMBLE) == ""
 
     def test_includes_path_and_description(self, tmp_path: Path) -> None:
         f = agents_md._AgentMdFile(
@@ -221,7 +225,7 @@ class TestFormat:
             content="hello",
             memory_type="Project",
         )
-        out = agents_md._format_for_prompt([f])
+        out = agents_md._format_for_prompt([f], agents_md._DEFAULT_PREAMBLE)
         assert "hello" in out
         assert str(tmp_path / "AGENTS.md") in out
         assert "project directives, version-controlled" in out
@@ -232,8 +236,20 @@ class TestFormat:
             content="x" * 50_000,
             memory_type="Project",
         )
-        out = agents_md._format_for_prompt([f])
+        out = agents_md._format_for_prompt([f], agents_md._DEFAULT_PREAMBLE)
         assert len(out) >= 50_000
+
+    def test_custom_preamble_replaces_default(self, tmp_path: Path) -> None:
+        """Recipe-overridable preamble flows through ``build_section``."""
+        _ = (tmp_path / "AGENTS.md").write_text("rule\n")
+        cfg = agents_md.AgentsMdConfig(
+            system_dir=tmp_path / "__s__",
+            user_dir=tmp_path / "__u__",
+            preamble="CUSTOM HEADER",
+        )
+        out = agents_md.build_section(tmp_path, config=cfg)
+        assert out.startswith("CUSTOM HEADER")
+        assert "Project and user directives follow" not in out
 
 
 class TestAddDir:
@@ -277,6 +293,26 @@ class TestConditionalFilter:
         kept = [f for f in all_files if not f.globs]
         assert any("u" in f.content for f in kept)
         assert all(f.content.strip() != "c" for f in kept)
+
+    def test_conditional_rules_for_paths_matches_globs(
+        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+    ) -> None:
+        rules = tmp_path / ".sagent" / "rules"
+        rules.mkdir(parents=True)
+        _ = (rules / "python.md").write_text(
+            "---\npaths: ['**/*.py']\n---\npython-rule\n"
+        )
+        _ = (rules / "text.md").write_text("---\npaths: ['**/*.txt']\n---\ntext-rule\n")
+        out, matched = agents_md.conditional_rules_for_paths(
+            tmp_path,
+            [tmp_path / "main.py"],
+            config=cfg,
+            exclude=set(),
+        )
+        assert "<system-reminder>" in out
+        assert "python-rule" in out
+        assert "text-rule" not in out
+        assert matched == {str((rules / "python.md").resolve())}
 
 
 class TestBuildSection:
@@ -411,7 +447,7 @@ class TestExtractPathGlobs:
     def test_string_paths_splits_comma_and_newline(self) -> None:
         meta: dict[str, object] = {"paths": "a/**, b/**\nc.py"}
         globs = agents_md._extract_path_globs(meta)
-        assert globs == ["a", "b", "c.py"]
+        assert globs == ["a/**", "b/**", "c.py"]
 
 
 class TestStripHtmlBlockComments:

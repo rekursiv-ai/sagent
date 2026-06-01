@@ -66,6 +66,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    base_model_id,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -100,7 +101,6 @@ class _AnthropicRawStreamSDK(Protocol):
     ) -> anthropic.APIStatusError: ...
 
 
-_CONTEXT_TAGS = ("+1m", "+200k")
 _CONTEXT_1M_BETA = "context-1m-2025-08-07"
 _CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
 _REDACT_THINKING_BETA = "redact-thinking-2026-02-12"
@@ -130,7 +130,7 @@ def supports_fast_mode(model_id: str) -> bool:
     is just ``service_tier="priority"``. The cross-provider ``latency``
     hint hides that asymmetry from callers.
     """
-    return _strip_context_tag(model_id) in _FAST_MODE_MODELS
+    return base_model_id(model_id) in _FAST_MODE_MODELS
 
 
 # Models that support server-side ``clear_tool_uses_20250919``. Per
@@ -149,18 +149,9 @@ _CONTEXT_MANAGEMENT_MODELS = frozenset(
 )
 
 
-def _strip_context_tag(model_id: str) -> str:
-    """Strip a trailing window-size tag so the wire id is canonical."""
-    lower = model_id.lower()
-    for tag in _CONTEXT_TAGS:
-        if lower.endswith(tag):
-            return model_id[: -len(tag)]
-    return model_id
-
-
 def supports_native_context_management(model_id: str) -> bool:
     """True when the model accepts the ``clear_tool_uses_20250919`` beta."""
-    return _strip_context_tag(model_id) in _CONTEXT_MANAGEMENT_MODELS
+    return base_model_id(model_id) in _CONTEXT_MANAGEMENT_MODELS
 
 
 def context_betas(model_id: str) -> list[str]:
@@ -480,7 +471,7 @@ class Anthropic:
         # Try exact match first, then strip +1m context tag.
         # Fail fast on unknown model IDs.
         profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            _strip_context_tag(mid),
+            base_model_id(mid),
         )
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
@@ -985,7 +976,7 @@ class _AnthropicModel:
         has_thinking = thinking in ("adaptive", "enabled")
         max_tok = request.max_response_tokens or self.max_response_tokens
         kwargs: dict[str, object] = {
-            "model": _strip_context_tag(self._model_id),
+            "model": base_model_id(self._model_id),
             "messages": messages,
             "max_tokens": max_tok,
             "temperature": request.temperature,
@@ -1399,17 +1390,28 @@ def _assistant_blocks(
     """Build Anthropic content blocks from an AssistantMessage.
 
     Thinking blocks are emitted verbatim (the wire dict from
-    ``block.model_dump()`` stored on the message), with one exception: a
-    ``thinking`` block whose ``signature`` is set but whose ``thinking`` body
-    is empty has lost its signed payload and cannot re-validate server-side
-    (Anthropic answers HTTP 400 ``thinking blocks ... cannot be modified``).
-    Such orphans are elided. ``redacted_thinking`` has no client-visible body
-    to lose and always passes through. Anthropic rejects assistant messages
-    whose final block is thinking, so we append a placeholder text block when
-    no text or tool_use follows.
+    ``block.model_dump()`` stored on the message), with two exceptions:
+
+    1. A ``thinking`` block whose ``signature`` is set but whose ``thinking``
+       body is empty has lost its signed payload and cannot re-validate
+       server-side (Anthropic answers HTTP 400 ``thinking blocks ... cannot be
+       modified``). Such orphans are elided.
+    2. Non-native thinking-block types (e.g. ``{"type":"reasoning"}`` from
+       OpenAI / Moonshot / MiniMax / OpenAI-subscription) cannot be translated
+       and would trip Anthropic's content-block validator after a cross-
+       provider session switch. They are dropped silently; the underlying
+       reasoning is opaque to other providers and there is no faithful re-
+       encoding.
+
+    ``redacted_thinking`` has no client-visible body to lose and always passes
+    through. Anthropic rejects assistant messages whose final block is
+    thinking, so we append a placeholder text block when no text or tool_use
+    follows.
     """
     blocks: list[dict[str, object]] = [
-        dict(tb) for tb in entry.thinking_blocks if not _is_orphan_thinking(tb)
+        dict(tb)
+        for tb in entry.thinking_blocks
+        if _is_native_thinking(tb) and not _is_orphan_thinking(tb)
     ]
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
@@ -1426,6 +1428,11 @@ def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
         and bool(block.get("signature"))
         and not block.get("thinking")
     )
+
+
+def _is_native_thinking(block: Mapping[str, object]) -> bool:
+    """True for Anthropic-native thinking-block types the API accepts."""
+    return block.get("type") in ("thinking", "redacted_thinking")
 
 
 def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:

@@ -163,6 +163,27 @@ def test_render_diff_detail_word_diff_with_delete_only() -> None:
     assert "x = 1" in out
 
 
+def test_render_diff_detail_skips_file_header_lines() -> None:
+    """Unified-diff ``--- a/foo`` / ``+++ b/foo`` headers must not pair.
+
+    Without filtering, ``_pair_word_diffs`` treats the headers as a
+    ``-/+`` pair against the first hunk's remove/add and emits a
+    nonsense word diff against the file paths. The ``Added``/``removed``
+    summary line would also include the headers in its counts.
+    """
+    con, buf = _capture(width=80)
+    diff = "--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+    render_diff_detail(con, diff)
+    out = buf.getvalue()
+    assert "a/foo" not in out, (
+        f"file-header lines must not survive into rendered output; got {out!r}"
+    )
+    assert "b/foo" not in out
+    # One add and one remove from the hunk only -- headers excluded.
+    assert "Added 1 lines" in out
+    assert "removed 1 lines" in out
+
+
 def test_render_diff_detail_narrow_width_no_padding() -> None:
     # When the line equals or exceeds ``width``, the no-padding branch
     # of ``_render_diff_line`` fires (line 363) and the same branch in

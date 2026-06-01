@@ -11,7 +11,6 @@ from sagent.tools import agent_send as send_module
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.core import agent_label_var, agent_registry
 from sagent.types.runtime import (
-    AgentSendDeferredMessage,
     AgentSendMessage,
     ToolResult,
 )
@@ -156,20 +155,85 @@ async def test_run_delay_schedules_call_later(monkeypatch: pytest.MonkeyPatch) -
 
 def test_deliver_into_live_inbox() -> None:
     target = FakeAgent()
-    send_module._deliver(target, "Me", "ping", 7)
+    agent_registry["DelayTarget"] = target
+    try:
+        send_module._deliver("DelayTarget", "Me", "ping", 7)
+    finally:
+        agent_registry.pop("DelayTarget", None)
     drained = asyncio.new_event_loop().run_until_complete(target.runtime.inbox.drain())
-    assert any(
-        isinstance(i, AgentSendDeferredMessage)
-        and i.source == "Me"
-        and i.text == "ping"
-        for i in drained
-    )
+    # The documentation (assets/default/tools_agentsend.md:6 and the
+    # description tooltip) claims the delivered message "automatically
+    # notes delay time". The drained payload must mention both the
+    # delay window and the original content so the recipient knows
+    # how stale a scheduled reminder is.
+    #
+    # The delivery posts an ``AgentSendMessage`` (preempting) -- the
+    # ``call_later`` delay timer alone supplies the "wait before
+    # delivery" semantic. A deferred message here would double-defer:
+    # the runtime parks deferred messages until ``AgentIdle``, masking
+    # the wake-up the delay was meant to provide.
+    matches = [
+        i for i in drained if isinstance(i, AgentSendMessage) and i.source == "Me"
+    ]
+    assert matches, drained
+    body = matches[0].text
+    assert "ping" in body
+    assert "7s" in body
 
 
 def test_deliver_dead_target_is_noop(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING"):
-        send_module._deliver(None, "Me", "x", 3)
+        # ``"Ghost"`` is not in ``agent_registry``; delivery must
+        # log a warning rather than silently push into thin air.
+        send_module._deliver("Ghost", "Me", "x", 3)
     assert any("Delayed message to dead agent" in rec.message for rec in caplog.records)
+
+
+def test_deliver_reresolves_target_at_delivery_time() -> None:
+    """Re-resolution beats stale-handle delivery.
+
+    Schedule against label X holding agent A; before the timer fires,
+    A dies and B is registered under the same label. The delayed
+    message must reach B (the *current* holder), not A's defunct
+    inbox.
+    """
+    original = FakeAgent()
+    replacement = FakeAgent()
+    agent_registry["Rebind"] = original
+    # Simulate the schedule→drop→rebind sequence between
+    # ``call_later`` and the timer callback.
+    agent_registry["Rebind"] = replacement
+    try:
+        send_module._deliver("Rebind", "Me", "after-rebind", 1)
+    finally:
+        agent_registry.pop("Rebind", None)
+    # ``drain()`` blocks on an empty queue; inspect the underlying
+    # queue size directly so the assertion can verify the stale
+    # handle stayed empty without hanging.
+    assert replacement.runtime.inbox._queue.qsize() == 1, (
+        "delivery must reach the current registry holder"
+    )
+    assert original.runtime.inbox._queue.qsize() == 0, (
+        "delivery must not land on the stale handle"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_negative_delay_is_error() -> None:
+    """Negative ``delay`` bypasses the ``delay > 0`` gate; reject it.
+
+    Schema declares ``minimum: 0``; runtime must enforce.
+    """
+    t = AgentSend()
+    target = FakeAgent()
+    agent_registry["Bob"] = target
+    try:
+        with with_fake_agent():
+            result = await t.run({"to": "Bob", "content": "hi", "delay": -1})
+    finally:
+        agent_registry.pop("Bob", None)
+    assert result.is_error
+    assert "delay" in result.content
 
 
 @pytest.mark.asyncio

@@ -55,13 +55,32 @@ def test_cost_tracker_record_updates_last_response_time() -> None:
     assert t.last_response_time >= before
 
 
-def test_cost_tracker_restore_overwrites_totals() -> None:
+def test_cost_tracker_restore_totals_overwrites_totals() -> None:
     t = CostTracker()
     t.record(_make_response(total_cost=0.10), model_id="m")
     persisted_total = TokenCount()
-    t.restore(total_cost_usd=99.0, total=persisted_total)
+    t.restore_totals(total_cost_usd=99.0, total=persisted_total)
     assert t.total_cost_usd == 99.0
     assert t.total is persisted_total
+
+
+def test_cost_tracker_restore_totals_preserves_per_call_provenance() -> None:
+    """The contract: only cumulative totals are restored.
+
+    ``calls_by_model``, ``last_request``, and ``last_response_time``
+    describe the *live* process's recorded calls; resume restarts that
+    history. A future "restore everything" hook can extend the signature
+    if a caller needs it.
+    """
+    t = CostTracker()
+    t.record(_make_response(total_cost=0.10), model_id="old")
+    before_calls = dict(t.calls_by_model)
+    before_last_request = t.last_request
+    before_last_response_time = t.last_response_time
+    t.restore_totals(total_cost_usd=99.0, total=TokenCount())
+    assert t.calls_by_model == before_calls
+    assert t.last_request is before_last_request
+    assert t.last_response_time == before_last_response_time
 
 
 if __name__ == "__main__":

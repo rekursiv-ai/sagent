@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import override
+from typing import cast, override
 
 import asyncio
 import contextlib
@@ -106,6 +106,10 @@ class _DummyInner:
     def prompt(self) -> str:
         return "dummy-prompt"
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         return ToolResult(call_id="", content=str(args.get("x", "")))
 
@@ -133,7 +137,14 @@ def test_aware_preserves_metadata_and_delegates() -> None:
     assert wrapped.prompt() == "dummy-prompt"
 
 
-def test_aware_schema_without_properties_passes_through() -> None:
+def test_aware_schema_without_properties_injects_background_fields() -> None:
+    """B1: ``type: object`` without ``properties`` still gets BG fields.
+
+    A wrapper that short-circuited to the unmerged schema in this
+    branch silently disabled backgrounding for any tool whose schema
+    declared no parameters.
+    """
+
     class NoProps:
         name: str = "NP"
         tool_id: str = "application/x-tool-np"
@@ -152,13 +163,18 @@ def test_aware_schema_without_properties_passes_through() -> None:
         def prompt(self) -> str:
             return ""
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             return ToolResult(call_id="", content="")
 
     wrapped = BackgroundAwareTool(NoProps())
-    # Schema unchanged - no properties key to merge into.
-    assert wrapped.directive_schema == {"type": "object"}
+    props = cast(Mapping[str, object], wrapped.directive_schema["properties"])
+    assert "background" in props
+    assert "delay" in props
 
 
 @pytest.mark.asyncio
@@ -379,6 +395,7 @@ async def test_cancel_persistent_subagent_uses_shutdown_lifecycle() -> None:
                     queue_id="child",
                     started=0.0,
                     kind="persistent_subagent",
+                    persistent_run_id="run-child",
                 ),
             )
             result = await t.run({"operation": "cancel", "id": "persistent:child"})
@@ -453,6 +470,7 @@ async def test_cancel_persistent_subagent_helper_with_bg_entry() -> None:
                     queue_id="child",
                     started=0.0,
                     kind="persistent_subagent",
+                    persistent_run_id="run-child",
                 ),
             )
             cancelled = cancel_persistent_subagent(agent, "child")
@@ -500,6 +518,7 @@ async def test_foreground_persistent_subagent_returns_without_detached_result() 
                     queue_id="child",
                     started=0.0,
                     kind="persistent_subagent",
+                    persistent_run_id="run-child",
                 ),
             )
             result = await asyncio.wait_for(

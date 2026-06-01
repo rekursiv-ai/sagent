@@ -28,7 +28,7 @@ import tempfile
 
 from sagent.lib import token_count
 from sagent.lib.json import JSON, MutableJSON, int_val, validate_json_schema
-from sagent.providers.anthropic import Anthropic, _strip_context_tag
+from sagent.providers.anthropic import Anthropic
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
@@ -38,7 +38,12 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    TokenCount,
+    base_model_id,
+)
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -191,7 +196,7 @@ class AnthropicCLI(Anthropic):
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
         profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            _strip_context_tag(mid),
+            base_model_id(mid),
         )
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
@@ -567,7 +572,7 @@ class _AnthropicCLIModel:
         tmpdir = Path(tempfile.mkdtemp(prefix="sagent-anthropic-cli-"))
         _populate_anthropic_tmpdir(tmpdir, self._provider.account)
         argv = _build_anthropic_argv(
-            model_id=_strip_context_tag(self._model_id),
+            model_id=base_model_id(self._model_id),
             system_prompt=self._pending_system,
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,

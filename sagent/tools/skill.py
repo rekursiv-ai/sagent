@@ -287,6 +287,11 @@ class Skill:
         )
         _prepend_to_first_user(history, text)
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: skill loading has no shared resource."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Load and return the named skill's SKILL.md body.
 

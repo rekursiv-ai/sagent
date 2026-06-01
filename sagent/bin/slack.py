@@ -80,7 +80,7 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
-from sagent.compactor import SummaryCompactor
+from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry

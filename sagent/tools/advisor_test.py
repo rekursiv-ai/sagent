@@ -101,7 +101,7 @@ async def test_run_returns_empty_on_no_assistant_message() -> None:
 @pytest.mark.asyncio
 async def test_advisor_model_bridge_forwards_history_and_system() -> None:
     inner = StubProviderModel(text="bridged")
-    bridge = _AdvisorModel(inner)
+    bridge = _AdvisorModel(inner, system="be brief")
     captured_text: list[str] = []
 
     def on_text(t: str) -> None:
@@ -112,8 +112,6 @@ async def test_advisor_model_bridge_forwards_history_and_system() -> None:
 
     msg = await bridge.stream(
         history=[],
-        system="be brief",
-        tools=[],
         on_text=on_text,
         on_thinking=on_thinking,
     )
@@ -124,11 +122,9 @@ async def test_advisor_model_bridge_forwards_history_and_system() -> None:
 @pytest.mark.asyncio
 async def test_advisor_model_bridge_blank_system_is_none() -> None:
     inner = StubProviderModel(text="ok")
-    bridge = _AdvisorModel(inner)
+    bridge = _AdvisorModel(inner, system="")
     _ = await bridge.stream(
         history=[],
-        system="",
-        tools=[],
         on_text=lambda _t: None,
         on_thinking=lambda _t: None,
     )

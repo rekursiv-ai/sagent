@@ -264,6 +264,34 @@ async def test_grep_python_fallback_offset(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_python_fallback_invalid_regex_returns_error(tmp_path: Path) -> None:
+    # The ripgrep path returns a clean ``ToolResult(is_error=True)`` for
+    # invalid patterns. The Python fallback must match that contract --
+    # not crash with ``re.error`` -- so callers see the same surface.
+    (tmp_path / "x.py").write_text("alpha\n")
+    result = await _run_grep_py(
+        {"pattern": "(unclosed", "path": str(tmp_path)},
+        tmp_path,
+    )
+    assert result.is_error
+    assert "regex" in result.content.lower() or "pattern" in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_grep_invalid_output_mode_returns_error(tmp_path: Path) -> None:
+    # The schema declares an enum {"content", "files_with_matches",
+    # "count"}; the runtime must reject unknown values rather than
+    # silently treating them as the default mode.
+    (tmp_path / "x.py").write_text("alpha\n")
+    result = await _run_grep(
+        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "bogus"},
+        tmp_path,
+    )
+    assert result.is_error
+    assert "output_mode" in result.content
+
+
+@pytest.mark.asyncio
 async def test_grep_python_fallback_multiline(tmp_path: Path) -> None:
     (tmp_path / "x.py").write_text("foo\nbar\n")
     result = await _run_grep_py(
@@ -827,6 +855,27 @@ async def test_grep_multiline_newline_pattern_works(tmp_path: Path) -> None:
     )
     assert not result.is_error
     assert "f.txt" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field",
+    ["keep_first", "keep_last", "offset", "-B", "-A", "-C"],
+)
+async def test_grep_rejects_negative_pagination(field: str, tmp_path: Path) -> None:
+    """Schema declares ``minimum: 0``; runtime must enforce.
+
+    Pre-fix, ``int_val`` happily returned negatives and the downstream
+    slice (``lines[-N:]``) tail-trimmed instead of erroring, masking
+    the directive bug.
+    """
+    _setup_tree(tmp_path)
+    result = await _run_grep(
+        {"pattern": "alpha", "path": str(tmp_path), field: -1},
+        tmp_path,
+    )
+    assert result.is_error, result.content
+    assert field in result.content
 
 
 if __name__ == "__main__":

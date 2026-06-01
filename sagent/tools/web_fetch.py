@@ -12,6 +12,7 @@ import asyncio
 import html
 import ipaddress
 import json
+import os
 import re
 import socket
 
@@ -168,8 +169,21 @@ class WebFetch:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: independent network fetch, no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Fetch the URL, extract main content, and return as text.
+
+        GET responses are cached per-URL for 15 minutes. The cache key
+        is the raw URL alone, so a URL whose server-side extraction
+        path changes during the TTL window (e.g. a Reddit page that
+        starts returning a different shape and falls into a different
+        adapter) will continue to serve the previously-extracted body
+        until the entry expires. Callers that need to bypass a stale
+        cache entry can switch to ``POST`` or wait out the TTL.
 
         Args:
           args: Directive with ``url`` and optional ``method`` / ``json``
@@ -235,8 +249,19 @@ def _request_bodies(
         return json_unfreeze(raw_json), None
     if raw_form is None:
         return None, None
+    unfrozen_form = json_unfreeze(raw_form)
+    # Schema declares ``form`` as an object, but LLM-supplied
+    # directives can violate the schema (``form=[]`` slipped through
+    # historically). Reject anything not a mapping so the downstream
+    # ``.items()`` call can't AttributeError out of the tool envelope.
+    # ``ValueError`` (not ``TypeError``) so it joins the existing
+    # caller-side ``except ValueError`` envelope in ``WebFetch.run``.
+    if not isinstance(unfrozen_form, dict):
+        raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
+            f"'form' must be an object of string fields, got {type(unfrozen_form).__name__}."
+        )
     return None, {
-        str(k): str(v) for k, v in cast(dict[str, Any], json_unfreeze(raw_form)).items()
+        str(k): str(v) for k, v in cast(dict[str, Any], unfrozen_form).items()
     }
 
 
@@ -637,17 +662,30 @@ class _GoogleNewsAdapter:
         return None
 
 
+_ALLOW_THIRD_PARTY_RENDER_ENV = "SAGENT_ALLOW_THIRD_PARTY_RENDER"
+
+
+def _third_party_render_allowed() -> bool:
+    """Return whether the operator has opted into third-party rendering.
+
+    Default: refuse. X / Twitter content is fetched via ``r.jina.ai``
+    (a third-party renderer); a privacy-sensitive caller cannot opt
+    out at the URL level, so default to refusing the hop and require
+    explicit consent via the environment variable.
+    """
+    value = os.environ.get(_ALLOW_THIRD_PARTY_RENDER_ENV, "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 class _XAdapter:
     """X (Twitter) -- full SPA with no useful SSR; route via reader proxy.
 
     X serves an empty shell to non-JS clients; tweet text only appears
     after a JS hydration step. We delegate the render to the existing
-    reader-proxy rung (Jina) and return its markdown. This is the same
-    third-party hop used by the bot-wall fallback; the adapter makes
-    that hop the unconditional default for x.com / twitter.com URLs
-    rather than a last-resort retry.
-
-    External dependency: every fetch flows through ``r.jina.ai``.
+    reader-proxy rung (Jina) and return its markdown. Because every
+    fetch egresses to ``r.jina.ai``, this adapter is opt-in: callers
+    must set ``SAGENT_ALLOW_THIRD_PARTY_RENDER=1`` or the fetch raises
+    ``FetchError``.
     """
 
     def matches(self, url: str) -> bool:
@@ -659,6 +697,13 @@ class _XAdapter:
 
     async def fetch(self, url: str) -> tuple[bytes, str]:
         """Fetch via reader proxy and tag as already-extracted markdown."""
+        if not _third_party_render_allowed():
+            message = (
+                f"X/Twitter fetch requires the third-party reader proxy"
+                f" ({_READER_PROXY_TEMPLATE.format(url='...')});"
+                f" set {_ALLOW_THIRD_PARTY_RENDER_ENV}=1 to allow."
+            )
+            raise FetchError(url, 0, {}, message.encode("utf-8"))
         body = await asyncio.to_thread(_reader_proxy_fetch, url)
         return body, _KIND_MARKDOWN
 

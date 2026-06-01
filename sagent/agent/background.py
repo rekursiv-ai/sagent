@@ -42,7 +42,7 @@ from sagent.types.tools import Tool
 class BackgroundTaskEntry:
     """A long-running task tracked by the Agent.
 
-    Three flavors share this dataclass:
+    Four flavors share this dataclass:
 
     - **Tool** (``kind="tool"``, ``hidden=False``). User-scheduled tool
       invocations spawned via ``background: true``. Listed by the
@@ -83,10 +83,20 @@ class BackgroundTaskEntry:
     """Dispatch hint for shutdown semantics."""
 
     persistent_run_id: str = ""
-    """Lifecycle run id for persistent subagents."""
+    """Lifecycle run id for persistent subagents.
+
+    Empty for non-persistent kinds; ``__post_init__`` rejects an empty
+    value when ``kind == "persistent_subagent"`` so the persistent-driver
+    bookkeeping always has a run id to key off."""
 
     notify_on_asleep: bool = True
     """Whether persistent subagent idle pings are enabled."""
+
+    def __post_init__(self) -> None:
+        if self.kind == "persistent_subagent" and not self.persistent_run_id:
+            raise ValueError(
+                "persistent_run_id is required when kind='persistent_subagent'",
+            )
 
 
 _BG_FIELDS: JSON = json_freeze(
@@ -139,14 +149,31 @@ class BackgroundAwareTool:
         self.clearable_results = tool.clearable_results
         self.description = tool.description
         schema: MutableJSON = cast(MutableJSON, dict(tool.directive_schema))
+        # Only object-typed schemas accept ``properties``. Injecting into
+        # ``type: "string"`` / ``"array"`` / etc. produces a schema that
+        # strict validators reject and that misrepresents the tool to the
+        # model. The schemaless case (no ``type``) is still accepted: JSON
+        # Schema treats omitted ``type`` as "any", and downstream
+        # validation catches malformed inputs at dispatch time.
+        schema_type = schema.get("type")
+        if schema_type is not None and schema_type != "object":
+            raise ValueError(
+                f"BackgroundAwareTool requires an object-typed directive_schema"
+                f" (or no ``type``); tool {tool.name!r} has type={schema_type!r}",
+            )
         raw_props = schema.get("properties")
-        if isinstance(raw_props, Mapping):
-            props: MutableJSON = cast(MutableJSON, dict(raw_props))
-            props.update(cast(MutableJSON, dict(_BG_FIELDS)))
-            schema["properties"] = cast(MutableJSONValue, props)
-            self.directive_schema = json_freeze(schema)
-        else:
-            self.directive_schema = tool.directive_schema
+        # Inject ``background`` / ``delay`` even when the inner schema is
+        # schemaless (no ``properties``); JSON Schema allows ``type:
+        # object`` without ``properties``, but a wrapper that skipped
+        # injection in that branch would silently disable backgrounding.
+        props: MutableJSON = (
+            cast(MutableJSON, dict(raw_props))
+            if isinstance(raw_props, Mapping)
+            else cast(MutableJSON, {})
+        )
+        props.update(cast(MutableJSON, dict(_BG_FIELDS)))
+        schema["properties"] = cast(MutableJSONValue, props)
+        self.directive_schema = json_freeze(schema)
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Forward to the wrapped tool's pre-execution label.
@@ -182,8 +209,35 @@ class BackgroundAwareTool:
         """
         return self._tool.prompt()
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Forward to the wrapped tool's serialization key.
+
+        Strips the injected ``background`` / ``delay`` keys first, so
+        the inner tool keys off its own schema, symmetric with ``run``.
+
+        Args:
+          args: Directive arguments parsed from the model output.
+
+        Returns:
+          key: The inner tool's serialization key, or ``None``.
+
+        """
+        _, _, clean_args = split_bg_args(args)
+        return self._tool.serialize_key(clean_args)
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Forward execution to the wrapped tool.
+        """Forward execution to the wrapped tool with bg keys stripped.
+
+        Symmetric with schema injection: this wrapper advertises
+        ``background`` / ``delay`` to the model, so it also owns
+        removing them before the inner tool's schema validation sees
+        them. ``_AgentTool.run`` already strips on the production path;
+        this strip covers direct invocation (alt-drivers, test
+        scaffolding) so the inner tool never receives unexpected kwargs.
+
+        Trusts the inner tool to satisfy the ``Tool.run`` "must not
+        raise" contract (errors populate ``ToolResult(is_error=True)``);
+        this wrapper does not add a defensive guard.
 
         Args:
           args: Directive arguments parsed from the model output.
@@ -192,7 +246,8 @@ class BackgroundAwareTool:
           result: The wrapped tool's ``ToolResult``.
 
         """
-        return await self._tool.run(args)
+        _, _, clean_args = split_bg_args(args)
+        return await self._tool.run(clean_args)
 
 
 def split_bg_args(
@@ -216,6 +271,8 @@ def split_bg_args(
 
     """
     clean = {k: v for k, v in args.items() if k not in ("background", "delay")}
-    delay_sec = float(int_val(args.get("delay"), 0))
+    # Negative ``delay`` is meaningless; coerce to zero rather than
+    # waiting an unbounded duration backwards or raising mid-dispatch.
+    delay_sec = max(0.0, float(int_val(args.get("delay"), 0)))
     background = bool_val(args.get("background"), default=False) or delay_sec > 0
-    return background, max(0.0, delay_sec), clean
+    return background, delay_sec, clean

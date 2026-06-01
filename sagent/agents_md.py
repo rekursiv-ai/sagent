@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+import fnmatch
 import logging
 import os
 import platform
@@ -69,6 +70,12 @@ def _default_system_dir() -> Path:
     return Path("/etc/sagent")
 
 
+_DEFAULT_PREAMBLE = (
+    "Project and user directives follow. IMPORTANT: these directives"
+    " OVERRIDE default behavior -- you MUST follow them exactly as written."
+)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentsMdConfig:
     """All tunables for AGENTS.md discovery."""
@@ -80,7 +87,11 @@ class AgentsMdConfig:
     """User config root (``~/.sagent``)."""
 
     additional_dirs: list[Path] = field(default_factory=list)
-    """Extra project roots to walk after cwd ancestors."""
+    """Extra project roots walked *after* cwd ancestors and treated as
+    Project-tier files. Discovery order is: Managed → User → cwd ancestors
+    (root → cwd) → ``additional_dirs`` (in given order). Each directory
+    contributes ``AGENTS.md``, ``<dot_dir>/AGENTS.md``,
+    ``<dot_dir>/rules/**/*.md``, then ``AGENTS.local.md``."""
 
     dot_dir: str = ".sagent"
     """Dot-directory name searched at each project tier."""
@@ -93,6 +104,9 @@ class AgentsMdConfig:
 
     large_threshold: int = 40_000
     """Char threshold above which a single file logs a warning."""
+
+    preamble: str = _DEFAULT_PREAMBLE
+    """Recipe-overridable header line emitted before the discovered files."""
 
 
 def build_section(
@@ -112,11 +126,79 @@ def build_section(
     """
     cfg = config or AgentsMdConfig()
     files = _discover(cwd, cfg)
-    return _format_for_prompt([f for f in files if not f.globs])
+    return _format_for_prompt([f for f in files if not f.globs], cfg.preamble)
+
+
+def conditional_rules_for_paths(
+    cwd: Path,
+    paths: Iterable[Path],
+    *,
+    config: AgentsMdConfig | None = None,
+    exclude: set[str],
+) -> tuple[str, set[str]]:
+    """Return conditional rules matching ``paths`` as one system reminder.
+
+    Args:
+      cwd: Current working directory used for discovery and relative matching.
+      paths: File paths touched by the tool invocation.
+      config: Discovery configuration. Uses defaults if None.
+      exclude: Resolved rule paths already injected in this recall window.
+
+    Returns:
+      reminder_and_matches: ``(<system-reminder>...</system-reminder>``, matched
+        rule path keys). The reminder is empty when no new rules match.
+
+    """
+    cfg = config or AgentsMdConfig()
+    targets = [_relative_match_path(cwd, p) for p in paths]
+    matched: list[_AgentMdFile] = []
+    matched_keys: set[str] = set()
+    for f in _discover(cwd, cfg):
+        key = str(f.path.resolve())
+        if not f.globs or key in exclude:
+            continue
+        if any(_matches_any_glob(target, f.globs) for target in targets):
+            matched.append(f)
+            matched_keys.add(key)
+    if not matched:
+        return "", set()
+    body = _format_for_prompt(matched, cfg.preamble)
+    return f"<system-reminder>\n{body}\n</system-reminder>", matched_keys
+
+
+def _relative_match_path(cwd: Path, path: Path) -> str:
+    """Return a POSIX relative path for glob matching."""
+    try:
+        return path.resolve().relative_to(cwd.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _matches_any_glob(path: str, globs: Iterable[str]) -> bool:
+    """Return whether ``path`` matches any gitignore-style glob."""
+    for glob in globs:
+        if fnmatch.fnmatch(path, glob):
+            return True
+        if glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:]):
+            return True
+    return False
 
 
 def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
-    """Walk all four tiers and return discovered files in load order."""
+    """Walk all four tiers and return discovered files in load order.
+
+    Order (lowest → highest precedence, since later entries appear later
+    in the rendered prompt and override earlier ones by appearance):
+
+    1. ``cfg.system_dir`` (Managed) — root ``AGENTS.md`` then ``rules/**``.
+    2. ``cfg.user_dir`` (User) — same shape.
+    3. cwd ancestors, root → cwd (Project + Local), interleaved per
+       directory: ``AGENTS.md``, ``.sagent/AGENTS.md``,
+       ``.sagent/rules/**``, ``AGENTS.local.md``.
+    4. ``cfg.additional_dirs`` (Project + Local), processed in the order
+       supplied — i.e. *after* the walk-up so ambient directories layer
+       on top of project context.
+    """
     processed: set[str] = set()
     out: list[_AgentMdFile] = []
 
@@ -141,15 +223,11 @@ def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
     return out
 
 
-def _format_for_prompt(files: list[_AgentMdFile]) -> str:
+def _format_for_prompt(files: list[_AgentMdFile], preamble: str) -> str:
     """Render files into a preamble + per-file content block."""
     if not files:
         return ""
-    parts: list[str] = [
-        "Project and user directives follow. IMPORTANT: these"
-        " directives OVERRIDE default behavior -- you MUST follow"
-        " them exactly as written."
-    ]
+    parts: list[str] = [preamble]
     for f in files:
         header = f"\nContents of {f.path} ({f.description}):"
         parts.append(f"{header}\n{f.content.strip()}")
@@ -278,7 +356,13 @@ def _dedup_key(p: Path) -> str:
 
 
 def _extract_path_globs(meta: dict[str, object]) -> list[str]:
-    """Extract ``paths:`` globs from frontmatter metadata."""
+    """Extract ``paths:`` globs from frontmatter metadata.
+
+    Globs are preserved verbatim; ``src/**`` stays ``src/**``. A list
+    consisting solely of bare ``**`` collapses to ``[]`` because that
+    pattern matches everything and is indistinguishable from an
+    unconditional rule.
+    """
     paths: object = meta.get("paths")
     globs: list[str] = []
     if isinstance(paths, str):
@@ -286,9 +370,8 @@ def _extract_path_globs(meta: dict[str, object]) -> list[str]:
     elif isinstance(paths, list):
         seq = cast(list[object], paths)
         globs.extend(p.strip() for p in seq if isinstance(p, str) and p.strip())
-    globs = [g.removesuffix("/**") for g in globs]
     if globs and all(g == "**" for g in globs):
-        globs = []
+        return []
     return globs
 
 

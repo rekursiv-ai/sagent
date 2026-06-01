@@ -71,6 +71,11 @@ class CharacterCount:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: this tool has no shared resource."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Run the tool and return a ToolResult.
 

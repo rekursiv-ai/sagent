@@ -95,7 +95,7 @@ class Text:
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Defer:
     """User typed ``/defer <text>`` (or pressed Tab on a non-empty buffer);
-    dispatch as a non-preempting ``UserQueuedMessage`` that drains at
+    dispatch as a non-preempting ``UserDeferredMessage`` that drains at
     ``AgentIdle``.
 
     Lets the user inject content that should be processed *after* the
@@ -109,7 +109,14 @@ class Defer:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Send:
-    """User typed ``/send <target> <message>``; route to subagent(s)."""
+    """User typed ``/send <target> <message>``; route to subagent(s).
+
+    Plain ``message`` text becomes a ``UserMessage`` on the target's
+    inbox. A leading-slash ``message`` (``/halt``, ``/quit``, ``/clear``,
+    ``/compact``, ``/kill``, ``/model``, ``/thinking``) is parsed and
+    dispatched as a control action against the target through
+    ``_dispatch_target_control`` instead.
+    """
 
     target: str
     content: str
@@ -152,6 +159,11 @@ _SUPPORTED = (
 
 def parse_slash(line: str) -> SlashAction | None:
     """Translate a typed line into a :class:`SlashAction`.
+
+    Quit verbs (``QUIT_WORDS``) match the *whole* stripped line; ``/quit
+    foo`` falls through to :class:`Unknown` rather than quitting,
+    because trailing tokens almost always reflect typo-paste at exit
+    time and silently quitting on those would surprise the user.
 
     Args:
       line: Raw input line (may have trailing whitespace).

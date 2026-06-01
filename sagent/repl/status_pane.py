@@ -46,6 +46,13 @@ def render_status_pane(agent: Agent) -> str:
         return ""
     tokens = agent.cost_tracker.total
     cost = float(agent.cost_tracker.total_cost_usd)
+    # ``output_tokens`` includes a live char-count estimate so the user
+    # sees a moving counter while the model streams; ``cost`` is
+    # intentionally settled-only -- pricing requires the provider-
+    # reported usage block, which only lands on response completion.
+    # The ``$cost`` field thus lags the ``output↓`` counter by one
+    # model-call boundary; the discrepancy snaps back in at each
+    # ``ModelResponseComplete``.
     live_response_tokens = (
         activity.live_response_chars // agent.budget.chars_per_token
         if activity.active
@@ -94,13 +101,18 @@ def _has_live_activity(agent: Agent) -> bool:
 def _wait_reason(agent: Agent, elapsed: float) -> str:
     runtime = agent.runtime
     now = asyncio.get_running_loop().time()
-    suspended_until = getattr(runtime, "service_suspended_until", None)
-    if isinstance(suspended_until, float) and suspended_until > now:
+    suspended_until = runtime.service_suspended_until
+    if suspended_until is not None and suspended_until > now:
         return f"retrying in {format_elapsed(suspended_until - now)}."
-    if getattr(runtime.inbox, "gate_armed", False):
-        return "waiting for input."
+    # Compaction outranks the gate-armed check: during compaction the
+    # gate can be armed (waiting for the compactor's own model response)
+    # but the user-visible state is "compacting", not "waiting for
+    # input". Reporting "waiting for input" while compacting would
+    # invite the user to type when no input is actually accepted.
     if agent.activity.current_compact_start > 0.0:
         return "compacting."
+    if runtime.inbox.gate_armed:
+        return "waiting for input."
     if not agent.activity.active:
         return ""
     if elapsed < _WAIT_REASON_THRESHOLD_SEC:

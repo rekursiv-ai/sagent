@@ -273,6 +273,11 @@ class PaperAuthor:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: independent network fetch, no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute an author search, metadata lookup, or papers listing.
 

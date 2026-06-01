@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from sagent.types.runtime import (
     AssistantMessage,
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "CONTEXT_TAGS",
     "ContextBudget",
     "Model",
     "ModelRequest",
@@ -36,7 +37,34 @@ __all__ = [
     "PromptTooLongError",
     "StreamInterruptedError",
     "TokenCount",
+    "base_model_id",
+    "default_buffer_tokens",
 ]
+
+
+CONTEXT_TAGS = ("+1m", "+200k")
+"""Window-size suffixes a sagent model id may carry (e.g. ``...+1m``)."""
+
+
+def base_model_id(model_id: str) -> str:
+    """Strip a trailing context-window tag, yielding the canonical model id.
+
+    A sagent model id may carry a ``+1m`` / ``+200k`` window suffix, but the
+    wire id, capability lookups, and metadata tables all key off the base id.
+    Matching is case-insensitive; an id with no known tag is returned as-is.
+
+    Args:
+      model_id: Model id, possibly with a trailing window tag.
+
+    Returns:
+      base_id: ``model_id`` without its window tag.
+
+    """
+    lower = model_id.lower()
+    for tag in CONTEXT_TAGS:
+        if lower.endswith(tag):
+            return model_id[: -len(tag)]
+    return model_id
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,6 +115,16 @@ class TokenCount:
     """Tokens served from prompt cache."""
 
     def __add__(self, other: TokenCount) -> TokenCount:
+        # Runtime guard against non-TokenCount operands: returning
+        # ``NotImplemented`` lets Python try the reflected dunder or
+        # raise a clear ``TypeError``. The annotation promises
+        # ``TokenCount``; pyright sees the isinstance as redundant, but
+        # at runtime callers reaching through ``object``-typed plumbing
+        # (status pane, persisted-metadata round-trip) can still pass a
+        # non-``TokenCount``; the unchecked code raised
+        # ``AttributeError`` mid-expression there.
+        if not isinstance(other, TokenCount):  # pyright: ignore[reportUnnecessaryIsInstance]
+            return NotImplemented  # pyright: ignore[reportUnreachable]
         return TokenCount(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
@@ -96,12 +134,21 @@ class TokenCount:
         )
 
     def __sub__(self, other: TokenCount) -> TokenCount:
+        # See ``__add__``: same runtime guard, same reasoning.
+        if not isinstance(other, TokenCount):  # pyright: ignore[reportUnnecessaryIsInstance]
+            return NotImplemented  # pyright: ignore[reportUnreachable]
+        # Clamp at zero per field: a snapshot taken before a user-initiated
+        # ``CostTracker.restore_totals`` may exceed the post-restore total,
+        # producing a negative delta the status pane would render as
+        # "-12 tokens". Subtraction is unchecked everywhere else; this is
+        # the one place an external mutation breaks monotonicity.
         return TokenCount(
-            input_tokens=self.input_tokens - other.input_tokens,
-            output_tokens=self.output_tokens - other.output_tokens,
-            cache_creation_tokens=self.cache_creation_tokens
-            - other.cache_creation_tokens,
-            cache_read_tokens=self.cache_read_tokens - other.cache_read_tokens,
+            input_tokens=max(0, self.input_tokens - other.input_tokens),
+            output_tokens=max(0, self.output_tokens - other.output_tokens),
+            cache_creation_tokens=max(
+                0, self.cache_creation_tokens - other.cache_creation_tokens
+            ),
+            cache_read_tokens=max(0, self.cache_read_tokens - other.cache_read_tokens),
         )
 
 
@@ -128,13 +175,13 @@ class ModelRequest:
     """Extended-thinking mode; ``None`` disables thinking."""
 
     effort: str | None = None
-    """Effort hint (Anthropic: ``low``/``medium``/``high``/``xhigh``/
-    ``max``; Qwen3: any non-``none`` value enables hybrid thinking).
+    """Effort hint; provider-specific accepted values (see provider
+    docs -- e.g. Anthropic accepts ``low``/``medium``/``high``/``xhigh``/
+    ``max``, Qwen3 enables hybrid thinking on any non-``none`` value).
     ``None`` omits the field so the API applies its own default."""
 
-    cache_ttl: str = "5m"
-    """Prompt-cache TTL (``5m`` or ``1h``); providers without prompt
-    caching ignore this field."""
+    cache_ttl: Literal["5m", "1h"] = "5m"
+    """Prompt-cache TTL; providers without prompt caching ignore this."""
 
     service_tier: str | None = None
     """Processing-tier hint; accepted values are provider-specific (see
@@ -203,10 +250,20 @@ class PromptTooLongError(Exception):
 
     @property
     def token_gap(self) -> int | None:
-        """Return the number of tokens over the limit, or None if unknown."""
+        """Tokens over the limit; ``None`` if unknown, ``0`` if exactly at cap.
+
+        Contract:
+          - ``None``: ``actual_tokens`` or ``limit_tokens`` is unknown.
+          - ``0``: prompt sits exactly at the limit (provider rejected
+            it but the gap was zero -- treat as at-cap, not "unknown").
+          - ``>0``: prompt overshoot, in tokens.
+
+        Callers branching on "is this overflow recoverable?" should use
+        ``gap is not None and gap >= 0`` for the known-shape case; the
+        old ``gap > 0`` branch silently merged "at cap" into "unknown".
+        """
         if self.actual_tokens is not None and self.limit_tokens is not None:
-            gap = self.actual_tokens - self.limit_tokens
-            return gap if gap > 0 else None
+            return max(0, self.actual_tokens - self.limit_tokens)
         return None
 
 
@@ -214,8 +271,12 @@ class StreamInterruptedError(Exception):
     """Stream indicated tool use but delivered no tool blocks."""
 
     def __init__(self, response: ModelResponse) -> None:
+        tokens = response.tokens
         super().__init__(
-            "Stream indicated tool_use but delivered no tool blocks",
+            "Stream indicated tool_use but delivered no tool blocks "
+            f"(input_tokens={tokens.input_tokens}, "
+            f"output_tokens={tokens.output_tokens}, "
+            f"stop_reason={response.stop_reason!r}).",
         )
         self.response = response
 
@@ -242,7 +303,8 @@ class Model(Protocol):
     The Agent layer's ``_AgentModel`` wrapper bridges this richer
     interface to the runtime's lean ``stream(history, system,
     tools, on_text, on_thinking) -> AssistantMessage`` form. Cost is
-    recorded out-of-band via ``agent.cost_tracker.record(response)``.
+    recorded out-of-band via ``Agent.record_response``, which writes
+    through to the root ``CostTracker``.
     """
 
     @property
@@ -488,6 +550,27 @@ class Model(Protocol):
         ...
 
 
+def default_buffer_tokens(max_request_tokens: int) -> int:
+    """Proportional compaction headroom for a given input window.
+
+    The single source of truth for force-compaction headroom: both
+    ``ContextBudget.from_model`` (the reactive/scrunch reservation) and
+    ``SummaryCompactor.should_compact`` (the proactive trigger) derive
+    their buffer here, so one rule governs when compaction fires across a
+    model swap. Scales as ``max_request_tokens // 15`` with an 8_000-token
+    floor, capped at half the window so it never collides with the
+    ``buffer_tokens < max_request_tokens`` budget invariant.
+
+    Args:
+      max_request_tokens: The model's input-token window.
+
+    Returns:
+      buffer: Tokens of headroom reserved below the effective cap.
+
+    """
+    return min(max(max_request_tokens // 15, 8_000), max(max_request_tokens // 2, 0))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContextBudget:
     """How an Agent allocates its context window across competing uses.
@@ -537,13 +620,36 @@ class ContextBudget:
             raise ValueError(
                 f"max_response_tokens must be > 0, got {self.max_response_tokens}"
             )
-        if self.buffer_tokens >= self.max_request_tokens:
+        if self.buffer_tokens < 0 or self.buffer_tokens >= self.max_request_tokens:
             raise ValueError(
-                f"buffer_tokens ({self.buffer_tokens}) must be <"
-                f" max_request_tokens ({self.max_request_tokens})"
+                f"buffer_tokens ({self.buffer_tokens}) must be in"
+                f" [0, max_request_tokens={self.max_request_tokens})"
             )
         if self.chars_per_token <= 0:
             raise ValueError(f"chars_per_token must be > 0, got {self.chars_per_token}")
+        if self.reattach_count < 0:
+            raise ValueError(f"reattach_count must be >= 0, got {self.reattach_count}")
+        if self.reattach_max_chars < 0:
+            raise ValueError(
+                f"reattach_max_chars must be >= 0, got {self.reattach_max_chars}"
+            )
+        if self.reattach_budget < 0:
+            raise ValueError(
+                f"reattach_budget must be >= 0, got {self.reattach_budget}"
+            )
+        if self.persist_threshold < 0:
+            raise ValueError(
+                f"persist_threshold must be >= 0, got {self.persist_threshold}"
+            )
+        if self.message_budget_chars < 0:
+            raise ValueError(
+                f"message_budget_chars must be >= 0, got {self.message_budget_chars}"
+            )
+        if self.keep_recent_on_compact is not None and self.keep_recent_on_compact < 0:
+            raise ValueError(
+                "keep_recent_on_compact must be >= 0 or None, got"
+                f" {self.keep_recent_on_compact}"
+            )
 
     @classmethod
     def from_model(cls, model: Model) -> ContextBudget:
@@ -560,16 +666,21 @@ class ContextBudget:
         inp = model.max_request_tokens
         out = model.max_response_tokens
         cpt = 4
+        buffer = default_buffer_tokens(inp)
         return cls(
             max_request_tokens=inp,
             max_response_tokens=out,
             chars_per_token=cpt,
-            buffer_tokens=max(inp // 15, 8_000),
+            buffer_tokens=buffer,
             reattach_count=5,
             reattach_max_chars=cpt * max(inp // 40, 2_000),
             reattach_budget=cpt * max(inp // 4, 10_000),
             persist_threshold=cpt * max(inp // 4, 20_000),
             message_budget_chars=cpt * max(inp // 2, 20_000),
+            # ``None`` defers to the compactor's own ``keep_recent``
+            # default, which adapts per-strategy; baking a number here
+            # would override that without the caller knowing.
+            keep_recent_on_compact=None,
         )
 
 
@@ -588,3 +699,16 @@ class ModelSpec:
 
     account: str | None = None
     """Optional account override (used by account auth)."""
+
+    def __post_init__(self) -> None:
+        # Empty ``provider``/``auth``/``model_id`` produce a degenerate
+        # spec that the provider factory rejects with a confusing
+        # "no such provider" error far from the construction site.
+        # ``account`` may legitimately be empty / ``None`` (default
+        # backend).
+        if not self.provider:
+            raise ValueError("ModelSpec.provider must be non-empty")
+        if not self.auth:
+            raise ValueError("ModelSpec.auth must be non-empty")
+        if not self.model_id:
+            raise ValueError("ModelSpec.model_id must be non-empty")

@@ -8,7 +8,8 @@ duplicate -- the formatting logic is already correct and battle-tested.
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from collections.abc import Sequence
+from typing import Literal, assert_never, cast
 
 import io
 import re
@@ -21,6 +22,7 @@ from sagent.repl.format import (
     set_terminal_title,
 )
 from sagent.repl.render import (
+    ChildItem,
     render_tool_result,
     service_suspended_text,
 )
@@ -57,7 +59,14 @@ class ConsolePrinter:
         self.console.print(text, markup=False, highlight=False)
 
     def write_chunk(self, text: str) -> None:
-        """Render a streaming partial without a newline."""
+        """Render a streaming partial without a newline.
+
+        Skips Rich markdown / markup parsing; partials are emitted as
+        raw ANSI-safe text so an unterminated ``[`` or backtick mid-
+        stream doesn't trigger a parse error or visual reflow. The
+        finalized block is re-rendered through :meth:`write_markdown`
+        for proper formatting once the assistant turn closes.
+        """
         self.console.out(text, end="", highlight=False)
 
     def write_markdown(self, text: str) -> None:
@@ -108,12 +117,14 @@ class ConsolePrinter:
         """Render red, indented tool-error (multi-line aware).
 
         First line gets the ``✗`` glyph; subsequent lines align with the
-        message column so structured traces stay readable.
+        message column so structured traces stay readable. An all-blank
+        body still renders a placeholder line: silently swallowing the
+        call would let upstream callers think the operator saw the
+        failure.
         """
-        body = text.rstrip("\n")
-        if not body:
-            return
-        lines = body.splitlines() or [body]
+        lines = text.rstrip("\n").splitlines() or [text.rstrip("\n")]
+        if not any(line.strip() for line in lines):
+            lines = ["<no error message>"]
         self.console.print(Text(f"    ✗ {lines[0]}", style="dim red"))
         for line in lines[1:]:
             self.console.print(Text(f"      {line}", style="dim red"))
@@ -147,7 +158,7 @@ class ConsolePrinter:
         self.console.print(Text(text, style="bold red"))
         self.console.print(Text(bar, style="red"))
 
-    def write_child_block(self, label: str, items: list[object]) -> None:
+    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None:
         r"""Render a child agent's labeled block.
 
         Format: first line carries the label gutter (``Agent_N  :  ``),
@@ -286,25 +297,27 @@ def _gutter_prefix(label: str, width: int) -> str:
     return pfx
 
 
-def _render_child_item(printer: ConsolePrinter, item: object) -> None:
+def _render_child_item(printer: ConsolePrinter, item: ChildItem) -> None:
     """Dispatch one child-block item to the appropriate printer method.
 
-    Child items are runtime types accumulated by the render observer:
-    ``AssistantMessage`` (streamed model text), ``ToolLabel``,
-    ``ModelResponseThinking``, ``ToolResult``, ``UserMessage``.
+    Exhaustive over :data:`repl.render.ChildItem`; ``assert_never`` makes
+    the type checker flag any new variant that forgets a branch here.
     """
-    if isinstance(item, AssistantMessage):
-        if item.text:
-            printer.write_markdown(item.text)
-    elif isinstance(item, ToolLabel):
-        printer.write_tool_label(item.text)
-    elif isinstance(item, ModelResponseThinking):
-        printer.write_thinking(item.text)
-    elif isinstance(item, ModelServiceSuspended):
-        printer.write_dim_line(service_suspended_text(item))
-    elif isinstance(item, ToolResult):
-        render_tool_result(printer, item)
-    elif isinstance(item, AgentSendMessage):
-        printer.write_agent_bar(item.source, item.text)
-    elif isinstance(item, UserMessage):
-        printer.write_user_bar(item.text)
+    match item:
+        case AssistantMessage(text=text):
+            if text:
+                printer.write_markdown(text)
+        case ToolLabel(text=text):
+            printer.write_tool_label(text)
+        case ModelResponseThinking(text=text):
+            printer.write_thinking(text)
+        case ModelServiceSuspended():
+            printer.write_dim_line(service_suspended_text(item))
+        case ToolResult():
+            render_tool_result(printer, item)
+        case AgentSendMessage(source=source, text=text):
+            printer.write_agent_bar(source, text)
+        case UserMessage(text=text):
+            printer.write_user_bar(text)
+        case _:
+            assert_never(item)

@@ -113,6 +113,30 @@ async def test_read_not_found(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["offset", "limit", "last_lines"])
+@pytest.mark.parametrize("value", [0, -1, -5])
+async def test_read_rejects_subminimum_windowing(
+    field: str,
+    value: int,
+    tmp_path: Path,
+) -> None:
+    """Schema declares ``minimum: 1``; runtime must enforce.
+
+    Pre-fix ``offset=0`` fell through to ``max(1, offset)`` and
+    silently became ``offset=1``; ``limit=0`` was treated as
+    "unbounded"; negatives produced garbage windows. All three are
+    schema violations.
+    """
+    f = tmp_path / "a.txt"
+    f.write_text("a\nb\nc\n")
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f), field: value})
+    assert result.is_error
+    assert field in result.content
+
+
+@pytest.mark.asyncio
 async def test_read_directory_errors(tmp_path: Path) -> None:
     sub = tmp_path / "dir"
     sub.mkdir()
@@ -299,8 +323,11 @@ def test_summary_minimal() -> None:
 
 
 def test_summary_offset_limit_window() -> None:
+    # End line is inclusive: offset=5, limit=20 covers lines 5..24.
+    # Pre-fix the summary printed ``5-25``, claiming a line that the
+    # tool never reads.
     s = read.summary({"file_path": "x.txt", "offset": 5, "limit": 20})
-    assert s == "Read x.txt:5-25"
+    assert s == "Read x.txt:5-24"
 
 
 def test_summary_last_lines() -> None:

@@ -315,6 +315,31 @@ def test_service_suspension_countdown_reason() -> None:
     )
 
 
+@pytest.mark.usefixtures("patched_loop_time")
+def test_compaction_outranks_gate_armed_reason() -> None:
+    """``compacting.`` must win over ``waiting for input.`` during compaction.
+
+    During compaction the inbox gate can be armed (the compactor itself
+    waits on a model response), but the user-visible state is
+    "compacting" -- no input is actually being accepted. Reporting
+    "waiting for input" would invite the user to type when typing won't
+    advance anything.
+    """
+    a = _agent(
+        current_compact_start=5.0,
+        elapsed_seconds=0.0,
+        input_tokens=10,
+        output_tokens=20,
+        total_cost_usd=0.05,
+    )
+    a.runtime.inbox.gate_armed = True
+    s = render_status_pane(_as_agent(a))
+    assert "compacting." in s, f"compaction state must outrank gate-armed; got {s!r}"
+    assert "waiting for input." not in s, (
+        f"gate-armed reason must not fire during compaction; got {s!r}"
+    )
+
+
 def test_real_agent_cost_tracker_is_compatible() -> None:
     """``render_status_pane`` accepts a real ``CostTracker``/``ActivityTracker``."""
 

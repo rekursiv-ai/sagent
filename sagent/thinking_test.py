@@ -55,6 +55,13 @@ def test_show_invalid_from_unshowable_states(current: ThinkingState) -> None:
         resolve_thinking_command("show", current)
 
 
+@pytest.mark.parametrize("current", ["off-hide", "redact-hide"])
+def test_hide_invalid_from_unhidable_states(current: ThinkingState) -> None:
+    """``hide`` must reject impossible transitions just like ``show``."""
+    with pytest.raises(ValueError, match="cannot hide"):
+        resolve_thinking_command("hide", current)
+
+
 @pytest.mark.parametrize(
     ("state", "request_mode", "show", "redact"),
     [

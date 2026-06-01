@@ -12,7 +12,6 @@ import pytest
 from sagent.prompt import (
     _is_git_repo,
     _is_git_worktree,
-    _load_env_template,
     _load_static,
     _shell_name,
     build_system,
@@ -81,9 +80,6 @@ def _stub_recipe_and_helpers() -> Iterator[None]:  # pyright: ignore[reportUnuse
             return_value=False,
         ),
     ]
-    # Clear ``@cache`` decorators so stubs take effect.
-    _load_static.cache_clear()
-    _load_env_template.cache_clear()
     with (
         patches[0],
         patches[1],
@@ -93,11 +89,7 @@ def _stub_recipe_and_helpers() -> Iterator[None]:  # pyright: ignore[reportUnuse
         patches[5],
         patches[6],
     ):
-        _load_static.cache_clear()
-        _load_env_template.cache_clear()
         yield
-    _load_static.cache_clear()
-    _load_env_template.cache_clear()
 
 
 def test_build_system_returns_concatenated_string() -> None:
@@ -142,6 +134,24 @@ def test_environment_section_unknown_model_falls_back() -> None:
     assert "unknown" in out  # cutoff fallback
 
 
+def test_environment_section_strips_context_tag() -> None:
+    # The default model id carries a ``+1m`` context tag. The cutoff lookup
+    # must canonicalize it like every other consumer (``_strip_context_tag``),
+    # else the default session renders "Knowledge cutoff: unknown".
+    out = environment("claude-opus-4-8+1m")
+    assert "Claude Opus 4.8" in out
+    assert "January 2026" in out
+
+
+def test_environment_section_haiku_utility_model_has_cutoff() -> None:
+    # The utility model's runtime id is ``claude-haiku-4-5``; the metadata
+    # table must key on that, not a dated suffix, or the lookup misses and
+    # the cutoff renders "unknown".
+    out = environment("claude-haiku-4-5")
+    assert "Claude Haiku 4.5" in out
+    assert "February 2025" in out
+
+
 def test_shell_name_recognizes_bash_and_zsh() -> None:
     assert _shell_name("/usr/bin/bash") == "bash"
     assert _shell_name("/bin/zsh") == "zsh"
@@ -149,8 +159,6 @@ def test_shell_name_recognizes_bash_and_zsh() -> None:
 
 
 def test_is_git_repo_true_on_zero_return(monkeypatch: pytest.MonkeyPatch) -> None:
-    _is_git_repo.cache_clear()
-
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
@@ -159,8 +167,6 @@ def test_is_git_repo_true_on_zero_return(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_is_git_repo_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    _is_git_repo.cache_clear()
-
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         raise OSError("not found")
 
@@ -168,11 +174,24 @@ def test_is_git_repo_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not _is_git_repo("/tmp/no-git")  # noqa: S108 -- arbitrary cwd token
 
 
+def test_is_git_repo_reflects_runtime_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cache used to freeze the first answer; ``git init`` must flip the result."""
+    returncode = [128]
+
+    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=returncode[0], stdout="", stderr=""
+        )
+
+    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
+    assert not _is_git_repo("/tmp/flips")  # noqa: S108 -- arbitrary cwd token
+    returncode[0] = 0
+    assert _is_git_repo("/tmp/flips")  # noqa: S108 -- arbitrary cwd token
+
+
 def test_is_git_worktree_false_when_command_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _is_git_worktree.cache_clear()
-
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=[], returncode=128, stdout="", stderr=""
@@ -183,8 +202,6 @@ def test_is_git_worktree_false_when_command_fails(
 
 
 def test_is_git_worktree_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    _is_git_worktree.cache_clear()
-
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         raise OSError("missing git")
 
@@ -195,8 +212,6 @@ def test_is_git_worktree_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> No
 def test_is_git_worktree_false_on_unexpected_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _is_git_worktree.cache_clear()
-
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=[], returncode=0, stdout="only-one-line", stderr=""
@@ -206,12 +221,62 @@ def test_is_git_worktree_false_on_unexpected_output(
     assert not _is_git_worktree("/tmp/single-line")  # noqa: S108 -- arbitrary cwd token
 
 
+def test_load_static_reflects_recipe_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``set_recipe`` swap must be visible on the next ``_load_static`` call."""
+    current = {"base": "A\n"}
+
+    def fake_recipe_dict(key: str) -> dict[str, str]:
+        return current if key == "system_prompt" else {}
+
+    def fake_read_asset(path: object) -> str:
+        return f"BODY-{str(path).strip()}"
+
+    monkeypatch.setattr("sagent.prompt.recipe_dict", fake_recipe_dict)
+    monkeypatch.setattr("sagent.prompt.read_asset", fake_read_asset)
+    assert _load_static() == "BODY-A"
+    current["base"] = "B\n"
+    assert _load_static() == "BODY-B"
+
+
 def test_build_system_dict_environment_is_lazy() -> None:
     d = build_system_dict("claude-opus-4-7")
     env_section = d["environment"]
     # Environment is a callable so it re-evaluates per call.
-    assert not isinstance(env_section, str)
     assert "claude-opus-4-7" in env_section()
+
+
+def test_build_system_dict_all_values_callable() -> None:
+    """All sections expose the same shape (callable) so callers don't branch."""
+    d = build_system_dict("claude-opus-4-7", custom="ci")
+    assert all(callable(v) for v in d.values())
+
+
+@pytest.mark.parametrize(
+    ("include_memory", "sections", "expect_memory"),
+    [
+        (True, None, True),
+        (False, None, False),
+        (True, ["memory"], True),
+        (False, ["memory"], False),
+        (True, ["static"], False),
+        (False, ["static"], False),
+    ],
+)
+def test_include_memory_vs_recipe_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    include_memory: bool,
+    sections: list[str] | None,
+    expect_memory: bool,
+) -> None:
+    """`include_memory` is an AND-gate with the recipe ``sections`` list."""
+
+    def fake_recipe_list(_section: str, _key: str) -> list[str]:
+        return sections or []
+
+    monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)
+    d = build_system_dict("claude-opus-4-7", include_memory=include_memory)
+    assert ("memory" in d) is expect_memory
 
 
 if __name__ == "__main__":

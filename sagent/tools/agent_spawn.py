@@ -57,6 +57,7 @@ from sagent.types.compactor import Compactor
 from sagent.types.model import Model, ModelSpec
 from sagent.types.runtime import (
     AgentIdle,
+    AgentSendMessage,
     AssistantMessage,
     ChildDoneEvent,
     ChildEvent,
@@ -214,8 +215,9 @@ def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
                     "type": "boolean",
                     "description": (
                         "Persistent only. When true (the default),"
-                        " the parent's inbox receives a UserMessage"
-                        " carrying the child's last assistant text"
+                        " the parent's inbox receives an"
+                        " AgentSendMessage carrying the child's last"
+                        " assistant text"
                         " every time the child becomes idle (drained"
                         " inbox, no work in flight) -- shape"
                         " '[<label> is idle] <last text>'. Pass false"
@@ -373,6 +375,11 @@ class AgentSpawn:
             return "completed with no output"
         return f"{len(text.splitlines())}L"
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: child spawns are independent."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Spawn and run a child agent per the directive.
 
@@ -389,21 +396,76 @@ class AgentSpawn:
         provider = opt_str(args, "provider")
         auth = opt_str(args, "auth")
         model_id = opt_str(args, "model_id")
+        # Detect ``account=""`` BEFORE ``opt_str`` collapses it to None.
+        # The downstream ``_resolve_model`` branch on ``account == ""``
+        # was unreachable because the local ``account`` had already
+        # been normalized to None. Reject at parse time so the schema
+        # ``minLength: 1`` intent is enforced once, at the edge.
+        if isinstance(args.get("account"), str) and args.get("account") == "":
+            return ToolResult(
+                call_id="", content="account cannot be empty.", is_error=True
+            )
         account = opt_str(args, "account")
         tools_raw = args.get("tools")
         tools: list[str] | None
-        if isinstance(tools_raw, (list, tuple)):
+        if tools_raw is None:
+            tools = None
+        elif isinstance(tools_raw, (list, tuple)):
             tools = [
                 str(t) for t in cast("list[object] | tuple[object, ...]", tools_raw)
             ]
         else:
-            tools = None
+            # Schema declares ``tools`` as an array; a string (or other
+            # non-list) here previously silently became ``tools=None``
+            # → inherit parent's full toolset. That's a permission gap
+            # -- the LLM asked to restrict tools but got the unrestricted
+            # set. Fail closed.
+            return ToolResult(
+                call_id="",
+                content=(
+                    "'tools' must be an array of tool names,"
+                    f" got {type(tools_raw).__name__}."
+                ),
+                is_error=True,
+            )
         max_rounds = opt_int(args, "max_tool_call_rounds")
         max_depth = opt_int(args, "max_depth")
+        # Schema-vs-runtime: enforce the per-knob minima the schema
+        # declares so ``max_tool_call_rounds=0`` (schema minimum=1)
+        # can't slip through and produce an agent that never runs.
+        if (
+            args.get("max_tool_call_rounds") is not None
+            and max_rounds is not None
+            and max_rounds < 1
+        ):
+            return ToolResult(
+                call_id="",
+                content=f"'max_tool_call_rounds' must be ≥ 1, got {max_rounds}.",
+                is_error=True,
+            )
+        if (
+            args.get("max_depth") is not None
+            and max_depth is not None
+            and max_depth < 0
+        ):
+            return ToolResult(
+                call_id="",
+                content=f"'max_depth' must be ≥ 0, got {max_depth}.",
+                is_error=True,
+            )
         persistent = bool_val(args.get("persistent"), False)
         notify_on_asleep = bool_val(args.get("notify_on_asleep"), True)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
+        if parent_agent is None:
+            return ToolResult(
+                call_id="",
+                content=(
+                    "AgentSpawn requires an active agent in"
+                    " ``current_agent_var``; no active agent is set."
+                ),
+                is_error=True,
+            )
         parent_depth = get_tool_state().depth
 
         # Effective max_depth = ``min`` over every non-None cap in
@@ -814,13 +876,13 @@ class AgentSpawn:
         m = _pick_field(
             model_id, self._model_id, parent_spec.model_id if parent_spec else None
         )
-        ac = _pick_field(
-            account, self._account, parent_spec.account if parent_spec else None
-        )
         if account == "" or self._account == "":
             return ToolResult(
                 call_id="", content="account cannot be empty.", is_error=True
             )
+        ac = _pick_field(
+            account, self._account, parent_spec.account if parent_spec else None
+        )
 
         if (
             parent_agent is not None
@@ -1022,11 +1084,11 @@ class _ChildForwarder:
     the verbosity table.
 
     When ``notify_on_asleep`` is True, the child's ``AgentIdle`` event is
-    additionally rendered as a ``UserMessage`` pushed into the parent's
-    inbox so the parent's model sees "child is idle" in its conversation
-    history (not just its observer pipeline). Distinct from rendering --
-    the inbox push is how persistent-child status reaches the parent's
-    decision layer.
+    additionally rendered as an ``AgentSendMessage`` (attributed to the
+    child's label) pushed into the parent's inbox so the parent's model
+    sees "child is idle" in its conversation history (not just its
+    observer pipeline). Distinct from rendering -- the inbox push is how
+    persistent-child status reaches the parent's decision layer.
     """
 
     __slots__ = (
@@ -1098,7 +1160,9 @@ class _ChildForwarder:
                 if last_text
                 else f"[{self._label} is idle]"
             )
-            self._parent_agent.runtime.inbox.push_back(UserMessage(text=body))
+            self._parent_agent.runtime.inbox.push_back(
+                AgentSendMessage(source=self._label, text=body)
+            )
             return
         if isinstance(event, ModelResponsePartial):
             self._stats.model_response_chars += len(event.text)

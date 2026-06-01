@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import json
 
 from sagent.lib.debug_log import (
+    _write,
     log_path,
     role_sequence,
     summarize_messages,
@@ -73,6 +74,19 @@ def test_trace_error_always_writes(
     assert len(records) == 1
     assert records[0]["event"] == "boom"
     assert records[0]["code"] == 400
+
+
+def test_write_drops_reserved_key_collisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User payload must not overwrite the reserved ``ts``/``event`` keys."""
+    target = tmp_path / "debug.log"
+    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
+    _write("real_event", {"event": "hijacked", "ts": "not-a-number", "extra": 1})
+    records = _read_records(target)
+    assert records[0]["event"] == "real_event"
+    assert isinstance(records[0]["ts"], (int, float))
+    assert records[0]["extra"] == 1
 
 
 def test_trace_does_not_raise_on_unserializable(

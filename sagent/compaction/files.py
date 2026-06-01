@@ -1,7 +1,9 @@
-"""Post-compaction utilities: file re-attachment.
+"""Post-compaction utilities: file re-attachment + microcompact key.
 
 Re-attach is an agent lifecycle concern -- it runs after compaction
-but is not part of the Compactor protocol.
+but is not part of the Compactor protocol. ``MICROCOMPACTED_ARGS_KEY``
+is the wire-format sentinel used by ``repl/replay.py`` to stub
+microcompacted tool-call args.
 """
 
 from __future__ import annotations
@@ -9,14 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import asyncio
-import dataclasses
+import html
 import logging
 
+from sagent.compaction.history import append_to_first_user
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
     ToolResult,
-    UserMessage,
 )
 
 
@@ -55,11 +57,15 @@ async def reattach_files(
       budget: Total character budget across all reattached files.
 
     """
-    recent = recent_files[-count:]
+    if count <= 0:
+        return
+    recent = list(reversed(recent_files[-count:]))
     if not recent:
         return
-    preserved = _collect_read_paths(history)
-    resolved = [str(Path(p).resolve()) for p in recent]  # noqa: ASYNC240 -- resolve() is CPU-only, no I/O
+    preserved = _collect_inlined_paths(history)
+    resolved = await asyncio.to_thread(
+        lambda: [str(Path(p).resolve()) for p in recent],
+    )
     parts: list[str] = []
     total_chars = 0
     for file_path, res in zip(recent, resolved, strict=True):
@@ -73,23 +79,36 @@ async def reattach_files(
                 p.read_text,
                 encoding="utf-8",
             )
+            truncation_suffix = "\n... (truncated for re-attachment)"
             if len(content) > max_chars:
-                content = content[:max_chars] + "\n... (truncated for re-attachment)"
+                # Reserve room for ``truncation_suffix`` inside ``max_chars``
+                # so the final string actually fits the cap; before the
+                # reservation the suffix was appended *after* the cap and
+                # silently overshot by ``len(truncation_suffix)`` chars.
+                head = max(0, max_chars - len(truncation_suffix))
+                content = content[:head] + truncation_suffix
             if total_chars + len(content) > budget:
                 break
             total_chars += len(content)
+            # Escape both the attribute and any literal ``</file>`` in the
+            # body so untrusted paths/content can't corrupt the wrapper.
+            safe_path = html.escape(file_path, quote=True)
+            safe_content = content.replace("</file>", "<\\/file>")
             parts.append(
-                f'<file path="{file_path}">\n{content}\n</file>',
+                f'<file path="{safe_path}">\n{safe_content}\n</file>',
             )
         except (OSError, UnicodeDecodeError):
             continue
     if not parts:
         return
+    # Re-attached block reads newest-first; reverse so most-recent reads last
+    # in the joined output, matching reader intuition (recent at the bottom).
+    parts.reverse()
     reattach = (
         "Recently accessed files"
         " (re-attached post-compaction):\n\n" + "\n\n".join(parts)
     )
-    _append_to_first_user(history, reattach)
+    append_to_first_user(history, reattach)
     logger.debug(
         "Re-attached %d files post-compaction (%d chars).",
         len(parts),
@@ -97,37 +116,39 @@ async def reattach_files(
     )
 
 
-def _append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
-    """Append ``text`` to the first UserMessage, or insert one at position 0."""
-    for j, entry in enumerate(history):
-        if isinstance(entry, UserMessage):
-            joined = f"{entry.text}\n\n{text}" if entry.text else text
-            history[j] = dataclasses.replace(entry, text=joined)
-            return
-    history.insert(0, UserMessage(text=text))
+_INLINING_TOOLS = frozenset({"read", "write"})
+"""Tool names whose history-embedded args/results already inline the file.
+
+A re-attach pass that ignored these would duplicate the file body on top of
+content the model can already see. ``Read`` puts the body in the
+``ToolResult``; ``Write`` puts the body in ``tc.args["content"]``. ``Edit``
+is intentionally excluded: it only embeds ``old_string``/``new_string``
+fragments, so the model loses surrounding context post-compaction unless
+re-attach can refresh the file."""
 
 
-def _collect_read_paths(history: list[ModelContextEvent]) -> set[str]:
-    """Collect resolved file paths from Read tool results.
+def _collect_inlined_paths(history: list[ModelContextEvent]) -> set[str]:
+    """Collect resolved file paths whose contents are already inline in history.
 
-    Walks pairs of ``AssistantMessage`` (with a Read ``ToolCall``) plus
-    the immediately-following ``ToolResult`` so we can dedup re-attach
-    against the file that's already inline in history.
+    Walks pairs of ``AssistantMessage`` (with a Read/Edit/Write ``ToolCall``)
+    plus the immediately-following ``ToolResult`` so we can dedup re-attach
+    against the file that's already inline.
     """
-    read_paths: dict[str, str] = {}
+    inlined: dict[str, str] = {}
     for entry in history:
         if not isinstance(entry, AssistantMessage):
             continue
         for tc in entry.tool_calls:
-            if tc.name.lower() == "read":
-                fp = tc.args.get("file_path")
-                if isinstance(fp, str) and fp:
-                    read_paths[tc.id] = fp
+            if tc.name.lower() not in _INLINING_TOOLS:
+                continue
+            fp = tc.args.get("file_path")
+            if isinstance(fp, str) and fp:
+                inlined[tc.id] = fp
     paths: set[str] = set()
     for entry in history:
         if not isinstance(entry, ToolResult):
             continue
-        fp = read_paths.get(entry.call_id)
+        fp = inlined.get(entry.call_id)
         if fp is None or entry.is_error or entry.content == CLEARED:
             continue
         paths.add(str(Path(fp).resolve()))

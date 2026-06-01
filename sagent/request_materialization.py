@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 
 import dataclasses
 
+from sagent.agent.context import wire_role
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -95,11 +96,17 @@ def materialize_messages(
                 keep_calls.difference_update(call_ids)
                 materialized = dataclasses.replace(entry, tool_calls=())
                 next_newer = out_reversed[-1] if out_reversed else None
+                # Emit the text-only assistant whenever it carries
+                # provider-visible payload and would not collide with a
+                # newer assistant turn (role alternation requires
+                # assistant/user/assistant/...). The previous gate that
+                # required ``next_newer is None`` silently dropped AM text
+                # whenever any newer entry followed; loosen it to "newer
+                # role is not assistant".
                 if (
                     not kept_call_ids
-                    and idx > 0
                     and _assistant_has_payload(materialized)
-                    and next_newer is None
+                    and (next_newer is None or wire_role(next_newer) != "assistant")
                 ):
                     out_reversed.append(materialized)
         else:
@@ -115,10 +122,13 @@ def _label_agent_sends(
     Applies the sender label before coalescing so that adjacent messages
     from different agents retain per-sender attribution after merging.
     Idempotent: a text already starting with this entry's own
-    ``[from <source>]: `` prefix is left unchanged. Without this guard,
-    re-materializing previously-materialized history (e.g. after a
-    compactor rewrite) would compound prefixes into
-    ``[from X]: [from X]: ...``.
+    ``[from <source>]: `` marker is left unchanged. ``startswith`` (not
+    substring ``in``) avoids the trap where a body that legitimately
+    quotes the marker -- e.g. ``"please write [from bob]: literally"``
+    -- gets silently passed through unlabelled. Cross-type coalescing
+    is handled by ``_coalesce_adjacent_users`` after labeling: any
+    merged user-side entry whose text quotes a marker has already been
+    labelled here at the producer, so re-labeling never happens.
     """
     for entry in messages:
         if isinstance(entry, AgentSendMessage):
@@ -134,37 +144,91 @@ def _label_agent_sends(
 def _coalesce_adjacent_users(
     messages: Iterable[ModelContextEvent],
 ) -> list[ModelContextEvent]:
+    """Merge adjacent user-side entries so the wire stays alternation-valid.
+
+    Same-source merges preserve the source type and attribution. Cross-
+    source merges -- ``UserMessage`` with ``AgentSendMessage`` or two
+    ``AgentSendMessage`` carrying different ``source`` values -- demote
+    to ``UserMessage``: the structured ``source`` cannot honestly
+    represent two different senders, and the textual ``[from X]: ``
+    labels added by :func:`_label_agent_sends` upstream already carry
+    per-sender attribution in the merged text.
+    """
+    deferred = _defer_user_between_tool_pair(messages)
     out: list[ModelContextEvent] = []
-    for entry in messages:
+    for entry in deferred:
         if (
             isinstance(entry, (AgentSendMessage, UserMessage))
             and out
-            and type(out[-1]) is type(entry)
-            and _same_source(out[-1], entry)
+            and wire_role(out[-1]) == "user"
         ):
             prev = out[-1]
-            if isinstance(entry, AgentSendMessage):
-                assert isinstance(prev, AgentSendMessage)
+            assert isinstance(prev, (UserMessage, AgentSendMessage))
+            text = f"{prev.text}\n\n{entry.text}"
+            attachments = (*prev.attachments, *entry.attachments)
+            if _same_source(prev, entry):
+                out[-1] = dataclasses.replace(prev, text=text, attachments=attachments)
             else:
-                assert isinstance(prev, UserMessage)
-            out[-1] = dataclasses.replace(
-                prev,
-                text=f"{prev.text}\n\n{entry.text}",
-                attachments=(*prev.attachments, *entry.attachments),
-            )
+                # Sources differ: the structured ``source`` field would
+                # silently claim one sender owns the other's content.
+                # Demote to ``UserMessage``; the in-text ``[from X]: ``
+                # labels (already applied upstream) preserve attribution.
+                out[-1] = UserMessage(text=text, attachments=attachments)
         else:
             out.append(entry)
     return out
 
 
-def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
-    """Return True iff two user-side entries share their sender identity.
+def _defer_user_between_tool_pair(
+    messages: Iterable[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    """Move user-side entries appearing between AM(tool_calls) and its TR.
 
-    ``UserMessage`` carries no sender field (all are the human), so any
-    two are same-source. ``AgentSendMessage`` carries ``source``; merging
-    across different sources would silently re-attribute one agent's
-    content to another.
+    Provider APIs reject any user-role turn between an
+    ``AssistantMessage`` carrying ``tool_calls`` and the matching
+    ``ToolResult`` for those calls. Such interleavings can be produced
+    by overrides whose payloads splice cross-source agent traffic
+    (``AgentSendMessage``) into a position that breaks the tool pair.
+    Defer any such entries to immediately after the matching tool
+    results close so the wire ordering stays valid while the user
+    content is preserved.
     """
+    deferred_buffer: list[UserMessage | AgentSendMessage] = []
+    pending: set[str] = set()
+    out: list[ModelContextEvent] = []
+    for entry in messages:
+        if isinstance(entry, AssistantMessage):
+            pending = {tc.id for tc in entry.tool_calls}
+            out.append(entry)
+        elif isinstance(entry, ToolResult):
+            out.append(entry)
+            pending.discard(entry.call_id)
+            if not pending and deferred_buffer:
+                out.extend(deferred_buffer)
+                deferred_buffer = []
+        elif pending and wire_role(entry) == "user":
+            assert isinstance(entry, (UserMessage, AgentSendMessage))
+            deferred_buffer.append(entry)
+        else:
+            out.append(entry)
+    out.extend(deferred_buffer)
+    return out
+
+
+def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
+    """Return True iff two user-side entries share sender identity.
+
+    ``UserMessage`` represents the human; two are same-source. Two
+    ``AgentSendMessage`` are same-source iff their ``source`` values
+    match. A ``UserMessage`` paired with an ``AgentSendMessage`` is
+    *not* same-source: the human did not author the agent's content
+    and the agent did not author the human's. Cross-type or
+    cross-source pairs still need merging for wire alternation, but
+    the merge path (see :func:`_coalesce_adjacent_users`) demotes them
+    to ``UserMessage`` so structured attribution is not falsified.
+    """
+    if type(left) is not type(right):
+        return False
     if isinstance(left, AgentSendMessage) and isinstance(right, AgentSendMessage):
         return left.source == right.source
     return True

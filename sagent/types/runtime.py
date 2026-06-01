@@ -8,15 +8,35 @@ tape/model/tool modules here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 
 import dataclasses
 import itertools
+import threading
 import time
 
 
-_id_counter: itertools.count[int] = itertools.count()
+_id_counter: Iterator[int] = itertools.count()
+"""Process-global monotonically-increasing id source for ``SessionMessage``.
+
+Shared across every ``AgentRuntime`` in the process. ``reset_id_counter``
+advances it forward only -- never backward -- so concurrent resumes
+from different tapes cannot collide. The single global counter keeps
+the contract simple at the cost of larger ids in long-lived processes.
+The ``Iterator[int]`` type accommodates the ``itertools.chain``
+sentinel ``reset_id_counter`` uses to re-emit a peeked value.
+"""
+
+_id_counter_lock: threading.Lock = threading.Lock()
+"""Guards the peek-and-replace inside ``reset_id_counter``.
+
+Two threads calling ``reset_id_counter`` concurrently can otherwise
+interleave the ``next(_id_counter)`` peek with the ``_id_counter =``
+replacement and produce non-monotonic ids -- tape persistence then
+collides on duplicate ``SessionMessage.id`` values. Resumes from
+distinct tapes are the realistic source of concurrency.
+"""
 
 
 def _empty_headers() -> dict[str, str]:
@@ -34,6 +54,7 @@ __all__ = [
     "ChildDoneEvent",
     "ChildEvent",
     "Clear",
+    "ClearComplete",
     "CohortComplete",
     "CohortStarted",
     "Compact",
@@ -75,9 +96,27 @@ __all__ = [
 
 
 def reset_id_counter(start: int) -> None:
-    """Reset the ``SessionMessage`` id counter."""
+    """Advance the ``SessionMessage`` id counter to ``start`` (forward-only).
+
+    Concurrent resumes share the same process-global counter; rewinding
+    it backwards (e.g. resume B sets the counter to 51 while resume A
+    has already minted ids up to 100) creates collision between later
+    appends from A (next id 51, duplicate of one A already issued) and
+    later appends from B. ``reset_id_counter`` is therefore monotonic:
+    if the counter is already past ``start``, the reset is a no-op.
+
+    ``itertools.count`` doesn't expose its cursor, so peek by minting
+    one id and either accepting it (it was already past ``start``,
+    replace with a counter that re-emits it on the next call) or
+    discarding it (was below ``start``, replace with ``count(start)``).
+    """
     global _id_counter  # noqa: PLW0603 -- module-level counter requires global statement
-    _id_counter = itertools.count(start)
+    with _id_counter_lock:
+        peek = next(_id_counter)
+        if peek >= start:
+            _id_counter = itertools.chain((peek,), _id_counter)
+        else:
+            _id_counter = itertools.count(start)
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -156,6 +195,20 @@ class AssistantMessage(SessionMessage):
 
     tool_calls: tuple[ToolCall, ...] = ()
     """Tool invocations requested by the model."""
+
+    def __post_init__(self) -> None:
+        # Duplicate ``ToolCall.id`` corrupts the runtime's per-call
+        # bookkeeping: ``running_tools[id]`` and the cohort set collapse
+        # collisions silently, leaking tasks and dropping results. Reject
+        # at construction so a malformed provider response fails loudly at
+        # the boundary rather than wedging the runtime later.
+        seen: set[str] = set()
+        for tc in self.tool_calls:
+            if tc.id in seen:
+                raise ValueError(
+                    f"duplicate tool_call id in AssistantMessage: {tc.id!r}"
+                )
+            seen.add(tc.id)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -289,6 +342,11 @@ class Halt:
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class Clear:
     """Detach tools, wipe history, wait for user."""
+
+
+@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+class ClearComplete:
+    """Published after the runtime finishes processing a ``Clear``."""
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -592,6 +650,7 @@ type RuntimeEvent = (
     Quit
     | Halt
     | Clear
+    | ClearComplete
     | Kill
     | Detach
     | Undetach

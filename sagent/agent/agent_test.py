@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast, override
+from typing import Literal, cast, override
 from unittest.mock import MagicMock, Mock, patch
 
 import asyncio
 import contextlib
 import json
 import logging
+import re
 
 import pytest
 
@@ -24,8 +25,11 @@ from sagent.agent.agent import (
     ActivityTracker,
     Agent,
     SystemPromptArg,
+    _AgentCompactor,
     _AgentTool,
+    _repair_compact_payload,
     _resolve_target_spec,
+    _should_cancel_background,
 )
 from sagent.agent.background import (
     BackgroundAwareTool,
@@ -34,11 +38,23 @@ from sagent.agent.background import (
 )
 from sagent.agent.context import validate_context
 from sagent.agent.session_io import append_session, load_session
-from sagent.agent.state import ToolState, agent_registry
+from sagent.agent.state import (
+    AgentLike,
+    ToolState,
+    agent_registry,
+    tool_state_context,
+)
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
-from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
+from sagent.tools.read import Read
+from sagent.types.compactor import CompactRestorable
+from sagent.types.tape import (
+    ContextSplice,
+    TapeRecord,
+    TapeRef,
+    full_tape_mask,
+)
 
 
 def _summary_override(
@@ -146,6 +162,8 @@ class StubModel:
 
 
 _STUB_SCHEMA: JSON = json_freeze({"type": "object"})
+_STRING_SCHEMA: JSON = json_freeze({"type": "string"})
+_TYPELESS_SCHEMA: JSON = json_freeze({})
 
 
 @dataclass(slots=True, kw_only=True)
@@ -170,6 +188,10 @@ class StubTool:
 
     def prompt(self) -> str:
         return ""
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
 
     async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
         self.calls.append(args)
@@ -214,6 +236,26 @@ def test_agent_budget_defaults_from_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> None:
+    rules = tmp_path / ".sagent" / "rules"
+    rules.mkdir(parents=True)
+    _ = (rules / "python.md").write_text(
+        "---\npaths: ['**/*.py']\n---\nUse Python rule.\n"
+    )
+    target = tmp_path / "main.py"
+    target.write_text("print('hi')\n")
+    agent = _build_agent(tools=[Read()])
+    agent.tool_state.bash_cwd = str(tmp_path)
+    wrapped = _AgentTool(Read(), agent)
+    with tool_state_context(agent.tool_state):
+        result = await wrapped.run({"file_path": str(target)})
+        repeated = await wrapped.run({"file_path": str(target)})
+    assert "<system-reminder>" in result.content
+    assert "Use Python rule." in result.content
+    assert "Use Python rule." not in repeated.content
+
+
+@pytest.mark.asyncio
 async def test_agent_model_stream_materializes_request() -> None:
     call = types.runtime.ToolCall(id="call_1", name="Bash", args={})
     model = StubModel()
@@ -231,8 +273,6 @@ async def test_agent_model_stream_materializes_request() -> None:
     )
     _ = await agent._agent_model.stream(
         agent.runtime.context().messages,
-        "",
-        [],
         lambda _: None,
         lambda _: None,
     )
@@ -269,6 +309,51 @@ def test_live_tool_result_chars_counts_read_results() -> None:
         types.runtime.ToolResult(call_id="bash-1", content="b" * 50)
     )
     assert a.live_tool_result_chars() == 250
+
+
+def test_agent_like_protocol_exposes_kill_all_tools() -> None:
+    """Regression for H10: ``AgentLike`` advertises ``kill_all_tools``.
+
+    Both the real ``Agent`` (``agent.py``) and the test ``FakeAgent``
+    (``testing.py``) implement ``kill_all_tools``; callers route the
+    verb via the Protocol (e.g. ``repl/input_pane.py``). The Protocol
+    must include the method so static analysis matches reality.
+    """
+    a = _build_agent()
+    via_protocol: AgentLike = a
+    # The Protocol method is present on the structural type; callers
+    # depend on this attribute being typed.
+    assert callable(via_protocol.kill_all_tools)
+
+
+def test_persist_budget_used_chars_excludes_persist_exempt_tools() -> None:
+    """Persist-exempt tool results don't inflate the persist budget.
+
+    Regression for AGENT-REVIEW-005: feeding ``post_process_result``
+    with the live-wire tally inflated ``used_message_chars`` by Read's
+    bytes, prematurely forcing unrelated (Bash) results to disk.
+    """
+    a = _build_agent()
+    read_call = types.runtime.ToolCall(id="read-1", name="Read", args={})
+    bash_call = types.runtime.ToolCall(id="bash-1", name="Bash", args={})
+    err_call = types.runtime.ToolCall(id="bash-err", name="Bash", args={})
+    a.runtime.append_history(types.runtime.UserMessage(text="go"))
+    a.runtime.append_history(
+        types.runtime.AssistantMessage(
+            tool_calls=(read_call, bash_call, err_call),
+        )
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="read-1", content="r" * 200)
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="bash-1", content="b" * 50)
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="bash-err", content="e" * 30, is_error=True)
+    )
+    # Only the non-error Bash result occupies the persist budget.
+    assert a.persist_budget_used_chars() == 50
 
 
 def test_agent_register_and_cancel_background() -> None:
@@ -348,6 +433,40 @@ async def test_public_cancel_background_actually_cancels_task() -> None:
     assert "j" not in a.background
 
 
+@pytest.mark.asyncio
+async def test_cancel_background_tool_kind_forgets_job_id_mapping() -> None:
+    """A tool-kind cancel must clear the call_id<->job_id mapping.
+
+    BUG-1: ``cancel_background`` only invoked ``_forget_job_id`` on the
+    detached branch. A ``kind="tool"`` entry cancelled this way left a
+    permanent entry in ``_job_ids_by_call_id`` / ``_call_ids_by_job_id``,
+    poisoning later job-id minting for fresh calls reusing the same
+    provider call id. The symmetric ``forget_background`` already did
+    this for the tool kind, exposing the asymmetry.
+    """
+    a = _build_agent()
+    task = asyncio.create_task(asyncio.sleep(10))
+    a.register_background(
+        "j",
+        BackgroundTaskEntry(
+            task=task,
+            tool_name="x",
+            queue_id="j",
+            started=0.0,
+            kind="tool",
+            call_id="call-x",
+        ),
+    )
+    # Seed the job-id<->call-id map as the live path does at registration.
+    _ = a.job_id_for_call("call-x")
+    assert "call-x" in a._job_ids_by_call_id
+
+    a.cancel_background("j")
+
+    assert "call-x" not in a._job_ids_by_call_id
+    assert task.cancelling() > 0
+
+
 def test_agent_system_string_to_factory() -> None:
     a = _build_agent(system="hi there")
     assert a.system_prompt() == "hi there"
@@ -382,6 +501,39 @@ def test_agent_tools_map_stores_raw_tools() -> None:
     stored = a.tools_map["Echo"]
     assert stored is tool
     assert not isinstance(stored, BackgroundAwareTool)
+
+
+def test_agent_tools_map_preserves_compact_restorable_identity() -> None:
+    """D1/CV2: a ``CompactRestorable`` tool keeps its Protocol identity.
+
+    ``BackgroundAwareTool`` proxies attribute reads but cannot satisfy
+    Protocol ``isinstance`` checks for methods it doesn't redeclare
+    (Python's protocol-isinstance walks the class dict, not
+    ``__getattr__``). The agent's structural fix keeps the *raw* tool
+    in ``tools_map`` so consumer sites' ``isinstance(t,
+    CompactRestorable)`` lookups still hit; per-request wrapping in
+    ``_AgentModel.stream`` injects the BG schema without touching the
+    stored tool. Regression-guard the contract here.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _RestorableStub(StubTool):
+        async def post_compact_restore(
+            self,
+            history: list[types.runtime.ModelContextEvent],
+            tool_state: object,
+            *,
+            budget_chars: int = 100_000,
+        ) -> None:
+            del history, tool_state, budget_chars
+
+    tool = _RestorableStub()
+    assert isinstance(tool, CompactRestorable)
+    a = _build_agent(tools=[tool])
+    stored = a.tools_map["Echo"]
+    assert isinstance(stored, CompactRestorable), (
+        "raw rich tool must satisfy CompactRestorable; the wrapper would not."
+    )
 
 
 @pytest.mark.asyncio
@@ -463,7 +615,14 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
     assert seen.name == "Echo"
     assert seen.description == "Echo tool."
     assert seen.tool_id == "application/x-tool-echo"
-    assert dict(seen.directive_schema) == {"type": "object"}
+    # B1: the wrapper injects ``background`` / ``delay`` even into
+    # schemaless tools; check the underlying ``type`` is preserved and
+    # the injected fields are present.
+    schema = dict(seen.directive_schema)
+    assert schema["type"] == "object"
+    props = cast(Mapping[str, object], schema["properties"])
+    assert "background" in props
+    assert "delay" in props
     assert seen.summary({}) == "echo"
     assert seen.prompt() == ""
 
@@ -485,12 +644,16 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     a.record_response(
         types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
     )
-    # Force an over-budget total and verify the next call raises.
+    # Force an over-budget total and verify the next call raises a
+    # ``UserFacingError`` subclass (polished remediation, not raw
+    # ``RuntimeError``) so the REPL renderer surfaces it cleanly.
     a.cost_tracker.total_cost_usd = 2.0
-    with pytest.raises(RuntimeError, match="Budget exhausted"):
+    with pytest.raises(types.exceptions.BudgetExhaustedError) as exc_info:
         a.record_response(
             types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
         )
+    assert exc_info.value.max_budget_usd == 1.0
+    assert "Budget exhausted" in str(exc_info.value)
 
 
 def test_token_count_addable() -> None:
@@ -538,6 +701,11 @@ def test_system_prompt_arg_type_alias_str_or_callable() -> None:
     assert callable(arg2)
 
 
+def test_system_prompt_rejects_dict() -> None:
+    with pytest.raises(TypeError, match=r"system.*str or Callable"):
+        _build_agent(system=cast(SystemPromptArg, {"static": "literal"}))
+
+
 def test_max_request_tokens_setter_rejects_over_model_limit() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="exceeds model's"):
@@ -582,6 +750,20 @@ def test_thinking_state_sets_request_and_display_without_provider_arg() -> None:
     assert a.thinking == "adaptive"
     assert a.show_thinking is False
     assert "redact_thinking" not in a.provider_args
+
+
+def test_restore_thinking_state_writes_all_three_fields() -> None:
+    """Public rollback API for a failed thinking-mode rebuild."""
+    a = _build_agent()
+    a.set_thinking_state("adaptive-show")
+    a.restore_thinking_state("off-hide", None, False)
+    assert a.thinking_state == "off-hide"
+    assert a.thinking is None
+    assert a.show_thinking is False
+    a.restore_thinking_state("on-show", "enabled", True)
+    assert a.thinking_state == "on-show"
+    assert a.thinking == "enabled"
+    assert a.show_thinking is True
 
 
 def test_change_model_derives_redact_thinking_from_state(
@@ -816,6 +998,112 @@ def test_swap_model_rescales_response_window_to_smaller_model() -> None:
     assert a.budget.max_response_tokens == a.model.max_response_tokens
     a.swap_model(StubModel(model_id="small", max_response_tokens=256))
     assert a.budget.max_response_tokens == 256
+
+
+@dataclass(slots=True, kw_only=True)
+class _NoopCompactor:
+    async def should_compact(
+        self,
+        input_tokens: int,
+        max_request_tokens: int,
+        max_response_tokens: int = 0,
+    ) -> bool:
+        del input_tokens, max_request_tokens, max_response_tokens
+        return False
+
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.runtime.ModelContextEvent],
+        model: types.model.Model,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        del context, model, custom_instructions
+        return _summary_override(
+            [types.runtime.UserMessage(text="ok")],
+            mint_ref,
+            tape=tape or None,
+        )
+
+
+def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
+    """Swapping to a smaller-window model with oversized history triggers compact.
+
+    The /model verb's whole purpose is rescuing a session whose
+    current model wedged (rate limit, oversized history). Just
+    rescaling the budget without compacting leaves the next provider
+    call to overflow against the new (smaller) model -- the user is
+    no better off. After a swap whose rescaled budget cannot hold the
+    current resolved view, push a ``Compact()`` so the agent layer's
+    bridge can fit history before the next stream call.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _LyingTokenModel(StubModel):
+        """Returns 500k tokens regardless of actual request size."""
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            return 500_000
+
+    a = Agent(
+        model=_LyingTokenModel(model_id="big", max_request_tokens=1_000_000),
+        tools=[],
+        compactor=_NoopCompactor(),
+    )
+    a.runtime.inbox.drain_nowait()  # clear any startup events
+    a.runtime.append_history(types.runtime.UserMessage(text="payload"))
+
+    # Swap to a smaller model that also reports 500k tokens for the
+    # current request -- 500k > (100k - 1024 - small buffer) so the
+    # post-swap budget cannot hold this history.
+    a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
+
+    items = a.runtime.inbox.drain_nowait()
+    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    assert compacts, (
+        f"swap_model to smaller model did not push Compact(); inbox was {items!r}"
+    )
+
+
+def test_swap_model_does_not_push_compact_when_history_fits() -> None:
+    """Swap to a model whose budget comfortably holds current history: no compact."""
+    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
+    a.runtime.inbox.drain_nowait()
+
+    a.swap_model(StubModel(model_id="same-size"))
+
+    items = a.runtime.inbox.drain_nowait()
+    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    assert not compacts, (
+        f"swap_model to fitting model spuriously pushed Compact(); inbox was {items!r}"
+    )
+
+
+def test_swap_model_no_compact_when_no_compactor_configured() -> None:
+    """No compactor wired: swap_model must not push Compact()."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _LyingTokenModel(StubModel):
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            return 500_000
+
+    a = Agent(
+        model=_LyingTokenModel(model_id="big", max_request_tokens=1_000_000),
+        tools=[],
+    )
+    a.runtime.inbox.drain_nowait()
+    a.runtime.append_history(types.runtime.UserMessage(text="payload"))
+
+    a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
+
+    items = a.runtime.inbox.drain_nowait()
+    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    assert not compacts
 
 
 def test_swap_model_replaces_model_and_inner_wrapper() -> None:
@@ -1288,6 +1576,7 @@ async def test_shutdown_force_preserves_persistent_subagent() -> None:
             started=0.0,
             hidden=False,
             kind="persistent_subagent",
+            persistent_run_id="run-child",
         ),
     )
     agent_registry["child"] = cast(Agent, child)
@@ -1321,6 +1610,7 @@ async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -
             started=0.0,
             hidden=False,
             kind="persistent_subagent",
+            persistent_run_id="run-missing",
         ),
     )
     try:
@@ -1525,18 +1815,28 @@ async def test_recompact_awaits_compact_complete_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clear_pushes_clear_event_and_resets_file_tracking() -> None:
+async def test_clear_resets_file_tracking_and_awaits_completion() -> None:
+    """``Agent.clear`` resolves after the runtime publishes ``ClearComplete``.
+
+    Regression for AGENT-REVIEW-003: ``clear`` used to push the
+    ``Clear`` event and return immediately, so callers could observe
+    history that had not yet been wiped.
+    """
     a = _build_agent()
-    # Stage a tracked file.
+    # Stage state that ``clear`` should reset.
     a.tool_state.mark_read("/tmp/x.txt")  # noqa: S108 -- placeholder
     assert a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
+    a.runtime.append_history(types.runtime.UserMessage(text="hello"))
+    assert a.history
 
-    await a.clear()
-    assert not a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
-
-    # Clear event is sitting on the inbox.
-    items = await a.runtime.inbox.drain()
-    assert any(isinstance(i, types.runtime.Clear) for i in items)
+    drive_task = asyncio.create_task(a.serve_forever())
+    try:
+        await a.clear()
+        assert not a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
+        assert a.history == []
+    finally:
+        a.shutdown()
+        await drive_task
 
 
 def test_build_system_appends_tool_contributions() -> None:
@@ -1705,6 +2005,10 @@ async def test_run_bg_propagates_external_cancellation() -> None:
 
         def prompt(self) -> str:
             return ""
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
 
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -2163,6 +2467,46 @@ async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
     assert ok is True
 
 
+@dataclass(slots=True, kw_only=True)
+class _ThresholdCompactor:
+    """Recording compactor that compacts exactly when ``should_compact`` fires."""
+
+    compacted: bool = False
+
+    async def should_compact(
+        self,
+        input_tokens: int,
+        max_request_tokens: int,
+        max_response_tokens: int = 0,
+    ) -> bool:
+        buffer = types.model.default_buffer_tokens(max_request_tokens)
+        return input_tokens >= max(0, max_request_tokens - max_response_tokens - buffer)
+
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.runtime.ModelContextEvent],
+        model: object,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        del context, model, custom_instructions
+        self.compacted = True
+        return _summary_override(
+            [types.runtime.UserMessage(text="[s]")], mint_ref, tape=tape
+        )
+
+    def maintain(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.runtime.ModelContextEvent],
+        tools: object,
+        mint_ref: Callable[[], TapeRef],
+    ) -> tuple[ContextSplice, ...]:
+        del tape, context, tools, mint_ref
+        return ()
+
+
 @pytest.mark.asyncio
 async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
     """``compact_if_needed`` matches ``compact_now``'s no-compactor semantics.
@@ -2230,6 +2574,86 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
     ]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_triggers_on_last_response_total() -> None:
+    """The gate keys on the last response's real token count, not an estimate.
+
+    A crude local estimator can under-count the true context (opus packs
+    ~2.83 chars/token, not 4), so a 990k-token context can estimate to 100k
+    and never cross the threshold. Anchoring on the provider's reported total
+    -- the way claude-code, codex, and gemini-cli all do -- fixes it: once a
+    response reports 990k, the next gate compacts regardless of the estimate.
+    The first turn (no response yet) falls back to the estimate.
+    """
+
+    class _UndercountModel(StubModel):
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            return 100_000
+
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
+
+    # Turn 1: no response recorded yet -> fall back to the estimate (100k <
+    # threshold), so no compaction.
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=_UndercountModel(
+            max_request_tokens=1_000_000, max_response_tokens=128_000
+        ),
+        tools=[],
+        compactor=rec,
+    )
+    assert await a.compact_if_needed(history, a.model) is True
+    assert rec.compacted is False
+
+    # Provider reports the sent request at 990k. Threshold: 1_000_000 -
+    # 128_000 - default_buffer(1M)=66_666 = 805_334. The estimate still
+    # under-counts at 100k, but the gate must now use the real 990k.
+    a.record_response(
+        types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text=""),
+            tokens=types.model.TokenCount(input_tokens=990_000),
+        )
+    )
+    await a.compact_if_needed(history, a.model)
+    assert rec.compacted is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_counts_cached_input_tokens() -> None:
+    """Prompt-cached context still triggers compaction.
+
+    Under prompt caching the provider bills most of the prompt as
+    ``cache_read``; ``input_tokens`` alone stays tiny. The gate must sum the
+    cache pools (input + cache_creation + cache_read), or a 990k cached
+    context -- billed as 5k input + 985k cache_read -- would never compact.
+    This is the exact shape that wedged session 27a70970 (compact_count=0).
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
+        tools=[],
+        compactor=rec,
+    )
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="x")
+    ]
+    a.record_response(
+        types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text=""),
+            tokens=types.model.TokenCount(
+                input_tokens=5_000, cache_read_tokens=985_000
+            ),
+        )
+    )
+    # 5_000 + 985_000 = 990_000 >= 805_334 -> compaction fires.
+    await a.compact_if_needed(history, a.model)
+    assert rec.compacted is True
 
 
 @pytest.mark.asyncio
@@ -2389,6 +2813,284 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
     assert a.compaction_state.compact_failures == 0
+
+
+def test_validate_payload_pending_check_subtracts_paired_externally() -> None:
+    """Mid-payload ``if pending:`` check must subtract ``paired_externally``.
+
+    The splice payload validator's end-of-payload check already subtracts
+    ``paired_externally``; the mid-payload check fired on encountering
+    a ``UserMessage`` did not, so the validator rejected a perfectly
+    well-formed splice whose AM tool_calls were externally paired and
+    whose payload then continued with a user-side entry.
+
+    Without the fix, ``ContextSplice.__post_init__`` raises
+    ``InvalidPayloadError`` here.
+    """
+    splice = ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        payload=(
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c1", name="Bash", args={}),),
+            ),
+            types.runtime.UserMessage(text="[continuation]"),
+        ),
+        strategy="external_am_then_user",
+        paired_externally=frozenset({"c1"}),
+    )
+    assert splice.payload[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_recomputes_paired_externally_from_final_payload() -> (
+    None
+):
+    """``_AgentCompactor.compact`` derives ``paired_externally`` from the
+    post-rewrite payload, not the producer's declaration.
+
+    The inner compactor returned a (validator-bypassed) override whose
+    payload has an externally paired AM tool_call followed by a UM.
+    The agent layer's repair pass (``_repair_compact_payload``) sees the
+    AM with unmatched tool_calls and synthesizes a local
+    ``[interrupted]`` ``ToolResult`` -- which means the call_id now has
+    a *local* pair and is no longer "external". Inheriting the
+    producer's ``paired_externally`` blindly would lie to the strict
+    validator. The bridge must recompute via :func:`unpaired_call_ids`
+    so the declaration stays honest. Here the synthetic TR pairs
+    locally, so ``external_c1`` is correctly dropped.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _ExternalAmCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            # Use replay() so we can land [AM, UM] with paired_externally
+            # without the constructor rejecting it -- mirrors a legacy
+            # on-disk splice the runtime resumes.
+            return ContextSplice.replay(
+                ref=mint_ref(),
+                mask=full_tape_mask(tape) if tape else (),
+                insert_after=None,
+                payload=(
+                    types.runtime.AssistantMessage(
+                        text="resuming",
+                        tool_calls=(
+                            types.runtime.ToolCall(
+                                id="external_c1",
+                                name="Bash",
+                                args={},
+                            ),
+                        ),
+                    ),
+                    types.runtime.UserMessage(text="postscript"),
+                ),
+                strategy="external_am_then_user",
+                paired_externally=frozenset({"external_c1"}),
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_ExternalAmCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    bridge = _AgentCompactor(_ExternalAmCompactor(), a)
+    # If the validator regression returns, ContextSplice.__post_init__
+    # raises InvalidPayloadError inside dataclasses.replace and the
+    # await propagates the error here.
+    override = await bridge.compact(
+        tape=a.runtime.tape,
+        context=a.runtime.context().messages,
+        model=a.runtime.model,
+        mint_ref=a.runtime.mint_ref,
+        custom_instructions=None,
+    )
+    # ``_repair_compact_payload`` synthesized a local TR for external_c1,
+    # so the call_id is no longer external and must be dropped from
+    # ``paired_externally``. The local pair is present and well-formed.
+    assert "external_c1" not in override.paired_externally
+    am_call_ids: set[str] = set()
+    tr_call_ids: set[str] = set()
+    for entry in override.payload:
+        if isinstance(entry, types.runtime.AssistantMessage):
+            am_call_ids.update(tc.id for tc in entry.tool_calls)
+        elif isinstance(entry, types.runtime.ToolResult):
+            tr_call_ids.add(entry.call_id)
+    assert "external_c1" in am_call_ids
+    assert "external_c1" in tr_call_ids
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> None:
+    """``_AgentCompactor.compact`` runs scrunch when the inner output won't fit.
+
+    Producer returns a splice whose payload, after enrich+repair, still
+    exceeds the model's input budget (``max_request_tokens -
+    max_response_tokens - buffer_tokens``). The bridge must rescue via
+    the scrunch maneuver -- partitioning oldest-first and re-running
+    the inner producer per partition until the resolved view fits --
+    instead of returning the oversized splice and letting the next
+    provider call wedge.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _OversizedCompactor:
+        compact_calls: int = 0
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            effective = max_request_tokens - max_response_tokens
+            return input_tokens >= max(0, effective - 10)
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: types.model.Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            self.compact_calls += 1
+            # First call returns a payload exceeding budget target so
+            # the bridge triggers scrunch. Subsequent calls (scrunch
+            # passes) return small payloads so the maneuver makes
+            # progress and stops within a few iterations.
+            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
+            return _summary_override(
+                [types.runtime.UserMessage(text=payload_text)],
+                mint_ref,
+                tape=tape or None,
+            )
+
+    @dataclass(slots=True, kw_only=True)
+    class _OverflowModel(StubModel):
+        max_request_tokens: int = 1_000
+        max_response_tokens: int = 100
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            # Each entry's text length / 4 = tokens. Mirrors the chars
+            # heuristic the scrunch planner uses.
+            return sum(
+                len(m.text) // 4
+                for m in request.messages
+                if isinstance(
+                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
+                )
+            )
+
+    budget = types.model.ContextBudget(
+        max_request_tokens=1_000,
+        max_response_tokens=100,
+        buffer_tokens=100,
+    )
+    compactor = _OversizedCompactor()
+    a = Agent(
+        model=_OverflowModel(),
+        compactor=compactor,
+        budget=budget,
+    )
+    # Seed history just so the runtime has something to compact.
+    a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+
+    assert await a.compact_now() is True
+
+    # The bridge invoked the producer multiple times: once for the
+    # normal compact, then again for each scrunch pass. At least 2.
+    assert compactor.compact_calls >= 2, (
+        f"expected scrunch to invoke producer multiple times, got"
+        f" {compactor.compact_calls}"
+    )
+    # Final resolved view must fit (input + buffer below max).
+    resolved = a.runtime.context().messages
+    visible_chars = sum(
+        len(m.text)
+        for m in resolved
+        if isinstance(m, (types.runtime.UserMessage, types.runtime.AgentSendMessage))
+    )
+    target = a.model.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+    assert visible_chars // 4 <= target, (
+        f"post-scrunch view ({visible_chars // 4} tok) still exceeds target {target}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
+    """Bridge does NOT run scrunch when the inner producer's output fits.
+
+    Sanity check on the gate: scrunch is a rescue, not a default path.
+    When the producer's normal compact() produces a payload that fits
+    the budget, the bridge returns it as-is with one producer call.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _NormalCompactor:
+        compact_calls: int = 0
+
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: types.model.Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            self.compact_calls += 1
+            return _summary_override(
+                [types.runtime.UserMessage(text="ok")],
+                mint_ref,
+                tape=tape or None,
+            )
+
+    compactor = _NormalCompactor()
+    a = Agent(model=StubModel(), compactor=compactor)
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+
+    assert await a.compact_now() is True
+
+    assert compactor.compact_calls == 1, (
+        f"bridge should invoke producer exactly once when output fits;"
+        f" got {compactor.compact_calls}"
+    )
 
 
 @pytest.mark.asyncio
@@ -2832,6 +3534,126 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
+    """Sync compaction path appends CompactStarted + CompactComplete to tape.
+
+    The inbox-arm handler at ``runtime.py: case Compact():`` calls
+    ``append_history`` for the lifecycle markers. ``compact_now``
+    bypasses the inbox (the runtime would cancel its own task if it
+    pushed ``Compact``), and previously only published the markers --
+    leaving them off the tape. Resume could not see that a synchronous
+    overflow-recovery compaction had run, only the resulting splice.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+
+    assert await a.compact_now() is True
+
+    started_seen = any(
+        isinstance(record, types.tape.ReferrableTapeEvent)
+        and isinstance(record.event, types.runtime.CompactStarted)
+        for record in a.runtime.tape
+    )
+    complete_seen = any(
+        isinstance(record, types.tape.ReferrableTapeEvent)
+        and isinstance(record.event, types.runtime.CompactComplete)
+        for record in a.runtime.tape
+    )
+    assert started_seen
+    assert complete_seen
+
+
+@pytest.mark.asyncio
+async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None:
+    """Sync compaction failure also appends CompactFailed to the tape."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            raise RuntimeError("boom")
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+
+    assert await a.compact_now() is False
+
+    started_seen = any(
+        isinstance(record, types.tape.ReferrableTapeEvent)
+        and isinstance(record.event, types.runtime.CompactStarted)
+        for record in a.runtime.tape
+    )
+    failed_seen = any(
+        isinstance(record, types.tape.ReferrableTapeEvent)
+        and isinstance(record.event, types.runtime.CompactFailed)
+        for record in a.runtime.tape
+    )
+    assert started_seen
+    assert failed_seen
+
+
+@pytest.mark.asyncio
 async def test_agent_model_proactive_compaction_failure_short_circuits() -> None:
     """Failed proactive compaction must not fall through to the provider.
 
@@ -2892,8 +3714,6 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     with pytest.raises(RuntimeError, match="compaction disconnected"):
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="hi")],
-            system="",
-            tools=[],
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
@@ -2950,14 +3770,11 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
 
     a = Agent(
         model=_OverflowModel(overflow_count=0),
-        tools=[],
         compactor=_OverflowingCompactor(),
     )
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="hi")],
-            system="",
-            tools=[],
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
@@ -3020,8 +3837,6 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="x")],
-            system="",
-            tools=[],
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
@@ -3096,8 +3911,6 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     with pytest.raises(RuntimeError, match="compaction blew up"):
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="x")],
-            system="",
-            tools=[],
             on_text=lambda _t: None,
             on_thinking=lambda _t: None,
         )
@@ -3193,7 +4006,10 @@ async def test_agent_tool_emits_label_and_delegates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_invalid_input_emits_label_without_running() -> None:
+async def test_agent_tool_invalid_input_suppresses_label() -> None:
+    """Invalid input short-circuits before ``ToolLabel`` -- the UI must
+    not show a "running" label for a call that never executed.
+    """
     inner = StubTool(
         directive_schema=json_freeze(
             {
@@ -3219,8 +4035,7 @@ async def test_agent_tool_invalid_input_emits_label_without_running() -> None:
     assert result.is_error
     assert "InputValidationError" in result.content
     assert inner.calls == []
-    assert len(labels) == 1
-    assert labels[0].text == "echo"
+    assert labels == []
 
 
 @pytest.mark.asyncio
@@ -3229,6 +4044,11 @@ async def test_clear_cancels_explicit_background_jobs() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -3242,10 +4062,14 @@ async def test_clear_cancels_explicit_background_jobs() -> None:
     task = next(iter(a.background.values())).task
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
-    await a.clear()
-
-    await asyncio.wait_for(task, timeout=1.0)
-    assert a.background == {}
+    drive_task = asyncio.create_task(a.serve_forever())
+    try:
+        await a.clear()
+        await asyncio.wait_for(task, timeout=1.0)
+        assert a.background == {}
+    finally:
+        a.shutdown()
+        await drive_task
 
 
 @pytest.mark.asyncio
@@ -3254,6 +4078,11 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -3313,6 +4142,11 @@ async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
@@ -3339,6 +4173,11 @@ async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
         @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
             started.set()
@@ -3358,11 +4197,23 @@ async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_call_round_cap_blocks_tool_spawn() -> None:
+async def test_tool_call_round_cap_allows_first_round_when_cap_is_one() -> None:
+    """``max_tool_call_rounds=1`` permits the first tool round.
+
+    Regression for AGENT-REVIEW-001: ``_before_tool_spawn`` used to
+    block when ``num + 1 >= cap``, rejecting the first round whenever
+    ``cap=1``. The docs ("Must be >= 1") and call sites such as
+    ``examples/multi_agent_reviewer.py`` expect exactly one round.
+    """
     started = asyncio.Event()
 
     @dataclass(slots=True, kw_only=True)
     class SideEffectTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -3373,16 +4224,52 @@ async def test_tool_call_round_cap_blocks_tool_spawn() -> None:
         responses=[
             types.runtime.AssistantMessage(
                 tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
-            )
+            ),
+            types.runtime.AssistantMessage(text="done"),
         ]
     )
     a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
     events = [type(ev) async for ev in a.run(types.runtime.UserMessage(text="go"))]
 
+    assert started.is_set()
+    assert types.runtime.ModelIdle in events
+    assert types.runtime.ModelResponseError not in events
+
+
+@pytest.mark.asyncio
+async def test_tool_call_round_cap_blocks_second_round_when_cap_is_one() -> None:
+    """``max_tool_call_rounds=1`` rejects the second tool-bearing response."""
+    started_count = 0
+
+    @dataclass(slots=True, kw_only=True)
+    class CountingTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            del args
+            nonlocal started_count
+            started_count += 1
+            return types.runtime.ToolResult(call_id="", content="ran")
+
+    model = StubModel(
+        responses=[
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
+            ),
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c2", name="Echo", args={}),)
+            ),
+        ]
+    )
+    a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
+    events = [type(ev) async for ev in a.run(types.runtime.UserMessage(text="go"))]
+
+    assert started_count == 1
     assert types.runtime.ModelResponseError in events
-    assert not started.is_set()
-    assert a.runtime.running_tools == {}
-    assert a.runtime.cohort == set()
 
 
 @pytest.mark.asyncio
@@ -3392,6 +4279,11 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
 
     @dataclass(slots=True, kw_only=True)
     class SlowTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -3441,6 +4333,11 @@ async def test_agent_tool_background_exception_is_logged(
 ) -> None:
     @dataclass(slots=True, kw_only=True)
     class FailingTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         @override
         async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
             del args
@@ -3505,7 +4402,6 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
 
     a = Agent(
         model=StubModel(),
-        tools=[],
         compactor=_AssistantTerminatedCompactor(),
         session_dir=tmp_path,
     )
@@ -3564,7 +4460,6 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
 
     a = Agent(
         model=StubModel(),
-        tools=[],
         compactor=_OkCompactor(),
         session_dir=tmp_path,
     )
@@ -4201,7 +5096,7 @@ async def test_compact_now_awaits_active_runtime_compact_task() -> None:
 
 @pytest.mark.asyncio
 async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
-    """Post-compact retry prediction must match the live auto-compact gate."""
+    """Post-compact retry prediction must call compactor with agent budget."""
 
     @dataclass(slots=True, kw_only=True)
     class _BudgetModel(StubModel):
@@ -4210,14 +5105,19 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
             del request
             return 90
 
-    class _SummaryCompactor:
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingCompactor:
+        should_compact_calls: list[tuple[int, int, int]] = field(default_factory=list)
+
         async def should_compact(
             self,
             input_tokens: int,
             max_request_tokens: int,
             max_response_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            self.should_compact_calls.append(
+                (input_tokens, max_request_tokens, max_response_tokens),
+            )
             return True
 
         async def compact(
@@ -4240,9 +5140,10 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
         max_response_tokens=10,
         buffer_tokens=10,
     )
+    compactor = _RecordingCompactor()
     a = Agent(
         model=_BudgetModel(max_request_tokens=1_000, max_response_tokens=10),
-        compactor=_SummaryCompactor(),
+        compactor=compactor,
         budget=budget,
     )
     a.runtime.append_history(types.runtime.UserMessage(text="x"))
@@ -4252,7 +5153,15 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
     splices = [record for record in a.runtime.tape if isinstance(record, ContextSplice)]
     assert len(splices) == 1
     assert "re-trigger compaction" in splices[0].fallback_reason
-    assert "threshold (80 tok)" in splices[0].fallback_reason
+    # The retry-prediction call must use the agent budget (100), not the
+    # raw model cap (1_000). The leading should_compact call is the
+    # proactive gate; the trailing one is the willRetriggerNextTurn
+    # prediction -- both run against agent.max_request_tokens.
+    assert compactor.should_compact_calls, "should_compact never called"
+    for _input, max_req, _max_resp in compactor.should_compact_calls:
+        assert max_req == 100, (
+            f"willRetriggerNextTurn used max_request_tokens={max_req}, expected 100"
+        )
 
 
 @pytest.mark.asyncio
@@ -4415,6 +5324,449 @@ def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
     a2 = _build_agent(session_dir=tmp_path)
     a2.resume(*loaded)
     assert a2.runtime.resume_retry_at == 2_000.0
+
+
+@pytest.mark.asyncio
+async def test_shutdown_force_false_cancels_detached_and_explicit_bg() -> None:
+    """``shutdown(force=False)`` must cancel detached + explicit_bg tasks.
+
+    Without this, detached / explicit-bg tasks outlive ``serve_forever``
+    and post to a dead inbox after the runtime has Quit. Only persistent
+    subagents are spared -- they own their own ``serve_forever``.
+    """
+    a = _build_agent()
+    detached_task = asyncio.create_task(asyncio.sleep(60))
+    explicit_task = asyncio.create_task(asyncio.sleep(60))
+    persistent_task = asyncio.create_task(asyncio.sleep(60))
+    a.runtime.detached["call-d"] = detached_task
+    a.register_background(
+        "job-explicit",
+        BackgroundTaskEntry(
+            task=explicit_task,
+            tool_name="X",
+            queue_id="job-explicit",
+            started=0.0,
+            kind="tool",
+        ),
+    )
+    a.register_background(
+        "job-persistent",
+        BackgroundTaskEntry(
+            task=persistent_task,
+            tool_name="Y",
+            queue_id="job-persistent",
+            started=0.0,
+            kind="persistent_subagent",
+            persistent_run_id="run-persistent",
+        ),
+    )
+    try:
+        a.shutdown(force=False)
+        with contextlib.suppress(asyncio.CancelledError):
+            await detached_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await explicit_task
+        assert detached_task.cancelled()
+        assert explicit_task.cancelled()
+        assert not persistent_task.cancelled(), (
+            "persistent_subagent owns its own serve_forever; must NOT be cancelled"
+        )
+    finally:
+        _ = persistent_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await persistent_task
+
+
+# --- A40: _repair_compact_payload pairs tool calls and fills missing TRs --
+
+
+def test_repair_compact_payload_fills_missing_tool_results_with_interrupted() -> None:
+    """Each ``ToolCall`` id declared by an ``AssistantMessage`` must
+    receive a matching ``ToolResult`` after repair. Missing pairs get
+    a synthetic ``[interrupted]`` placeholder so the payload is a
+    wire-valid compaction input.
+    """
+    am = types.runtime.AssistantMessage(
+        tool_calls=tuple(
+            types.runtime.ToolCall(id=f"c{idx}", name="x", args={}) for idx in range(20)
+        ),
+    )
+    # Only every other id has a real result; the rest must be filled.
+    results = [
+        types.runtime.ToolResult(call_id=f"c{idx}", content="ok")
+        for idx in range(0, 20, 2)
+    ]
+    out = _repair_compact_payload(
+        [am, *results, types.runtime.UserMessage(text="next")]
+    )
+    seen_ids = {e.call_id for e in out if isinstance(e, types.runtime.ToolResult)}
+    assert seen_ids == {f"c{idx}" for idx in range(20)}
+    interrupted = [
+        e
+        for e in out
+        if isinstance(e, types.runtime.ToolResult) and e.content == "[interrupted]"
+    ]
+    assert len(interrupted) == 10
+
+
+@pytest.mark.asyncio
+async def test_agent_run_rejects_concurrent_drivers() -> None:
+    """Two concurrent ``Agent.run`` calls on the same agent are forbidden.
+
+    The single-driver contract owns ``shutdown`` in ``finally``;
+    overlapping callers would push ``Quit()`` into the foreign driver
+    and silently corrupt it. Fail loudly instead.
+    """
+    a = _build_agent()
+    a._run_active = True
+    try:
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            async for _event in a.run(types.runtime.UserMessage(text="second")):
+                pass
+    finally:
+        a._run_active = False
+
+
+# --- A18: lock-in the "no await between check and set" invariant -----------
+
+
+def test_agent_run_has_no_await_between_run_active_check_and_set() -> None:
+    """A18: source-level guard on ``Agent.run``'s check-and-set atomicity.
+
+    The ``if self._run_active`` / ``self._run_active = True`` pair runs
+    atomically only because no ``await`` interleaves them under asyncio's
+    cooperative scheduling. A future maintainer dropping an ``await`` (a
+    log flush, a metric push) between the two would silently let two
+    concurrent ``run`` callers slip past the guard. Scan the source so
+    the invariant fails CI rather than failing in production.
+    """
+    source = Path(Agent.run.__code__.co_filename).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    check_line = next(
+        i for i, line in enumerate(lines) if "if self._run_active:" in line
+    )
+    set_line = next(
+        i
+        for i, line in enumerate(lines[check_line:], start=check_line)
+        if "self._run_active = True" in line
+    )
+    # Strip strings/comments before scanning for the await keyword so the
+    # lock-down comment + docstring that *describes* the no-await rule
+    # doesn't trip its own test.
+    between = lines[check_line + 1 : set_line]
+    code_only = [
+        re.sub(r"#.*$", "", re.sub(r"(\".*?\"|'.*?')", "", line)) for line in between
+    ]
+    blob = "\n".join(code_only)
+    assert not re.search(r"\bawait\b", blob), (
+        f"`await` snuck between ``Agent.run`` check and set (lines "
+        f"{check_line + 1}-{set_line}); see test docstring for why this is "
+        f"unsafe"
+    )
+
+
+# --- A31: unified background-cancel predicate ------------------------------
+
+
+_BgKind = Literal["tool", "persistent_subagent", "detached"]
+
+
+def _bg_entry(
+    task: asyncio.Task[object],
+    *,
+    kind: _BgKind,
+    hidden: bool = False,
+) -> BackgroundTaskEntry:
+    # ``persistent_run_id`` is mandatory when ``kind="persistent_subagent"``
+    # and ignored otherwise; supplying a stub keeps the helper general.
+    return BackgroundTaskEntry(
+        task=task,
+        tool_name="t",
+        queue_id="q",
+        started=0.0,
+        hidden=hidden,
+        kind=kind,
+        persistent_run_id="run-test" if kind == "persistent_subagent" else "",
+    )
+
+
+@pytest.mark.asyncio
+async def test_should_cancel_background_tools_only_mode() -> None:
+    """tools_only mode cancels only ``kind == 'tool'`` non-hidden jobs."""
+    loop = asyncio.get_running_loop()
+    live = cast(asyncio.Task[object], loop.create_future())
+    try:
+        assert (
+            _should_cancel_background(_bg_entry(live, kind="tool"), mode="tools_only")
+            is True
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="detached"), mode="tools_only"
+            )
+            is False
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="persistent_subagent"), mode="tools_only"
+            )
+            is False
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="tool", hidden=True), mode="tools_only"
+            )
+            is False
+        )
+    finally:
+        _ = cast(asyncio.Future[object], live).cancel()
+
+
+@pytest.mark.asyncio
+async def test_should_cancel_background_all_mode() -> None:
+    """All mode cancels every non-hidden non-persistent live job."""
+    loop = asyncio.get_running_loop()
+    live = cast(asyncio.Task[object], loop.create_future())
+    done_future = loop.create_future()
+    done_future.set_result(None)
+    done = cast(asyncio.Task[object], done_future)
+    try:
+        assert (
+            _should_cancel_background(_bg_entry(live, kind="tool"), mode="all") is True
+        )
+        assert (
+            _should_cancel_background(_bg_entry(live, kind="detached"), mode="all")
+            is True
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="persistent_subagent"), mode="all"
+            )
+            is False
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="tool", hidden=True), mode="all"
+            )
+            is False
+        )
+        assert (
+            _should_cancel_background(_bg_entry(done, kind="tool"), mode="all") is False
+        )
+    finally:
+        _ = cast(asyncio.Future[object], live).cancel()
+
+
+# --- A6: ``job_id_for_call`` is public (no SLF001 noqa needed) -------------
+
+
+def test_job_id_for_call_is_public_on_agent() -> None:
+    """The cross-class helper must not require an SLF001 suppression."""
+    assert hasattr(Agent, "job_id_for_call")
+    assert not hasattr(Agent, "_job_id_for_call"), (
+        "rename leftover: remove the private alias"
+    )
+    source = Path(Agent.run.__code__.co_filename).read_text(encoding="utf-8")
+    assert "SLF001" not in source or "_job_id_for_call" not in source, (
+        "SLF001 noqa should be gone with the rename"
+    )
+
+
+# --- W7-α regression tests --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_background_aware_tool_strips_bg_keys_before_inner() -> None:
+    """REV7-020: direct ``BackgroundAwareTool.run`` calls must strip bg keys.
+
+    The wrapper advertises ``background`` / ``delay`` in the schema, so
+    it -- not just the runtime-path ``_AgentTool`` wrapper -- owns
+    stripping them before the inner tool's schema validation sees them.
+    """
+    inner_calls: list[Mapping[str, object]] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class CapturingTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            inner_calls.append(dict(args))
+            return types.runtime.ToolResult(call_id="", content="ok")
+
+    wrap = BackgroundAwareTool(CapturingTool())
+    _ = await wrap.run({"background": True, "msg": "hi"})
+    assert inner_calls, "inner tool was not invoked"
+    last = inner_calls[-1]
+    assert "background" not in last
+    assert "delay" not in last
+    assert last["msg"] == "hi"
+
+
+def test_background_aware_tool_rejects_non_object_schema() -> None:
+    """REV7-019: ``BackgroundAwareTool`` requires object-typed schemas.
+
+    Injecting ``properties`` into a ``type: "string"`` / ``"array"`` /
+    etc. schema silently produces a schema that strict validators reject
+    and misrepresents the tool to the model. The wrapper must refuse
+    construction up front.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class StringSchemaTool(StubTool):
+        directive_schema: JSON = _STRING_SCHEMA
+
+    with pytest.raises(ValueError, match="object-typed"):
+        _ = BackgroundAwareTool(StringSchemaTool())
+
+
+def test_background_aware_tool_accepts_typeless_schema() -> None:
+    """REV7-019: schemaless inner schemas still wrap (JSON Schema's "any")."""
+
+    @dataclass(slots=True, kw_only=True)
+    class TypelessTool(StubTool):
+        directive_schema: JSON = _TYPELESS_SCHEMA
+
+    wrap = BackgroundAwareTool(TypelessTool())
+    # Injection still happens; the wrapper's whole job depends on it.
+    props = cast(Mapping[str, object], wrap.directive_schema["properties"])
+    assert "background" in props
+    assert "delay" in props
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
+    tmp_path: Path,
+) -> None:
+    """REV7-004: the breaker branch sets ``last_compact_error`` so the
+    ``_AgentModel.stream`` ``assert last_err is not None`` invariant holds
+    even after a coupling slip clears the prior error.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _AlwaysCompactCompactor:
+        async def should_compact(
+            self,
+            input_tokens: int,
+            max_request_tokens: int,
+            max_response_tokens: int = 0,
+        ) -> bool:
+            del input_tokens, max_request_tokens, max_response_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, mint_ref, custom_instructions
+            raise RuntimeError("ignored: breaker is open")
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(
+        model=StubModel(),
+        compactor=_AlwaysCompactCompactor(),
+        session_dir=tmp_path,
+    )
+    # Open the breaker AND clear last_compact_error to simulate the
+    # coupling slip the assert is supposed to defend against.
+    a.compaction_state.compact_failures = 3
+    a.last_compact_error = None
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    progressed = await a.compact_if_needed(a.runtime.context().messages, a.model)
+    assert progressed is False
+    assert a.last_compact_error is not None
+
+
+def test_agent_rejects_zero_max_attempts() -> None:
+    """REV7-015: ``max_attempts < 1`` would yield
+    ``RetriesExhaustedError("Failed after 0 attempts: None")`` from the
+    first send. Validate up front instead.
+    """
+    with pytest.raises(ValueError, match="max_attempts"):
+        _ = Agent(model=StubModel(), max_attempts=0)
+
+
+def test_agent_summary_failure_falls_back_to_tool_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REV7-006: any ``summary()`` exception falls back to the tool name."""
+
+    @dataclass(slots=True, kw_only=True)
+    class BrokenSummaryTool(StubTool):
+        @override
+        def summary(self, args: Mapping[str, object]) -> str:
+            del args
+            raise TypeError("author bug")
+
+    a = _build_agent(tools=[BrokenSummaryTool()])
+    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
+    with caplog.at_level(logging.ERROR, logger="sagent.agent.agent"):
+        result = asyncio.new_event_loop().run_until_complete(wrapper.run({}))
+    # Tool ran to completion; no ``is_error`` leak from the label failure.
+    assert not result.is_error
+    assert any("summary" in r.getMessage() for r in caplog.records)
+
+
+def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
+    """REV7-044 verification: when ``_before_tool_spawn`` returns the
+    round-cap error, the runtime suppresses ``publish(item)`` for that
+    ``ModelResponseComplete``. ``_enforce_caps`` therefore does not see
+    that complete event, so no second ``ModelResponseError`` is pushed.
+
+    Documents the observed runtime behavior to guard against a future
+    refactor that re-orders publish vs before-spawn and accidentally
+    introduces the double-push the original review feared.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class CountingTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            del args
+            return types.runtime.ToolResult(call_id="", content="ran")
+
+    model = StubModel(
+        responses=[
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
+            ),
+            types.runtime.AssistantMessage(
+                tool_calls=(types.runtime.ToolCall(id="c2", name="Echo", args={}),)
+            ),
+        ]
+    )
+    a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
+
+    async def _drive() -> int:
+        count = 0
+        async for ev in a.run(types.runtime.UserMessage(text="go")):
+            if isinstance(ev, types.runtime.ModelResponseError):
+                count += 1
+        return count
+
+    error_count = asyncio.new_event_loop().run_until_complete(_drive())
+    assert error_count == 1, f"expected 1 ModelResponseError, got {error_count}"
 
 
 if __name__ == "__main__":

@@ -95,6 +95,11 @@ class PlayAudio:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: playback has no shared in-process resource."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Play a WAV file on the host's audio output.
 

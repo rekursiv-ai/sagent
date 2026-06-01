@@ -10,9 +10,11 @@ single-file edit here, not a hunt across every provider.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol
 
 import json
+import logging
 
 from sagent.lib.json import json_unfreeze
 from sagent.types.runtime import (
@@ -26,6 +28,9 @@ from sagent.types.tape import TapeEvent
 
 if TYPE_CHECKING:
     from sagent.types.model import ModelRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class TokenEstimator(Protocol):
@@ -45,8 +50,9 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     Walks every wire-bearing surface: system prompt, each entry's
     text-bearing fields (``UserMessage.text``, ``AssistantMessage.text``,
     every ``ToolCall.args``/``name``/``id``, every thinking block's
-    ``signature``/``thinking``, ``ToolResult.content``), image
-    attachments, and the tools schema.
+    ``signature``/``thinking``, ``ToolResult.content``), image and PDF
+    attachments (both billed as image tokens by Anthropic/Google), and
+    the tools schema.
 
     Args:
       request: Fully-built model request.
@@ -73,8 +79,7 @@ def _entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
     if isinstance(entry, (AgentSendMessage, UserMessage)):
         total = model.approx_text_tokens(entry.text)
         for att in entry.attachments:
-            if att.descriptor.startswith("image/"):
-                total += model.approx_image_tokens(att.data)
+            total += _attachment_tokens(att.descriptor, att.data, model)
         return total
     if isinstance(entry, AssistantMessage):
         total = model.approx_text_tokens(entry.text)
@@ -86,12 +91,42 @@ def _entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
                 )
             )
         for tb in entry.thinking_blocks:
-            total += model.approx_text_tokens(str(tb.get("signature") or ""))
-            total += model.approx_text_tokens(str(tb.get("thinking") or ""))
+            total += _thinking_block_tokens(tb, model)
         return total
     assert isinstance(entry, ToolResult)
     total = model.approx_text_tokens(entry.content)
     for att in entry.attachments:
-        if att.descriptor.startswith("image/"):
-            total += model.approx_image_tokens(att.data)
+        total += _attachment_tokens(att.descriptor, att.data, model)
     return total
+
+
+def _thinking_block_tokens(block: Mapping[str, object], model: TokenEstimator) -> int:
+    """Sum every text-bearing field across the known thinking-block shapes.
+
+    Anthropic emits ``{"type":"thinking","signature":...,"thinking":...}`` and
+    ``{"type":"redacted_thinking"}``; OpenAI / OpenAI-subscription / chat-
+    completions reasoning is stored as ``{"type":"reasoning","text":...}``. All
+    re-ship on the wire in some form (or at minimum count against the model's
+    output-token quota when later sent back as input on a resume), so every
+    text-bearing field must contribute to the request token estimate.
+    """
+    total = 0
+    for field in ("signature", "thinking", "text"):
+        value = block.get(field)
+        if isinstance(value, str) and value:
+            total += model.approx_text_tokens(value)
+    return total
+
+
+def _attachment_tokens(descriptor: str, data: bytes, model: TokenEstimator) -> int:
+    """Approximate token cost of one ``BytesMessage`` attachment.
+
+    Images and PDFs are both shipped on the wire by Anthropic and Google
+    providers; both contribute to the request token budget. New
+    descriptors are logged so a silent drop -- the previous bug, where
+    PDFs were filtered out and compaction fired late -- can't recur.
+    """
+    if descriptor.startswith("image/") or descriptor == "application/pdf":
+        return model.approx_image_tokens(data)
+    logger.warning("token_count: unknown attachment descriptor %s", descriptor)
+    return 0

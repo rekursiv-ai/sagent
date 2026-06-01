@@ -40,15 +40,20 @@ def test_prompt_too_long_custom_message() -> None:
     assert err.token_gap == 50
 
 
-def test_prompt_too_long_token_gap_zero_returns_none() -> None:
-    """``token_gap`` is None when actual does not exceed limit."""
+def test_prompt_too_long_token_gap_zero_when_exactly_at_cap() -> None:
+    """``actual == limit`` is at-cap, not unknown: returns ``0``.
+
+    The provider rejected the prompt while ``actual == limit``; the gap
+    is known (zero) and distinct from "we have no idea how much over".
+    """
     err = PromptTooLongError(actual_tokens=100, limit_tokens=100)
-    assert err.token_gap is None
+    assert err.token_gap == 0
 
 
-def test_prompt_too_long_token_gap_negative_returns_none() -> None:
+def test_prompt_too_long_token_gap_zero_when_below_cap() -> None:
+    """Below-cap is still a known shape; gap clamps to ``0``."""
     err = PromptTooLongError(actual_tokens=50, limit_tokens=100)
-    assert err.token_gap is None
+    assert err.token_gap == 0
 
 
 def test_prompt_too_long_token_gap_unknown_when_actual_missing() -> None:

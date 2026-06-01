@@ -9,9 +9,10 @@ command when the user changes provider without naming a model -- so
 the user picked, falling back to ``OpenAISubscription.DEFAULT_MODEL``
 when this provider hasn't been used before.
 
-Concurrent agents racing writes: the last writer wins, via
-``atomic_write_bytes``. No locking; the file is tiny and the cost
-of a lost update is trivial (next swap re-records).
+Concurrent writers (multiple agent processes / threads) are serialised
+through an ``fcntl.flock`` on a sibling lock file so the
+load->modify->write sequence is atomic across both. Without the lock,
+two writes racing on different provider keys would clobber each other.
 """
 
 from __future__ import annotations
@@ -19,8 +20,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import fcntl
 import json
 import logging
+import os
 
 from sagent.lib.atomic_file import atomic_write_bytes
 
@@ -73,19 +76,36 @@ def record(provider: str, model_id: str) -> None:
     """Persist that ``provider`` was last used with ``model_id``.
 
     No-op when the entry already matches (skips the disk write).
+    Persistence is best-effort: any ``OSError`` raised while creating
+    the ``~/.sagent/`` directory, acquiring the lock file, or writing
+    the data is logged at WARNING and swallowed -- callers never crash
+    on a locked-down home directory.
 
     Args:
       provider: Provider class name.
       model_id: The model_id to associate.
 
+    Raises:
+      ValueError: When ``provider`` or ``model_id`` is empty.
+
     """
     if not provider or not model_id:
-        return
-    current = load()
-    if current.get(provider) == model_id:
-        return
-    current[provider] = model_id
+        raise ValueError(
+            "last_models.record requires non-empty provider and model_id; "
+            f"got provider={provider!r}, model_id={model_id!r}."
+        )
     try:
-        atomic_write_bytes(_PATH, json.dumps(current, indent=2).encode("utf-8"))
+        _PATH.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = _PATH.with_suffix(_PATH.suffix + ".lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            current = load()
+            if current.get(provider) == model_id:
+                return
+            current[provider] = model_id
+            atomic_write_bytes(_PATH, json.dumps(current, indent=2).encode("utf-8"))
+        finally:
+            os.close(fd)
     except OSError:
         logger.warning("Could not persist last-models to %s", _PATH, exc_info=True)

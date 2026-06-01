@@ -52,7 +52,6 @@ from sagent.types.runtime import (
     RuntimeEvent,
     UserDeferredMessage,
     UserMessage,
-    UserQueuedMessage,
 )
 
 
@@ -216,6 +215,31 @@ async def test_dispatch_kill_namespaced_subagent_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_kill_owner_slash_job_unknown_owner_surfaces_error() -> None:
+    """F7: ``/kill bogus/qid`` with an unknown owner must surface an error.
+
+    Previously the code fell through to ``_resolve_targets`` and then
+    ``agent.kill_tool(target)``, silently no-op'ing while the user
+    believed the kill landed.
+    """
+    a = _agent()
+    stub = cast(_StubAgent, a)
+    p = RecordingPrinter()
+    empty: dict[str, AgentLike] = {}
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new=empty,
+    ):
+        _ = await _dispatch(a, SlashKill(target="bogus/qid"), p)
+    assert stub.killed == [], (
+        f"unknown owner must not trigger self.kill_tool fallback; got {stub.killed!r}"
+    )
+    assert any("unknown owner" in error for error in p.tool_errors), (
+        f"expected 'unknown owner' error; got {p.tool_errors!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_dispatch_kill_all() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
@@ -223,6 +247,28 @@ async def test_dispatch_kill_all() -> None:
     _ = await _dispatch(a, SlashKill(target="all"), p)
     assert stub.killed_all == 1
     assert any("cancelled all" in line for line in p.slash_blocks)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_kill_all_clears_local_repl_queues() -> None:
+    """F136: ``/kill all`` must also clear REPL-local urgent/deferred staging.
+
+    Otherwise the user sees a "pending" preview that survives a wipe
+    they explicitly requested, contradicting the kill-all gesture.
+    """
+    a = _agent()
+    stub = cast(_StubAgent, a)
+    p = RecordingPrinter()
+    queues = InputQueues(
+        urgent=[QueuedInputBlock(text="staged urgent")],
+        deferred=[QueuedInputBlock(text="staged later")],
+    )
+    _ = await _dispatch(a, SlashKill(target="all"), p, queues=queues)
+    assert stub.killed_all == 1
+    assert not queues.has_any(), (
+        f"/kill all must clear REPL queues; got urgent={queues.urgent!r}"
+        f" deferred={queues.deferred!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -297,15 +343,23 @@ async def test_dispatch_text_pushes_user_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_defer_pushes_user_queued_message() -> None:
-    """``/defer <text>`` pushes ``UserQueuedMessage`` (non-preempting)."""
+async def test_dispatch_defer_pushes_user_deferred_message() -> None:
+    """F31: ``/defer <text>`` pushes ``UserDeferredMessage``.
+
+    Aligns the slash with Tab's ``_kb_defer`` (which also stages as
+    deferred) and with ``Defer``'s docstring -- "drains at
+    ``AgentIdle``". Previously the slash pushed ``UserQueuedMessage``,
+    which drains at the chat-safe boundary; that divergence let
+    headless ``/defer`` callers preempt mid-round while the equivalent
+    Tab gesture did not.
+    """
     a = _agent()
     stub = cast(_StubAgent, a)
     _ = await _dispatch(a, SlashDefer(content="for later"), None)
     pushed = stub.runtime.inbox.items
     assert any(
-        isinstance(i, UserQueuedMessage) and i.text == "for later" for i in pushed
-    )
+        isinstance(i, UserDeferredMessage) and i.text == "for later" for i in pushed
+    ), f"expected UserDeferredMessage; got {pushed!r}"
 
 
 def test_resolve_targets_supports_exact_glob_brace_and_regex() -> None:
@@ -331,9 +385,69 @@ def test_resolve_targets_supports_exact_glob_brace_and_regex() -> None:
         agent_registry.clear()
 
 
+def test_resolve_targets_empty_regex_does_not_match_everything() -> None:
+    """REPL-020: ``/`` parses as an empty regex that matches every label.
+
+    Empty-pattern regex search returns True on every string, silently
+    fanning ``/halt /`` (or ``/send / ...``) out to every persistent
+    subagent. Reject patterns shorter than ``/x/`` to keep the regex
+    surface meaningfully filterable.
+    """
+    child1 = _persistent_agent()
+    child2 = _persistent_agent()
+    agent_registry.update({"fix-tools": child1, "fix-compact": child2})
+    try:
+        assert _resolve_targets("/") == [], (
+            "bare '/' must not match every persistent subagent"
+        )
+        assert _resolve_targets("//") == [], (
+            "empty-body '//' regex must not match every persistent subagent"
+        )
+    finally:
+        agent_registry.clear()
+
+
 @pytest.mark.asyncio
-async def test_dispatch_send_sends_user_message_to_child() -> None:
+async def test_dispatch_halt_all_targets_every_persistent_subagent() -> None:
+    """REPL-041: ``/halt all`` must halt every persistent subagent.
+
+    Mirrors ``/kill all``. Without a special case, the literal target
+    string "all" falls through to ``_resolve_targets`` which only
+    matches a registry label called ``all`` -- almost never what the
+    user meant.
+    """
     a = _agent()
+    child1 = _persistent_agent()
+    child2 = _persistent_agent()
+    child1_stub = cast(_StubAgent, child1)
+    child2_stub = cast(_StubAgent, child2)
+    p = RecordingPrinter()
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"fix-tools": child1, "fix-compact": child2},
+    ):
+        _ = await _dispatch(a, SlashHalt(target="all"), p)
+    assert child1_stub.halted == 1, (
+        f"fix-tools must be halted by /halt all; halted={child1_stub.halted}"
+    )
+    assert child2_stub.halted == 1, (
+        f"fix-compact must be halted by /halt all; halted={child2_stub.halted}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_pushes_agent_send_message_with_source() -> None:
+    """``/send <child>`` routes a parent->child handoff, not anonymous user
+    input.
+
+    The child must see an ``AgentSendMessage`` attributed to the
+    parent's name so the renderer (`repl/render.py`) and replay
+    (`repl/replay.py`) draw the attributed bar, and so the child's
+    model context distinguishes parent text from human input.
+    """
+    a = _agent()
+    stub_parent = cast(_StubAgent, a)
+    stub_parent.name = "Parent"
     child = _persistent_agent()
     child_stub = cast(_StubAgent, child)
     p = RecordingPrinter()
@@ -343,9 +457,16 @@ async def test_dispatch_send_sends_user_message_to_child() -> None:
     finally:
         agent_registry.clear()
 
-    assert any(
-        isinstance(item, UserMessage) and item.text == "continue"
-        for item in child_stub.runtime.inbox.items
+    pushed = child_stub.runtime.inbox.items
+    matches = [
+        item
+        for item in pushed
+        if isinstance(item, AgentSendMessage)
+        and item.source == "Parent"
+        and item.text == "continue"
+    ]
+    assert matches, (
+        f"expected one AgentSendMessage(source='Parent', text='continue'); got {pushed!r}"
     )
     assert "[/send fix-tools] sent" in p.slash_blocks
 
@@ -839,6 +960,64 @@ def test_quit_surfaces_queued_input_preview() -> None:
     assert line is None
     console.print.assert_called_once()
     assert not queues.has_any()
+
+
+def test_quit_discard_preview_includes_count_when_multiple_blocks() -> None:
+    """F35: discard message must surface the total block count.
+
+    Previously the preview showed only the last block, making the user
+    believe one message was lost when several were staged. The new
+    message reports the count and ellipses any truncated preview body.
+    """
+    session = MagicMock()
+
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    console = MagicMock()
+    queues = InputQueues(
+        deferred=[
+            QueuedInputBlock(text="first"),
+            QueuedInputBlock(text="second"),
+            QueuedInputBlock(text="third"),
+        ]
+    )
+    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    line = asyncio.run(src.next_line())
+    assert line is None
+    console.print.assert_called_once()
+    rendered = str(console.print.call_args.args[0])
+    assert "3" in rendered, f"discard preview must include count; got {rendered!r}"
+    assert "messages" in rendered, (
+        f"discard preview must use plural for >1 block; got {rendered!r}"
+    )
+
+
+def test_quit_discard_preview_marks_truncated_body_with_ellipsis() -> None:
+    """A long block preview must be marked as truncated, not silently cut.
+
+    Otherwise an 80-char clip looks like the entire message; the
+    operator can't tell content was elided.
+    """
+    session = MagicMock()
+
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    console = MagicMock()
+    long_text = "x" * 200
+    queues = InputQueues(deferred=[QueuedInputBlock(text=long_text)])
+    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    line = asyncio.run(src.next_line())
+    assert line is None
+    rendered = str(console.print.call_args.args[0])
+    assert "…" in rendered, (
+        f"truncated preview must end with ellipsis marker; got {rendered!r}"
+    )
 
 
 def test_quit_without_console_swallows_preview() -> None:

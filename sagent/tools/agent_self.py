@@ -21,7 +21,7 @@ from sagent import (
     providers as providers_module,
     types,
 )
-from sagent.lib.json import JSON, int_val, json_freeze
+from sagent.lib.json import JSON, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
@@ -30,7 +30,6 @@ from sagent.providers import (
 )
 from sagent.tools.core import (
     current_agent_var,
-    get_tool_state,
     load_tool_description,
     provider_not_allowed_result,
 )
@@ -194,6 +193,11 @@ class AgentSelf:
 
         """
         return ""
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: self-patching has no shared file resource."""
+        del args
+        return None
 
     async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
         """Apply an AgentSelf patch object.
@@ -371,21 +375,30 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         agent.status = plan.status
         parts.append(f"status={plan.status}")
     if plan.model is not None:
-        # ``swap_model`` rescales the budget to the new model's window
+        new_model = plan.model.model
+        # ``swap_model`` rescales the budget into the new model's window
         # (whole-window budgets follow the new ceiling; pinned values clamp
-        # down), so any explicit per-call limits below land within range.
+        # down), so no explicit budget reset is needed here. Snapshot the
+        # capability flags first: ``swap_model`` zeroes effort / thinking /
+        # service_tier / latency when the new model lacks support, so a
+        # post-swap check would never see them set. Compare pre vs post to
+        # emit the ``(unsupported)`` confirmation lines.
+        had_effort = agent.effort is not None
+        had_thinking = agent.thinking is not None
+        had_service_tier = agent.service_tier is not None
+        had_latency = agent.latency is not None
         agent.swap_model(plan.model.model, spec=plan.model.spec)
         parts.append(f"model={plan.model.label}")
-        if not plan.model.model.supports_effort and agent.effort is not None:
+        if not new_model.supports_effort and had_effort:
             agent.effort = None
             parts.append("effort=unset (unsupported)")
-        if not plan.model.model.supports_thinking and agent.thinking is not None:
+        if not new_model.supports_thinking and had_thinking:
             agent.thinking = None
             parts.append("thinking=off (unsupported)")
-        if not plan.model.model.valid_service_tiers and agent.service_tier is not None:
+        if not new_model.valid_service_tiers and had_service_tier:
             agent.service_tier = None
             parts.append("service_tier=unset (unsupported)")
-        if not plan.model.model.valid_latency_modes and agent.latency is not None:
+        if not new_model.valid_latency_modes and had_latency:
             agent.latency = None
             parts.append("latency=unset (unsupported)")
     if plan.thinking is not None:
@@ -490,12 +503,11 @@ def _plan_model(
             )
     else:
         account = spec.account
+    # An auth/account-only swap (no model_id, same provider) keeps the
+    # current model -- matches REPL ``/model --auth sub`` semantics so
+    # the tool surface and slash command behave the same way.
     if not model_id and prov_name == spec.provider:
-        return types.runtime.ToolResult(
-            call_id="",
-            content="model_id is required when changing auth/account without provider.",
-            is_error=True,
-        )
+        model_id = spec.model_id
     if model_id and prov_name == spec.provider:
         inferred = infer_provider(model_id, prov_name)
         if inferred is not None:
@@ -538,7 +550,13 @@ def _plan_model_options(
         return {}
     options = cast(Mapping[str, object], raw)
     supported = _supported_model_options(model)
-    unknown = sorted(set(options) - set(supported))
+    # A key is unsupported only when it carries a *non-null* value the model
+    # can't honor. Clearing an option to ``null`` (e.g. latency/service_tier)
+    # is a valid request the per-field validation handles, so a null must
+    # never trip this capability gate.
+    unknown = sorted(
+        k for k in options if k not in supported and options[k] is not None
+    )
     if unknown:
         return types.runtime.ToolResult(
             call_id="",
@@ -684,10 +702,23 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | 
     """Validate a single token limit without applying it."""
     if raw is None:
         return None
-    if not isinstance(raw, (int, float, str)):
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
         return types.runtime.ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {attr} must be a number.",
+            is_error=True,
+        )
+    # Schema declares token limits as ``type: integer``; ``int(1.9)``
+    # would silently round to 1 and accept the request. A float here
+    # is a directive error -- reject so the LLM doesn't see its
+    # ``1.9`` request quietly become ``1``.
+    if isinstance(raw, float) and not raw.is_integer():
+        return types.runtime.ToolResult(
+            call_id="",
+            content=(
+                f"Invalid AgentSelf limit override: {attr} must be an"
+                f" integer, got {raw!r}."
+            ),
             is_error=True,
         )
     try:
@@ -730,18 +761,15 @@ def _do_diagnostics(
     """Return current agent diagnostics."""
     agent = cast("Agent | None", current_agent_var.get(None))
     spec = agent.model_spec if agent is not None else None
-    stats = dict(get_tool_state().stats)
     lines: list[str] = []
     if changes:
         lines.append("Changes: " + ", ".join(changes))
     if d is not None:
         lines.extend(_catalog_lines(d, agent))
-    if stats:
-        lines.extend(_format_stats(stats))
+    if agent is not None:
+        lines.extend(_format_stats(agent))
     else:
-        lines.append(
-            "No stats yet - the Agent publishes stats after the first completed model request."
-        )
+        lines.append("No agent context; stats unavailable.")
     lines.extend(_spec_lines(spec))
     if agent is not None:
         lines.extend(_agent_option_lines(agent))
@@ -796,24 +824,28 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
     return lines
 
 
-def _format_stats(stats: dict[str, float | int]) -> list[str]:
-    """Format session stats into display lines."""
-    max_req = int_val(stats.get("max_request_tokens"), 0)
-    max_resp = int_val(stats.get("max_response_tokens"), 0)
-    input_tokens = int_val(stats.get("input_tokens"), 0)
+def _format_stats(agent: Agent) -> list[str]:
+    """Format live cost/budget counters into display lines.
+
+    Reads directly from the single cost store (``agent.cost_tracker``)
+    plus the live budget/round counters on the agent. No separate
+    per-request publisher exists; diagnostics is a pull, not a push.
+    """
+    tracker = agent.cost_tracker
+    max_req = agent.max_request_tokens
+    max_resp = agent.max_response_tokens
+    input_tokens = tracker.last_request.input_tokens
     pct = (input_tokens / max_req * 100) if max_req else 0.0
-    total_in = int_val(stats.get("total_input_tokens"), 0)
-    total_out = int_val(stats.get("total_output_tokens"), 0)
     return [
-        f"Tool call rounds:   {int_val(stats.get('num_tool_call_rounds'), 0)}",
+        f"Tool call rounds:   {agent.num_tool_call_rounds}",
         f"Max request tokens:   {max_req:,}",
         f"Max response tokens:  {max_resp:,}",
         f"Input tokens:       {input_tokens:,} ({pct:.1f}% of max request)",
-        f"Total input tokens: {total_in:,}",
-        f"Total output tokens:{total_out:,}",
-        f"Cache creation:     {int_val(stats.get('cache_creation_tokens'), 0):,}",
-        f"Cache read:         {int_val(stats.get('cache_read_tokens'), 0):,}",
-        f"Total cost (USD):   ${cast(float, stats.get('total_cost_usd') or 0.0):.2f}",
+        f"Total input tokens: {tracker.total.input_tokens:,}",
+        f"Total output tokens:{tracker.total.output_tokens:,}",
+        f"Cache creation:     {tracker.total.cache_creation_tokens:,}",
+        f"Cache read:         {tracker.total.cache_read_tokens:,}",
+        f"Total cost (USD):   ${tracker.total_cost_usd:.2f}",
     ]
 
 

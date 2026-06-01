@@ -9,14 +9,12 @@ import logging
 
 from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
-    AgentLike,
     agent_label_var,
     agent_registry,
     load_tool_description,
     opt_int,
 )
 from sagent.types.runtime import (
-    AgentSendDeferredMessage,
     AgentSendMessage,
     ToolResult,
 )
@@ -26,18 +24,40 @@ logger = logging.getLogger(__name__)
 
 
 def _deliver(
-    target: AgentLike | None,
+    to: str,
     sender: str,
     content: str,
     delay: int,
 ) -> None:
-    """Deliver a delayed message into the target's inbox."""
-    del delay
+    """Deliver a delayed message into the target's inbox.
+
+    Re-resolves ``to`` against ``agent_registry`` at delivery time
+    rather than capturing the target object at schedule time: a
+    persistent agent that died, restarted, or was relabelled between
+    schedule and delivery would otherwise receive the message on a
+    stale handle (or worse, a different identity reusing the old
+    object). Re-resolution makes the registry the single source of
+    truth and turns the dead-target case into a soft warning instead
+    of a silent delivery to a defunct inbox.
+
+    Posts an ``AgentSendMessage`` (preempting) -- the ``call_later``
+    delay timer alone supplies the "wait before delivery" semantic.
+    Using ``AgentSendDeferredMessage`` here would double-defer the
+    delivery: the runtime parks deferred messages until ``AgentIdle``,
+    so a busy target would not see the wake-up the delay timer was
+    meant to provide.
+
+    Prepends a ``[delayed Ns]`` marker to the body so the recipient
+    can tell a scheduled reminder from a fresh send (the description
+    tooltip and ``assets/default/tools_agentsend.md`` promise this).
+    """
+    target = agent_registry.get(to)
     if target is None:
-        logger.warning("Delayed message to dead agent from %s", sender)
+        logger.warning("Delayed message to dead agent %r from %s", to, sender)
         return
+    body = f"[delayed {delay}s] {content}" if delay > 0 else content
     target.runtime.inbox.push_back(
-        AgentSendDeferredMessage(source=sender, text=content),
+        AgentSendMessage(source=sender, text=body),
     )
 
 
@@ -117,6 +137,11 @@ class AgentSend:
         listing = f"Active agents you can message: {', '.join(others)}"
         return f"{identity} {listing}" if identity else listing
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: inbox push is independent per call."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Deliver a message to the target agent's inbox.
 
@@ -136,6 +161,12 @@ class AgentSend:
         if not content:
             return ToolResult(
                 call_id="", content="'content' is required.", is_error=True
+            )
+        if delay is not None and delay < 0:
+            return ToolResult(
+                call_id="",
+                content=f"'delay' must be ≥ 0, got {delay}.",
+                is_error=True,
             )
 
         target = agent_registry.get(to)
@@ -160,7 +191,7 @@ class AgentSend:
             asyncio.get_running_loop().call_later(
                 delay,
                 _deliver,
-                target,
+                to,
                 sender,
                 content,
                 delay,

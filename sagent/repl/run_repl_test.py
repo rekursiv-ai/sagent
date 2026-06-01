@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
+import sys
 
 import pytest
 
@@ -32,13 +34,14 @@ from sagent.repl.render import (
 )
 from sagent.repl.run_repl import (
     _background_tasks_for_repl_cancel,
+    _input_queue_committer_observer,
     _parse_model_args,
     _subagent_phase,
     do_login,
     do_switch_model,
     do_switch_thinking,
     format_tasks,
-    make_input_queue_committer,
+    install_input_queue_committer,
     run_repl,
 )
 from sagent.types.model import ModelSpec
@@ -102,13 +105,13 @@ def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
     return target.provider, target.auth, target.account, target.model_id
 
 
-def test_input_queue_committer_installs_before_tool_spawn_hook() -> None:
+def test_install_input_queue_committer_installs_before_tool_spawn_hook() -> None:
     agent = _QueueAgent()
     queues = InputQueues(
         urgent=[QueuedInputBlock(text="interrupt now")],
         deferred=[QueuedInputBlock(text="later")],
     )
-    make_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
     pushed = hook(AssistantMessage(text="tool next"))
@@ -118,7 +121,9 @@ def test_input_queue_committer_installs_before_tool_spawn_hook() -> None:
     assert pushed.text == "interrupt now"
 
 
-def test_input_queue_committer_preserves_existing_before_tool_spawn_hook() -> None:
+def test_install_input_queue_committer_preserves_existing_before_tool_spawn_hook() -> (
+    None
+):
     original_error = ModelResponseError(RuntimeError("too many tool rounds"))
 
     def _original(_message: AssistantMessage) -> RuntimeEvent | None:
@@ -128,7 +133,7 @@ def test_input_queue_committer_preserves_existing_before_tool_spawn_hook() -> No
     agent.runtime.before_tool_spawn = _original
     queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
 
-    make_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
@@ -136,7 +141,7 @@ def test_input_queue_committer_preserves_existing_before_tool_spawn_hook() -> No
     assert [block.text for block in queues.urgent] == ["interrupt now"]
 
 
-def test_input_queue_committer_composes_existing_empty_hook() -> None:
+def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
     seen: list[AssistantMessage] = []
 
     def _original(message: AssistantMessage) -> RuntimeEvent | None:
@@ -147,7 +152,7 @@ def test_input_queue_committer_composes_existing_empty_hook() -> None:
     agent.runtime.before_tool_spawn = _original
     queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
 
-    make_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
@@ -159,16 +164,17 @@ def test_input_queue_committer_composes_existing_empty_hook() -> None:
     assert queues.urgent == []
 
 
-def test_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
+def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
     agent = _QueueAgent()
     queues = InputQueues()
-    observer = make_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
     later_error = ModelResponseError(RuntimeError("later hook"))
 
     def _later(_message: AssistantMessage) -> RuntimeEvent | None:
         return later_error
 
     agent.runtime.before_tool_spawn = _later
+    observer = _input_queue_committer_observer(_as_queue_agent(agent), queues)
     observer(AgentIdle())
 
     hook = agent.runtime.before_tool_spawn
@@ -176,15 +182,65 @@ def test_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
     assert hook(AssistantMessage(text="tool next")) is later_error
 
 
-def test_input_queue_committer_deferred_does_not_fire_on_model_response_complete() -> (
-    None
-):
+def test_install_input_queue_committer_deferred_skips_model_response_complete() -> None:
     agent = _QueueAgent()
     queues = InputQueues(deferred=[QueuedInputBlock(text="later")])
-    observer = make_input_queue_committer(_as_queue_agent(agent), queues)
+    observer = _input_queue_committer_observer(_as_queue_agent(agent), queues)
     observer(ModelResponseComplete(message=AssistantMessage(text="done")))
     assert [b.text for b in queues.deferred] == ["later"]
     assert agent.runtime.inbox.pushed == []
+
+
+def test_install_input_queue_committer_uninstall_restores_before_tool_spawn() -> None:
+    """REPL-043: uninstall closure restores the prior hook and detaches observer.
+
+    Without this the caller would have to capture / restore the
+    ``before_tool_spawn`` slot by hand -- exactly the asymmetric
+    capture pattern this refactor removes from ``run_repl``.
+    """
+    agent = _QueueAgent()
+    original = agent.runtime.before_tool_spawn
+    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+
+    uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
+    # Install: hook wrapped, observer attached.
+    assert agent.runtime.before_tool_spawn is not original
+    initial_observer_count = len(agent.runtime.observers)
+    assert initial_observer_count >= 1
+
+    uninstall()
+    assert agent.runtime.before_tool_spawn is original, (
+        f"uninstall must restore prior before_tool_spawn;"
+        f" got {agent.runtime.before_tool_spawn}"
+    )
+    assert len(agent.runtime.observers) == initial_observer_count - 1, (
+        f"uninstall must detach the observer it appended;"
+        f" observers={agent.runtime.observers!r}"
+    )
+    # Idempotent: a second call is safe.
+    uninstall()
+    assert agent.runtime.before_tool_spawn is original
+
+
+def test_install_input_queue_committer_uninstall_preserves_later_hook() -> None:
+    """Uninstall must not clobber a later install that took ownership.
+
+    A subsequent owner replaces ``before_tool_spawn``; uninstall sees
+    the slot no longer holds our wrapper and leaves it alone.
+    """
+    agent = _QueueAgent()
+    queues = InputQueues()
+    uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
+    later_error = ModelResponseError(RuntimeError("later owner"))
+
+    def _later_hook(_message: AssistantMessage) -> RuntimeEvent | None:
+        return later_error
+
+    agent.runtime.before_tool_spawn = _later_hook
+    uninstall()
+    assert agent.runtime.before_tool_spawn is _later_hook, (
+        "uninstall must not clobber a downstream hook that took over the slot"
+    )
 
 
 def test_parse_model_args_no_tokens_returns_usage_string() -> None:
@@ -320,6 +376,11 @@ class _FakeInbox:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
+    model_call: object = None
+    compact_task: object = None
+    cohort: set[str] = field(default_factory=set)
+    running_tools: tuple[object, ...] = ()
+    service_suspended_until: float | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -359,6 +420,13 @@ class _FakeAgent:
             self.thinking = None
         self.show_thinking = state.endswith("-show")
         self.provider_args["redact_thinking"] = state == "redact-hide"
+
+    def restore_thinking_state(
+        self, state: str | None, thinking: str | None, show_thinking: bool
+    ) -> None:
+        self.thinking_state = state
+        self.thinking = thinking
+        self.show_thinking = show_thinking
 
     def set_provider_arg(self, key: str, value: object) -> None:
         self.provider_args[key] = value
@@ -417,6 +485,7 @@ def _as_agent(a: _FakeAgent) -> Agent:
 class _QueueRuntime:
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
     before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None] | None = None
+    observers: list[Callable[[RuntimeEvent], None]] = field(default_factory=list)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -725,7 +794,8 @@ def test_format_tasks_no_registry_header_only() -> None:
 def test_format_tasks_lists_registered_agent_fg_idle() -> None:
     agent = _FakeAgent()
     other = MagicMock()
-    other.work = None
+    other.runtime.model_call = None
+    other.runtime.compact_task = None
     other.background = {}
     with patch(
         "sagent.repl.run_repl.agent_registry",
@@ -811,6 +881,92 @@ def test_run_repl_invokes_replay_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_repl_unwinds_observers_and_before_tool_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-entering ``run_repl`` on the same agent must not stack state.
+
+    F134: the body appends 2 observers and patches ``before_tool_spawn``
+    via ``install_input_queue_committer``. Without a ``finally`` that
+    detaches them, repeated entries pile up across re-entries.
+    """
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+
+    def _sentinel_observer(event: RuntimeEvent) -> None:
+        del event
+
+    runtime.observers.append(_sentinel_observer)
+    original_before_tool_spawn = runtime.before_tool_spawn
+    observers_before = list(runtime.observers)
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+        show_thinking: bool = False
+        name: str = "test"
+        status: str | None = None
+        session_dir: object | None = None
+        background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+
+        async def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self, *, force: bool = False) -> None:
+            del force
+
+        def cancel_background(self, key: str) -> None:
+            del key
+
+    holder = _Holder(runtime=runtime)
+
+    @contextlib.contextmanager
+    def _stub_patch_stdout(**_kwargs: object):
+        yield
+
+    def _stub_console(**_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    def _stub_session(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    def _stub_history(_path: object) -> MagicMock:
+        return MagicMock()
+
+    def _stub_input_source(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    def _stub_replay(_agent: object, _printer: object) -> None:
+        return None
+
+    fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+
+    def _stub_spawn(
+        _agent: object, _source: object, **_kwargs: object
+    ) -> asyncio.Task[None]:
+        return fake_pump
+
+    run_repl_mod = sys.modules["sagent.repl.run_repl"]
+
+    monkeypatch.setattr(run_repl_mod, "patch_stdout", _stub_patch_stdout)
+    monkeypatch.setattr(run_repl_mod, "Console", _stub_console)
+    monkeypatch.setattr(run_repl_mod, "PromptSession", _stub_session)
+    monkeypatch.setattr(run_repl_mod, "FileHistory", _stub_history)
+    monkeypatch.setattr(run_repl_mod, "PromptToolkitInputSource", _stub_input_source)
+    monkeypatch.setattr(run_repl_mod, "replay_messages", _stub_replay)
+    monkeypatch.setattr(run_repl_mod, "spawn_repl_pump", _stub_spawn)
+
+    await run_repl(cast(Agent, holder), history=tmp_path / "history")
+
+    assert runtime.observers == observers_before, (
+        f"run_repl must detach the observers it installed; got {runtime.observers}"
+    )
+    assert runtime.before_tool_spawn is original_before_tool_spawn, (
+        f"run_repl must restore before_tool_spawn; got {runtime.before_tool_spawn}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() -> None:
     agent = _FakeAgent()
     tool_task = asyncio.create_task(asyncio.sleep(10.0))
@@ -830,6 +986,7 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
             queue_id="child",
             started=0.0,
             kind="persistent_subagent",
+            persistent_run_id="run-child",
             hidden=False,
         ),
     }
@@ -842,7 +999,7 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 
 
 @pytest.mark.asyncio
-async def test_make_input_queue_committer_pushes_deferred_on_agent_idle() -> None:
+async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() -> None:
     """``AgentIdle`` with non-empty queue → coalesced ``UserDeferredMessage`` pushed; queue cleared."""
     queues = InputQueues(
         deferred=[
@@ -853,7 +1010,7 @@ async def test_make_input_queue_committer_pushes_deferred_on_agent_idle() -> Non
     )
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    observer = make_input_queue_committer(cast(Agent, holder), queues)
+    observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(AgentIdle())
     assert not queues.has_any()
     pushed = await runtime.inbox.drain()
@@ -863,12 +1020,12 @@ async def test_make_input_queue_committer_pushes_deferred_on_agent_idle() -> Non
     assert item.text == "elephant\n\nbanana\n\nchair"
 
 
-def test_make_input_queue_committer_ignores_non_agent_idle_events() -> None:
+def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
     """Non-``AgentIdle`` events leave ``queued_input`` and the inbox untouched."""
     queues = InputQueues(deferred=[QueuedInputBlock(text="elephant")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    observer = make_input_queue_committer(cast(Agent, holder), queues)
+    observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
     observer(ModelIdle())
@@ -876,12 +1033,12 @@ def test_make_input_queue_committer_ignores_non_agent_idle_events() -> None:
     assert runtime.inbox._queue.empty()
 
 
-def test_make_input_queue_committer_ignores_agent_idle_when_empty() -> None:
+def test_input_queue_committer_observer_ignores_agent_idle_when_empty() -> None:
     """``AgentIdle`` with an empty queue is a no-op (no spurious push)."""
     queues = InputQueues()
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    observer = make_input_queue_committer(cast(Agent, holder), queues)
+    observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(AgentIdle())
     assert runtime.inbox._queue.empty()
 
@@ -897,7 +1054,7 @@ async def test_startup_idle_flushes_staged_queue_on_first_agent_idle() -> None:
     )
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
+    _ = install_input_queue_committer(cast(Agent, holder), queues)
 
     flushed = asyncio.Event()
 
@@ -927,7 +1084,7 @@ async def test_startup_idle_not_fired_when_history_needs_model() -> None:
     queues = InputQueues(deferred=[QueuedInputBlock(text="for later")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
+    _ = install_input_queue_committer(cast(Agent, holder), queues)
     runtime.inbox.push_back(UserMessage(text="answer this first"))
 
     order: list[type] = []
@@ -955,12 +1112,10 @@ class _TextOnlyModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_thinking
+        del history, on_thinking
         for ch in self.text:
             on_text(ch)
         return AssistantMessage(text=self.text)
@@ -1024,7 +1179,7 @@ def _harness_runtime() -> tuple[
     queues = InputQueues()
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
-    runtime.observers.append(make_input_queue_committer(cast(Agent, holder), queues))
+    _ = install_input_queue_committer(cast(Agent, holder), queues)
     return runtime, holder, queues
 
 
@@ -1157,7 +1312,7 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     class _Holder:
         runtime = agent
 
-    agent.observers.append(make_input_queue_committer(cast(Agent, _Holder()), queues))
+    _ = install_input_queue_committer(cast(Agent, _Holder()), queues)
 
     second_round = asyncio.Event()
     rounds = 0
@@ -1250,6 +1405,10 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         def name(self) -> str:
             return self._name
 
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
@@ -1264,12 +1423,10 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            system: str,
-            tools: list[agent_runtime.Tool],
             on_text: Callable[[str], None],
             on_thinking: Callable[[str], None],
         ) -> AssistantMessage:
-            del system, tools, on_thinking
+            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -1348,6 +1505,7 @@ def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
         queue_id=queue_id,
         started=0.0,
         kind="persistent_subagent",
+        persistent_run_id=f"run-{queue_id}",
         hidden=False,
         delay_sec=0.0,
     )
@@ -1380,6 +1538,7 @@ def test_subagent_phase_stopped_when_task_done() -> None:
         queue_id="child-1",
         started=0.0,
         kind="persistent_subagent",
+        persistent_run_id="run-child-1",
         hidden=False,
         delay_sec=0.0,
     )
@@ -1436,6 +1595,7 @@ def test_subagent_phase_errored_when_task_crashed() -> None:
         queue_id="child-crashed",
         started=0.0,
         kind="persistent_subagent",
+        persistent_run_id="run-child-crashed",
         hidden=False,
         delay_sec=0.0,
     )
@@ -1451,16 +1611,6 @@ def test_subagent_phase_running_when_child_not_in_registry() -> None:
     with patch(
         "sagent.repl.run_repl.agent_registry",
         empty_registry,
-    ):
-        assert _subagent_phase(job) == "running"
-
-
-def test_subagent_phase_running_when_child_has_no_runtime() -> None:
-    job = _make_subagent_job("child-no-rt")
-    child = MagicMock(spec=[])  # no 'runtime' attribute
-    with patch(
-        "sagent.repl.run_repl.agent_registry",
-        {"child-no-rt": child},
     ):
         assert _subagent_phase(job) == "running"
 

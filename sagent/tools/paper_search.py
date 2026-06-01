@@ -448,6 +448,11 @@ class PaperSearch:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: independent network fetch, no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute a paper search and return formatted results.
 

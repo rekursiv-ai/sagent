@@ -62,7 +62,9 @@ def post_process_result(
           disables persistence; results above the threshold are
           off-loaded to disk and replaced with a preview.
       message_budget_chars: Aggregate live tool-result budget. ``0`` disables it.
-      used_message_chars: Live tool-result characters already in context.
+      used_message_chars: Persist-budget characters already in context;
+          excludes results whose tool is in ``PERSIST_EXEMPT_TOOLS`` and
+          error results, since ``_should_persist`` skips both.
 
     Returns:
       processed: Possibly-modified ``ToolResult``. ``call_id`` /
@@ -171,10 +173,20 @@ def _write_unique(filepath: Path, content: bytes) -> Path:
             filepath.with_name(f"{filepath.stem}-{suffix}.txt"), content
         )
     try:
-        _ = os.write(fd, content)
+        _write_all(fd, content)
     finally:
         os.close(fd)
     return filepath
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` to ``fd``, looping over short writes."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written == 0:
+            raise OSError("Failed to write bytes to tool-result file.")
+        view = view[written:]
 
 
 def _format_size(n: int) -> str:

@@ -40,6 +40,7 @@ from sagent.tools.web_fetch import (
     _match_http_fetch,
     _parse_rss_cluster,
     _RedditAdapter,
+    _request_bodies,
     _url_is_safe,
     _validated_host,
     _XAdapter,
@@ -1282,8 +1283,11 @@ def test_x_adapter_matches_x_and_twitter_hosts() -> None:
     assert adapter.matches("https://example.com/x.com") is False
 
 
-def test_x_adapter_routes_through_reader_proxy() -> None:
-    """X fetches always flow through the Jina reader proxy as markdown."""
+def test_x_adapter_routes_through_reader_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """X fetches flow through the Jina reader proxy when opt-in is set."""
+    monkeypatch.setenv("SAGENT_ALLOW_THIRD_PARTY_RENDER", "1")
     with patch(
         "sagent.tools.web_fetch._reader_proxy_fetch",
         return_value=b"# tweet content",
@@ -1294,6 +1298,37 @@ def test_x_adapter_routes_through_reader_proxy() -> None:
     mock_proxy.assert_called_once_with("https://x.com/user/status/123")
     assert body == b"# tweet content"
     assert kind == _KIND_MARKDOWN
+
+
+def test_x_adapter_rejects_third_party_proxy_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the opt-in env flag, X fetches must refuse the third-party hop.
+
+    Twitter/X content flows through ``r.jina.ai`` -- a third-party
+    renderer the caller cannot opt out of. Default to refusing the
+    proxy and require ``SAGENT_ALLOW_THIRD_PARTY_RENDER=1`` so a
+    privacy-sensitive caller doesn't silently egress URLs to Jina.
+    """
+    monkeypatch.delenv("SAGENT_ALLOW_THIRD_PARTY_RENDER", raising=False)
+
+    def _explode(url: str) -> bytes:
+        del url
+        raise AssertionError(
+            "reader proxy must not be called when opt-in flag is missing"
+        )
+
+    with (
+        patch(
+            "sagent.tools.web_fetch._reader_proxy_fetch",
+            side_effect=_explode,
+        ),
+        pytest.raises(FetchError) as exc,
+    ):
+        asyncio.run(_XAdapter().fetch("https://x.com/user/status/123"))
+    body = exc.value.body.decode("utf-8", errors="replace").lower()
+    assert "third-party" in body or "proxy" in body
+    assert "SAGENT_ALLOW_THIRD_PARTY_RENDER".lower() in body
 
 
 # Integration: dispatch through WebFetch.run end-to-end.
@@ -1315,6 +1350,19 @@ def test_run_google_news_routes_to_rss_extraction() -> None:
         result = asyncio.run(WebFetch().run({"url": "https://news.google.com/"}))
     assert "# Top stories - Google News" in result.content
     assert "## Lead" in result.content
+
+
+@pytest.mark.parametrize("bad_form", [[], "stringly", 42])
+def test_post_form_non_object_rejected(bad_form: object) -> None:
+    """``form`` schema declares ``type: object``; reject non-mappings.
+
+    Pre-fix, ``form=[]`` propagated to ``.items()`` and raised
+    ``AttributeError`` outside the tool envelope (escaping ``run``'s
+    ``except ValueError``). Reject at parse time so the directive
+    error surfaces as a normal tool error.
+    """
+    with pytest.raises(ValueError, match="form"):
+        _request_bodies("POST", {"form": bad_form})
 
 
 if __name__ == "__main__":

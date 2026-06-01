@@ -211,6 +211,17 @@ def test_model_capabilities() -> None:
     assert model.supports_account_auth is True
 
 
+def test_google_cli_legacy_model_does_not_support_thinking() -> None:
+    """Legacy ``gemini-1.5-*`` snapshots can't accept ``thinkingConfig``.
+
+    Even via ACP the CLI cannot enable thinking on these models, so capability
+    advertisement must honor the per-model profile flag.
+    """
+    provider = GoogleCLI()
+    assert provider.model("gemini-1.5-flash").supports_thinking is False
+    assert provider.model("gemini-1.5-pro").supports_thinking is False
+
+
 def test_max_image_limits() -> None:
     """Vision limits match the Gemini API recipe."""
     model = GoogleCLI().model("gemini-2.5-flash")

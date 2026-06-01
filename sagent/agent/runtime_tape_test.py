@@ -17,7 +17,7 @@ from sagent.agent.context import (
     resolve_context,
     validate_context,
 )
-from sagent.agent.runtime import AgentRuntime, Model, Tool
+from sagent.agent.runtime import AgentRuntime, Model
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -39,12 +39,10 @@ class _NoopModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_text, on_thinking
+        del history, on_text, on_thinking
         return AssistantMessage(text="")
 
 

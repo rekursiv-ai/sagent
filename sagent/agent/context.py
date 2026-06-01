@@ -53,7 +53,6 @@ from sagent.types.runtime import (
 from sagent.types.tape import (
     ContextSplice,
     ReferrableTapeEvent,
-    TapeEvent,
     TapeRecord,
     TapeRef,
 )
@@ -66,7 +65,34 @@ __all__ = [
     "masked_refs_by_alive",
     "resolve_context",
     "validate_context",
+    "wire_role",
 ]
+
+
+def wire_role(entry: ModelContextEvent) -> str | None:
+    """Return the provider-wire role for ``entry``.
+
+    ``UserMessage`` and ``AgentSendMessage`` both serialize as
+    ``user``-role on the wire. Several runtime, materialization,
+    session, and compactor sites need to reason about wire-role
+    alternation rather than Python type identity, and treating the two
+    classes as distinct produces wire-invalid contexts (back-to-back
+    user-role turns the provider rejects).
+
+    Args:
+      entry: A provider-facing model context event.
+
+    Returns:
+      role: ``"user"`` for ``UserMessage``/``AgentSendMessage``,
+          ``"assistant"`` for ``AssistantMessage``, ``None`` for
+          ``ToolResult`` (which has its own pairing rules).
+
+    """
+    if isinstance(entry, (UserMessage, AgentSendMessage)):
+        return "user"
+    if isinstance(entry, AssistantMessage):
+        return "assistant"
+    return None
 
 
 logger = logging.getLogger(__name__)
@@ -88,9 +114,6 @@ class ResolvedContext:
 
     version: int
     """Tape length at resolve time; usable as a memoization key."""
-
-    discontinuity: bool
-    """True when ``messages`` is not a pure append of ``prior.messages``."""
 
 
 def alive_splices(tape: Sequence[TapeRecord]) -> set[TapeRef]:
@@ -140,11 +163,7 @@ def masked_refs_by_alive(
     return {record.ref for record in tape if masked.contains(record.ref)}
 
 
-def resolve_context(
-    tape: Sequence[TapeRecord],
-    *,
-    prior: ResolvedContext | None = None,
-) -> ResolvedContext:
+def resolve_context(tape: Sequence[TapeRecord]) -> ResolvedContext:
     """Render ``tape`` to a provider-facing message list.
 
     Three passes: aliveness, masked-by-alive, forward emit. See module
@@ -152,12 +171,9 @@ def resolve_context(
 
     Args:
       tape: Append-only session tape.
-      prior: Last ``ResolvedContext`` returned, used for discontinuity
-          detection. ``None`` (default) reports ``discontinuity=False``.
 
     Returns:
-      resolved: Provider-facing messages, version key, and a
-          discontinuity flag.
+      resolved: Provider-facing messages and version key.
 
     """
     alive = alive_splices(tape)
@@ -212,7 +228,6 @@ def resolve_context(
         messages=messages,
         origins=origins,
         version=len(tape),
-        discontinuity=_is_discontinuous(messages, prior),
     )
 
 
@@ -236,17 +251,19 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
-    prev_role: type[AgentSendMessage | UserMessage | AssistantMessage] | None = None
+    prev_role: str | None = None
     for entry in messages:
-        if isinstance(entry, AssistantMessage):
+        role = wire_role(entry)
+        if role == "assistant":
+            assert isinstance(entry, AssistantMessage)
             if pending:
                 raise InvalidContextError(
                     f"assistant turn with pending tool calls: {sorted(pending)}",
                 )
-            if prev_role is AssistantMessage:
+            if prev_role == "assistant":
                 raise InvalidContextError("provider context violates role alternation")
             pending = {tc.id for tc in entry.tool_calls}
-            prev_role = AssistantMessage
+            prev_role = "assistant"
         elif isinstance(entry, ToolResult):
             if entry.call_id in seen_results:
                 raise InvalidContextError(
@@ -264,10 +281,9 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                 raise InvalidContextError(
                     f"user message before tool results: pending {sorted(pending)}",
                 )
-            role = type(entry)
-            if prev_role is role:
+            if prev_role == "user":
                 raise InvalidContextError("provider context violates role alternation")
-            prev_role = role
+            prev_role = "user"
     if pending:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(pending)}",
@@ -312,15 +328,3 @@ def _index_of(order: list[TapeRef], ref: TapeRef) -> int | None:
         if r == ref:
             return i
     return None
-
-
-def _is_discontinuous(
-    messages: Sequence[TapeEvent],
-    prior: ResolvedContext | None,
-) -> bool:
-    """True iff ``messages`` is not a pure append over ``prior.messages``."""
-    if prior is None:
-        return False
-    if len(messages) < len(prior.messages):
-        return True
-    return any(messages[i] is not prior.messages[i] for i in range(len(prior.messages)))

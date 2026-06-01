@@ -13,7 +13,7 @@ sagent --no-compact
 In Python, pass a compactor explicitly:
 
 ```python
-from sagent.compactor import SummaryCompactor
+from sagent.compaction.summary import SummaryCompactor
 
 agent = Agent(
     model=model,

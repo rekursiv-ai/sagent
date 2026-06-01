@@ -49,6 +49,10 @@ class _StubTool:
     def prompt(self) -> str:
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         return ToolResult(call_id="", content="")
@@ -133,6 +137,41 @@ async def test_inject_background_status_appends_to_first_user() -> None:
     assert isinstance(first, UserMessage)
     assert "Active background tasks" in first.text
     assert "[q1] Bash" in first.text
+
+
+@pytest.mark.asyncio
+async def test_inject_background_status_wording_distinguishes_running_from_done() -> (
+    None
+):
+    """Running tasks report 'since started'; completed ones report 'ago'."""
+    gate = asyncio.Event()
+
+    async def _wait_gate() -> None:
+        await gate.wait()
+
+    running_task = asyncio.create_task(_wait_gate())
+    done_task = asyncio.create_task(_noop_coro())
+    await done_task  # drive ``_noop_coro`` to completion.
+    assert done_task.done()
+    assert not running_task.done()
+    running = BackgroundTaskEntry(
+        task=running_task, tool_name="Bash", queue_id="qR", started=0.0
+    )
+    done = BackgroundTaskEntry(
+        task=done_task, tool_name="Bash", queue_id="qD", started=0.0
+    )
+    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    try:
+        inject_background_status(history, {"qR": running, "qD": done})
+        first = history[0]
+        assert isinstance(first, UserMessage)
+        assert "qR" in first.text
+        assert "since started" in first.text
+        assert "qD" in first.text
+        assert "ago" in first.text
+    finally:
+        gate.set()
+        await running_task
 
 
 @pytest.mark.asyncio

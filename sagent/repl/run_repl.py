@@ -105,10 +105,11 @@ async def run_repl(
             style=style,
         )
         printer = ConsolePrinter(console)
-        agent.runtime.observers.append(
-            make_render_observer(printer, show_thinking=lambda: agent.show_thinking)
+        render_observer = make_render_observer(
+            printer, show_thinking=lambda: agent.show_thinking
         )
-        agent.runtime.observers.append(make_input_queue_committer(agent, queues))
+        agent.runtime.observers.append(render_observer)
+        uninstall_committer = install_input_queue_committer(agent, queues)
         pump_task = spawn_repl_pump(
             agent,
             PromptToolkitInputSource(session, queues=queues, console=console),
@@ -138,6 +139,11 @@ async def run_repl(
                     logger, "REPL input pump raised during shutdown", exc
                 )
             agent.cancel_background(REPL_PUMP_KEY)
+            # Detach observers + restore before_tool_spawn so re-entering
+            # ``run_repl`` on the same agent doesn't accumulate state.
+            uninstall_committer()
+            if render_observer in agent.runtime.observers:
+                agent.runtime.observers.remove(render_observer)
     if agent.session_dir is not None:
         _ = sys.stderr.write(
             "Resume this session with:\n"
@@ -158,17 +164,69 @@ def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]
     ]
 
 
-def make_input_queue_committer(
+def install_input_queue_committer(
     agent: Agent,
     queues: InputQueues,
-) -> Callable[[RuntimeEvent], None]:
-    """Observer that commits REPL-local queues at their lifecycle events."""
+) -> Callable[[], None]:
+    """Install the REPL-local queue committer; return its uninstall closure.
+
+    Installs both halves of the committer:
+
+    - Wraps ``agent.runtime.before_tool_spawn`` so urgent queue blocks
+      flush as a ``UserMessage`` before the next tool spawns. The
+      previous hook is preserved and called first; if it returns an
+      event, that event wins and the queue stays put.
+    - Appends an observer to ``agent.runtime.observers`` that commits
+      urgent / deferred queues on each ``AgentIdle``.
+
+    The caller invokes the returned uninstall in ``finally`` to detach
+    the observer and restore the prior ``before_tool_spawn``. Without
+    this, a re-entered ``run_repl`` on the same agent stacks observers
+    and hook layers.
+
+    Args:
+      agent: Agent whose runtime gains the committer.
+      queues: REPL-local urgent / deferred queues to flush.
+
+    Returns:
+      uninstall: Closure that reverses both install steps. Idempotent;
+          safe to call multiple times.
+
+    """
     previous_before_tool_spawn = agent.runtime.before_tool_spawn
-    agent.runtime.before_tool_spawn = functools.partial(
+    wrapped_before_tool_spawn = functools.partial(
         _before_tool_spawn,
         queues=queues,
         previous_before_tool_spawn=previous_before_tool_spawn,
     )
+    agent.runtime.before_tool_spawn = wrapped_before_tool_spawn
+    observer = _input_queue_committer_observer(agent, queues)
+    agent.runtime.observers.append(observer)
+
+    def uninstall() -> None:
+        if observer in agent.runtime.observers:
+            agent.runtime.observers.remove(observer)
+        # Restore only when nothing downstream replaced our wrapper;
+        # blindly assigning would clobber a later install that
+        # legitimately owns the slot now.
+        if agent.runtime.before_tool_spawn is wrapped_before_tool_spawn:
+            agent.runtime.before_tool_spawn = previous_before_tool_spawn
+
+    return uninstall
+
+
+def _input_queue_committer_observer(
+    agent: Agent,
+    queues: InputQueues,
+) -> Callable[[RuntimeEvent], None]:
+    """Return the observer half of the queue committer.
+
+    Module-private: production callers go through
+    :func:`install_input_queue_committer`, which also installs the
+    ``before_tool_spawn`` hook and returns the uninstall closure.
+    Exposed for observer-only unit tests that exercise dispatch in
+    isolation from the install / uninstall mechanics.
+    """
     return functools.partial(_commit_local_queues, agent=agent, queues=queues)
 
 
@@ -291,6 +349,12 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
     ):
         _write(printer, f"[/thinking] {state}")
         return
+    # Snapshot every mutable field touched below so the
+    # ``_rebuild_current_model`` failure branch can roll back
+    # transactionally. ``set_thinking_state`` writes three fields,
+    # ``clear_provider_arg`` writes one; both are pure attribute
+    # mutations (no exception path between them), so capturing the
+    # pre-state once is sufficient.
     old_state = agent.thinking_state
     old_thinking = agent.thinking
     old_show = agent.show_thinking
@@ -298,31 +362,17 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
     agent.set_thinking_state(state)
     if not supports_redact:
         agent.clear_provider_arg("redact_thinking")
+    # Only the redact-supporting path triggers a rebuild; the
+    # non-redact branch only adjusted local fields, no model swap
+    # required.
     if supports_redact and not _rebuild_current_model(agent, printer):
-        _restore_thinking_state(agent, old_state, old_thinking, old_show)
+        agent.restore_thinking_state(old_state, old_thinking, old_show)
         if old_redact is None:
             agent.clear_provider_arg("redact_thinking")
         else:
             agent.set_provider_arg("redact_thinking", old_redact)
         return
     _write(printer, f"[/thinking] {state}")
-
-
-def _restore_thinking_state(
-    agent: Agent,
-    state: ThinkingState | None,
-    thinking: str | None,
-    show_thinking: bool,
-) -> None:
-    """Restore thinking fields after a failed provider rebuild."""
-    if hasattr(agent, "_thinking_state"):
-        agent._thinking_state = state  # noqa: SLF001 -- transactional rollback
-        agent._thinking = thinking  # noqa: SLF001 -- transactional rollback
-        agent._show_thinking = show_thinking  # noqa: SLF001 -- transactional rollback
-        return
-    object.__setattr__(agent, "thinking_state", state)
-    object.__setattr__(agent, "thinking", thinking)
-    object.__setattr__(agent, "show_thinking", show_thinking)
 
 
 def _infer_thinking_state(agent: Agent) -> ThinkingState:
@@ -335,7 +385,11 @@ def _infer_thinking_state(agent: Agent) -> ThinkingState:
 
 
 def _provider_accepts_arg(agent: Agent, key: str) -> bool:
-    """Return whether the current provider factory accepts ``key``."""
+    """Return whether the current provider factory accepts ``key``.
+
+    A factory exposing ``**kwargs`` (``VAR_KEYWORD``) accepts every key
+    name; the named-parameter check alone would false-negative on those.
+    """
     spec = agent.model_spec
     if spec is None:
         return False
@@ -347,9 +401,12 @@ def _provider_accepts_arg(agent: Agent, key: str) -> bool:
     if factory is None:
         return False
     try:
-        return key in inspect.signature(factory).parameters
+        parameters = inspect.signature(factory).parameters
     except (TypeError, ValueError):
         return False
+    if key in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 def _rebuild_current_model(agent: Agent, printer: Printer | None) -> bool:
@@ -407,10 +464,13 @@ def format_tasks(agent: Agent) -> str:
     total_fg = 0
     total_bg = 0
     for label, other in agent_registry.items():
-        visible_bg = [
-            j for j in getattr(other, "background", {}).values() if not j.hidden
-        ]
-        fg = 1 if getattr(other, "work", None) is not None else 0
+        visible_bg = [j for j in other.background.values() if not j.hidden]
+        # ``AgentLike`` doesn't expose ``work`` (a foreground convenience
+        # on ``Agent``); derive the same condition from runtime state
+        # the Protocol does promise.
+        runtime = other.runtime
+        fg_active = runtime.model_call is not None or runtime.compact_task is not None
+        fg = 1 if fg_active else 0
         bg_n = len(visible_bg)
         total_fg += fg
         total_bg += bg_n
@@ -480,17 +540,14 @@ def _subagent_phase(job: BackgroundTaskEntry) -> str:
     child = agent_registry.get(job.queue_id)
     if child is None:
         return "running"
-    rt = getattr(child, "runtime", None)
-    if rt is None:
+    rt = child.runtime
+    if rt.model_call is not None:
         return "running"
-    if getattr(rt, "model_call", None) is not None:
-        return "running"
-    if getattr(rt, "compact_task", None) is not None:
+    if rt.compact_task is not None:
         return "compacting"
-    if getattr(rt, "cohort", None):
+    if rt.cohort:
         return "tool-wait"
-    inbox = getattr(rt, "inbox", None)
-    if inbox is not None and inbox.gate_armed:
+    if rt.inbox.gate_armed:
         return "gate-armed"
     return "idle"
 

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AuthRefreshError",
+    "BudgetExhaustedError",
     "ContextOverflowError",
     "UserFacingError",
     "log_exception_or_warning",
@@ -31,6 +32,28 @@ class UserFacingError(Exception):
     the message itself is the remediation cue (auth expired, network
     down, etc.).
     """
+
+
+class BudgetExhaustedError(UserFacingError):
+    """Cumulative model spend reached the agent's ``max_budget_usd`` cap.
+
+    Raised by ``Agent.record_response`` when the cost tracker crosses
+    the configured cap. The message embeds the realized spend and the
+    configured cap so the REPL renderer can present them verbatim
+    without ``ClassName:`` noise.
+
+    Args:
+      total_cost_usd: Realized cumulative spend at the time of raise.
+      max_budget_usd: The configured cap that was crossed.
+
+    """
+
+    def __init__(self, *, total_cost_usd: float, max_budget_usd: float) -> None:
+        super().__init__(
+            f"Budget exhausted: ${total_cost_usd:.2f} >= ${max_budget_usd:.2f}",
+        )
+        self.total_cost_usd = total_cost_usd
+        self.max_budget_usd = max_budget_usd
 
 
 class AuthRefreshError(UserFacingError):
@@ -56,7 +79,28 @@ class ContextOverflowError(UserFacingError):
     ``/model`` to a larger window) so the REPL renderer can show it
     verbatim without ``ClassName:`` noise. The original provider
     exception is preserved via ``__cause__``.
+
+    Args:
+      message: Polished remediation text shown verbatim to the user.
+      attempts: Number of overflow-recovery iterations that elapsed
+          before exhaustion; ``0`` when the first ``compact_now`` itself
+          raised.
+      final_tokens: Estimated input token count after the last failed
+          recovery attempt; ``None`` when unknown (e.g. compactor
+          raised before a re-estimate).
+
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int = 0,
+        final_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.final_tokens = final_tokens
 
 
 def log_exception_or_warning(
@@ -101,6 +145,13 @@ def log_task_exception(
     polished remediation text); anything else logs at ``ERROR`` with
     ``exc_info`` so the operator gets a traceback. ``CancelledError``
     and clean completion are silent.
+
+    Note: ``Task.exception()`` returns ``BaseException`` (asyncio
+    surfaces ``KeyboardInterrupt`` / ``SystemExit`` through this same
+    accessor for tasks that propagated them). The ``UserFacingError``
+    branch catches only the ``Exception`` subset; non-``Exception``
+    ``BaseException`` instances fall through to the ``error`` branch
+    with ``exc_info`` so the operator sees the originating traceback.
     """
 
     def _cb(task: asyncio.Task[object]) -> None:
@@ -112,6 +163,9 @@ def log_task_exception(
         if isinstance(exc, UserFacingError):
             logger.warning("%s: %s", where, exc)
         else:
-            logger.error("%s", where, exc_info=exc)
+            # Mirror ``log_exception_or_warning``: ``"%s: %s"`` lets the
+            # operator scan ``where`` + the exception message on the
+            # same line; ``exc_info`` adds the traceback below.
+            logger.error("%s: %s", where, exc, exc_info=exc)
 
     return _cb
