@@ -249,6 +249,11 @@ class Wiki:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: wiki access has no shared in-process resource."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Dispatch a Wiki operation (locate, list, read_page, read_index, lint).
 

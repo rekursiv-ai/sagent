@@ -9,6 +9,12 @@ from unittest.mock import patch
 
 import pytest
 
+from sagent.agent.state import (
+    agent_registry,
+    fresh_default_tool_state,
+)
+from sagent.tools.agent_spawn import _persistent_tasks
+
 
 @pytest.fixture(params=["asyncio"])
 def anyio_backend(request: pytest.FixtureRequest) -> str:
@@ -41,3 +47,38 @@ def _fast_sleep(request: pytest.FixtureRequest) -> Iterator[None]:  # pyright: i
 
     with patch("asyncio.sleep", _instant):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_tool_state() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
+    """Reset the fallback ``ToolState`` to a fresh instance per test.
+
+    ``get_tool_state()`` returns the module-level fallback when no
+    ``tool_state_context`` is active. Tests (and tools-under-test) that
+    call it outside a context mutate the singleton; state then bleeds
+    into unrelated tests as flaky failures.
+    """
+    with fresh_default_tool_state():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_registry() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
+    """Snapshot and restore the process-global agent registries per test.
+
+    ``agent_registry`` and ``_persistent_tasks`` are module-level dicts that
+    tools and tests mutate directly. Under xdist a single worker runs many
+    test files in one process, so an entry one test forgets to pop (e.g. a
+    spawned ``fix-tools`` agent) leaks into a later test's view and flips
+    unrelated assertions. Restoring both dicts to their pre-test contents
+    makes that leakage structurally impossible -- one rule for every test.
+    """
+    registry_snapshot = dict(agent_registry)
+    tasks_snapshot = dict(_persistent_tasks)
+    try:
+        yield
+    finally:
+        agent_registry.clear()
+        agent_registry.update(registry_snapshot)
+        _persistent_tasks.clear()
+        _persistent_tasks.update(tasks_snapshot)

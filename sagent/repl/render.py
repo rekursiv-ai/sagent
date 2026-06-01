@@ -15,9 +15,11 @@ implementations live in :mod:`repl.console_pane` (rich-backed) and on
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Sequence
 from typing import Protocol
 
+import contextlib
+import contextvars
 import logging
 import time
 
@@ -29,7 +31,9 @@ from sagent.types.exceptions import (
     UserFacingError,
 )
 from sagent.types.runtime import (
+    AgentSendDeferredMessage,
     AgentSendMessage,
+    AgentSendQueuedMessage,
     AssistantMessage,
     BudgetReset,
     ChildDoneEvent,
@@ -37,6 +41,7 @@ from sagent.types.runtime import (
     CompactComplete,
     CompactFailed,
     CompactStarted,
+    DetachedResult,
     ModelResponseCancelled,
     ModelResponseComplete,
     ModelResponseError,
@@ -55,12 +60,44 @@ from sagent.types.runtime import (
 
 logger = logging.getLogger(__name__)
 
-HALT_MESSAGE = "agent halted — type to retry, or /login, /model, /quit"
+# Streaming text without a stable Markdown boundary is held in
+# ``_stream_buf`` until the next paragraph break. A 100K+-char in-progress
+# fenced block would let the buffer grow for the entire round; flush
+# unconditionally past this cap so memory stays bounded.
+_STREAM_BUF_FLUSH_BYTES = 64 * 1024
+
+# Live-observer dispatch is wrapped in a broad ``except`` so a renderer
+# bug never tears down the agent loop. That same swallow hides real
+# failures from unit tests that legitimately want the exception to
+# surface. Tests flip this ``ContextVar`` to True via the
+# :func:`strict_observer` context manager so dispatch failures re-raise
+# instead of getting logged.
+_strict_observer: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "repl_render_strict_observer", default=False
+)
+
+
+@contextlib.contextmanager
+def strict_observer() -> Generator[None, None, None]:
+    """Make ``RenderObserver.__call__`` re-raise dispatch failures.
+
+    Yields:
+      None: enters the strict scope for the duration of the ``with``.
+
+    """
+    token = _strict_observer.set(True)
+    try:
+        yield
+    finally:
+        _strict_observer.reset(token)
+
+
+HALT_MESSAGE = "agent halted -- type to retry, or /login, /model, /quit"
 HALT_MESSAGE_AUTH = (
-    "agent halted — run /login to re-authenticate or /model to switch providers"
+    "agent halted -- run /login to re-authenticate or /model to switch providers"
 )
 HALT_MESSAGE_CONTEXT = (
-    "agent halted — run /compact <hints>, /clear, or /model to reduce context"
+    "agent halted -- run /compact <hints>, /clear, or /model to reduce context"
 )
 
 
@@ -92,7 +129,21 @@ def service_suspended_text(event: ModelServiceSuspended) -> str:
     )
 
 
-type ChildItem = ToolResult | UserMessage | AssistantMessage | ModelServiceSuspended
+type ChildItem = (
+    ToolLabel
+    | ModelResponseThinking
+    | ToolResult
+    | ModelServiceSuspended
+    | AgentSendMessage
+    | UserMessage
+    | AssistantMessage
+)
+"""Items accumulated under a child label for rendering in one block.
+
+Mirrors what ``_child_atomic_item`` returns (atomic forwards from the
+child runtime), plus the synthetic ``AssistantMessage`` the observer
+materializes from streamed ``ModelResponsePartial`` text on flush.
+"""
 
 
 class Printer(Protocol):
@@ -113,7 +164,7 @@ class Printer(Protocol):
     def write_diff(self, diff: str, file_path: str = "") -> None: ...
     def write_interrupted(self) -> None: ...
     def write_halt(self, text: str) -> None: ...
-    def write_child_block(self, label: str, items: list[object]) -> None: ...
+    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None: ...
     def set_terminal_title(self, text: str) -> None: ...
 
 
@@ -169,7 +220,7 @@ class RecordingPrinter:
     halts: list[str]
     """``write_halt`` payloads."""
 
-    child_blocks: list[tuple[str, list[object]]]
+    child_blocks: list[tuple[str, list[ChildItem]]]
     """Tuples of ``(label, items)``."""
 
     titles: list[str]
@@ -239,7 +290,7 @@ class RecordingPrinter:
     def write_halt(self, text: str) -> None:
         self.halts.append(text)
 
-    def write_child_block(self, label: str, items: list[object]) -> None:
+    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None:
         self.child_blocks.append((label, list(items)))
 
     def set_terminal_title(self, text: str) -> None:
@@ -285,7 +336,8 @@ def make_render_observer(
       show_thinking: Predicate controlling thinking display. ``None`` always shows.
 
     Returns:
-      observer: Callable that the agent appends to ``self.observers``.
+      observer: ``RenderObserver`` instance the agent appends to
+          ``self.observers``; callable on each ``RuntimeEvent``.
 
     """
     return RenderObserver(printer, show_thinking=show_thinking)
@@ -309,16 +361,22 @@ class RenderObserver:
         self._show_thinking = show_thinking or (lambda: True)
         self._stream_buf: str = ""
         self._child_text: dict[str, str] = {}
-        self._child_items: dict[str, list[object]] = {}
+        self._child_items: dict[str, list[ChildItem]] = {}
 
     def __call__(self, event: RuntimeEvent) -> None:
         try:
             self._dispatch(event)
-        except Exception as e:  # noqa: BLE001 -- display safety net
-            self._printer.write_tool_error(
-                f"render failed for {type(event).__name__}: {type(e).__name__}: {e}",
-            )
-            logger.debug("render observer failed", exc_info=True)
+        except Exception:
+            # Don't re-enter the printer from the safety net: if the
+            # printer was the cause of the dispatch failure, calling
+            # ``write_tool_error`` here would just raise again and
+            # bury the original traceback. Log it instead so the
+            # operator can inspect the failure offline. Tests that need
+            # to see the failure use :func:`strict_observer` to flip
+            # this branch into a re-raise.
+            if _strict_observer.get():
+                raise
+            logger.exception("render observer failed for %s", type(event).__name__)
 
     def _dispatch(self, event: RuntimeEvent) -> None:
         match event:
@@ -340,6 +398,13 @@ class RenderObserver:
                 self._printer.write_tool_label(text)
             case ToolResult():
                 render_tool_result(self._printer, event)
+            case DetachedResult(result=result):
+                # A detached tool finally completed; the user has no
+                # other visual cue for the late arrival, so render the
+                # result through the same surface a sync ``ToolResult``
+                # would use.
+                self._flush_stream()
+                render_tool_result(self._printer, result)
             case ToolResultPartial(text=text):
                 self._printer.write_chunk(text)
             case ModelResponseCancelled():
@@ -416,6 +481,13 @@ class RenderObserver:
                 self._printer.write_dim_line(
                     f"[compaction failed: {type(exc).__name__}: {exc}]",
                 )
+            case AgentSendQueuedMessage() | AgentSendDeferredMessage():
+                # Silent by design: the visible event is the
+                # ``AgentSendMessage`` that lands once the inbox gate
+                # drains. Rendering the queued/deferred placeholder
+                # would double-render the same payload from the user's
+                # point of view.
+                pass
             case _:
                 pass
 
@@ -424,6 +496,13 @@ class RenderObserver:
         self._stream_buf += chunk
         boundary = find_stable_boundary(self._stream_buf)
         if boundary <= 0:
+            # A long-running unclosed fence (no ``\n\n`` boundary inside
+            # a code block) would otherwise let the buffer grow without
+            # bound for the rest of the round. Flush at the cap so
+            # memory stays bounded even if the model never emits a
+            # closing fence.
+            if len(self._stream_buf) > _STREAM_BUF_FLUSH_BYTES:
+                self._flush_stream()
             return
         stable = self._stream_buf[:boundary].rstrip("\n")
         self._stream_buf = self._stream_buf[boundary:]
@@ -438,15 +517,42 @@ class RenderObserver:
             self._printer.write_markdown(remaining)
 
     def _consume_child(self, label: str, inner: RuntimeEvent) -> None:
-        """Buffer one child event; flush at stable boundaries or atomic events."""
-        for other in list(self._child_items):
+        """Buffer one child event; flush at stable boundaries or atomic events.
+
+        Whenever the active child label changes, every *other* label's
+        pending text and items are flushed first. Cost is O(num-other-
+        children) per event -- intentional, not a hot path: the cross-
+        child flush keeps slow children from rendering interleaved into
+        the wrong slot, and the typical cohort fanout is small.
+        """
+        # ``ChildEvent`` may nest: a grandchild forwards through its
+        # parent, which forwards to us as ``ChildEvent(label,
+        # ChildEvent(...))``. Unwrap so the innermost runtime event is
+        # what the rest of the dispatcher sees; otherwise grandchild
+        # events fall through ``_child_atomic_item``'s ``None`` branch
+        # and disappear from the UI.
+        while isinstance(inner, ChildEvent):
+            inner = inner.inner
+        # When the active child label changes, flush any pending
+        # streaming text from the previous label too -- otherwise a slow
+        # child's partial output lingers until its ``ChildDoneEvent``
+        # and renders in the wrong slot.
+        for other in list(self._child_items.keys() | self._child_text.keys()):
             if other != label:
+                self._move_text_to_items(other)
                 self._emit_child(other)
         if isinstance(inner, ModelResponsePartial):
             buf = self._child_text.get(label, "") + inner.text
             boundary = find_stable_boundary(buf)
             if boundary <= 0:
                 self._child_text[label] = buf
+                # Mirror the parent ``_feed_stream`` size cap: a
+                # long-running unclosed fence (no ``\n\n`` boundary)
+                # would otherwise let ``_child_text[label]`` grow
+                # without bound for the whole round.
+                if len(buf) > _STREAM_BUF_FLUSH_BYTES:
+                    self._move_text_to_items(label)
+                    self._emit_child(label)
                 return
             stable = buf[:boundary].rstrip("\n")
             self._child_text[label] = buf[boundary:]
@@ -483,7 +589,7 @@ class RenderObserver:
             self._printer.write_child_block(label, items)
 
 
-def _child_atomic_item(inner: RuntimeEvent) -> object | None:
+def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
     """Translate a non-streaming child event into a child-block item."""
     if isinstance(inner, ToolLabel):
         return inner

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import json
+import logging
 import os
 import time
 
+import pytest
+
+from sagent import sessions
 from sagent.sessions import (
     SessionInfo,
+    _peek_session,
     cwd_slug,
     existing_scope_dir,
     latest_session,
@@ -51,7 +57,20 @@ def _write_session(
 def test_cwd_slug_replaces_separators(tmp_path: Path) -> None:
     slug = cwd_slug(tmp_path)
     assert "/" not in slug
-    assert all(c.isalnum() or c == "-" for c in slug)
+    # Slug draws from ``[A-Za-z0-9_-]``: ``_`` keeps the path-separator
+    # structure injective (see ``test_cwd_slug_no_separator_collision``)
+    # while still being filesystem-safe.
+    assert all(c.isalnum() or c in ("-", "_") for c in slug)
+
+
+def test_cwd_slug_no_separator_collision() -> None:
+    """Distinct paths that differ only in ``/`` vs ``-`` must not alias.
+
+    Pre-fix both paths slugged to ``-tmp-a-b`` because the regex
+    replaced every non-alphanumeric (including ``/``) with ``-``,
+    silently mixing transcripts from neighbouring directories.
+    """
+    assert cwd_slug("/tmp/a-b") != cwd_slug("/tmp/a/b")  # noqa: S108 -- literal paths exercise the collision invariant; no FS access.
 
 
 def test_cwd_slug_is_deterministic(tmp_path: Path) -> None:
@@ -88,6 +107,39 @@ def test_session_dir_for_scope_creates_scoped_dir(tmp_path: Path) -> None:
     assert sdir.parent == tmp_path / "slack-T123"
 
 
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "../escape",
+        "a/../b",
+        "/abs",
+        "",
+        "..",
+        "with\x00nul",
+        "back\\slash",
+    ],
+)
+def test_session_dir_for_scope_rejects_traversal(scope: str, tmp_path: Path) -> None:
+    """Caller-supplied scope must not escape the projects root.
+
+    Pre-fix, ``scope="../escape"`` would land at
+    ``<projects>/../escape/<uuid>`` -- a directory outside the
+    configured root that a malicious caller (slack thread id, etc.)
+    could use to overwrite arbitrary files.
+    """
+    with pytest.raises(ValueError, match="scope"):
+        session_dir_for_scope(scope, base=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    ["../escape", "/abs", "", "..", "with\x00nul"],
+)
+def test_existing_scope_dir_rejects_traversal(scope: str, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="scope"):
+        existing_scope_dir(scope, base=tmp_path)
+
+
 def test_existing_scope_dir_none_when_scope_missing(tmp_path: Path) -> None:
     assert existing_scope_dir("nonexistent", base=tmp_path) is None
 
@@ -100,12 +152,12 @@ def test_existing_scope_dir_none_when_scope_dir_has_no_children(
 
 
 def test_existing_scope_dir_returns_most_recent(tmp_path: Path) -> None:
-    """``existing_scope_dir`` selects by mtime."""
+    """``existing_scope_dir`` selects by mtime among dirs that have a session file."""
     scope = "scope-Y"
     old = tmp_path / scope / "old"
     new = tmp_path / scope / "new"
-    old.mkdir(parents=True)
-    new.mkdir(parents=True)
+    _write_session(old, session_id="O")
+    _write_session(new, session_id="N")
     # Force ordering.
     os.utime(old, (1, 1))
     os.utime(new, (1_000_000, 1_000_000))
@@ -281,7 +333,8 @@ def test_pick_session_out_of_range_returns_none() -> None:
     assert selected is None
 
 
-def test_pick_session_non_numeric_returns_none() -> None:
+def test_pick_session_non_numeric_then_eof_returns_none() -> None:
+    """Non-numeric input re-prompts; EOF on the retry collapses to None."""
     sessions = [_info(1)]
     selected = pick_session(
         sessions, stream_in=StringIO("nope\n"), stream_out=StringIO()
@@ -298,6 +351,98 @@ def test_pick_session_writes_a_menu(tmp_path: Path) -> None:
     out = sout.getvalue()
     assert "[ 1]" in out
     assert "[ 2]" in out
+
+
+def test_pick_session_truncation_header_when_over_cap() -> None:
+    """The 20-cap must surface in the prompt so users know about hidden rows."""
+    sessions = [_info(i) for i in range(1, 26)]
+    sout = StringIO()
+    _ = pick_session(sessions, stream_in=StringIO("\n"), stream_out=sout)
+    out = sout.getvalue()
+    assert "20 of 25" in out
+
+
+def test_pick_session_invalid_input_reprompts() -> None:
+    """Non-numeric input differentiates from abort by re-prompting."""
+    sessions = [_info(1), _info(2)]
+    # First input is garbage; second selects 2.
+    sin = StringIO("garbage\n2\n")
+    sout = StringIO()
+    selected = pick_session(sessions, stream_in=sin, stream_out=sout)
+    assert selected is sessions[1]
+    assert sout.getvalue().count("Resume which?") >= 2
+
+
+def test_iter_jsonl_warns_on_malformed(caplog: pytest.LogCaptureFixture) -> None:
+    """Malformed non-blank lines log a warning rather than silently dropping."""
+    with caplog.at_level(logging.WARNING, logger=sessions.__name__):
+        records = parse_jsonl('{"ok": 1}\n{not json}\n[1, 2]\n')
+    assert records == [{"ok": 1}]
+    assert sum("malformed" in r.message.lower() for r in caplog.records) >= 1
+    assert sum("non-dict" in r.message.lower() for r in caplog.records) >= 1
+
+
+def test_existing_scope_dir_skips_dirs_without_session_jsonl(tmp_path: Path) -> None:
+    """Pre-created scope dirs missing ``session.jsonl`` must not win the max."""
+    scope = "scope-Z"
+    empty = tmp_path / scope / "empty"
+    valid = tmp_path / scope / "valid"
+    empty.mkdir(parents=True)
+    _write_session(valid, session_id="V")
+    # Make ``empty`` strictly newer than ``valid`` so an mtime-only max
+    # would pick it; the filter is the only thing rescuing ``valid``.
+    now = time.time()
+    os.utime(valid, (now - 1000, now - 1000))
+    os.utime(valid / "session.jsonl", (now - 1000, now - 1000))
+    os.utime(empty, (now + 1000, now + 1000))
+    selected = existing_scope_dir(scope, base=tmp_path)
+    assert selected == valid
+
+
+def test_peek_session_signals_corruption_on_mid_iteration_failure(
+    tmp_path: Path,
+) -> None:
+    """A read failure partway through must not produce a half-counted SessionInfo.
+
+    Either the directory is dropped (``None``) or the returned record
+    carries ``corrupt=True``. The previous behaviour returned a
+    SessionInfo with whatever counts had accumulated, hiding the
+    corruption from callers.
+    """
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    sdir = pdir / "s"
+    sdir.mkdir(parents=True)
+    (sdir / "session.jsonl").write_bytes(
+        b'{"kind": "meta", "session_id": "S", "model_id": "m"}\n'
+        b'{"kind": "history", "type": "user", "text": "ok"}\n'
+        b"\xff\xfe garbage \xc3\x28\n"
+    )
+    info = _peek_session(sdir)
+    assert info is None or info.corrupt is True
+
+
+def test_latest_session_avoids_full_peek_sort(tmp_path: Path) -> None:
+    """``latest_session`` peeks only the mtime winner.
+
+    A counter wraps ``_peek_session`` and asserts at most one call --
+    candidate sort is mtime-only.
+    """
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    for i in range(3):
+        _write_session(pdir / f"s{i}", session_id=f"S{i}")
+
+    real_peek = sessions._peek_session
+    calls = {"n": 0}
+
+    def counting_peek(d: Path) -> SessionInfo | None:
+        calls["n"] += 1
+        return real_peek(d)
+
+    with patch.object(sessions, "_peek_session", side_effect=counting_peek):
+        _ = latest_session(tmp_path, projects_dir=projects)
+    assert calls["n"] == 1
 
 
 if __name__ == "__main__":

@@ -1,4 +1,16 @@
-"""Compaction orchestration helpers -- extracted from Agent."""
+"""Agent-coupled compaction orchestration.
+
+Wraps the standalone helpers in :mod:`sagent.compaction`
+with the pieces that need ``Agent``-owned state -- the
+``CompactionState`` bookkeeping record, the background-job re-surface
+step (which reads ``BackgroundTaskEntry`` from the Agent's registry),
+and the ``post_compact_enrich`` orchestrator that wires everything
+together against the live ``Tool`` map and ``ToolState``.
+
+The pure helpers (history mutation, file re-attachment, summary
+strategy, scrunch maneuver) live in the standalone module so they
+can be unit-tested without spinning up an ``Agent``.
+"""
 
 from __future__ import annotations
 
@@ -10,26 +22,29 @@ import time
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import ToolState
-from sagent.lib.compaction import reattach_files
+from sagent.compaction.files import reattach_files
+from sagent.compaction.history import (
+    MAX_CONSECUTIVE_COMPACT_FAILURES,
+    append_to_first_user,
+)
 from sagent.types.compactor import CompactRestorable
 from sagent.types.model import ContextBudget
 from sagent.types.runtime import (
     ModelContextEvent,
-    UserMessage,
 )
 from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)
 
-MAX_CONSECUTIVE_COMPACT_FAILURES = 3
-"""Auto-compaction circuit breaker.
 
-After this many consecutive auto-compact failures, ``compact_if_needed``
-short-circuits (returns ``False``) without invoking the compactor. The
-caller surfaces the underlying error rather than retrying a broken
-compactor indefinitely. Reset on any successful compaction.
-"""
+__all__ = [
+    "MAX_CONSECUTIVE_COMPACT_FAILURES",
+    "CompactionState",
+    "append_to_first_user",
+    "inject_background_status",
+    "post_compact_enrich",
+]
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -44,28 +59,6 @@ class CompactionState:
 
     compacting: bool = False
     """True while a compaction is in flight; gates re-entry."""
-
-
-def append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
-    """Append ``text`` to the first ``UserMessage`` in ``history``, or insert one.
-
-    The compactor and its post-enrich steps inject context (reattached
-    files, background-task status, skill bodies) ahead of the prompt.
-    The simplest place is the first user message; if none exists yet
-    (e.g. compactor returned an assistant-led summary), insert a fresh
-    one at position 0.
-
-    Args:
-      history: History to mutate in place.
-      text: Content to append (or seed a new ``UserMessage`` with).
-
-    """
-    for j, entry in enumerate(history):
-        if isinstance(entry, UserMessage):
-            joined = f"{entry.text}\n\n{text}" if entry.text else text
-            history[j] = dataclasses.replace(entry, text=joined)
-            return
-    history.insert(0, UserMessage(text=text))
 
 
 def inject_background_status(
@@ -86,7 +79,10 @@ def inject_background_status(
         done = job.task.done()
         status = "completed" if done else "running"
         elapsed = int(now - job.started)
-        lines.append(f"- [{qid}] {job.tool_name}: {status} ({elapsed}s ago)")
+        # "ago" is correct only when the elapsed window has closed; for
+        # still-running tasks the same number is "since started".
+        when = "ago" if done else "since started"
+        lines.append(f"- [{qid}] {job.tool_name}: {status} ({elapsed}s {when})")
     if lines:
         text = "Active background tasks (re-surfaced post-compaction):\n" + "\n".join(
             lines

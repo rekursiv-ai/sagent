@@ -120,11 +120,13 @@ class Google:
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.075, response=0.3, cache_read=0.01875),
+            supports_thinking=False,
         ),
         "gemini-1.5-pro": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=1.25, response=5.0, cache_read=0.3125),
+            supports_thinking=False,
         ),
     }
 

@@ -6,20 +6,26 @@ from typing import cast, override
 
 import time
 
+import pytest
+
 from sagent.repl.render import (
+    _STREAM_BUF_FLUSH_BYTES,
     HALT_MESSAGE,
     HELP_TEXT,
     RecordingPrinter,
     make_render_observer,
     render_tool_result,
     service_suspended_text,
+    strict_observer,
 )
 from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
 )
 from sagent.types.runtime import (
+    AgentSendDeferredMessage,
     AgentSendMessage,
+    AgentSendQueuedMessage,
     AssistantMessage,
     BudgetReset,
     ChildDoneEvent,
@@ -27,6 +33,7 @@ from sagent.types.runtime import (
     CompactComplete,
     CompactFailed,
     CompactStarted,
+    DetachedResult,
     ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
@@ -415,7 +422,16 @@ def test_dispatch_handles_unknown_events_silently() -> None:
     assert p.tool_errors == []
 
 
-def test_render_observer_error_emits_error_line() -> None:
+def test_render_observer_error_logs_without_reentering_printer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The safety net must not recurse through the failing printer.
+
+    A printer that raises was previously sent ``write_tool_error`` from
+    the catch-all -- which would re-raise from the same broken sink and
+    bury the original failure. The safety net now logs only.
+    """
+
     class BoomPrinter(RecordingPrinter):
         @override
         def write_user_bar(self, text: str) -> None:
@@ -424,9 +440,13 @@ def test_render_observer_error_emits_error_line() -> None:
 
     p = BoomPrinter()
     obs = make_render_observer(p)
-    obs(UserMessage(text="oops"))
-    # Safety net: a write_tool_error must be recorded.
-    assert any("render failed" in e for e in p.tool_errors)
+    with caplog.at_level("ERROR", logger="sagent.repl.render"):
+        obs(UserMessage(text="oops"))
+    assert p.tool_errors == [], (
+        f"safety net must not re-enter the failing printer; "
+        f"got tool_errors={p.tool_errors!r}"
+    )
+    assert any("render observer failed" in r.message for r in caplog.records)
 
 
 def test_child_event_streaming_partial_buffers_until_boundary() -> None:
@@ -558,6 +578,170 @@ def test_child_done_event_flushes_pending() -> None:
     # Flush picks up the buffered partial as an AssistantMessage.
     labels = [label for label, _ in p.child_blocks]
     assert labels == ["Agent_0"]
+
+
+def test_nested_child_event_grandchild_reaches_printer() -> None:
+    """``ChildEvent(ChildEvent(...))`` must unwrap to the innermost event.
+
+    A grandchild forwards through its parent as
+    ``ChildEvent(label, ChildEvent(label, inner))``. Without recursive
+    unwrap, ``_child_atomic_item`` sees the outer ``ChildEvent`` (not in
+    its dispatch table), returns ``None``, and the grandchild's output
+    silently disappears.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(
+        ChildEvent(
+            label="Agent_0",
+            inner=ChildEvent(
+                label="Agent_0",
+                inner=ToolLabel(call_id="c1", text="x"),
+            ),
+        ),
+    )
+    assert p.child_blocks, (
+        "nested ChildEvent must render to a child block; grandchild output"
+        " was dropped instead"
+    )
+    label, items = p.child_blocks[0]
+    assert label == "Agent_0"
+    assert any(isinstance(i, ToolLabel) and i.text == "x" for i in items)
+
+
+def test_cross_child_boundary_flushes_pending_stream_text() -> None:
+    """Switching active child label flushes the previous label's stream.
+
+    Without this, a slow child's buffered partial output lingers until
+    its ``ChildDoneEvent`` and renders interleaved with later children
+    -- the wrong slot from the user's point of view.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    # Buffer streaming text under Agent_0 (no boundary, so it stays).
+    obs(
+        ChildEvent(
+            label="Agent_0",
+            inner=ModelResponsePartial(text="incomplete from 0"),
+        ),
+    )
+    # Switch to Agent_1; should flush Agent_0's buffered text first.
+    obs(ChildEvent(label="Agent_1", inner=ToolLabel(call_id="c1", text="x")))
+    labels = [label for label, _ in p.child_blocks]
+    assert "Agent_0" in labels, (
+        f"Agent_0's buffered stream text must flush at boundary change;"
+        f" got labels={labels!r}"
+    )
+    agent0_items = next(items for lbl, items in p.child_blocks if lbl == "Agent_0")
+    assert any(
+        isinstance(i, AssistantMessage) and "incomplete from 0" in i.text
+        for i in agent0_items
+    )
+
+
+def test_stream_buf_flushes_at_size_cap() -> None:
+    """An in-progress fence without a boundary still flushes past the cap.
+
+    Without the cap, a 100K+-char in-progress fenced block would let
+    the buffer grow unbounded for the whole round.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    # Open a fence and stream a long single-line body so
+    # ``find_stable_boundary`` returns 0 (no paragraph break).
+    obs(ModelResponsePartial(text="```\n" + "x" * (_STREAM_BUF_FLUSH_BYTES + 1)))
+    assert p.markdowns, "stream buffer must flush once past the size cap"
+
+
+def test_strict_observer_reraises_dispatch_failures() -> None:
+    """REPL-026: ``strict_observer()`` flips the safety-net swallow off.
+
+    By default, a printer that raises inside the dispatch is logged and
+    swallowed so a renderer bug never tears down the agent loop. Tests
+    legitimately need the exception to surface; ``strict_observer``
+    re-raises so the assertion sees the real failure.
+    """
+
+    class _BoomPrinter(RecordingPrinter):
+        @override
+        def write_user_bar(self, text: str) -> None:
+            del text
+            raise RuntimeError("boom")
+
+    obs = make_render_observer(_BoomPrinter())
+    # Default: swallowed; no exception escapes the observer call.
+    obs(UserMessage(text="hi"))
+    # Strict: re-raised.
+    with strict_observer(), pytest.raises(RuntimeError, match="boom"):
+        obs(UserMessage(text="hi"))
+
+
+def test_child_stream_buf_flushes_at_size_cap() -> None:
+    r"""REPL-017: per-child stream buffer must mirror the parent's size cap.
+
+    Parent stream has a 64KB cap; the per-child buffer in ``_consume_child``
+    had no equivalent. A child streaming a long fenced block (no ``\n\n``
+    boundary) would let ``_child_text[label]`` grow without bound for the
+    whole round.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    # Open a fence under one child and stream a long single-line body so
+    # ``find_stable_boundary`` returns 0 (no paragraph break).
+    obs(
+        ChildEvent(
+            label="Agent_0",
+            inner=ModelResponsePartial(
+                text="```\n" + "x" * (_STREAM_BUF_FLUSH_BYTES + 1),
+            ),
+        ),
+    )
+    # The buffer for Agent_0 must be bounded by the same cap as the
+    # parent stream buffer.
+    child_text = obs._child_text.get("Agent_0", "")
+    assert len(child_text) <= _STREAM_BUF_FLUSH_BYTES, (
+        f"child stream buffer must flush at size cap;"
+        f" len={len(child_text)} cap={_STREAM_BUF_FLUSH_BYTES}"
+    )
+
+
+def test_detached_result_routes_through_tool_result_path() -> None:
+    """``DetachedResult`` renders the inner ``ToolResult`` to the user.
+
+    Without this case, a previously-detached tool's late completion
+    would not have any visual cue -- the user wouldn't know it landed.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    result = ToolResult(call_id="c1", content="done", summary="ok")
+    obs(DetachedResult(result=result))
+    assert p.tool_summaries == ["ok"], (
+        f"DetachedResult must render the inner ToolResult; got"
+        f" tool_summaries={p.tool_summaries!r}"
+    )
+
+
+def test_agent_send_queued_and_deferred_are_silent() -> None:
+    """``AgentSendQueuedMessage`` / ``AgentSendDeferredMessage`` are
+    intentionally silent.
+
+    Both are inbox-side placeholders; the visible event is the
+    ``AgentSendMessage`` that lands once the gate drains. Rendering the
+    queued/deferred wrapper would double-render the same payload.
+    """
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(AgentSendQueuedMessage(source="r", text="t"))
+    obs(AgentSendDeferredMessage(source="r", text="t"))
+    assert p.user_bars == [], (
+        f"queued/deferred wrappers must not write user bar; got {p.user_bars!r}"
+    )
+    assert p.agent_bars == [], (
+        f"queued/deferred wrappers must not write agent bar; got {p.agent_bars!r}"
+    )
+    assert p.tool_errors == [], (
+        f"queued/deferred wrappers must not raise errors; got {p.tool_errors!r}"
+    )
 
 
 def test_recording_printer_rendered_text_concats() -> None:

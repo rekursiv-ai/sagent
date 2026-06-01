@@ -27,15 +27,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import base64
 import dataclasses
 import json
 import logging
+import os
 import time
 
-from sagent.agent.context import resolve_context
+from sagent.agent.context import resolve_context, wire_role
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
@@ -118,7 +119,13 @@ def _att_to_json(att: BytesMessage) -> dict[str, str]:
 
 
 def _att_from_json(raw: object) -> BytesMessage | None:
-    """Decode one ``{mime, data(base64)}`` dict; return ``None`` on malformed input."""
+    """Decode one ``{mime, data(base64)}`` dict; return ``None`` on malformed input.
+
+    Only descriptors that match the wire-known media prefixes round-trip;
+    unknown descriptors are dropped silently rather than constructing a
+    ``BytesMessage`` the downstream provider would reject (or worse, mis-route
+    if a tampered session injects a non-attachment descriptor).
+    """
     if not isinstance(raw, dict):
         return None
     d = cast(Mapping[str, object], raw)
@@ -126,10 +133,28 @@ def _att_from_json(raw: object) -> BytesMessage | None:
     data = d.get("data")
     if not isinstance(mime, str) or not isinstance(data, str):
         return None
+    if not _is_known_attachment_descriptor(mime):
+        return None
     try:
         return BytesMessage(data=base64.b64decode(data), descriptor=mime)
     except (ValueError, TypeError):
         return None
+
+
+_KNOWN_ATTACHMENT_PREFIXES: tuple[str, ...] = (
+    "image/",
+    "audio/",
+    "video/",
+    "application/pdf",
+    "application/json",
+    "application/octet-stream",
+    "text/",
+)
+
+
+def _is_known_attachment_descriptor(mime: str) -> bool:
+    """Return True when ``mime`` matches a wire-allowed attachment prefix."""
+    return any(mime.startswith(prefix) for prefix in _KNOWN_ATTACHMENT_PREFIXES)
 
 
 def _atts_to_json(atts: tuple[BytesMessage, ...]) -> list[dict[str, str]]:
@@ -476,15 +501,6 @@ def _legacy_clear_to_splice(ref: TapeRef, last_visible_ord: int) -> ContextSplic
     )
 
 
-def _common_kwargs(d: Mapping[str, object]) -> dict[str, object]:
-    """Extract the ``id`` / ``parent_id`` / ``timestamp`` triple shared by all entries."""
-    return {
-        "id": int_val(d.get("id"), 0),
-        "parent_id": int_val(d.get("parent_id"), -1),
-        "timestamp": float_val(d.get("timestamp"), 0.0),
-    }
-
-
 def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
     """Decode one ``kind: history`` record into a ``TapeEvent`` (or ``None``)."""
     t = d.get("type")
@@ -503,19 +519,25 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             exception=RuntimeError(str(d.get("message") or "")),
             tape_len=int_val(d.get("tape_len"), 0),
         )
-    common = _common_kwargs(d)
+    entry_id = int_val(d.get("id"), 0)
+    parent_id = int_val(d.get("parent_id"), -1)
+    timestamp = float_val(d.get("timestamp"), 0.0)
     if t == "user":
         return UserMessage(
             text=str(d.get("text") or ""),
             attachments=_atts_from_json(d.get("attachments")),
-            **cast(dict[str, Any], common),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
         )
     if t == "agent_send":
         return AgentSendMessage(
             source=str(d.get("source") or ""),
             text=str(d.get("text") or ""),
             attachments=_atts_from_json(d.get("attachments")),
-            **cast(dict[str, Any], common),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
         )
     if t == "assistant":
         raw_tcs = d.get("tool_calls")
@@ -542,7 +564,9 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             text=str(d.get("text") or ""),
             thinking_blocks=_thinking_from_json(d.get("thinking_blocks")),
             tool_calls=tuple(tcs),
-            **cast(dict[str, Any], common),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
         )
     if t == "tool_result":
         return ToolResult(
@@ -554,7 +578,9 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             diff_file_path=str(d.get("diff_file_path") or ""),
             hint=str(d.get("hint") or ""),
             summary=str(d.get("summary") or ""),
-            **cast(dict[str, Any], common),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
         )
     return None
 
@@ -590,6 +616,7 @@ def serialize_tool_state(state: ToolState) -> dict[str, object]:
         "recent_files": state.recent_files,
         "additional_dirs": list(state.additional_dirs),
         "invoked_skills": sorted(state.invoked_skills),
+        "invoked_rules": sorted(state.invoked_rules),
         "depth": state.depth,
     }
 
@@ -600,6 +627,13 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
     Mutates ``state`` in place. ``_content_cache`` stays empty; content
     re-loads lazily on the next ``check_stale`` / ``consume_changed_files``
     against disk.
+
+    Intentionally **not** round-tripped (omitted from snapshot/restore):
+
+    - ``bash_parse_cache``: pure performance cache for the ``Bash`` tool;
+      re-derived on first parse, no behavioral diff.
+    - ``start_cwd``: captured at process start to detect cwd drift; not
+      a property of the persisted session.
 
     Args:
       state: ``ToolState`` to mutate.
@@ -648,6 +682,14 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
         state.invoked_skills.update(
             name
             for name in cast(list[object], raw_skills)
+            if isinstance(name, str) and name
+        )
+    state.invoked_rules.clear()
+    raw_rules = snapshot.get("invoked_rules")
+    if isinstance(raw_rules, list):
+        state.invoked_rules.update(
+            name
+            for name in cast(list[object], raw_rules)
             if isinstance(name, str) and name
         )
 
@@ -1035,9 +1077,17 @@ def append_session(
 ) -> None:
     """Append records to ``session.jsonl``.
 
-    Order within a batch: ``meta`` → tape records (in tape order) →
-    ``tool_state`` snapshot. Each loader pass keeps the latest ``meta``
-    and latest post-barrier ``tool_state``.
+    Order within a batch: ``meta`` -> tape records (in tape order) ->
+    runtime events -> persistent agent records -> ``tool_state``
+    snapshot. Each loader pass keeps the latest ``meta`` and latest
+    post-barrier ``tool_state``.
+
+    Durability: the batch is appended in place via ``_append_lines`` and
+    ``fsync``ed. The tape is append-only, so an append never rewrites
+    prior records; a crash can only truncate the new tail, and the
+    loader already skips a torn trailing line. Appending in place keeps
+    persistence O(bytes appended) and preserves the file's inode so
+    ``tail -f`` keeps following it.
 
     Args:
       path: Destination file path; created if missing.
@@ -1061,9 +1111,35 @@ def append_session(
     if not parts:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        for line in parts:
-            _ = f.write(line + "\n")
+    _append_lines(path, parts)
+
+
+def _append_lines(path: Path, lines: Sequence[str]) -> None:
+    """Append ``lines`` to ``path`` in place, then ``fsync`` for durability.
+
+    Opens ``path`` with ``O_APPEND`` and writes the batch in one pass.
+    The tape is append-only, so an append never rewrites prior records:
+    a crash can only truncate the new tail, which the loader already
+    skips as a malformed trailing line. Appending in place (rather than
+    rewrite-to-tmp + rename) keeps the cost O(bytes appended) instead of
+    O(file size), and preserves the file's inode so ``tail -f`` and
+    inotify watchers keep following it rather than being orphaned on the
+    renamed-away inode.
+
+    Args:
+      path: Destination file (created if missing).
+      lines: Each becomes one JSONL record (newline appended here).
+
+    """
+    payload = "".join(line + "\n" for line in lines).encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[], None]:
@@ -1346,8 +1422,14 @@ def load_session(
 
 
 def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
-    """Return loaded tape records in canonical ordinal order."""
-    return sorted(tape, key=lambda record: record.ref.ordinal)
+    """Return loaded tape records in canonical ``(session_id, ordinal)`` order.
+
+    Cross-session loads (forks, merged session_dirs) can collide on the
+    same ordinal; sort by ``session_id`` first so same-ordinal records
+    from different sessions tie deterministically and stay grouped by
+    session.
+    """
+    return sorted(tape, key=lambda record: (record.ref.session_id, record.ref.ordinal))
 
 
 def _has_later_barrier(
@@ -1470,9 +1552,15 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
             session_id = record.ref.session_id
             break
 
+    # ``replay()`` (not the validating constructor) because the input
+    # came from on-disk records: legacy tapes can carry consecutive
+    # AssistantMessage entries (e.g. interrupted before a tool result
+    # landed) and the role-alternation invariant in ``__post_init__``
+    # would reject them. The runtime's rescue / resolver paths handle
+    # whatever resolved shape this produces.
     return [
         *tape,
-        ContextSplice(
+        ContextSplice.replay(
             ref=TapeRef(session_id=session_id, ordinal=next_ordinal),
             mask=full_tape_mask(tape),
             insert_after=None,
@@ -1487,12 +1575,34 @@ def _coalesce_adjacent_users(
 ) -> tuple[ModelContextEvent, ...]:
     out: list[ModelContextEvent] = []
     for entry in history:
-        if isinstance(entry, UserMessage) and out and isinstance(out[-1], UserMessage):
+        if (
+            isinstance(entry, (UserMessage, AgentSendMessage))
+            and out
+            and wire_role(out[-1]) == "user"
+        ):
             prev = out[-1]
-            out[-1] = UserMessage(
-                text=f"{prev.text}\n\n{entry.text}",
-                attachments=(*prev.attachments, *entry.attachments),
-            )
+            assert isinstance(prev, (UserMessage, AgentSendMessage))
+            text = f"{prev.text}\n\n{entry.text}"
+            attachments = (*prev.attachments, *entry.attachments)
+            if isinstance(prev, AgentSendMessage):
+                out[-1] = dataclasses.replace(
+                    prev,
+                    text=text,
+                    attachments=attachments,
+                )
+            elif isinstance(entry, AgentSendMessage):
+                # Preserve agent attribution by adopting the agent type.
+                out[-1] = dataclasses.replace(
+                    entry,
+                    text=text,
+                    attachments=attachments,
+                )
+            else:
+                out[-1] = dataclasses.replace(
+                    prev,
+                    text=text,
+                    attachments=attachments,
+                )
         else:
             out.append(entry)
     return tuple(out)
@@ -1639,10 +1749,11 @@ def restore_model(
         )
         logger.info("Restored model %s/%s", meta.provider, meta.model_id)
         return model, spec
-    except (AttributeError, RuntimeError, ValueError):
+    except Exception:  # noqa: BLE001 -- provider construction may raise diverse exceptions (network / auth / sdk surprises); ``restore_model`` contract says: any failure -> caller keeps its default model, do not propagate
         logger.warning(
             "Failed to restore model %s/%s; keeping default",
             meta.provider,
             meta.model_id,
+            exc_info=True,
         )
         return None

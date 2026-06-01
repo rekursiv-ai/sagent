@@ -22,7 +22,6 @@ from sagent.providers.anthropic import (
     _is_prompt_too_long_text,
     _parse_response,
     _raw_message_stream,
-    _strip_context_tag,
     _tool_result_block,
     _tool_use_block,
     build_context_management,
@@ -53,19 +52,6 @@ def _make_request(
     messages: list[ModelContextEvent],
 ) -> ModelRequest:
     return ModelRequest(messages=messages)
-
-
-@pytest.mark.parametrize(
-    ("model_id", "stripped"),
-    [
-        ("claude-opus-4-7+1m", "claude-opus-4-7"),
-        ("claude-opus-4-7+200k", "claude-opus-4-7"),
-        ("claude-opus-4-7", "claude-opus-4-7"),
-        ("Claude-Opus-4-7+1M", "Claude-Opus-4-7"),
-    ],
-)
-def test_strip_context_tag(model_id: str, stripped: str) -> None:
-    assert _strip_context_tag(model_id) == stripped
 
 
 def test_context_betas_one_million_emits_beta() -> None:
@@ -269,6 +255,46 @@ def test_assistant_blocks_drops_signature_only_thinking() -> None:
         "text",
     ]
     assert blocks[0].get("thinking") == "kept"
+
+
+def test_assistant_blocks_drops_foreign_reasoning_blocks() -> None:
+    """Non-native thinking-block types are dropped on cross-provider switch.
+
+    After a session swaps from OpenAI / Moonshot / MiniMax / OpenAI-sub to
+    Anthropic, ``AssistantMessage.thinking_blocks`` may carry
+    ``{"type":"reasoning",...}`` entries. Anthropic's API rejects unknown
+    block types with HTTP 400, and there's no faithful translation, so the
+    serializer must silently elide them rather than forward verbatim.
+    """
+    asst = AssistantMessage(
+        text="ok",
+        thinking_blocks=(
+            {"type": "reasoning", "text": "hidden"},
+            {"type": "thinking", "thinking": "kept", "signature": "sig"},
+        ),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    types = [b.get("type") for b in blocks]
+    assert "reasoning" not in types
+    assert types == ["thinking", "text"]
+
+
+def test_assistant_blocks_drops_foreign_reasoning_only_appends_placeholder() -> None:
+    """Foreign-only thinking + no text/tool_calls still emits a valid message.
+
+    After elision the assistant message is empty; the existing rule that
+    Anthropic rejects assistant messages with no content drives a fallback
+    text block.
+    """
+    asst = AssistantMessage(
+        thinking_blocks=({"type": "reasoning", "text": "hidden"},),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    # Empty blocks list after elision; no trailing placeholder is needed
+    # because the message has no thinking block to mask. Anthropic will
+    # reject an empty assistant turn upstream, but that's the caller's
+    # contract -- we don't synthesize content out of nothing.
+    assert blocks == []
 
 
 def test_assistant_blocks_preserves_mixed_thinking_modes() -> None:

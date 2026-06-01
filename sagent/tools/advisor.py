@@ -69,14 +69,13 @@ SYSTEM_NUDGE = (
 class _AdvisorModel:
     """Bridge a provider ``Model`` to the runtime ``Model`` protocol."""
 
-    def __init__(self, inner: Model) -> None:
+    def __init__(self, inner: Model, system: str) -> None:
         self._inner = inner
+        self._system = system
 
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
@@ -84,8 +83,6 @@ class _AdvisorModel:
 
         Args:
           history: Conversation history for the advisor consult.
-          system: System prompt to send.
-          tools: Runtime-side tools forwarded by the engine (ignored).
           on_text: Callback for each streamed text chunk.
           on_thinking: Callback for each streamed thinking chunk.
 
@@ -93,8 +90,7 @@ class _AdvisorModel:
           message: Final ``AssistantMessage`` from the inner provider.
 
         """
-        del tools
-        request = ModelRequest(messages=history, system=system or None)
+        request = ModelRequest(messages=history, system=self._system or None)
         response = await self._inner.stream(request, on_text, on_thinking)
         return response.message
 
@@ -170,6 +166,11 @@ class Advisor:
         self._system = system
         self._uses = 0
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: advisor calls are independent."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Run a fresh sub-agent consultation and return the advice.
 
@@ -196,8 +197,7 @@ class Advisor:
             max_uses=self._max_uses,
         )
         runtime = agent_runtime.AgentRuntime(
-            model=_AdvisorModel(self._model),
-            system=self._system,
+            model=_AdvisorModel(self._model, self._system),
             tools=[],
         )
         history = await runtime.run(UserMessage(text=prompt))

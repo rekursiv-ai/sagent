@@ -125,6 +125,11 @@ class BackgroundTask:
             "or foreground running jobs."
         )
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: background-task control has no shared resource."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Dispatch a list, cancel, or foreground operation.
 

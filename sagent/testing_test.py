@@ -16,6 +16,7 @@ from sagent.tools.core import (
 from sagent.types.model import Pricing
 from sagent.types.runtime import (
     AssistantMessage,
+    Halt,
     Kill,
     ModelResponseComplete,
     Quit,
@@ -124,8 +125,6 @@ async def test_fake_agent_null_model_stream_returns_empty() -> None:
 
     msg = await a.runtime.model.stream(
         a.runtime.context().messages,
-        a.runtime.system,
-        list(a.runtime.tools_map.values()),
         _on_text,
         _on_text,
     )
@@ -272,6 +271,58 @@ def test_with_fake_agent_does_not_leak_on_exception() -> None:
     with pytest.raises(ValueError, match="boom"), with_fake_agent():
         raise ValueError("boom")
     assert tool_state_var.get(None) is state_before
+
+
+@pytest.mark.asyncio
+async def test_null_model_satisfies_runtime_model_protocol() -> None:
+    """The default fake runtime's model accepts the runtime ``stream`` shape.
+
+    Guards against regressions that swap the runtime ``Model`` Protocol
+    (lean ``stream(history, on_text, on_thinking) ->
+    AssistantMessage``) for the rich provider ``types.model.Model``
+    surface and leave ``_NullModel`` stranded. The runtime calls
+    ``model.stream`` with exactly these three positional args; this
+    test invokes the same shape end-to-end.
+    """
+    a = FakeAgent()
+    ctx = a.runtime.context()
+
+    msg = await a.runtime.model.stream(
+        ctx.messages,
+        lambda _t: None,
+        lambda _t: None,
+    )
+    assert isinstance(msg, AssistantMessage)
+    assert msg.text == ""
+
+
+@pytest.mark.asyncio
+async def test_fake_agent_halt_pushes_to_inbox_not_observers() -> None:
+    """``halt`` queues a ``Halt`` on the inbox without invoking observers.
+
+    Real ``Agent.halt`` (``agent/agent.py:883-885``) pushes to
+    ``runtime.inbox`` so the runtime dispatch loop drives the halt
+    state machine. ``FakeAgent`` mirrors that contract: observers stay
+    reserved for events the runtime itself publishes so tests can
+    distinguish runtime-sourced halts from stub calls.
+    """
+    a = FakeAgent()
+
+    a.halt()
+    items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=0.1)
+
+    assert [type(item) for item in items] == [Halt]
+    assert a.events == []
+
+
+def test_with_fake_agent_accepts_prebuilt_agent() -> None:
+    """``with_fake_agent(agent=...)`` installs the caller's fake verbatim."""
+    prebuilt = FakeAgent()
+    prebuilt.tool_state.bash_cwd = "/srv/x"
+    with with_fake_agent(agent=prebuilt) as active:
+        assert active is prebuilt
+        assert current_agent_var.get() is prebuilt
+        assert tool_state_var.get() is prebuilt.tool_state
 
 
 if __name__ == "__main__":

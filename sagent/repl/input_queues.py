@@ -97,26 +97,53 @@ class InputQueues:
     ) -> None:
         """Replace queue contents after Up/Down navigation commit.
 
+        Edit mode replaces only the head block the user lifted (the
+        first urgent block when urgent exists; otherwise the first
+        deferred block). The remaining snapshot tail is restored
+        verbatim so blocks the user did not touch survive the commit.
+
+        Commit-lane truth table::
+
+            edit_mode  urgent_count  lane       -> committed lane
+            False      *             "urgent"      urgent
+            False      *             "deferred"    deferred
+            True       0             "urgent"      urgent
+            True       0             "deferred"    deferred (tail)
+            True       >0            *             urgent  (head was urgent;
+                                                            stays urgent regardless of lane)
+
         ``lane`` is the caller's commit intent: Enter passes
         ``"urgent"`` so the committed block dispatches at the next
         chat-safe boundary; Tab keeps the default ``"deferred"`` so
-        navigation-from-tab still defers. When ``edit_mode`` is True
-        and ``urgent_count > 0`` the lifted block was already urgent
-        and stays urgent regardless of ``lane``.
+        navigation-from-tab still defers.
         """
         self.clear()
         if edit_mode and nav_queue:
             attachments = nav_queue[0].attachments
-            if urgent_count or lane == "urgent":
+            head_is_urgent = urgent_count > 0 or lane == "urgent"
+            if head_is_urgent:
                 self.stage_urgent(text, attachments)
+                tail_urgent = nav_queue[1:urgent_count] if urgent_count else ()
+                tail_deferred = nav_queue[max(urgent_count, 1) :]
             else:
                 self.stage_deferred(text, attachments)
+                tail_urgent = ()
+                tail_deferred = nav_queue[1:]
+            self.urgent.extend(tail_urgent)
+            self.deferred.extend(tail_deferred)
             return
         self.restore_from_snapshot(nav_queue, urgent_count=urgent_count)
+        # Non-edit commits (Up-navigated to a history slot, then Enter /
+        # Tab) carry the *first snapshot block*'s attachments forward --
+        # the snapshot block is the user's intent for "what was queued
+        # when they started navigating", and discarding its attachments
+        # silently loses image/PDF payloads the user staged before
+        # navigation began.
+        attachments = nav_queue[0].attachments if nav_queue else ()
         if lane == "urgent":
-            self.stage_urgent(text)
+            self.stage_urgent(text, attachments)
         else:
-            self.stage_deferred(text)
+            self.stage_deferred(text, attachments)
 
     def restore_from_snapshot(
         self, nav_queue: Sequence[QueuedInputBlock], *, urgent_count: int = 0
@@ -160,8 +187,14 @@ class InputQueues:
         self.deferred.clear()
         return True
 
-    def pop_tail_preview(self) -> str:
-        """Return the most important staged block for discard messages."""
+    def peek_tail_preview(self) -> str:
+        """Return the most important staged block for discard messages.
+
+        Read-only: leaves both lanes intact. Urgent has priority over
+        deferred (Enter-staged is "more committed" than Tab-staged), and
+        within a lane the most recently appended block is returned --
+        the user-visible tail of the queue preview.
+        """
         if self.urgent:
             return self.urgent[-1].text
         if self.deferred:

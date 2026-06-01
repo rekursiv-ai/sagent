@@ -41,6 +41,7 @@ from sagent.tools.core import (
 from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 from sagent.types.runtime import (
     AgentIdle,
+    AgentSendMessage,
     AssistantMessage,
     ChildEvent,
     ModelIdle,
@@ -288,6 +289,39 @@ async def test_run_depth_cap_exceeded() -> None:
         max_depth_var.reset(token)
     assert result.is_error
     assert "max_depth" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_without_current_agent_returns_error() -> None:
+    """Root use (no ``current_agent_var``) must not assertion-crash.
+
+    ``AgentSpawn._execute_child`` later asserts ``parent_agent is not
+    None``; if the run path admits a ``None`` parent we hit a bare
+    ``AssertionError`` that escapes the tool envelope. Reject early
+    with a clean ``ToolResult(is_error=True)`` so a tool-call from a
+    root context surfaces a structured message instead of an unhandled
+    exception.
+    """
+    parent = _make_parent()
+    # Install the minimal contextvars so the depth-cap check passes,
+    # but explicitly clear ``current_agent_var`` (root use) to model
+    # the "tool fired without an active agent" path.
+    path_t = agent_path_var.set("")
+    label_t = agent_label_var.set("Agent")
+    counter_t = agent_counter_var.set(itertools.count())
+    state_t = tool_state_var.set(parent.tool_state)
+    agent_t = current_agent_var.set(None)
+    try:
+        t = AgentSpawn()
+        result = await t.run({"prompt": "task"})
+    finally:
+        current_agent_var.reset(agent_t)
+        tool_state_var.reset(state_t)
+        agent_counter_var.reset(counter_t)
+        agent_label_var.reset(label_t)
+        agent_path_var.reset(path_t)
+    assert result.is_error
+    assert "no active agent" in result.content.lower()
 
 
 @pytest.mark.asyncio
@@ -865,7 +899,13 @@ def test_forwarder_notify_on_asleep_true_suppresses_boot_idle() -> None:
 
 def test_forwarder_notify_on_asleep_true_pushes_after_first_turn() -> None:
     """notify_on_asleep=True: AgentIdle AFTER the child has produced
-    history pushes a UserMessage. This is the real busy→idle edge.
+    history pushes an AgentSendMessage attributed to the child. This is
+    the real busy→idle edge.
+
+    Attribution: source must be the child's label so the renderer's
+    AgentSendMessage bar surfaces the right "from" header and the
+    parent's model context disambiguates the idle ping from anonymous
+    human input.
     """
     parent = _make_parent()
     child = _make_parent()
@@ -878,7 +918,8 @@ def test_forwarder_notify_on_asleep_true_pushes_after_first_turn() -> None:
     queue = parent.runtime.inbox._queue
     assert queue.qsize() == 1
     msg = queue.get_nowait()
-    assert isinstance(msg, UserMessage)
+    assert isinstance(msg, AgentSendMessage)
+    assert msg.source == "child"
     assert msg.text == "[child is idle] reply"
 
 
@@ -900,7 +941,8 @@ def test_forwarder_notify_on_asleep_includes_last_assistant_text() -> None:
     queue = parent.runtime.inbox._queue
     assert queue.qsize() == 1
     msg = queue.get_nowait()
-    assert isinstance(msg, UserMessage)
+    assert isinstance(msg, AgentSendMessage)
+    assert msg.source == "child"
     assert msg.text == "[child is idle] hello parent"
 
 
@@ -940,7 +982,8 @@ def test_forwarder_notify_on_asleep_prefers_agent_send_content() -> None:
     queue = parent.runtime.inbox._queue
     assert queue.qsize() == 1
     msg = queue.get_nowait()
-    assert isinstance(msg, UserMessage)
+    assert isinstance(msg, AgentSendMessage)
+    assert msg.source == "child"
     assert msg.text == "[child is idle] report body", (
         f"forwarder must surface AgentSend content, not the ack 'Done.'; got {msg.text!r}"
     )
@@ -1181,7 +1224,8 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
         # assistant text; subsequent pings are possible if the agent
         # cycles, but at least one must be present.
         first = parent.runtime.inbox._queue.get_nowait()
-        assert isinstance(first, UserMessage)
+        assert isinstance(first, AgentSendMessage)
+        assert first.source == "watcher-child"
         assert first.text == "[watcher-child is idle] done", (
             f"unexpected payload: {first.text!r}"
         )
@@ -1425,6 +1469,68 @@ async def test_spawned_child_writes_own_session_jsonl(tmp_path: Path) -> None:
     # The child's session.jsonl must carry real records, not be empty.
     content = child_files[0].read_text(encoding="utf-8")
     assert content.strip(), "child session.jsonl is empty"
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_empty_account() -> None:
+    """``account=""`` must be a hard error, not silent inheritance.
+
+    Mirrors ``AgentSelf.run({"account": ""})`` which already errors at
+    ``agent_self.py:485-490``. Pre-fix the local ``account`` had
+    already been collapsed to ``None`` by ``opt_str`` before the
+    reject branch ran, so the branch was unreachable and the spawn
+    silently inherited the parent's account.
+    """
+    parent = _make_parent()
+    with _parent_context(parent):
+        t = AgentSpawn()
+        result = await t.run(
+            {"prompt": "p", "model_id": "gpt-5", "account": ""},
+        )
+    assert result.is_error
+    assert "account cannot be empty" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_malformed_tools_string() -> None:
+    """``tools="Read"`` is malformed -- not an array. Fail closed.
+
+    Pre-fix this silently became ``tools=None`` → inherit the
+    parent's full toolset. The LLM asked to restrict tools but got
+    the unrestricted set: a permission gap.
+    """
+    parent = _make_parent()
+    with _parent_context(parent):
+        t = AgentSpawn()
+        result = await t.run({"prompt": "p", "tools": "Read"})
+    assert result.is_error
+    assert "tools" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_max_tool_call_rounds_zero() -> None:
+    """Schema declares ``minimum: 1``; runtime must enforce.
+
+    Pre-fix ``max_tool_call_rounds=0`` slipped through and produced
+    an agent that immediately hit its cap before any model round.
+    """
+    parent = _make_parent()
+    with _parent_context(parent):
+        t = AgentSpawn()
+        result = await t.run({"prompt": "p", "max_tool_call_rounds": 0})
+    assert result.is_error
+    assert "max_tool_call_rounds" in result.content
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_negative_max_depth() -> None:
+    """Schema declares ``minimum: 0``; runtime must enforce."""
+    parent = _make_parent()
+    with _parent_context(parent):
+        t = AgentSpawn()
+        result = await t.run({"prompt": "p", "max_depth": -1})
+    assert result.is_error
+    assert "max_depth" in result.content
 
 
 if __name__ == "__main__":

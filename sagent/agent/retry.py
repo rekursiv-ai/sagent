@@ -18,6 +18,7 @@ Constants:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, cast
 
 import asyncio
@@ -49,6 +50,14 @@ RETRY_BASE_SEC = 0.5
 MAX_RETRY_DELAY = 32.0
 PERSISTENT_MAX_BACKOFF_SEC = 300.0
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
+
+# Persistent-retry cap. Without this, a permanently-429'ing server wedges
+# the persistent loop indefinitely; only ``CancelledError`` can interrupt.
+# At ``PERSISTENT_MAX_BACKOFF_SEC=300`` and exponential ramp-up, 60 attempts
+# is roughly 5 hours of wall-clock retry -- long enough that a transient
+# upstream outage typically clears, short enough that an unattended job
+# eventually fails loud instead of stalling forever.
+DEFAULT_MAX_PERSISTENT_ATTEMPTS = 60
 
 # Depth cap when unwinding ``__cause__`` chains - a pathological
 # self-referencing cycle must not hang us.
@@ -129,9 +138,13 @@ def extract_retry_after(error: Exception) -> float | None:
 
     Checks in order:
 
-    1. ``retry-after`` (RFC 7231, seconds).
+    1. ``retry-after`` (RFC 7231, either delta-seconds or HTTP-date).
     2. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
        limit fully clears) - converted to delta-from-now.
+
+    All return paths are clamped to ``_MAX_SERVER_RETRY_AFTER_SEC`` (24h)
+    to neutralize a misconfigured upstream advertising a far-future reset
+    that would otherwise wedge persistent retry for days or years.
 
     Args:
       error: Exception with an attached HTTP response.
@@ -143,31 +156,42 @@ def extract_retry_after(error: Exception) -> float | None:
     response = getattr(error, "response", None)
     if response is None:
         return None
-    headers = getattr(response, "headers", {}) or {}
+    raw_headers = getattr(response, "headers", {}) or {}
+    headers = _lower_headers(raw_headers)
     val = headers.get("retry-after")
     if val is not None:
         try:
-            return _retry_after_seconds(float(val))
+            return _clamp_retry_after(_retry_after_seconds(float(val)))
         except (ValueError, TypeError):
             pass
+        try:
+            dt = parsedate_to_datetime(val)
+        except (TypeError, ValueError):
+            dt = None
+        if dt is not None:
+            return _clamp_retry_after(dt.timestamp() - time.time())
     reset = headers.get("anthropic-ratelimit-unified-reset")
     if reset is not None:
         try:
-            return max(0.0, float(reset) - time.time())
+            delta = float(reset) - time.time()
         except (ValueError, TypeError):
-            pass
+            return None
+        return _clamp_retry_after(delta)
     return None
 
 
-# A ``Retry-After`` delta this large is implausible; values at or above it
-# are an absolute Unix timestamp (epoch seconds), which some servers and
-# proxies send instead of RFC 7231 delta-seconds. ~1 year in seconds; any
-# real epoch (~1.8e9) clears it while no sane backoff approaches it.
-_RETRY_AFTER_EPOCH_THRESHOLD_SEC = 365 * 24 * 60 * 60
+_MAX_SERVER_RETRY_AFTER_SEC = 24 * 60 * 60
 
 
 def _retry_after_seconds(value: float) -> float:
     """Interpret a numeric ``Retry-After`` as a delay, converting epochs.
+
+    Some servers and proxies send an absolute Unix timestamp instead of
+    RFC 7231 delta-seconds. An epoch reset is close to ``now``; a delta --
+    even a large one -- is not. Convert to a delta only when ``value`` lands
+    within a clamp-window of ``now`` (i.e. it plausibly *is* an epoch), so a
+    far-from-now large delta stays a delta and clamps rather than collapsing
+    to ~0 via ``value - now``.
 
     Args:
       value: Parsed ``retry-after`` number (delta-seconds or epoch).
@@ -176,9 +200,25 @@ def _retry_after_seconds(value: float) -> float:
       delay_sec: Non-negative seconds to wait.
 
     """
-    if value >= _RETRY_AFTER_EPOCH_THRESHOLD_SEC:
-        return max(0.0, value - time.time())
+    now = time.time()
+    if value >= now - _MAX_SERVER_RETRY_AFTER_SEC:
+        return max(0.0, value - now)
     return max(0.0, value)
+
+
+def _clamp_retry_after(delta_sec: float) -> float:
+    """Clamp a server-advertised retry delay into ``[0, _MAX_SERVER_RETRY_AFTER_SEC]``."""
+    return min(max(0.0, delta_sec), _MAX_SERVER_RETRY_AFTER_SEC)
+
+
+def _lower_headers(headers: object) -> dict[str, str]:
+    """Return ``headers`` as a flat lowercase-key dict; tolerate any Mapping."""
+    if not isinstance(headers, Mapping):
+        return {}
+    return {
+        str(k).lower(): str(v)
+        for k, v in cast(Mapping[object, object], headers).items()
+    }
 
 
 def error_diagnostics(error: Exception) -> str:
@@ -236,6 +276,7 @@ async def send_with_retry(
     on_discarded_response: Callable[[ModelResponse], None] | None = None,
     on_service_suspended: Callable[[float, float, bool, Exception], None] | None = None,
     resume_retry_at: float | None = None,
+    max_persistent_attempts: int = DEFAULT_MAX_PERSISTENT_ATTEMPTS,
 ) -> ModelResponse:
     """Send with backoff and error classification.
 
@@ -267,12 +308,17 @@ async def send_with_retry(
           server_supplied, and the original exception.
       resume_retry_at: Optional wall-clock timestamp loaded from a prior
           service suspension; sleeps remaining time before the first send.
+      max_persistent_attempts: Hard cap on persistent-mode retry attempts.
+          Without this, a permanently-failing server wedges the loop
+          indefinitely. Defaults to
+          :data:`DEFAULT_MAX_PERSISTENT_ATTEMPTS`.
 
     Returns:
       response: Completed model response.
 
     Raises:
-      RetriesExhaustedError: If all attempts fail.
+      RetriesExhaustedError: If all attempts fail (including persistent
+          mode hitting ``max_persistent_attempts``).
       RateLimitError: On 429 in non-persistent mode.
 
     """
@@ -366,6 +412,10 @@ async def send_with_retry(
                 raise RateLimitError(reset_time, e) from e
             if persistent:
                 persistent_attempt += 1
+                if persistent_attempt >= max_persistent_attempts:
+                    raise RetriesExhaustedError(
+                        f"Failed after {persistent_attempt} persistent attempts: {e}",
+                    ) from e
                 base = RETRY_BASE_SEC * (2.0**persistent_attempt)
                 delay = min(
                     base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security

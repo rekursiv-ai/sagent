@@ -31,6 +31,7 @@ from sagent.providers.openai_sub import (
     _build_tool,
     _build_tool_result_item,
     _build_tools,
+    _build_user_item,
     _consume_stream,
     _jwt_claim,
     _jwt_exp,
@@ -42,6 +43,7 @@ from sagent.types.exceptions import AuthRefreshError, UserFacingError
 from sagent.types.model import ModelRequest, StreamInterruptedError
 from sagent.types.runtime import (
     AssistantMessage,
+    BytesMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -66,6 +68,10 @@ class _StubTool:
 
     def prompt(self) -> str:
         return ""
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
@@ -227,6 +233,67 @@ def _items_as_list(req: ModelRequest) -> list[Mapping[str, object]]:
 def test_build_input_user_message() -> None:
     items = _items_as_list(_stub_request_messages(UserMessage(text="hello")))
     assert items == [{"role": "user", "content": "hello"}]
+
+
+# 1×1 transparent PNG -- smallest valid PNG ``image_lib.resize`` will accept.
+_TINY_PNG = base64.b64decode(
+    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgAAIAAAUAAen"
+    b"63NgAAAAASUVORK5CYII="
+)
+
+
+def test_build_input_preserves_user_image_attachment() -> None:
+    """User-side image attachments survive as Responses ``input_image`` blocks.
+
+    The subscription path historically dropped ``attachments`` because the
+    builder mapped ``UserMessage`` to a bare-string ``content``; vision turns
+    crossing the Codex backend silently regressed.
+    """
+    req = _stub_request_messages(
+        UserMessage(
+            text="what is this?",
+            attachments=(BytesMessage(data=_TINY_PNG, descriptor="image/png"),),
+        ),
+    )
+    items = _items_as_list(req)
+    assert len(items) == 1
+    content = items[0]["content"]
+    assert isinstance(content, list)
+    types = [b.get("type") for b in cast(list[Mapping[str, object]], content)]
+    assert types == ["input_text", "input_image"]
+    image_block = cast(list[Mapping[str, object]], content)[1]
+    image_url = cast(str, image_block["image_url"])
+    assert image_url.startswith("data:image/")
+    assert ";base64," in image_url
+
+
+def test_build_user_item_text_only_keeps_bare_string_content() -> None:
+    """No attachments → no allocation overhead, simple ``content=str`` shape."""
+    item = _build_user_item(
+        UserMessage(text="hi"), max_image_dim=2048, max_image_bytes=20 * 1024 * 1024
+    )
+    assert item == {"role": "user", "content": "hi"}
+
+
+def test_build_user_item_drops_non_image_attachment_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """PDF + other non-image attachments are skipped with a warning.
+
+    The Responses API has no analogue of Anthropic's PDF block; opaque drop
+    would silently lose user intent, so the path logs each skipped descriptor.
+    """
+    with caplog.at_level("WARNING", logger="sagent.providers.openai_sub"):
+        item = _build_user_item(
+            UserMessage(
+                text="see attached",
+                attachments=(BytesMessage(data=b"%PDF", descriptor="application/pdf"),),
+            ),
+            max_image_dim=2048,
+            max_image_bytes=20 * 1024 * 1024,
+        )
+    assert item == {"role": "user", "content": "see attached"}
+    assert any("application/pdf" in r.message for r in caplog.records)
 
 
 def test_build_input_assistant_text_and_tool_call() -> None:

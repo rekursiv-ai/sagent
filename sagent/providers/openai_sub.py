@@ -81,6 +81,8 @@ if TYPE_CHECKING:
     import openai
     import openai.types.responses as oai_responses
     import openai.types.shared as oai_shared
+
+    import sagent.lib.image as image_lib
 else:
     from sagent.lib.lazy_import import lazy_import
 
@@ -88,6 +90,7 @@ else:
     openai = lazy_import("openai")  # 493ms cold
     oai_responses = lazy_import("openai.types.responses")
     oai_shared = lazy_import("openai.types.shared")
+    image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
@@ -125,6 +128,7 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    BytesMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -793,7 +797,11 @@ class _OpenAISubModel(_OpenAIModel):
         )
         create_kwargs: dict[str, object] = {
             "model": self._model_id,
-            "input": _build_input(request),
+            "input": _build_input(
+                request,
+                max_image_dim=self.max_image_dim,
+                max_image_bytes=self.max_image_bytes,
+            ),
             "instructions": request.system or "",
             "store": False,
             "stream": True,
@@ -879,18 +887,74 @@ def _build_tool(tool: Tool) -> oai_responses.FunctionToolParam:
     }
 
 
-def _build_input(request: ModelRequest) -> oai_responses.ResponseInputParam:
-    """Convert history entries to Responses API input items."""
+def _build_input(
+    request: ModelRequest,
+    *,
+    max_image_dim: int = 2048,
+    max_image_bytes: int = 20 * 1024 * 1024,
+) -> oai_responses.ResponseInputParam:
+    """Convert history entries to Responses API input items.
+
+    Args:
+      request: Fully-built model request.
+      max_image_dim: Maximum image dimension (pixels); larger inputs are
+          resized before encoding.
+      max_image_bytes: Maximum image size in bytes after resize.
+
+    Returns:
+      items: Responses API input items in send order.
+
+    """
     ids = IdRemapper("fc_")
     items: oai_responses.ResponseInputParam = []
     for entry in request.messages:
         if isinstance(entry, (AgentSendMessage, UserMessage)):
-            items.append({"role": "user", "content": entry.text})
+            items.append(
+                _build_user_item(entry, max_image_dim, max_image_bytes),
+            )
         elif isinstance(entry, AssistantMessage):
             _build_assistant_items(entry, items, ids)
         else:
             items.append(_build_tool_result_item(entry, ids))
     return items
+
+
+def _build_user_item(
+    entry: AgentSendMessage | UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> oai_responses.EasyInputMessageParam:
+    """Wire-shape a user-side entry, inlining any image attachments."""
+    image_atts = [att for att in entry.attachments if _is_image_attachment(att)]
+    non_image_atts = [att for att in entry.attachments if not _is_image_attachment(att)]
+    for att in non_image_atts:
+        logger.warning(
+            "OpenAI subscription: skipping non-image attachment (mime=%s)",
+            att.descriptor,
+        )
+    if not image_atts:
+        return {"role": "user", "content": entry.text}
+    blocks: list[oai_responses.ResponseInputContentParam] = []
+    if entry.text:
+        blocks.append({"type": "input_text", "text": entry.text})
+    for att in image_atts:
+        raw, mime = image_lib.resize(
+            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
+        )
+        b64 = base64.b64encode(raw).decode()
+        blocks.append(
+            {
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": f"data:{mime};base64,{b64}",
+            }
+        )
+    return {"role": "user", "content": blocks}
+
+
+def _is_image_attachment(att: BytesMessage) -> bool:
+    """True for ``BytesMessage`` attachments whose descriptor is an image mime."""
+    return att.descriptor.startswith("image/")
 
 
 def _build_assistant_items(

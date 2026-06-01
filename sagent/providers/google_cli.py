@@ -284,8 +284,14 @@ class _GoogleCLIModel:
 
     @property
     def supports_thinking(self) -> bool:
-        """``True``: ACP exposes ``agent_thought_chunk`` notifications."""
-        return True
+        """Whether the active model supports thinking.
+
+        ACP exposes ``agent_thought_chunk`` notifications, but legacy Gemini
+        models (``gemini-1.5-*``) cannot accept ``thinkingConfig`` on the
+        underlying API. Honor the per-model profile flag rather than blanket-
+        advertising support.
+        """
+        return self._profile.supports_thinking
 
     @property
     def supports_effort(self) -> bool:
@@ -768,7 +774,7 @@ def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:
     for opt_key in ("project_id", "scope", "token_type"):
         value = raw.get(opt_key)
         if isinstance(value, str) and value:
-            creds[opt_key] = value  # type: ignore[literal-required]
+            creds[opt_key] = value
     return creds
 
 
@@ -800,7 +806,7 @@ def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
     existing["refresh_token"] = creds["refresh_token"]
     existing["expiry_date"] = creds["expiry_date"]
     for opt_key in ("project_id", "scope", "token_type"):
-        value = creds.get(opt_key)  # type: ignore[literal-required]
+        value = creds.get(opt_key)
         if isinstance(value, str) and value:
             existing[opt_key] = value
     atomic_write_bytes(path, json.dumps(existing).encode(), file_mode=0o600)

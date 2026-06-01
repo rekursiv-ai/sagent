@@ -201,6 +201,11 @@ class Bash:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: Bash has no static path to serialize on."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute the command and return the result.
 

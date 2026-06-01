@@ -24,11 +24,12 @@ Public API:
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, cast
 
 import json
+import logging
 import re
 import sys
 import time
@@ -37,27 +38,39 @@ import uuid
 from sagent.lib.json import MutableJSON
 
 
+logger = logging.getLogger(__name__)
+
 _SAGENT_HOME = Path.home() / ".sagent"
+_PICK_CAP = 20
 _PROJECTS_DIR = _SAGENT_HOME / "projects"
-_SLUG_RE = re.compile(r"[^a-zA-Z0-9]")
+# Path separators map to ``_`` so the slug stays injective on the
+# separator structure: ``/tmp/a-b`` and ``/tmp/a/b`` previously
+# collapsed to the same slug because both ``/`` and ``-`` became
+# ``-``. Keeping ``/`` distinct under ``_`` preserves the directory
+# boundary information without introducing characters outside
+# ``[A-Za-z0-9_-]`` (all filesystem-safe).
+_SLUG_NONALPHANUM_RE = re.compile(r"[^a-zA-Z0-9/]")
 _MAX_SLUG_LEN = 200
 
 
 def cwd_slug(cwd: str | Path) -> str:
     """Derive a directory-safe slug for ``cwd``.
 
-    Replace non-alphanumerics with ``-``. If the result exceeds
-    ``_MAX_SLUG_LEN``, append a short hash suffix for uniqueness.
+    Maps path separators (``/``) to ``_`` and other non-alphanumerics
+    to ``-``, then truncates with a stable hash suffix when the result
+    exceeds ``_MAX_SLUG_LEN``. The two-character mapping prevents
+    sibling directory paths that differ only in ``/`` vs ``-`` from
+    aliasing to the same slug.
 
     Args:
       cwd: Current working directory.
 
     Returns:
-      slug: Directory-safe slug string.
+      slug: Directory-safe slug string drawn from ``[A-Za-z0-9_-]``.
 
     """
     s = str(Path(cwd).resolve())
-    sanitized = _SLUG_RE.sub("-", s)
+    sanitized = _SLUG_NONALPHANUM_RE.sub("-", s).replace("/", "_")
     if len(sanitized) <= _MAX_SLUG_LEN:
         return sanitized
     # Python hash is salted per-process; use a stable fnv-like
@@ -99,11 +112,43 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
     return d
 
 
+def _safe_scope(scope: str) -> str:
+    """Validate that ``scope`` cannot escape its parent directory.
+
+    Slack thread ids and similar caller-supplied keys land here
+    unchanged; an attacker controlling that key must not be able to
+    write outside the configured projects root via path-traversal
+    segments (``..``), absolute paths, NUL bytes, or empty names.
+
+    Args:
+      scope: Caller-supplied scope identifier.
+
+    Returns:
+      scope: The validated scope, unchanged.
+
+    Raises:
+      ValueError: When ``scope`` contains traversal or is otherwise
+          unusable as a single directory name.
+
+    """
+    if not scope:
+        raise ValueError("scope cannot be empty.")
+    if "\x00" in scope:
+        raise ValueError("scope cannot contain NUL bytes.")
+    if scope.startswith("/") or "\\" in scope:
+        raise ValueError(f"scope must be a relative single segment: {scope!r}")
+    parts = scope.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"scope must not contain traversal segments: {scope!r}")
+    return scope
+
+
 def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
     """Return a fresh session dir under a named scope.
 
     Args:
-      scope: Named scope (e.g. Slack thread ID).
+      scope: Named scope (e.g. Slack thread ID). Must be a relative
+          path with no traversal segments; otherwise ``ValueError``.
       base: Root directory override. Defaults to ``~/.sagent/projects``.
 
     Returns:
@@ -111,7 +156,7 @@ def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
 
     """
     root = base if base is not None else _PROJECTS_DIR
-    d = root / scope / uuid.uuid4().hex[:12]
+    d = root / _safe_scope(scope) / uuid.uuid4().hex[:12]
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -120,18 +165,22 @@ def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
     """Return the most recent session dir for ``scope``, if any.
 
     Args:
-      scope: Named scope (e.g. Slack thread ID).
+      scope: Named scope (e.g. Slack thread ID). Must be a relative
+          path with no traversal segments; otherwise ``ValueError``.
       base: Root directory override. Defaults to ``~/.sagent/projects``.
 
     Returns:
-      path: Most recent session directory, or None if none exist.
+      path: Most recent session directory containing ``session.jsonl``,
+        or None if none exist.
 
     """
     root = base if base is not None else _PROJECTS_DIR
-    scope_dir = root / scope
+    scope_dir = root / _safe_scope(scope)
     if not scope_dir.exists():
         return None
-    children = [c for c in scope_dir.iterdir() if c.is_dir()]
+    children = [
+        c for c in scope_dir.iterdir() if c.is_dir() and (c / "session.jsonl").exists()
+    ]
     if not children:
         return None
     return max(children, key=lambda p: p.stat().st_mtime)
@@ -159,6 +208,9 @@ class SessionInfo:
     model_id: str
     """Last-seen model id from the ``meta`` record."""
 
+    corrupt: bool = field(default=False)
+    """True when the head scan aborted mid-file; counts above are partial."""
+
 
 def parse_jsonl(text: str) -> list[MutableJSON]:
     """Parse JSONL text, skipping blank lines and malformed records.
@@ -174,7 +226,7 @@ def parse_jsonl(text: str) -> list[MutableJSON]:
 
 
 def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
-    """Yield one JSON dict per line, skipping blanks and malformed."""
+    """Yield one JSON dict per line, logging malformed and non-dict entries."""
     for raw in lines:
         line = raw.strip()
         if not line:
@@ -182,9 +234,12 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
+            logger.warning("Skipping malformed JSONL line: %r", line[:120])
             continue
         if isinstance(parsed, dict):
             yield cast(MutableJSON, parsed)
+        else:
+            logger.warning("Skipping non-dict JSONL record: %r", line[:120])
 
 
 def _is_user_text_message(rec: MutableJSON) -> bool:
@@ -215,6 +270,7 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
     message_count = 0
     model_id = ""
     session_id = session_dir.name
+    corrupt = False
     # Stream line-by-line: a multi-megabyte ``session.jsonl`` from a
     # long-running thread shouldn't force a whole-file load into
     # memory just to pull the title + count.
@@ -231,7 +287,10 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
                     if not first_user_msg and _is_user_text_message(rec):
                         first_user_msg = str(rec["text"])
     except (OSError, UnicodeDecodeError):
-        return None
+        # Surface corruption on whatever we managed to read rather than
+        # silently dropping or returning partial counts as if complete.
+        logger.warning("Aborted mid-file while peeking %s", session_file)
+        corrupt = True
     return SessionInfo(
         path=session_dir,
         session_id=session_id,
@@ -239,6 +298,7 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
         status=status or first_user_msg,
         message_count=message_count,
         model_id=model_id,
+        corrupt=corrupt,
     )
 
 
@@ -301,6 +361,9 @@ def latest_session(
 ) -> SessionInfo | None:
     """Return the most recently modified session under ``cwd``.
 
+    Cheaper than ``list_sessions(...)[0]``: only the mtime winner is
+    head-scanned. Falls back to the next candidate if peek fails.
+
     Args:
       cwd: Current working directory.
       projects_dir: Override for the projects root directory.
@@ -309,8 +372,26 @@ def latest_session(
       session: Most recent session, or None if none exist.
 
     """
-    sessions = list_sessions(cwd, projects_dir=projects_dir)
-    return sessions[0] if sessions else None
+    pdir = project_dir(cwd, projects_dir=projects_dir)
+    if not pdir.exists():
+        return None
+    candidates: list[tuple[float, Path]] = []
+    for child in pdir.iterdir():
+        if not child.is_dir():
+            continue
+        session_file = child / "session.jsonl"
+        if not session_file.exists():
+            continue
+        try:
+            candidates.append((session_file.stat().st_mtime, child))
+        except OSError:
+            continue
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    for _, child in candidates:
+        info = _peek_session(child)
+        if info is not None:
+            return info
+    return None
 
 
 def _format_relative_time(ts: float) -> str:
@@ -351,22 +432,36 @@ def pick_session(
         return None
     sin = stream_in if stream_in is not None else sys.stdin
     sout = stream_out if stream_out is not None else sys.stdout
-    for i, s in enumerate(sessions[:20], start=1):
+    visible = sessions[:_PICK_CAP]
+    if len(sessions) > _PICK_CAP:
+        sout.write(
+            f"  (showing {_PICK_CAP} of {len(sessions)} sessions; older ones hidden)\n"
+        )
+    for i, s in enumerate(visible, start=1):
         rel = _format_relative_time(s.mtime)
         label = _truncate(s.status, 60) or "(no user messages)"
         sout.write(f"  [{i:>2}] {rel:>7} · {s.message_count:>3} msg · {label}\n")
-    sout.write("Resume which? [1] ")
-    sout.flush()
-    try:
-        raw = sin.readline().strip()
-    except (EOFError, KeyboardInterrupt):
+    # Re-prompt on parse failure so a typo is recoverable; only EOF /
+    # Ctrl-C / out-of-range aborts.
+    while True:
+        sout.write("Resume which? [1] ")
+        sout.flush()
+        try:
+            line = sin.readline()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if line == "":
+            # EOF: stream closed without input.
+            return None
+        raw = line.strip()
+        if not raw:
+            # Blank line ⇒ accept default (most recent).
+            return visible[0]
+        try:
+            idx = int(raw) - 1
+        except ValueError:
+            sout.write(f"  not a number: {raw!r}\n")
+            continue
+        if 0 <= idx < len(visible):
+            return visible[idx]
         return None
-    if not raw:
-        return sessions[0]
-    try:
-        idx = int(raw) - 1
-    except ValueError:
-        return None
-    if 0 <= idx < min(len(sessions), 20):
-        return sessions[idx]
-    return None

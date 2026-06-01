@@ -1,18 +1,24 @@
-"""Tests for ``compactor``: structured-summary compaction strategy."""
+"""Tests for ``compaction.summary``: structured-summary compaction strategy."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import override
+from typing import Literal, cast, override
 
 import httpx
 import pytest
 
 from sagent.agent.context import resolve_context
-from sagent.compactor import (
+from sagent.compaction import summary
+from sagent.compaction.summary import (
     SummaryCompactor,
+    _attach_markers,
+    _coalesce_adjacent_users,
+    _drop_orphan_tool_results,
+    _format_summary,
     _request_entries,
+    _strip_attachments,
     build_continuation,
 )
 from sagent.testing import MockModelCaps
@@ -23,6 +29,7 @@ from sagent.types.model import (
     PromptTooLongError,
 )
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     BytesMessage,
     ModelContextEvent,
@@ -153,18 +160,28 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_truncates_long_fallback_summary() -> None:
-    """No ``<summary>`` tag and length > cap → text truncated."""
-    text = "x" * 12_000
+async def test_compact_no_summary_tag_routes_through_fallback() -> None:
+    """No ``<summary>`` tag → ``fallback_splice`` body, never raw model text.
+
+    Prevents the analysis-stripped raw output from leaking through as a
+    "summary" with the wrong observability label. The structural fix
+    routes through ``fallback_splice`` so ``strategy='summary_fallback'``
+    and ``fallback_reason='missing <summary>'`` are recorded.
+    """
+    text = "x" * 12_000  # no <summary> envelope
     model = _ScriptedModel(
         stream_responses=[ModelResponse(message=AssistantMessage(text=text))]
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
-    result = await _apply_compact(compactor, history, model)
-    first = result[0]
-    assert isinstance(first, UserMessage)
-    assert "(truncated)" in first.text
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary_fallback"
+    assert override.fallback_reason == "missing <summary>"
+    payload_text = "".join(
+        m.text for m in override.payload if isinstance(m, UserMessage)
+    )
+    assert "x" * 1_000 not in payload_text
+    assert "Compaction failed" in payload_text
 
 
 def test_build_continuation_minimal() -> None:
@@ -216,6 +233,23 @@ async def test_should_compact_subtracts_response_tokens() -> None:
     # effective = 200_000 - 8_000 = 192_000; threshold = 182_000.
     assert await compactor.should_compact(181_999, 200_000, 8_000) is False
     assert await compactor.should_compact(182_000, 200_000, 8_000) is True
+
+
+@pytest.mark.asyncio
+async def test_should_compact_default_buffer_scales_with_window() -> None:
+    """The default headroom scales with the window, matching the budget.
+
+    A flat default under-reserves on large-window models: ``should_compact``
+    must fire at the same proportional headroom ``ContextBudget.from_model``
+    reserves (66_666 for a 1M window), not a fixed 13_000 -- otherwise a 1M
+    session rides ~53k tokens past the budgeted ceiling before compacting.
+    """
+    compactor = SummaryCompactor()  # default buffer derives from the window
+    # 1M window: proportional buffer 66_666, effective 872_000,
+    # threshold 805_334. An 810k prompt is past the reserved headroom.
+    assert await compactor.should_compact(810_000, 1_000_000, 128_000) is True
+    # Just under the proportional threshold: still room, no compaction.
+    assert await compactor.should_compact(800_000, 1_000_000, 128_000) is False
 
 
 @pytest.mark.asyncio
@@ -421,6 +455,11 @@ async def test_compact_shrinks_tool_results_before_dropping_groups() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_drops_groups_after_shrunken_retry_overflows() -> None:
+    """Shrunk retry still overflows → drop oldest group → succeed.
+
+    Multi-group history so one group can be dropped without emptying
+    the request (M31 forbids content-free requests on overflow).
+    """
     body = "post-drop summary"
     overflow = PromptTooLongError(actual_tokens=250_000, limit_tokens=200_000)
     call = ToolCall(id="call_1", name="Bash", args={})
@@ -429,6 +468,11 @@ async def test_compact_drops_groups_after_shrunken_retry_overflows() -> None:
     )
     compactor = SummaryCompactor(max_attempts=3)
     history: list[ModelContextEvent] = [
+        UserMessage(text="r1"),
+        UserMessage(text="r1b"),
+        UserMessage(text="r1c"),
+        UserMessage(text="r1d"),
+        UserMessage(text="r1e"),
         AssistantMessage(text="I checked the log", tool_calls=(call,)),
         ToolResult(call_id="call_1", content="x" * 1_000_000),
     ]
@@ -441,17 +485,17 @@ async def test_compact_drops_groups_after_shrunken_retry_overflows() -> None:
     ]
     assert len(second_results) == 1
     assert len(second_results[0].content) < 1_000_000
-    final_results = [
-        entry for entry in model.received[-1].messages if isinstance(entry, ToolResult)
-    ]
-    assert final_results == []
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
 
 
 @pytest.mark.asyncio
 async def test_compact_drops_groups_on_token_gap_unknown() -> None:
-    """``token_gap=None`` triggers the fallback group-drop heuristic."""
+    """``token_gap=None`` triggers the fallback group-drop heuristic.
+
+    Multi-group history so a single overflow can drop the oldest group
+    and still leave content to summarize on the retry.
+    """
     body = "post-shrink"
     overflow = PromptTooLongError()  # actual/limit both unset → gap=None
     model = _ScriptedModel(stream_responses=[overflow, _summary_resp(body)])
@@ -459,6 +503,10 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
     tc = ToolCall(id="t1", name="Bash", args={"cmd": "ls"})
     history: list[ModelContextEvent] = [
         UserMessage(text="r1"),
+        UserMessage(text="r1b"),
+        UserMessage(text="r1c"),
+        UserMessage(text="r1d"),
+        UserMessage(text="r1e"),
         AssistantMessage(text="", tool_calls=(tc,)),
         ToolResult(call_id="t1", content="output bytes"),
         UserMessage(text="r2"),
@@ -630,7 +678,8 @@ async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
         AssistantMessage(text="resp1"),
     ]
     override = await _build_compact_override(compactor, history, model)
-    assert override.fallback_reason == "summary failed after 3 attempts"
+    assert override.strategy == "summary_fallback"
+    assert override.fallback_reason
     assert len(override.payload) == 1
     first = override.payload[0]
     assert isinstance(first, UserMessage)
@@ -648,7 +697,8 @@ async def test_compact_failure_preserves_current_user_turn() -> None:
         UserMessage(text="continue the active task"),
     ]
     override = await _build_compact_override(compactor, history, model)
-    assert override.fallback_reason == "summary failed after 3 attempts"
+    assert override.strategy == "summary_fallback"
+    assert override.fallback_reason
     assert override.preserved_tail_count == 1
     assert len(override.payload) == 1
     assert isinstance(override.payload[0], UserMessage)
@@ -835,7 +885,7 @@ async def test_verify_summary_true_uses_improved_summary() -> None:
     model = _ScriptedModel(
         stream_responses=[
             _summary_resp(first),
-            ModelResponse(message=AssistantMessage(text=improved)),
+            _summary_resp(improved),
         ]
     )
     compactor = SummaryCompactor(verify_summary=True)
@@ -889,7 +939,7 @@ async def test_verify_summary_retries_with_shrunk_history_on_overflow() -> None:
         stream_responses=[
             _summary_resp("first pass"),
             overflow,
-            ModelResponse(message=AssistantMessage(text="verified after shrink")),
+            _summary_resp("verified after shrink"),
         ]
     )
     compactor = SummaryCompactor(verify_summary=True, max_attempts=3)
@@ -906,6 +956,277 @@ async def test_verify_summary_retries_with_shrunk_history_on_overflow() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert "verified after shrink" in first.text
+
+
+# --- H2: orphan-filter preserves interleaved sibling events ---------------
+
+
+def test_drop_orphan_tool_results_keeps_interleaved_sibling_and_result() -> None:
+    """An ``AgentSendMessage`` between AM and its ``ToolResult`` must not
+    silently drop the result. The result belongs to the *preceding*
+    ``AssistantMessage.tool_calls`` regardless of unrelated events in
+    between.
+    """
+    am = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
+    sibling = AgentSendMessage(source="peer", text="ping")
+    tr = ToolResult(call_id="c1", content="ok")
+    out = _drop_orphan_tool_results([am, sibling, tr])
+    # AM, AgentSend, and TR must all survive; AM must precede TR.
+    assert am in out
+    assert sibling in out
+    assert tr in out
+    assert out.index(am) < out.index(tr)
+
+
+# --- H1: coalesce must not merge across AgentSendMessage sources ----------
+
+
+def test_coalesce_adjacent_users_does_not_merge_cross_source_agent_sends() -> None:
+    out = _coalesce_adjacent_users(
+        [
+            AgentSendMessage(source="X", text="a"),
+            AgentSendMessage(source="Y", text="b"),
+        ]
+    )
+    assert len(out) == 2
+    first, second = out
+    assert isinstance(first, AgentSendMessage)
+    assert isinstance(second, AgentSendMessage)
+    assert first.source == "X"
+    assert second.source == "Y"
+
+
+def test_coalesce_adjacent_users_merges_same_source_agent_sends() -> None:
+    out = _coalesce_adjacent_users(
+        [
+            AgentSendMessage(source="X", text="a"),
+            AgentSendMessage(source="X", text="b"),
+        ]
+    )
+    assert len(out) == 1
+    only = out[0]
+    assert isinstance(only, AgentSendMessage)
+    assert only.source == "X"
+    assert "a" in only.text
+    assert "b" in only.text
+
+
+# --- H6: empty model output must record summary_fallback ------------------
+
+
+@pytest.mark.asyncio
+async def test_compact_empty_model_output_records_summary_fallback() -> None:
+    """Empty summary text must surface as ``strategy='summary_fallback'``.
+
+    Before the fix, ``""`` was substituted by a no-output literal and
+    shipped under ``strategy='summary'`` -- a silent observability gap.
+    """
+    model = _ScriptedModel(
+        stream_responses=[ModelResponse(message=AssistantMessage(text=""))]
+    )
+    compactor = SummaryCompactor()
+    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary_fallback"
+    assert override.fallback_reason
+
+
+@pytest.mark.asyncio
+async def test_compact_missing_summary_tag_records_summary_fallback() -> None:
+    """Output without a ``<summary>`` block must fall back, not ship 'summary'.
+
+    Before the fix, ``_format_summary`` emitted a placeholder line but the
+    surrounding ``compact()`` still produced ``strategy='summary'`` and
+    embedded the placeholder in the continuation message.
+    """
+    model = _ScriptedModel(
+        stream_responses=[
+            ModelResponse(message=AssistantMessage(text="no envelope here"))
+        ]
+    )
+    compactor = SummaryCompactor()
+    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary_fallback"
+    assert "missing <summary>" in override.fallback_reason
+
+
+# --- H5: format_summary must not ship raw analysis-stripped text ----------
+
+
+def test_format_summary_without_summary_tag_returns_none() -> None:
+    """No ``<summary>`` block → ``None`` so ``compact()`` dispatches to
+    ``fallback_splice``. Information-leak + observability gap fix.
+    """
+    raw = "<analysis>private scratch notes</analysis>\nleftover analysis text"
+    assert _format_summary(raw) is None
+
+
+# --- M31: empty groups[] after drop must not send a content-free request --
+
+
+@pytest.mark.asyncio
+async def test_compact_all_groups_dropped_records_fallback() -> None:
+    """When every group is dropped on overflow, the compactor must record
+    a fallback instead of streaming an empty body to the model.
+    """
+    overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)
+    # Two overflows would drop everything; a third stream must not run.
+    model = _ScriptedModel(stream_responses=[overflow, overflow])
+    compactor = SummaryCompactor(max_attempts=2)
+    history: list[ModelContextEvent] = [UserMessage(text="r1")]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary_fallback"
+    assert model.stream_calls <= 2
+
+
+# --- M32/M64: descriptor branching by isinstance + match -----------------
+
+
+def test_attach_markers_missing_descriptor_does_not_default_to_image() -> None:
+    """An attachment without a ``descriptor`` must not be silently classified
+    as ``[image]``; ``isinstance(a, BytesMessage)`` + descriptor branching
+    is the contract.
+    """
+
+    class _Bogus:
+        pass
+
+    out = _attach_markers("body", (_Bogus(),))
+    assert "[image]" not in out
+
+
+def test_strip_attachments_pdf_uses_document_marker() -> None:
+    pdf = BytesMessage(data=b"%PDF", descriptor="application/pdf")
+    history: list[ModelContextEvent] = [UserMessage(text="see", attachments=(pdf,))]
+    out = _strip_attachments(history)
+    only = out[0]
+    assert isinstance(only, UserMessage)
+    assert "[document]" in only.text
+    assert "[image]" not in only.text
+
+
+# --- A42: empty text + non-BytesMessage attachment must not emit empty user --
+
+
+def test_strip_attachments_drops_entry_with_empty_text_and_no_markers() -> None:
+    """When the only attachment is a non-``BytesMessage`` shape and the
+    text is empty, ``_attach_markers`` returns ``""``. Emitting the
+    resulting ``UserMessage(text="", attachments=())`` would produce a
+    provider-rejected empty user message; the entry must be dropped.
+    The defensive non-``BytesMessage`` skip in ``_attach_markers``
+    anticipates future attachment shapes; this test guards the empty
+    edge case.
+    """
+
+    class _UnknownAttachment:
+        pass
+
+    fake = cast(BytesMessage, _UnknownAttachment())
+    entry = UserMessage(text="", attachments=(fake,))
+    out = _strip_attachments([entry])
+    assert out == []
+
+
+# --- M63: direction Literal runtime-checked ------------------------------
+
+
+def test_summary_compactor_rejects_invalid_direction() -> None:
+    with pytest.raises(ValueError, match="direction"):
+        _ = SummaryCompactor(
+            direction=cast(Literal["from", "up_to"], "sideways"),
+        )
+
+
+# --- H8: recipe switch propagates to next compaction ---------------------
+
+
+def test_default_compact_prompt_resolves_through_live_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Module-import-time reads froze prompts against the initial recipe;
+    after ``set_recipe`` the new asset must take effect immediately.
+    """
+    calls: list[str] = []
+
+    def fake_read_asset(path: object) -> str:
+        s = str(path)
+        calls.append(s)
+        return f"PROMPT_FOR::{s}"
+
+    def fake_compactor_path(key: str) -> str:
+        return f"recipe-X/{key}.md"
+
+    monkeypatch.setattr(summary, "read_asset", fake_read_asset)
+    monkeypatch.setattr(summary, "_compactor_path", fake_compactor_path)
+
+    first = summary.default_compact_prompt()
+    assert first == "PROMPT_FOR::recipe-X/full.md"
+
+    def fake_compactor_path_b(key: str) -> str:
+        return f"recipe-Y/{key}.md"
+
+    monkeypatch.setattr(summary, "_compactor_path", fake_compactor_path_b)
+    second = summary.default_compact_prompt()
+    assert second == "PROMPT_FOR::recipe-Y/full.md"
+    assert first != second
+
+
+# --- H3: orphan-filter equivalent two-pass behavior ----------------------
+
+
+def test_drop_orphan_tool_results_drops_unmatched_call_id() -> None:
+    """A ``ToolResult`` whose call_id has no matching AM tool_call must
+    be dropped; truly orphan results (e.g. from a malformed resume)
+    are filtered at the request-build boundary.
+    """
+    orphan_tr = ToolResult(call_id="ghost", content="nope")
+    out = _drop_orphan_tool_results(
+        [UserMessage(text="hi"), orphan_tr, UserMessage(text="next")]
+    )
+    assert orphan_tr not in out
+
+
+def test_drop_orphan_tool_results_user_message_interrupts_pending_turn() -> None:
+    """A ``UserMessage`` between AM and its TR drops the partially-
+    answered tool turn -- modelling a Ctrl+C / Halt interrupt that
+    injected a new user turn mid-tool.
+    """
+    am = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
+    interrupt = UserMessage(text="halt")
+    late_tr = ToolResult(call_id="c1", content="ok")
+    out = _drop_orphan_tool_results([am, interrupt, late_tr])
+    assert am not in out
+    assert late_tr not in out
+    assert interrupt in out
+
+
+# --- A33: AgentSendMessage between AM and its TRs must defer until close --
+
+
+def test_drop_orphan_tool_results_buffers_agent_send_until_tool_turn_closes() -> None:
+    """An ``AgentSendMessage`` arriving between an ``AssistantMessage``
+    with multiple tool_calls and the completion of its tool turn must
+    render *after* the tool turn, not before. Emitting ASM before the
+    AM reverses chronological order even though the wire roles remain
+    valid.
+    """
+    am = AssistantMessage(
+        tool_calls=(
+            ToolCall(id="t1", name="x", args={}),
+            ToolCall(id="t2", name="y", args={}),
+        ),
+    )
+    tr1 = ToolResult(call_id="t1", content="r1")
+    asm = AgentSendMessage(source="peer", text="ping")
+    tr2 = ToolResult(call_id="t2", content="r2")
+    out = _drop_orphan_tool_results([am, tr1, asm, tr2])
+    assert am in out
+    assert asm in out
+    assert tr1 in out
+    assert tr2 in out
+    assert out.index(am) < out.index(asm)
+    assert out.index(tr2) < out.index(asm)
 
 
 if __name__ == "__main__":

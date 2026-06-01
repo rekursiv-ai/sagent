@@ -397,6 +397,20 @@ def test_google_model_properties() -> None:
     assert m.max_image_bytes == 20 * 1024 * 1024
 
 
+def test_legacy_gemini_models_do_not_support_thinking() -> None:
+    """Legacy ``gemini-1.5-*`` models reject ``thinkingConfig``.
+
+    The Google API answers HTTP 400 ``thinkingConfig is not supported`` for
+    these snapshots; capability advertisement must match so the local layer
+    short-circuits before the request flies.
+    """
+    p = Google.from_key("k")
+    assert p.model("gemini-1.5-flash").supports_thinking is False
+    assert p.model("gemini-1.5-pro").supports_thinking is False
+    assert p.model("gemini-1.5-flash").supports_effort is False
+    assert p.model("gemini-1.5-pro").supports_effort is False
+
+
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
     body = _build_request(
         ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive")

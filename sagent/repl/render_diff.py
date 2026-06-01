@@ -83,11 +83,20 @@ _DIFF_REMOVED_WORD_STYLE = "on rgb(179,89,107)"  # Brighter red.
 # Muted gray for diff gutter line numbers.
 _GUTTER_FG = "rgb(160,160,160)"
 
-# Threshold at which we fall back to line-level diff instead
-# of word-level highlighting.
+# Word-diff falls back to line-level highlighting once the changed
+# characters exceed this fraction of the total compared characters.
+# 40% is the empirical sweet spot: below this, the word diff is still
+# legible (a couple of changed tokens per line); above, the highlight
+# noise overwhelms the surrounding context and the line diff is
+# clearer. Adjust together with the diff fixtures.
 _WORD_DIFF_THRESHOLD = 0.4
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Unified-diff file-header lines (``--- a/foo`` / ``+++ b/foo``) start
+# with ``-``/``+`` but are not hunk content. Without this filter
+# ``_pair_word_diffs`` would pair the headers against the first hunk's
+# remove/add and emit a nonsense word diff against ``a/foo`` vs ``b/foo``.
+_FILE_HEADER_RE = re.compile(r"^(?:---|\+\+\+)(?:\s|$)")
 _WORD_RE = re.compile(r"(\s+|\w+|[^\s\w]+)")
 
 _md = MarkdownIt()
@@ -105,7 +114,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
 
     """
     lexer = _get_lexer(file_path)
-    lines = diff.splitlines()
+    lines = [ln for ln in diff.splitlines() if not _FILE_HEADER_RE.match(ln)]
 
     added = sum(1 for ln in lines if ln.startswith("+"))
     removed = sum(1 for ln in lines if ln.startswith("-"))

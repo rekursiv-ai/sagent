@@ -106,6 +106,12 @@ def _load_recipe() -> dict[str, object]:
 def read_asset(path: str | Path) -> str:
     """Read an asset file, expanding ``{{include: path}}`` directives.
 
+    Cycles and runaway nesting are clamped: a per-call visited-set
+    detects self-include and a depth cap (see ``_MAX_ASSET_DEPTH``)
+    bounds total include chain length. Both render an inline marker
+    instead of recursing -- mirrors the contract in
+    ``agents_md._process``.
+
     Args:
       path: Relative path within the assets directory, or absolute path.
 
@@ -113,11 +119,29 @@ def read_asset(path: str | Path) -> str:
       text: File contents with include directives recursively expanded.
 
     """
+    return _read_asset(path, visited=set(), depth=0)
+
+
+_MAX_ASSET_DEPTH = 8
+
+
+def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
+    """Recursive worker for :func:`read_asset` with cycle/depth guards."""
     p = _ASSETS_DIR / path if isinstance(path, str) else path
-    text = p.read_text(encoding="utf-8")
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return f"[include: unreadable path {p}]"
+    key = str(resolved)
+    if key in visited:
+        return f"[include: cycle on {p}]"
+    if depth >= _MAX_ASSET_DEPTH:
+        return f"[include: depth cap reached at {p}]"
+    visited.add(key)
+    text = resolved.read_text(encoding="utf-8")
 
     def _replace(m: re.Match[str]) -> str:
-        return read_asset(m.group(1).strip())
+        return _read_asset(m.group(1).strip(), visited=visited, depth=depth + 1)
 
     return _RE_INCLUDE.sub(_replace, text)
 
@@ -527,6 +551,11 @@ class _ToolImpl:
         del result
         return None
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run decorator-based tools in parallel (no serialization)."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Invoke the wrapped function and return a ToolResult.
 
@@ -691,6 +720,24 @@ def has_been_read(path: str) -> bool:
 _file_write_locks: dict[str, asyncio.Lock] = {}
 
 
+def file_lock_key(path: str) -> str:
+    """Return the canonical serialization key for a file path.
+
+    Both the per-path write lock and the runtime's same-file cohort
+    grouping key off this, so a grouped call and the lock it acquires
+    always agree on identity (symlinks/``..`` normalized via
+    ``resolve``).
+
+    Args:
+      path: File path (already cwd-resolved by ``resolve_tool_path``).
+
+    Returns:
+      key: Canonical absolute path string.
+
+    """
+    return str(Path(path).resolve())
+
+
 def get_file_write_lock(path: str) -> asyncio.Lock:
     """Return the shared write lock for ``path``.
 
@@ -704,7 +751,7 @@ def get_file_write_lock(path: str) -> asyncio.Lock:
     # Avoid ``setdefault`` here - it eagerly constructs a new Lock on
     # every call even when the key already exists, and throws it
     # away. Edit/Write hit this on every mutation; cheap to skip.
-    resolved = str(Path(path).resolve())
+    resolved = file_lock_key(path)
     lock = _file_write_locks.get(resolved)
     if lock is None:
         lock = asyncio.Lock()
@@ -767,6 +814,7 @@ __all__ = (
     "changed_files_context",
     "cost_root_var",
     "current_agent_var",
+    "file_lock_key",
     "get_file_write_lock",
     "get_tool_state",
     "has_been_read",

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import override
+from typing import TYPE_CHECKING, override
 
-from sagent.lib.json import JSON
 from sagent.lib.token_count import approx_request_tokens
+
+
+if TYPE_CHECKING:
+    import pytest
+from sagent.lib.json import JSON
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
@@ -89,8 +93,13 @@ def test_user_with_image_attachment() -> None:
     assert n == 7
 
 
-def test_user_with_non_image_attachment_zero() -> None:
-    """Non-image attachments contribute nothing."""
+def test_user_with_pdf_attachment_counted() -> None:
+    """PDF attachments contribute to the token estimate.
+
+    Anthropic and Google providers ship PDFs on the wire; the estimator
+    must include them or compaction fires after the request is already
+    oversized.
+    """
     n = approx_request_tokens(
         _req(
             [
@@ -104,7 +113,36 @@ def test_user_with_non_image_attachment_zero() -> None:
         ),
         _TokenModel(),
     )
+    assert n == 7
+
+
+def test_user_with_unknown_attachment_zero_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unknown descriptors contribute zero but emit a warning.
+
+    Silent-drop was the F58 bug; the warning is the defensive log that
+    keeps a future provider addition from re-introducing the regression.
+    """
+    with caplog.at_level("WARNING", logger="sagent.lib.token_count"):
+        n = approx_request_tokens(
+            _req(
+                [
+                    UserMessage(
+                        text="",
+                        attachments=(
+                            BytesMessage(
+                                data=b"hello",
+                                descriptor="application/x-unknown",
+                            ),
+                        ),
+                    ),
+                ],
+            ),
+            _TokenModel(),
+        )
     assert n == 0
+    assert any("application/x-unknown" in r.message for r in caplog.records)
 
 
 def test_assistant_text() -> None:
@@ -166,6 +204,25 @@ def test_assistant_thinking_signature_counted() -> None:
     )
     # 80 // 4 + 40 // 4 = 20 + 10.
     assert n == 30
+
+
+def test_reasoning_text_blocks_count_tokens() -> None:
+    """OpenAI/Moonshot reasoning blocks (``type=reasoning``) bill via ``text``.
+
+    These blocks reach ``AssistantMessage.thinking_blocks`` from the OpenAI-
+    compat / OpenAI-subscription parsers as ``{"type":"reasoning","text":...}``.
+    Without counting their ``text`` field a long reasoning trace contributes
+    zero to the estimate, so proactive compaction fires far too late and the
+    provider 400s with context overflow.
+    """
+    msg = AssistantMessage(
+        text="hi",
+        thinking_blocks=({"type": "reasoning", "text": "x" * 4000},),
+    )
+    n = approx_request_tokens(_req([msg]), _TokenModel())
+    # 4000 chars // 4 = 1000 tokens from the reasoning text; ``"hi"`` rounds
+    # to 0 from the // 4 truncation.
+    assert n == 1000
 
 
 def test_tools_schema_counted() -> None:

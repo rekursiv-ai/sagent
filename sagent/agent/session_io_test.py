@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import dataclasses
 import json
+import os
 
 import pytest
 
@@ -57,12 +59,10 @@ class _RuntimeModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        system: str,
-        tools: list[agent_runtime.Tool],
         on_text: Callable[[str], None],
         on_thinking: Callable[[str], None],
     ) -> AssistantMessage:
-        del history, system, tools, on_text, on_thinking
+        del history, on_text, on_thinking
         return AssistantMessage(text="")
 
 
@@ -151,6 +151,7 @@ def test_serialize_tool_state_round_trip(tmp_path: Path) -> None:
     state.bash_cwd = str(tmp_path)
     state.depth = 2
     state.additional_dirs = ["/tmp/a"]  # noqa: S108 -- placeholder
+    state.invoked_rules.add("/tmp/a/.sagent/rules/python.md")  # noqa: S108
     state.read_cache["/tmp/x.txt"] = ReadCacheEntry(  # noqa: S108
         offset=0, limit=100, last_lines=10, mtime=1234.5
     )
@@ -160,6 +161,7 @@ def test_serialize_tool_state_round_trip(tmp_path: Path) -> None:
     assert restored.bash_cwd == state.bash_cwd
     assert restored.depth == state.depth
     assert restored.additional_dirs == state.additional_dirs
+    assert restored.invoked_rules == state.invoked_rules
     assert restored.read_cache["/tmp/x.txt"].mtime == 1234.5  # noqa: S108
 
 
@@ -260,6 +262,28 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
     ]
     assert len(matching) == 1
     assert matching[0].content == "hello world\n"
+
+
+def test_append_session_appends_in_place_without_rewrite(tmp_path: Path) -> None:
+    """Each ``append_session`` extends the file in place, keeping its inode.
+
+    The tape is append-only, so persistence must append -- not rewrite via
+    tmp + rename. A stable inode across batches proves the write is
+    O(bytes appended) (not O(file size)) and that ``tail -f`` / inotify
+    watchers keep following the file instead of being orphaned on the
+    renamed-away inode.
+    """
+    session_file = tmp_path / "session.jsonl"
+    append_session(session_file, meta={"session_id": "s1"})
+    ino_first = session_file.stat().st_ino
+    append_session(session_file, meta={"session_id": "s1", "status": "two"})
+    ino_second = session_file.stat().st_ino
+
+    assert ino_first == ino_second
+    lines = session_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["kind"] == "meta"
+    assert json.loads(lines[1])["status"] == "two"
 
 
 def test_user_message_with_attachment(tmp_path: Path) -> None:
@@ -445,6 +469,100 @@ def test_append_session_no_ops_on_empty_batch(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     append_session(session_file)
     assert not session_file.exists()
+
+
+def test_append_session_crash_writing_oversized_splice_preserves_prior_state(
+    tmp_path: Path,
+) -> None:
+    """Splice records routinely exceed Linux PIPE_BUF (4096); a crash mid-write
+    over such a record must not corrupt the prior committed state.
+
+    The retired comment in ``append_session`` claimed line-level kernel
+    atomicity via ``O_APPEND`` for "all current record types", but a
+    ``ContextSplice`` with a 16 KiB payload entry already serializes
+    well past the 4096 ceiling. The atomic-replace path makes the
+    failure mode batch-level, regardless of line length.
+    """
+    session_file = tmp_path / "session.jsonl"
+    prior = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
+    append_session(session_file, meta=prior.serialize())
+    prior_bytes = session_file.read_bytes()
+
+    splice = ContextSplice(
+        ref=TapeRef(session_id="abc", ordinal=0),
+        mask=(),
+        insert_after=None,
+        payload=(UserMessage(text="x" * 16_384),),
+        strategy="summary",
+    )
+    sizing_path = tmp_path / "size.jsonl"
+    append_session(sizing_path, tape_delta=[splice])
+    splice_line_bytes = len(sizing_path.read_bytes().splitlines()[0])
+    assert splice_line_bytes > 4_096
+
+    def _explode(fd: int, data: bytes) -> int:
+        del fd, data
+        raise OSError("simulated crash on oversized record")
+
+    with (
+        patch("sagent.agent.session_io.os.write", _explode),
+        pytest.raises(OSError, match="simulated crash"),
+    ):
+        append_session(session_file, tape_delta=[splice])
+
+    assert session_file.read_bytes() == prior_bytes
+
+
+def test_append_session_crash_during_write_preserves_prior_state(
+    tmp_path: Path,
+) -> None:
+    """A crash mid-append leaves prior records intact plus a torn tail.
+
+    Append-in-place never rewrites or loses prior records, so a failure
+    partway through the new batch leaves the prior bytes verbatim with a
+    truncated (non-newline-terminated) trailing line. The loader skips
+    that torn tail and recovers the prior committed state -- the new
+    batch is simply absent, as if the save had never happened. (The
+    stronger byte-identical-on-crash guarantee belonged to the rejected
+    rewrite-to-tmp + rename approach; append trades it for O(delta)
+    writes and a stable inode that ``tail -f`` can follow.)
+    """
+    session_file = tmp_path / "session.jsonl"
+    prior_meta = SessionMeta(session_id="abc", model_id="m", provider="P", auth="env")
+    append_session(session_file, meta=prior_meta.serialize())
+    prior_bytes = session_file.read_bytes()
+
+    real_write = os.write
+    fail_after = [1]
+
+    def _explode(fd: int, data: bytes) -> int:
+        if fail_after[0] <= 0:
+            raise OSError("simulated crash")
+        fail_after[0] -= 1
+        return real_write(fd, data[:1])
+
+    new_meta = SessionMeta(
+        session_id="abc", model_id="m2", provider="P", auth="env", status="failed"
+    )
+    with (
+        patch("sagent.agent.session_io.os.write", _explode),
+        pytest.raises(OSError, match="simulated crash"),
+    ):
+        append_session(
+            session_file,
+            meta=new_meta.serialize(),
+            tape_delta=_records_from([UserMessage(text="y" * 2_000)]),
+        )
+
+    # Prior records are byte-for-byte intact; only an unterminated tail
+    # was appended, and the loader recovers the prior committed state.
+    assert session_file.read_bytes().startswith(prior_bytes)
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    meta, tape, _ = loaded
+    assert meta.model_id == "m"
+    assert meta.status != "failed"
+    assert tape == []
 
 
 def test_load_session_orders_loaded_tape_by_ordinal(tmp_path: Path) -> None:
@@ -1078,6 +1196,97 @@ def test_load_session_drops_attachment_with_bad_mime_or_data(tmp_path: Path) -> 
     # Only the valid base64 attachment survives.
     assert len(entry.attachments) == 1
     assert entry.attachments[0].data == b"hello"
+
+
+def test_load_session_drops_attachment_with_unknown_mime_prefix(
+    tmp_path: Path,
+) -> None:
+    """``_att_from_json`` rejects descriptors outside the known-prefix allow-list."""
+    session_file = tmp_path / "session.jsonl"
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "x"},
+        {
+            "kind": "history",
+            "type": "user",
+            "text": "mixed",
+            "attachments": [
+                {"mime": "rogue/descriptor", "data": "aGVsbG8="},
+                {"mime": "application/x-malware", "data": "aGVsbG8="},
+                {"mime": "image/png", "data": "aGVsbG8="},
+            ],
+        },
+    )
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    entry = _history_from_tape(tape)[0]
+    assert isinstance(entry, UserMessage)
+    assert [a.descriptor for a in entry.attachments] == ["image/png"]
+
+
+def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
+    tmp_path: Path,
+) -> None:
+    """Tapes with two adjacent assistants + orphan tool_use load without raising.
+
+    Without ``ContextSplice.replay`` in ``_repair_dangling_tape`` the
+    validating constructor rejects the role-alternation violation when
+    the repair barrier is materialized.
+    """
+    session_file = tmp_path / "session.jsonl"
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "abc"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 0},
+            "type": "user",
+            "text": "go",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 1},
+            "type": "assistant",
+            "text": "first",
+        },
+        cast(
+            "dict[str, object]",
+            {
+                "kind": "history",
+                "ref": {"session_id": "abc", "ordinal": 2},
+                "type": "assistant",
+                "text": "second with orphan call",
+                "tool_calls": [{"id": "call_x", "name": "echo", "args": {}}],
+            },
+        ),
+    )
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+    _, tape, _ = loaded
+    history = _history_from_tape(tape)
+    # Repair pairs the orphan tool_use with a synthetic [interrupted] result.
+    tool_results = [e for e in history if isinstance(e, ToolResult)]
+    assert any("[interrupted]" in tr.content for tr in tool_results)
+
+
+def test_sort_tape_by_session_id_then_ordinal() -> None:
+    """Same-ordinal records from different sessions order by ``session_id``."""
+    rec_a = ReferrableTapeEvent(
+        ref=TapeRef(session_id="b", ordinal=1), event=UserMessage(text="b-1")
+    )
+    rec_b = ReferrableTapeEvent(
+        ref=TapeRef(session_id="a", ordinal=1), event=UserMessage(text="a-1")
+    )
+    rec_c = ReferrableTapeEvent(
+        ref=TapeRef(session_id="a", ordinal=0), event=UserMessage(text="a-0")
+    )
+    sorted_tape = session_io._sort_tape_by_ordinal([rec_a, rec_b, rec_c])
+    assert [(r.ref.session_id, r.ref.ordinal) for r in sorted_tape] == [
+        ("a", 0),
+        ("a", 1),
+        ("b", 1),
+    ]
 
 
 def test_load_session_drops_non_list_attachments_and_thinking(

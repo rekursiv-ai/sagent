@@ -66,24 +66,24 @@ def _truncate_index(text: str) -> tuple[str, str | None]:
     """Apply line/byte caps to an index file.
 
     Returns ``(truncated_text, warning_or_none)``. Byte truncation
-    cuts at the last newline so we don't mangle a line.
+    cuts at the last newline so we don't mangle a line. When both
+    line and byte caps fire the returned warning lists both reasons,
+    joined with ``"; "``.
     """
+    warnings: list[str] = []
     lines = text.splitlines(keepends=True)
     if len(lines) > _MAX_ENTRYPOINT_LINES:
         lines = lines[:_MAX_ENTRYPOINT_LINES]
-        truncated = "".join(lines)
-        warn = f"exceeded {_MAX_ENTRYPOINT_LINES}-line cap"
-    else:
-        truncated = "".join(lines)
-        warn = None
+        warnings.append(f"exceeded {_MAX_ENTRYPOINT_LINES}-line cap")
+    truncated = "".join(lines)
     if len(truncated.encode()) > _MAX_ENTRYPOINT_BYTES:
         b = truncated.encode()[:_MAX_ENTRYPOINT_BYTES]
         nl = b.rfind(b"\n")
         if nl > 0:
             b = b[:nl]
         truncated = b.decode(errors="replace") + "\n"
-        warn = f"exceeded {_MAX_ENTRYPOINT_BYTES}-byte cap"
-    return truncated, warn
+        warnings.append(f"exceeded {_MAX_ENTRYPOINT_BYTES}-byte cap")
+    return truncated, "; ".join(warnings) if warnings else None
 
 
 def load_index(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
@@ -194,7 +194,10 @@ def build_system_section(cwd: str | Path, *, projects_dir: Path | None = None) -
       section: Memory section string (always non-empty).
 
     """
-    mdir = memory_dir(cwd, projects_dir=projects_dir)
+    # The prompt template tells the model the directory exists; create
+    # it here so a Write to ``<memory_dir>/foo.md`` succeeds without an
+    # explicit mkdir step.
+    mdir = ensure_memory_dir(cwd, projects_dir=projects_dir)
     index = load_index(cwd, projects_dir=projects_dir)
     index_block = index.strip() if index else "(no memories yet - MEMORY.md is empty)"
     return _MEMORY_SECTION.format(

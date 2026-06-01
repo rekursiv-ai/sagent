@@ -9,72 +9,45 @@ import stat
 
 import pytest
 
-from sagent.lib.atomic_file import (
-    atomic_write,
-    atomic_write_binary,
-    atomic_write_bytes,
-)
+from sagent.lib.atomic_file import atomic_write_bytes
 
 
-def test_atomic_write_text_creates_file(tmp_path: Path) -> None:
-    dst = tmp_path / "out.txt"
-    with atomic_write(dst) as f:
-        _ = f.write("hello world")
-    assert dst.read_text() == "hello world"
-
-
-def test_atomic_write_text_creates_parent_dirs(tmp_path: Path) -> None:
-    dst = tmp_path / "a" / "b" / "c.txt"
-    with atomic_write(dst) as f:
-        _ = f.write("nested")
-    assert dst.read_text() == "nested"
-
-
-def test_atomic_write_text_rollback_on_exception(tmp_path: Path) -> None:
-    dst = tmp_path / "out.txt"
-    dst.write_text("original")
-
-    def _do_write() -> None:
-        with atomic_write(dst) as f:
-            _ = f.write("clobber")
-            raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError, match="boom"):
-        _do_write()
-    # Existing file is preserved; tmp file is removed.
-    assert dst.read_text() == "original"
-    siblings = [p for p in tmp_path.iterdir() if p.name != "out.txt"]
-    assert siblings == []
-
-
-def test_atomic_write_text_overwrites_existing(tmp_path: Path) -> None:
-    dst = tmp_path / "out.txt"
-    dst.write_text("v1")
-    with atomic_write(dst) as f:
-        _ = f.write("v2")
-    assert dst.read_text() == "v2"
-
-
-def test_atomic_write_binary_creates_file(tmp_path: Path) -> None:
+def test_atomic_write_bytes_fsyncs_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bytes payloads are fsynced before rename so a crash can't lose them."""
     dst = tmp_path / "out.bin"
-    payload = b"\x00\x01\x02hello"
-    with atomic_write_binary(dst) as f:
-        _ = f.write(payload)
-    assert dst.read_bytes() == payload
+    fsynced: list[int] = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd: int) -> None:
+        fsynced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    atomic_write_bytes(dst, b"payload")
+    assert fsynced, "atomic_write_bytes must fsync before rename"
+    assert dst.read_bytes() == b"payload"
 
 
-def test_atomic_write_binary_rollback_on_exception(tmp_path: Path) -> None:
-    dst = tmp_path / "out.bin"
-    dst.write_bytes(b"orig")
+def test_atomic_write_bytes_with_file_mode_fsyncs_before_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``file_mode`` path also fsyncs the data before the rename."""
+    dst = tmp_path / "creds.bin"
+    fsynced: list[int] = []
+    real_fsync = os.fsync
 
-    def _do_write() -> None:
-        with atomic_write_binary(dst) as f:
-            _ = f.write(b"clobber")
-            raise RuntimeError("boom")
+    def record_fsync(fd: int) -> None:
+        fsynced.append(fd)
+        real_fsync(fd)
 
-    with pytest.raises(RuntimeError):
-        _do_write()
-    assert dst.read_bytes() == b"orig"
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    atomic_write_bytes(dst, b"secret", file_mode=0o600)
+    assert fsynced
+    assert dst.read_bytes() == b"secret"
 
 
 def test_atomic_write_bytes_creates_file(tmp_path: Path) -> None:
@@ -147,16 +120,29 @@ def test_atomic_write_bytes_rollback_on_open_failure(tmp_path: Path) -> None:
     assert not dst.exists()
 
 
-def test_atomic_write_follows_symlinks(tmp_path: Path) -> None:
-    target = tmp_path / "target.txt"
-    target.write_text("orig")
-    link = tmp_path / "link.txt"
+def test_atomic_write_bytes_follows_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"orig")
+    link = tmp_path / "link.bin"
     link.symlink_to(target)
-    with atomic_write(link) as f:
-        _ = f.write("new")
+    atomic_write_bytes(link, b"new")
     # Symlink still points at the same file; target updated through the link.
     assert link.is_symlink()
-    assert target.read_text() == "new"
+    assert target.read_bytes() == b"new"
+
+
+def test_atomic_write_bytes_symlink_to_nonexistent_does_not_create_target_dirs(
+    tmp_path: Path,
+) -> None:
+    """Dangling symlink must not materialise the foreign target directory."""
+    target = tmp_path / "foreign" / "x.bin"  # parent does not exist
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+    atomic_write_bytes(link, b"data")
+    assert not (tmp_path / "foreign").exists()
+    # The link itself was replaced with a regular file holding the payload
+    # (the link's parent is ``tmp_path``, which exists).
+    assert link.read_bytes() == b"data"
 
 
 if __name__ == "__main__":

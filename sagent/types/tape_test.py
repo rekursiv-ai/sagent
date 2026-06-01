@@ -214,6 +214,57 @@ def test_replay_bypasses_validation() -> None:
     assert len(splice.mask) == 2
 
 
+def test_payload_rejects_duplicate_tool_call_id_across_messages() -> None:
+    """D9: duplicate ``tool_call.id`` across two AMs in one payload fails.
+
+    Pairing logic within a single payload was checked, but two AMs both
+    declaring tool_call id ``t1`` (each properly paired with their own
+    ToolResult) used to slip past validation. Providers reject the
+    resulting payload at send time with confusing tool-pairing errors;
+    catch at construct time instead.
+    """
+    am1 = AssistantMessage(
+        text="",
+        tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
+    )
+    am2 = AssistantMessage(
+        text="",
+        tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
+    )
+    with pytest.raises(InvalidPayloadError, match="duplicate tool_call"):
+        _splice(
+            payload=(
+                am1,
+                ToolResult(call_id="t1", content="a"),
+                am2,
+                ToolResult(call_id="t1", content="b"),
+            ),
+        )
+
+
+def test_replay_tolerates_new_default_field_additions() -> None:
+    """B16: ``replay`` survives a new dataclass field with a default.
+
+    The hand-built ``values`` dict used to ``KeyError`` for any field
+    not enumerated. The default-fallback path lets ``replay`` continue
+    to construct legacy splices even when the dataclass grows new
+    fields (so long as the new fields carry defaults).
+    """
+    splice = ContextSplice.replay(
+        ref=_REF,
+        mask=(),
+        insert_after=None,
+        payload=(UserMessage(text="x"),),
+        strategy="legacy",
+    )
+    # Default-valued fields land at their dataclass defaults.
+    assert splice.token_before == 0
+    assert splice.token_after == 0
+    assert splice.fallback_reason == ""
+    assert splice.preserved_tail_count == 0
+    assert splice.paired_externally == frozenset()
+
+
 def test_replay_preserves_all_fields() -> None:
     """``replay()`` populates every dataclass field, including defaults."""
     splice = ContextSplice.replay(
@@ -233,6 +284,32 @@ def test_replay_preserves_all_fields() -> None:
     assert splice.fallback_reason == "ran out"
     assert splice.preserved_tail_count == 3
     assert splice.paired_externally == frozenset({"q"})
+
+
+def test_paired_externally_does_not_hide_local_invalid_pair_order() -> None:
+    """SAGENT-REV-003: ``paired_externally`` must not absolve local mis-ordering.
+
+    A payload of ``AM(t1), User, TR(t1)`` is wire-invalid (the user
+    turn between an AM with pending tool_calls and its matching TR
+    breaks provider alternation). The validator used to silently accept
+    it whenever ``t1`` appeared in ``paired_externally``, because the
+    user-side branch drained ``pending`` via ``-= paired_externally``
+    and the later TR was admitted through the orphan branch's external
+    escape hatch. The field contract says the pair lives *outside*
+    this payload, not "skip pairing checks for this id locally".
+    """
+    with pytest.raises(
+        InvalidPayloadError,
+        match=r"tool_call|alternation|orphan|paired_externally",
+    ):
+        _splice(
+            payload=(
+                AssistantMessage(tool_calls=(ToolCall(id="c1", name="t", args={}),)),
+                UserMessage(text="interrupt"),
+                ToolResult(call_id="c1", content="late"),
+            ),
+            paired_externally=frozenset({"c1"}),
+        )
 
 
 if __name__ == "__main__":

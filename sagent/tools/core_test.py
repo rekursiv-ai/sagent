@@ -360,6 +360,26 @@ def test_get_tool_state_default_outside_context() -> None:
     assert isinstance(s, ToolState)
 
 
+def test_default_tool_state_is_isolated_per_test_part_one() -> None:
+    """A50: the autouse fixture must reset ``_default_state`` per test.
+
+    Paired with ``..._part_two``; the first test mutates the singleton
+    and the second asserts the mutation did not survive. Without the
+    autouse fixture the second test would observe the mutation as a
+    flaky-test vector.
+    """
+    s = get_tool_state()
+    s.invoked_skills.add("contaminant_marker_A50")
+
+
+def test_default_tool_state_is_isolated_per_test_part_two() -> None:
+    """A50 (pair): mutation from part_one must NOT survive into this test."""
+    s = get_tool_state()
+    assert "contaminant_marker_A50" not in s.invoked_skills, (
+        "default ToolState bled between tests; autouse reset fixture broken"
+    )
+
+
 def test_tool_state_context_swaps_state() -> None:
     custom = ToolState()
     custom.bash_cwd = "/tmp"  # noqa: S108 -- test placeholder, not real fs use
@@ -639,6 +659,18 @@ def test_recipe_yaml_non_dict_root_returns_empty(tmp_path: Path) -> None:
         assert recipe_dict("anything") == {}
     finally:
         set_recipe("sagent")
+
+
+def test_read_asset_self_include_does_not_recurse(tmp_path: Path) -> None:
+    # ``{{include: <self>}}`` must not blow the Python stack. Mirror the
+    # ``agents_md._process`` contract: visited-set / depth cap clamps
+    # the cycle and returns a clean string. Plain ``RecursionError``
+    # leaks an implementation detail and crashes the calling tool.
+    cyclic = tmp_path / "self.md"
+    cyclic.write_text(f"prefix\n{{{{include: {cyclic}}}}}\nsuffix")
+    out = read_asset(cyclic)
+    assert "prefix" in out
+    assert "suffix" in out
 
 
 def test_read_asset_includes_directive(tmp_path: Path) -> None:

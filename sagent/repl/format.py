@@ -62,10 +62,12 @@ def print_user_bar(
 
 
 def set_terminal_title(text: str, max_len: int = 80) -> None:
-    r"""Write an OSC 0 (icon+window title) escape to stdout.
+    r"""Write an OSC 0 (icon+window title) escape to stderr.
 
-    Safe under ``patch_stdout`` -- the proxy routes writes above the
-    prompt without tearing it down. No-op when not a tty.
+    stderr (not stdout) is intentional: the prompt-toolkit input runs
+    on stdout, and an OSC escape interleaved into that stream can
+    confuse the input renderer. stderr ttys honour OSC the same way and
+    stay out of the prompt path. No-op when stderr is not a tty.
 
     Args:
       text: Title text to set.
@@ -115,13 +117,14 @@ def format_count(n: int) -> str:
       n: Token count.
 
     Returns:
-      formatted: E.g. ``"412"``, ``"12K"``, ``"1.8M"``.
+      formatted: E.g. ``"412"`` (<10K), ``"12K"`` (10K..999_499),
+          ``"1.0M"`` (999_500 -- boundary case lifted off the K scale
+          so banker's-rounded ``f"{n/1000:.0f}K"`` never produces
+          ``"1000K"``), ``"1.8M"`` (≥1M).
 
     """
     if n < 10_000:
         return str(n)
-    # Threshold lifted to 999_500 so banker's-rounded ``f"{n/1000:.0f}K"``
-    # never produces ``"1000K"`` -- step straight to the M scale instead.
     if n < 999_500:
         return f"{n / 1000:.0f}K"
     return f"{n / 1_000_000:.1f}M"

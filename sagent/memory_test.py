@@ -59,6 +59,17 @@ class TestLoadIndex:
         assert "a" * 20_000 in body
         assert "b" * 20_000 not in body
 
+    def test_both_caps_reported(self, tmp_path: Path) -> None:
+        """When both line and byte caps fire, both must surface in the warning."""
+        d = memory.ensure_memory_dir("/x", projects_dir=tmp_path / "projects")
+        # 300 lines of 200 chars = 60 KB total: trips line cap (200) AND
+        # byte cap (25 KB) after line truncation.
+        lines = [("a" * 200) + "\n" for _ in range(300)]
+        _ = (d / "MEMORY.md").write_text("".join(lines))
+        content = memory.load_index("/x", projects_dir=tmp_path / "projects")
+        assert "200-line cap" in content
+        assert "25000-byte cap" in content
+
     def test_unreadable_index_returns_empty(self, tmp_path: Path) -> None:
         d = memory.ensure_memory_dir("/x", projects_dir=tmp_path / "projects")
         _ = (d / "MEMORY.md").write_bytes(b"\xff\xfe not utf-8 \xc3\x28")
@@ -78,6 +89,12 @@ class TestBuildSystemSection:
             "/nonexistent", projects_dir=tmp_path / "projects"
         )
         assert "no memories yet" in out.lower()
+
+    def test_creates_memory_dir_when_missing(self, tmp_path: Path) -> None:
+        """The prompt tells the model the dir exists; back that promise up."""
+        projects = tmp_path / "projects"
+        _ = memory.build_system_section("/some/cwd", projects_dir=projects)
+        assert memory.memory_dir("/some/cwd", projects_dir=projects).is_dir()
 
     def test_with_index(self, tmp_path: Path) -> None:
         d = memory.ensure_memory_dir("/x", projects_dir=tmp_path / "projects")

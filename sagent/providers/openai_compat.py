@@ -72,7 +72,6 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
-    BytesMessage,
     ToolCall,
     UserMessage,
 )
@@ -1007,10 +1006,6 @@ def _parse_tool_arguments(
     )
     return {}
 
-
-# Avoid unused-import warning when ``BytesMessage`` ends up unused after the
-# rewrite (consumers cast attachments directly).
-_ = BytesMessage
 
 # Wire default model class last so subclasses can also use the default.
 OpenAICompat.MODEL_CLASS = OpenAICompatModel

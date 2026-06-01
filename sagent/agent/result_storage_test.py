@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import os
 import re
 
 from sagent.agent.result_storage import (
@@ -12,6 +15,10 @@ from sagent.agent.result_storage import (
     post_process_result,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_empty_result_gets_completed_marker() -> None:
@@ -105,6 +112,37 @@ def test_persist_collision_writes_distinct_file(tmp_path: Path) -> None:
     assert saved.name != "call_abc.txt"
     assert saved.read_text() == "X" * 5_000
     assert (target / "call_abc.txt").read_text() == "PRIOR"
+
+
+def test_persist_handles_posix_short_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for AGENT-REVIEW-002: short ``os.write`` must not truncate.
+
+    POSIX ``write(2)`` is permitted to return fewer bytes than requested.
+    The previous one-shot ``os.write`` ignored the return value, dropping
+    the tail of large results.
+    """
+    real_write = os.write
+    chunk_sizes: Iterator[int] = iter([16, 64, 1024])
+
+    def short_write(fd: int, data: bytes) -> int:
+        try:
+            limit = next(chunk_sizes)
+        except StopIteration:
+            return real_write(fd, data)
+        return real_write(fd, bytes(data[:limit]))
+
+    monkeypatch.setattr(os, "write", short_write)
+
+    body = "Y" * 5_000
+    result = ToolResult(call_id="short_write", content=body)
+    out = post_process_result(
+        result, "Bash", session_dir=tmp_path, persist_threshold=1_000
+    )
+    assert PERSISTED_TAG in out.content
+    on_disk = tmp_path / "tool-results" / "short_write.txt"
+    assert on_disk.read_text() == body
 
 
 if __name__ == "__main__":

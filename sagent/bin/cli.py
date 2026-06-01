@@ -71,7 +71,7 @@ from sagent.agent.session_io import (
     load_session,
 )
 from sagent.agent.state import agent_registry, unique_registry_label
-from sagent.compactor import SummaryCompactor
+from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.json import MutableJSON, json_unfreeze
 from sagent.prompt import build_system
 from sagent.providers import (

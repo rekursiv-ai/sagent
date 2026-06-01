@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sagent.lib.compaction import MICROCOMPACTED_ARGS_KEY
+from sagent.agent.context import alive_splices, masked_refs_by_alive
+from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import (
     make_render_observer,
     render_tool_result,
@@ -29,6 +30,7 @@ from sagent.types.runtime import (
 from sagent.types.tape import (
     ContextSplice,
     ReferrableTapeEvent,
+    TapeEvent,
 )
 
 
@@ -36,12 +38,17 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from sagent.agent.agent import Agent
-    from sagent.repl.render import Printer
+    from sagent.repl.render import Printer, RenderObserver
     from sagent.types.tools import Tool
 
 
 def replay_messages(agent: Agent, printer: Printer) -> None:
     """Render persisted history into scrollback.
+
+    Walks the mask-resolved view of the tape: entries covered by an
+    alive ``ContextSplice``'s mask vanish; each alive splice's payload
+    renders via the same ladder. The resumed scrollback matches what
+    the model sees going forward.
 
     Args:
       agent: Agent whose ``history`` to replay.
@@ -52,43 +59,51 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     if not tape:
         return
     tools = agent.tools_map
+    # Replay is a one-shot pass over a frozen tape; snapshot
+    # ``show_thinking`` once and thread the same bool through both the
+    # observer (via a constant-returning closure) and ``_render_entry``.
+    # A throwaway observer just for replay: replay rendering doesn't
+    # attach to ``agent.observers`` (no live dispatch path), so we build
+    # a one-shot instance and hand-feed it each tape event.
+    show_thinking = agent.show_thinking
     render_event = make_render_observer(
         printer,
-        show_thinking=lambda: agent.show_thinking,
+        show_thinking=lambda: show_thinking,
     )
+    alive = alive_splices(tape)
+    masked = masked_refs_by_alive(tape, alive)
     rendered_messages = 0
     for record in tape:
         if isinstance(record, ContextSplice):
+            if record.ref not in alive:
+                continue
+            for payload_entry in record.payload:
+                rendered_messages += _render_entry(
+                    payload_entry,
+                    printer=printer,
+                    render_event=render_event,
+                    tools=tools,
+                    show_thinking=show_thinking,
+                )
             continue
         assert isinstance(record, ReferrableTapeEvent)
-        entry = record.event
-        match entry:
-            case UserMessage(text=text):
-                rendered_messages += 1
-                printer.write_user_bar(text)
-            case AgentSendMessage(source=source, text=text):
-                rendered_messages += 1
-                printer.write_agent_bar(source, text)
-            case AssistantMessage(
-                text=text,
-                thinking_blocks=blocks,
-                tool_calls=calls,
+        if record.ref in masked:
+            # Non-payload runtime markers (CompactStarted etc.) inside a
+            # masked range still surface -- they are dispatch-only events,
+            # not the masked conversation content.
+            if not isinstance(
+                record.event,
+                (UserMessage, AgentSendMessage, AssistantMessage, ToolResult),
             ):
-                rendered_messages += 1
-                if agent.show_thinking:
-                    for block in blocks:
-                        body = str(block.get("thinking") or block.get("text") or "")
-                        if body:
-                            printer.write_thinking(body)
-                if text.strip():
-                    printer.write_markdown(text)
-                for tc in calls:
-                    printer.write_tool_label(_label_for_call(tc, tools))
-            case ToolResult():
-                rendered_messages += 1
-                render_tool_result(printer, entry)
-            case _:
-                render_event(entry)
+                render_event(record.event)
+            continue
+        rendered_messages += _render_entry(
+            record.event,
+            printer=printer,
+            render_event=render_event,
+            tools=tools,
+            show_thinking=show_thinking,
+        )
     parts = ["resumed", f"{rendered_messages} messages"]
     cost = float(agent.total_cost_usd)
     if cost > 0:
@@ -119,6 +134,45 @@ def _mode_parts(agent: Agent) -> list[str]:
     return parts
 
 
+def _render_entry(
+    entry: TapeEvent,
+    *,
+    printer: Printer,
+    render_event: RenderObserver,
+    tools: Mapping[str, Tool],
+    show_thinking: bool,
+) -> int:
+    """Render one tape event; return 1 if it counts as a message, else 0."""
+    match entry:
+        case UserMessage(text=text):
+            printer.write_user_bar(text)
+            return 1
+        case AgentSendMessage(source=source, text=text):
+            printer.write_agent_bar(source, text)
+            return 1
+        case AssistantMessage(
+            text=text,
+            thinking_blocks=blocks,
+            tool_calls=calls,
+        ):
+            if show_thinking:
+                for block in blocks:
+                    body = str(block.get("thinking") or block.get("text") or "")
+                    if body:
+                        printer.write_thinking(body)
+            if text.strip():
+                printer.write_markdown(text)
+            for tc in calls:
+                printer.write_tool_label(_label_for_call(tc, tools))
+            return 1
+        case ToolResult():
+            render_tool_result(printer, entry)
+            return 1
+        case _:
+            render_event(entry)
+            return 0
+
+
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:
     """Return the rendered label for ``tc``, honoring microcompacted stubs.
 
@@ -128,6 +182,12 @@ def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:
     ``cmd``, etc.) have been replaced. Without this check every
     microcompacted ``Read`` falls back to ``Read.summary``'s ``"?"``
     placeholder and the resumed scrollback loses every filename.
+
+    The ``and stored`` guard rejects empty strings (not just non-str
+    types): an empty stored label is no more useful than no label, so
+    fall back to the live ``tool.summary`` rather than emit a blank
+    scrollback entry on a session whose microcompactor stamped an empty
+    placeholder.
     """
     stored = tc.args.get(MICROCOMPACTED_ARGS_KEY) if tc.args else None
     if isinstance(stored, str) and stored:

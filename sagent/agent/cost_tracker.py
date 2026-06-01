@@ -11,8 +11,11 @@ Two methods, both name what they do:
 
 - :meth:`record` -- write one model response. Always live; status pane reads
   ``tracker.total*`` directly.
-- :meth:`restore` -- session-resume hook; overwrites totals from
-  persisted metadata.
+- :meth:`restore_totals` -- session-resume hook; overwrites cumulative
+  totals (``total_cost_usd`` + ``total``) from persisted metadata.
+  Per-call provenance (``calls_by_model``, ``last_request``,
+  ``last_response_time``) is intentionally *not* restored: those describe
+  the live process's call history, and resume restarts that history.
 
 There is no fold step, no snapshot, no second store. ``Agent`` keeps a
 small ``_run_start`` snapshot for ``last_run_*`` deltas, but that is
@@ -44,7 +47,12 @@ class CostTracker:
     """Map from model id to number of recorded calls."""
 
     last_response_time: float = dataclasses.field(default_factory=time.time)
-    """Wall-clock seconds of the last ``record``."""
+    """Wall-clock seconds of the last ``record``.
+
+    Seeded to construction time so renderers that show "time since last
+    response" produce a sane non-zero delta before the first ``record``;
+    treat any value within the first second of process start as a
+    placeholder rather than a real model response."""
 
     def record(self, response: ModelResponse, *, model_id: str) -> None:
         """Update totals from one completed model response.
@@ -60,12 +68,18 @@ class CostTracker:
         self.total_cost_usd += response.total_cost
         self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
 
-    def restore(self, *, total_cost_usd: float, total: TokenCount) -> None:
+    def restore_totals(self, *, total_cost_usd: float, total: TokenCount) -> None:
         """Overwrite cumulative totals from persisted session metadata.
 
         Counterpart to :meth:`record` for the session-resume path: seeds
-        the tracker with the values written by an earlier session before
-        any new responses are recorded on top.
+        the cumulative-total fields (``total_cost_usd`` and ``total``)
+        with the values written by an earlier session before any new
+        responses are recorded on top.
+
+        Per-call provenance fields (``calls_by_model``, ``last_request``,
+        ``last_response_time``) are intentionally left untouched: they
+        describe the *live* process's recorded calls, and the resumed
+        process starts that history fresh.
 
         Args:
           total_cost_usd: Persisted cumulative USD cost.

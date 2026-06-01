@@ -137,6 +137,11 @@ class Glob:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: read-only listing needs no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Match files against a glob pattern and return paths.
 
@@ -171,6 +176,12 @@ class Glob:
             return ToolResult(
                 call_id="",
                 content=f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
+                is_error=True,
+            )
+        if max_results < 1:
+            return ToolResult(
+                call_id="",
+                content=f"max_results must be >= 1; got {max_results}.",
                 is_error=True,
             )
         # Python's Path.glob requires a relative pattern. If the

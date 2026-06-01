@@ -67,8 +67,13 @@ def compute_cost(
     # Fast mode surcharges only request/response: Anthropic's fast-mode
     # pricing table lists Input/Output rates and no separate cache rates,
     # so cache write/read stay at standard rates here.
-    request_rate = pricing.fast_request if fast else pricing.request
-    response_rate = pricing.fast_response if fast else pricing.response
+    request_rate = pricing.request
+    response_rate = pricing.response
+    if fast:
+        # Un-priced fast rates (``fast_*`` == 0.0) fall back to standard:
+        # bill what's known, never $0.
+        request_rate = pricing.fast_request or request_rate
+        response_rate = pricing.fast_response or response_rate
     input_cost = (
         input_tokens * request_rate
         + cache_creation * pricing.cache_write

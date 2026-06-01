@@ -43,12 +43,21 @@ def test_parse_frontmatter_crlf_line_endings() -> None:
     assert body == "body\r\n"
 
 
-def test_parse_frontmatter_invalid_yaml_returns_empty() -> None:
-    # Unmatched bracket triggers ``yaml.YAMLError`` -> ({}, raw).
+def test_parse_frontmatter_invalid_yaml_returns_stripped_body() -> None:
+    # Unmatched bracket triggers ``yaml.YAMLError``. Body still strips the
+    # delimiters whenever the ``---``...``---`` block is structurally present
+    # so callers see one consistent shape regardless of parse outcome.
     raw = "---\nkey: [unclosed\n---\nbody\n"
     meta, body = parse_frontmatter(raw)
     assert meta == {}
-    assert body == raw
+    assert body == "body\n"
+
+
+def test_parse_frontmatter_strips_utf8_bom() -> None:
+    raw = "\ufeff---\nkey: value\n---\nbody\n"
+    meta, body = parse_frontmatter(raw)
+    assert meta == {"key": "value"}
+    assert body == "body\n"
 
 
 def test_parse_frontmatter_non_dict_yaml_returns_empty() -> None:

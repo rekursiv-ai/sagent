@@ -13,6 +13,8 @@ import httpx
 import pytest
 
 from sagent.agent.retry import (
+    _MAX_SERVER_RETRY_AFTER_SEC,
+    DEFAULT_MAX_PERSISTENT_ATTEMPTS,
     MAX_RETRY_DELAY,
     PERSISTENT_MAX_BACKOFF_SEC,
     RETRY_BASE_SEC,
@@ -262,6 +264,64 @@ def test_extract_retry_after_no_relevant_headers() -> None:
     assert extract_retry_after(err) is None
 
 
+def test_extract_retry_after_handles_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RFC 7231 allows ``Retry-After`` as an HTTP-date, not just delta-seconds."""
+    monkeypatch.setattr(time, "time", lambda: 4_102_444_800.0)  # 2100-01-01T00:00:00Z
+    err = _HTTPError(
+        _FakeResponse(429, {"retry-after": "Fri, 01 Jan 2100 00:01:00 GMT"})
+    )
+    delay = extract_retry_after(err)
+    assert delay == pytest.approx(60.0)
+
+
+def test_extract_retry_after_handles_capitalized_header() -> None:
+    """SDKs sometimes pass capitalized header keys; lookup must be case-insensitive."""
+    err = _HTTPError(_FakeResponse(429, {"Retry-After": "7"}))
+    assert extract_retry_after(err) == pytest.approx(7.0)
+
+
+def test_extract_retry_after_clamps_anthropic_reset_to_24h(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misconfigured reset advertising 30 days must not wedge retry for weeks."""
+    now = 1_700_000_000.0
+    monkeypatch.setattr(time, "time", lambda: now)
+    far_future = now + 30 * 24 * 60 * 60
+    err = _HTTPError(
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(far_future)})
+    )
+    delay = extract_retry_after(err)
+    assert delay == pytest.approx(24 * 60 * 60)
+
+
+def test_extract_retry_after_clamps_seconds_form() -> None:
+    """Seconds-form ``retry-after`` is bounded by ``_MAX_SERVER_RETRY_AFTER_SEC``."""
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "999999999"}))
+    delay = extract_retry_after(err)
+    assert delay == _MAX_SERVER_RETRY_AFTER_SEC
+
+
+def test_extract_retry_after_large_delta_clamps_not_zeroed() -> None:
+    # A legal RFC-7231 delta-seconds at/above the 1-year epoch threshold must
+    # clamp to _MAX_SERVER_RETRY_AFTER_SEC, not be misread as an absolute epoch
+    # and collapse to 0.0 -- which would silently drop the server's backoff.
+    err = _HTTPError(_FakeResponse(429, {"retry-after": str(365 * 24 * 60 * 60)}))
+    assert extract_retry_after(err) == _MAX_SERVER_RETRY_AFTER_SEC
+
+
+def test_extract_retry_after_clamps_http_date_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP-date form is bounded by ``_MAX_SERVER_RETRY_AFTER_SEC``."""
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    err = _HTTPError(
+        _FakeResponse(429, {"retry-after": "Wed, 21 Oct 2099 07:28:00 GMT"})
+    )
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert delay <= _MAX_SERVER_RETRY_AFTER_SEC
+
+
 def test_rate_limit_error_with_future_reset_includes_clock() -> None:
     reset = time.time() + 30.0
     original = _HTTPError(_FakeResponse(429))
@@ -475,6 +535,41 @@ async def test_send_with_retry_persistent_loops_through_remote_protocol_error(
     # 3 persistent attempts means 3 sleeps; without the fix the
     # short-backoff loop would have raised RetriesExhaustedError.
     assert len(sleeps) == 3
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_persistent_attempts_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent retry honors ``max_persistent_attempts`` and fails loud.
+
+    Without the cap, a permanently-429'ing server wedges the loop
+    indefinitely; only ``CancelledError`` can interrupt.
+    """
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(_FakeResponse(429))
+    model = _PersistentModel(stream_responses=[err] * 20)
+    with pytest.raises(RetriesExhaustedError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=1_000,
+            persistent_retry=True,
+            publish_recoverable=_silent,
+            max_persistent_attempts=3,
+        )
+    assert model.stream_calls == 3
+
+
+def test_default_max_persistent_attempts_finite() -> None:
+    """The default persistent cap must be bounded; infinite is a wedge."""
+    assert 0 < DEFAULT_MAX_PERSISTENT_ATTEMPTS < 10_000
 
 
 @pytest.mark.asyncio

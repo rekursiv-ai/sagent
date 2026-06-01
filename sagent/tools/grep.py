@@ -89,6 +89,11 @@ _GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
 _GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
 _NUDGE = "grep/rg via Bash is a bad UX. Use the Grep tool."
 
+# Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
+# Validated at runtime so an unknown value errors instead of silently
+# behaving like ``files_with_matches``.
+_OUTPUT_MODES: frozenset[str] = frozenset({"content", "files_with_matches", "count"})
+
 
 class Grep:
     """Search file contents with regex patterns."""
@@ -235,6 +240,11 @@ class Grep:
         """
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Run in parallel: read-only search needs no serialization."""
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Search for a regex pattern in files and return matches.
 
@@ -258,14 +268,36 @@ class Grep:
             "multiline",
         }
         kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
+        keep_first = int_val(args.get("keep_first"), 250)
+        keep_last = int_val(args.get("keep_last"), 0)
+        offset = int_val(args.get("offset"), 0)
+        context_before = _kw_int(kwargs, "-B", "context_before")
+        context_after = _kw_int(kwargs, "-A", "context_after")
+        context_symmetric = _kw_int(kwargs, "-C", "context")
+        # Schema declares all pagination/context knobs as ``minimum: 0``
+        # integers but ``int_val`` accepts negatives, which then index
+        # from the end of the result list (``lines[-N:]`` returns the
+        # tail instead of failing). Enforce the schema floor here so a
+        # malformed directive surfaces as a tool error rather than
+        # mystery output.
+        bounds_err = _check_nonnegative(
+            ("keep_first", keep_first, args.get("keep_first")),
+            ("keep_last", keep_last, args.get("keep_last")),
+            ("offset", offset, args.get("offset")),
+            ("-B", context_before, args.get("-B")),
+            ("-A", context_after, args.get("-A")),
+            ("-C", context_symmetric, args.get("-C") or args.get("context")),
+        )
+        if bounds_err is not None:
+            return bounds_err
         return await run_sync(
             self._run,
             pattern=str(args.get("pattern", "")),
             path=str(args.get("path", ".")),
             output_mode=str(args.get("output_mode", "files_with_matches")),
-            keep_first=int_val(args.get("keep_first"), 250),
-            keep_last=int_val(args.get("keep_last"), 0),
-            offset=int_val(args.get("offset"), 0),
+            keep_first=keep_first,
+            keep_last=keep_last,
+            offset=offset,
             multiline=bool_val(args.get("multiline"), False),
             **kwargs,
         )
@@ -283,6 +315,15 @@ class Grep:
         **kwargs: object,  # Non-identifier params: -B, -A, -C, -i, glob, type
     ) -> str | ToolResult:
         """Dispatch the grep search to ripgrep or the Python fallback."""
+        if output_mode not in _OUTPUT_MODES:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"unknown output_mode: {output_mode!r}"
+                    f" (expected one of {sorted(_OUTPUT_MODES)})"
+                ),
+                is_error=True,
+            )
         glob_filter = _kw_str(kwargs, "glob", "glob_filter")
         file_type = _kw_str(kwargs, "type", "file_type")
         exclude = _kw_str(kwargs, "exclude")
@@ -872,14 +913,21 @@ def _grep_python(
     show_line_numbers: bool,
     multiline: bool,
     offset: int,
-) -> str:
+) -> str | ToolResult:
     """Grep using Python regex (fallback)."""
     flags = 0
     if multiline:
         flags |= re.DOTALL
     if case_insensitive:
         flags |= re.IGNORECASE
-    pat = re.compile(pattern, flags)
+    try:
+        pat = re.compile(pattern, flags)
+    except re.error as exc:
+        return ToolResult(
+            call_id="",
+            content=f"invalid regex pattern: {exc}",
+            is_error=True,
+        )
     max_results = sys.maxsize if keep_last > 0 or keep_first <= 0 else keep_first
     state = _GrepState(
         output_mode=output_mode,
@@ -943,3 +991,25 @@ def _path_matches(path: str, globs: Sequence[str], exclude: str) -> bool:
     if exclude and rel.match(exclude):
         return False
     return any(rel.match(glob) for glob in globs)
+
+
+def _check_nonnegative(
+    *fields: tuple[str, int, object],
+) -> ToolResult | None:
+    """Reject schema-violating negative knobs at the tool entrypoint.
+
+    Each tuple is ``(name, coerced, raw)``: when the caller supplied
+    ``raw`` (anything but ``None``) but the coerced int is negative,
+    surface a tool error instead of letting it index from the end of
+    a result slice downstream.
+    """
+    for name, coerced, raw in fields:
+        if raw is None:
+            continue
+        if coerced < 0:
+            return ToolResult(
+                call_id="",
+                content=f"'{name}' must be ≥ 0, got {coerced}.",
+                is_error=True,
+            )
+    return None

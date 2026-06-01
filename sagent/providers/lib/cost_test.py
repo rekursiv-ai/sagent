@@ -68,6 +68,14 @@ def test_compute_cost_fast_applies_only_to_request_and_response() -> None:
     assert out_c == pytest.approx(50.0)
 
 
+def test_compute_cost_fast_without_fast_rates_falls_back_to_standard() -> None:
+    # ``fast=True`` on a ``Pricing`` with no fast rates (default 0.0) must bill
+    # at standard rates, not collapse request/response cost to $0.
+    pricing = Pricing(request=5.0, response=25.0)
+    in_c, out_c, total = compute_cost(pricing, 1_000_000, 1_000_000, fast=True)
+    assert (in_c, out_c, total) == (5.0, 25.0, 30.0)
+
+
 def test_model_profile_defaults() -> None:
     p = ModelProfile(max_request_tokens=1000, max_response_tokens=500)
     assert p.max_request_tokens == 1000

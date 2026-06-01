@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal, assert_never, cast
 
 
 type ThinkingState = Literal[
@@ -77,7 +77,13 @@ def resolve_thinking_command(
 
 
 def request_thinking(state: ThinkingState) -> str | None:
-    """Return the provider request thinking mode for ``state``."""
+    """Return the provider request thinking mode for ``state``.
+
+    ``redact-hide`` requests the provider's ``"adaptive"`` mode (despite
+    the user-facing name suggesting "off"). The provider returns
+    redacted thinking blocks under adaptive when policy triggers, and we
+    suppress local rendering separately via ``should_show_thinking``.
+    """
     if state.startswith("adaptive-") or state == "redact-hide":
         return "adaptive"
     if state.startswith("on-"):
@@ -96,8 +102,22 @@ def should_redact_thinking(state: ThinkingState) -> bool:
 
 
 def _startup_state(command: ThinkingCommand) -> ThinkingState:
-    """Expand partial startup commands without a live current state."""
+    """Expand partial startup commands without a live current state.
+
+    Full states pass through; partial commands map to canonical hides
+    (or adaptive-show for the bare ``show`` alias). ``assert_never``
+    keeps the match exhaustive as ``ThinkingCommand`` grows.
+    """
     match command:
+        case (
+            "adaptive-show"
+            | "adaptive-hide"
+            | "on-show"
+            | "on-hide"
+            | "off-hide"
+            | "redact-hide"
+        ):
+            return command
         case "adaptive":
             return "adaptive-hide"
         case "on":
@@ -111,13 +131,27 @@ def _startup_state(command: ThinkingCommand) -> ThinkingState:
         case "hide":
             return "adaptive-hide"
         case _:
-            return command
+            assert_never(command)
 
 
 def _live_state(command: ThinkingCommand, current: ThinkingState) -> ThinkingState:
-    """Expand partial live commands against ``current``."""
+    """Expand partial live commands against ``current``.
+
+    ``show`` and ``hide`` are symmetric: each raises when ``current`` is
+    a fixed-display state (``off-hide`` / ``redact-hide``) for which the
+    requested transition is impossible.
+    """
     suffix = "show" if current.endswith("-show") else "hide"
     match command:
+        case (
+            "adaptive-show"
+            | "adaptive-hide"
+            | "on-show"
+            | "on-hide"
+            | "off-hide"
+            | "redact-hide"
+        ):
+            return command
         case "adaptive":
             return cast(ThinkingState, f"adaptive-{suffix}")
         case "on":
@@ -131,7 +165,7 @@ def _live_state(command: ThinkingCommand, current: ThinkingState) -> ThinkingSta
                 return "adaptive-hide"
             if current == "on-show":
                 return "on-hide"
-            return current
+            raise ValueError(f"cannot hide thinking from state {current!r}")
         case "show":
             if current == "adaptive-hide":
                 return "adaptive-show"
@@ -139,4 +173,4 @@ def _live_state(command: ThinkingCommand, current: ThinkingState) -> ThinkingSta
                 return "on-show"
             raise ValueError(f"cannot show thinking from state {current!r}")
         case _:
-            return command
+            assert_never(command)

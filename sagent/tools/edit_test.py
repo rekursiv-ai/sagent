@@ -177,6 +177,23 @@ async def test_edit_chain_three_edits_no_staleness(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_non_utf8_file_returns_error(tmp_path: Path) -> None:
+    # ``Read`` already returns a clean ``[Non-UTF-8 file: ...]`` for
+    # binary/Latin-1 content; ``Edit`` must mirror that contract instead
+    # of raising ``UnicodeDecodeError``.
+    f = tmp_path / "latin.txt"
+    f.write_bytes(b"calf\xe9\n")  # ``café`` in Latin-1; invalid UTF-8.
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        agent.tool_state.mark_read(str(f), content="")
+        result = await edit.run(
+            {"file_path": str(f), "old_string": "calf", "new_string": "X"}
+        )
+    assert result.is_error
+    assert "UTF-8" in result.content
+
+
+@pytest.mark.asyncio
 async def test_edit_preserves_mode(tmp_path: Path) -> None:
     f = tmp_path / "a.txt"
     f.write_text("foo\n")

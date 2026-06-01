@@ -7,12 +7,19 @@ from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock
 
+import inspect
+
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 
 from sagent.agent.agent import Agent
+from sagent.repl import keybindings as keybindings_mod
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import NavState, build_key_bindings
-from sagent.types.runtime import UserDeferredMessage, UserMessage
+from sagent.types.runtime import (
+    BytesMessage,
+    UserDeferredMessage,
+    UserMessage,
+)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -362,6 +369,13 @@ def test_tab_then_up_then_enter_re_queues_via_navigation_path() -> None:
 
 
 def test_urgent_survives_up_enter_navigation_round_trip() -> None:
+    """Up + edit + Enter replaces only the lifted head; deferred tail survives.
+
+    F34: prior behavior collapsed urgent + deferred snapshot into a
+    single staged urgent block, dropping every deferred entry. The
+    edited buffer replaces the head urgent block; the deferred tail
+    returns to its lane verbatim.
+    """
     agent = _busy_agent()
     queues = InputQueues(
         urgent=[QueuedInputBlock(text="now")], deferred=[QueuedInputBlock(text="later")]
@@ -376,7 +390,7 @@ def test_urgent_survives_up_enter_navigation_round_trip() -> None:
     buf.text = "edited now"
     _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
     assert [b.text for b in queues.urgent] == ["edited now"]
-    assert queues.deferred == []
+    assert [b.text for b in queues.deferred] == ["later"]
 
 
 def test_urgent_survives_up_down_navigation_round_trip() -> None:
@@ -723,24 +737,59 @@ def test_escape_z_undo() -> None:
 
 
 def test_ctrl_c_halts_during_model_call() -> None:
+    """REPL-037: a composed buffer is staged as urgent then cleared."""
     agent = _busy_agent()
-    kb = _build(agent)
+    queues = InputQueues()
+    kb = _build(agent, queues)
     buf = _fake_buf("partial line")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
     assert agent.halt_calls == 1
-    # Buffer is not reset on halt path; only on the idle-clear path.
-    buf.reset.assert_not_called()
+    assert [b.text for b in queues.urgent] == ["partial line"]
+    buf.reset.assert_called_once()
 
 
-def test_ctrl_c_pulls_urgent_queue_into_editor() -> None:
+def test_ctrl_c_busy_preserves_urgent_queue_with_attachments() -> None:
+    """REPL-037: Ctrl+C must not flatten urgent blocks to ``.text`` only.
+
+    Previously the busy path concatenated every urgent block's text into
+    the buffer and cleared the queue -- attachments were dropped on the
+    floor. Urgent blocks (which may carry attachments) now stay in the
+    queue verbatim across a halt; the user's composed buffer becomes
+    one additional urgent block.
+    """
     agent = _busy_agent()
-    queues = InputQueues(urgent=[QueuedInputBlock(text="what is happening?")])
+    attachment = BytesMessage(data=b"png-bytes", descriptor="image/png")
+    queues = InputQueues(
+        urgent=[
+            QueuedInputBlock(text="what is happening?", attachments=(attachment,)),
+        ],
+    )
     kb = _build(agent, queues)
     buf = _fake_buf("")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
     assert agent.halt_calls == 1
-    assert buf.text == "what is happening?"
-    assert not queues.urgent
+    assert [b.text for b in queues.urgent] == ["what is happening?"]
+    assert queues.urgent[0].attachments == (attachment,), (
+        f"Ctrl+C must preserve urgent attachments; got {queues.urgent[0].attachments!r}"
+    )
+
+
+def test_ctrl_c_busy_with_typed_text_stages_buffer_as_urgent_block() -> None:
+    """REPL-037: composed buffer text becomes one more urgent block.
+
+    Halt-path must not silently overwrite text the user was composing.
+    Stage the buffer as its own urgent block so it survives the halt
+    and rides through with the existing queued blocks (whose
+    attachments are preserved by staying in the queue).
+    """
+    agent = _busy_agent()
+    queues = InputQueues(urgent=[QueuedInputBlock(text="urgent block")])
+    kb = _build(agent, queues)
+    buf = _fake_buf("typed-by-user")
+    _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert agent.halt_calls == 1
+    assert [b.text for b in queues.urgent] == ["urgent block", "typed-by-user"]
+    buf.reset.assert_called_once()
 
 
 def test_ctrl_c_busy_preserves_deferred_queue() -> None:
@@ -808,6 +857,90 @@ def test_up_arrow_on_tab_staging_lifts_back_truly_retracts() -> None:
     assert buf2.text == "draft"
     assert not queues.has_any()
     assert agent.runtime.inbox.items == []
+
+
+def test_enter_on_whitespace_during_navigation_restores_snapshot() -> None:
+    """Whitespace Enter during navigation must restore the snapshot.
+
+    REPL-002. Prior behavior: whitespace-only Enter at ``cursor > 0``
+    reset the buffer and returned without touching the snapshot, so the
+    queued blocks the user had lifted disappeared and the nav cursor
+    stayed at 1 forever. The whitespace edit is a "discard my edit"
+    intent; treat it the same as a final Down: restore the snapshot
+    queue + the original buffer text and clear nav state.
+    """
+    agent = _busy_agent()
+    queues = InputQueues(
+        urgent=[QueuedInputBlock(text="now")],
+        deferred=[QueuedInputBlock(text="later")],
+    )
+    nav = NavState()
+    kb = _build(agent, queues, nav)
+    buf = _fake_buf("typed")
+    # Up lifts both blocks into buffer; snapshot captured.
+    _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert buf.text == "now\n\nlater"
+    assert not queues.has_any()
+    assert nav.cursor == 1
+    # User clears to whitespace, hits Enter.
+    buf.text = "   "
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert nav.cursor == 0, f"nav state must clear; got cursor={nav.cursor}"
+    assert nav.snapshot_queue == (), "snapshot must clear after whitespace Enter"
+    assert [b.text for b in queues.urgent] == ["now"], (
+        f"urgent queue must restore on whitespace Enter; got urgent={queues.urgent!r}"
+    )
+    assert [b.text for b in queues.deferred] == ["later"], (
+        f"deferred queue must restore on whitespace Enter;"
+        f" got deferred={queues.deferred!r}"
+    )
+    assert buf.text == "typed", (
+        f"snapshot input must restore to buffer; got buf.text={buf.text!r}"
+    )
+    assert agent.runtime.inbox.items == []
+
+
+def test_tab_on_whitespace_during_navigation_restores_snapshot() -> None:
+    """Whitespace Tab during navigation must restore the snapshot.
+
+    REPL-029. Sibling of REPL-002 for the Tab handler.
+    """
+    agent = _busy_agent()
+    queues = InputQueues(deferred=[QueuedInputBlock(text="for-later")])
+    nav = NavState()
+    kb = _build(agent, queues, nav)
+    buf = _fake_buf("typed")
+    _handler(kb, ("up",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert buf.text == "for-later"
+    assert not queues.has_any()
+    assert nav.cursor == 1
+    buf.text = "  \t  "
+    _handler(kb, ("tab",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert nav.cursor == 0, f"nav state must clear; got cursor={nav.cursor}"
+    assert nav.snapshot_queue == (), "snapshot must clear after whitespace Tab"
+    assert [b.text for b in queues.deferred] == ["for-later"], (
+        f"deferred queue must restore on whitespace Tab;"
+        f" got deferred={queues.deferred!r}"
+    )
+    assert buf.text == "typed", (
+        f"snapshot input must restore to buffer; got buf.text={buf.text!r}"
+    )
+    assert agent.runtime.inbox.items == []
+
+
+def test_kb_defer_docstring_names_correct_message_type() -> None:
+    """REPL-030: Tab handler docstring must reference ``UserDeferredMessage``.
+
+    ``input_queues.commit_deferred_on_idle`` pushes ``UserDeferredMessage``;
+    the prior doc claimed ``UserQueuedMessage`` (the non-preempting variant
+    used elsewhere). Misleading docs hide which gate the runtime is waiting
+    on when debugging deferred drain.
+    """
+    doc = inspect.getsource(keybindings_mod)
+    assert "UserQueuedMessage" not in doc, (
+        "Tab handler doc still references UserQueuedMessage;"
+        " input_queues pushes UserDeferredMessage"
+    )
 
 
 if __name__ == "__main__":

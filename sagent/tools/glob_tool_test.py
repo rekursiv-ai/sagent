@@ -114,6 +114,19 @@ async def test_glob_sort_mtime_desc(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_glob_max_results_zero_errors(tmp_path: Path) -> None:
+    # Schema declares minimum=1; the runtime must reject 0/negative
+    # rather than returning an empty (no matches) string.
+    (tmp_path / "a.py").write_text("")
+    result = await _run_glob(
+        {"pattern": "*.py", "path": str(tmp_path), "max_results": 0},
+        tmp_path,
+    )
+    assert result.is_error
+    assert "max_results" in result.content
+
+
+@pytest.mark.asyncio
 async def test_glob_invalid_sort_errors(tmp_path: Path) -> None:
     result = await _run_glob(
         {"pattern": "*.py", "path": str(tmp_path), "sort": "bogus"},

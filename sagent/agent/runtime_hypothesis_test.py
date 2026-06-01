@@ -158,13 +158,24 @@ def test_coalesce_preserves_each_source(history: list[ModelContextEvent]) -> Non
 
     Catches bug H: pre-fix, adjacent AgentSends from different sources
     merged under the first's source, silently dropping the second.
+
+    Post-fix the structured ``source`` field can be lost when a cross-
+    source merge demotes to ``UserMessage`` (the only honest move when
+    one structured field cannot represent two senders). The label
+    upstream (:func:`_label_agent_sends`, prepended *before* coalesce
+    in :func:`materialize_messages`) carries the attribution into the
+    text of the merged turn; assert via labelled output that every
+    source still appears.
     """
-    coalesced = _coalesce_adjacent_users(history)
+    labelled = list(_label_agent_sends(history))
+    coalesced = _coalesce_adjacent_users(labelled)
     input_sources = {m.source for m in history if isinstance(m, AgentSendMessage)}
-    output_sources = {m.source for m in coalesced if isinstance(m, AgentSendMessage)}
-    assert input_sources == output_sources, (
-        f"source set changed during coalesce: input={input_sources!r}"
-        f" output={output_sources!r}"
+    merged_text = "".join(
+        m.text for m in coalesced if isinstance(m, (UserMessage, AgentSendMessage))
+    )
+    missing = {src for src in input_sources if f"[from {src}]: " not in merged_text}
+    assert not missing, (
+        f"sources lost during coalesce: {sorted(missing)!r} output_text={merged_text!r}"
     )
 
 

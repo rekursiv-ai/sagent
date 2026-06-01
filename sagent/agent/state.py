@@ -80,14 +80,14 @@ class ToolState:
     additional_dirs: list[str] = dataclasses.field(default_factory=list)
     """Extra dirs whose ``AGENTS.md`` files are walked."""
 
-    stats: dict[str, float | int] = dataclasses.field(default_factory=dict)
-    """Per-request session stats written by the Agent."""
-
     bash_parse_cache: BashParseCache = dataclasses.field(default_factory=dict)
     """Per-request bashlex parse cache."""
 
     invoked_skills: set[str] = dataclasses.field(default_factory=set)
     """Names of skills exercised this session."""
+
+    invoked_rules: set[str] = dataclasses.field(default_factory=set)
+    """Resolved paths of conditional AGENTS.md rules already injected."""
 
     depth: int = 0
     """Subagent recursion depth."""
@@ -123,6 +123,7 @@ class ToolState:
         self._read_order.clear()
         self._content_cache.clear()
         self.invoked_skills.clear()
+        self.invoked_rules.clear()
 
     def mark_read(
         self,
@@ -358,6 +359,29 @@ def get_tool_state() -> ToolState:
 
 
 @contextmanager
+def fresh_default_tool_state() -> Generator[None]:
+    """Swap the module-level fallback ``ToolState`` for a fresh instance.
+
+    Used by the sagent autouse pytest fixture to isolate tests that
+    invoke ``get_tool_state()`` outside an explicit
+    ``tool_state_context``: without isolation, mutations to the
+    singleton (``invoked_skills``, ``read_cache``, ``bash_cwd``)
+    persist across tests and surface as flaky cross-test interference.
+
+    Yields:
+      control: yields once; the original fallback is restored on exit.
+
+    """
+    global _default_state  # noqa: PLW0603 -- isolation requires module-level reassignment
+    original = _default_state
+    _default_state = ToolState()
+    try:
+        yield
+    finally:
+        _default_state = original
+
+
+@contextmanager
 def tool_state_context(state: ToolState) -> Generator[None]:
     """Install ``state`` as the active tool state for the duration of the block.
 
@@ -462,6 +486,10 @@ class AgentLike(Protocol):
 
     def kill_tool(self, qid: str) -> None:
         """Cancel one outstanding tool task by human job id or call id."""
+        ...
+
+    def kill_all_tools(self) -> None:
+        """Cancel every outstanding tool task."""
         ...
 
     def shutdown(self, *, force: bool = False) -> None:

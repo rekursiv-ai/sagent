@@ -17,6 +17,7 @@ from sagent.lib.json import (
     json_freeze,
 )
 from sagent.tools.core import (
+    file_lock_key,
     get_tool_state,
     load_tool_description,
     mark_read,
@@ -135,6 +136,19 @@ class Read:
         limit = int_val(args.get("limit"), 2000)
         last_lines = int_val(args.get("last_lines"), 0)
         pages = str(args.get("pages", ""))
+        # Schema declares ``offset``/``limit``/``last_lines`` as
+        # ``minimum: 1`` integers but ``int_val`` accepts any int
+        # (including 0 and negatives). Reject schema violations at the
+        # entrypoint -- ``offset=0`` previously fell through to the
+        # ``max(1, offset)`` clamp in ``_window_text`` which masked the
+        # error and made ``offset=0`` silently mean ``offset=1``.
+        bounds_err = _check_minimum(
+            ("offset", offset, args.get("offset")),
+            ("limit", limit, args.get("limit")),
+            ("last_lines", last_lines, args.get("last_lines")),
+        )
+        if bounds_err is not None:
+            return bounds_err
         return await asyncio.to_thread(
             self._run,
             file_path=file_path,
@@ -143,6 +157,23 @@ class Read:
             last_lines=last_lines,
             pages=pages,
         )
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Serialize same-file Read/Edit/Write within a cohort.
+
+        Ordering a Read against same-file Edit/Write in one cohort makes
+        a batched Read observe the post-edit content deterministically,
+        and keeps the read-cache stamp consistent with the final write.
+
+        Args:
+          args: Directive carrying ``file_path``.
+
+        Returns:
+          key: Canonical path, or ``None`` when no path was supplied.
+
+        """
+        path = resolve_tool_path(str(args.get("file_path", "")))
+        return file_lock_key(path) if path else None
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
@@ -162,7 +193,9 @@ class Read:
         if last_lines > 0:
             suffix = f":last-{last_lines}"
         elif offset > 0 and limit > 0:
-            suffix = f":{offset}-{offset + limit}"
+            # End line is inclusive: ``offset=10, limit=3`` covers lines
+            # 10, 11, 12 -- the last line is ``offset + limit - 1``.
+            suffix = f":{offset}-{offset + limit - 1}"
         elif offset > 0:
             suffix = f":{offset}+"
         elif limit > 0:
@@ -582,3 +615,26 @@ def _resolve_page_range(
             is_error=True,
         )
     return None, None
+
+
+def _check_minimum(
+    *fields: tuple[str, int, object],
+) -> ToolResult | None:
+    """Reject schema-violating windowing args at the tool entrypoint.
+
+    Each tuple is ``(name, coerced, raw)``: ``coerced`` is the
+    ``int_val`` result we'd otherwise pass downstream; ``raw`` is the
+    untouched directive value used to detect "the caller supplied it"
+    (an absent key has ``raw is None`` and is allowed to fall through
+    to the default).
+    """
+    for name, coerced, raw in fields:
+        if raw is None:
+            continue
+        if coerced < 1:
+            return ToolResult(
+                call_id="",
+                content=f"'{name}' must be ≥ 1, got {coerced}.",
+                is_error=True,
+            )
+    return None
