@@ -179,6 +179,12 @@ sagent/bin/cli.py --help
 
 ## Quickstart: CLI
 
+Use Claude backend,
+
+```
+sagent/bin/cli.py --allow-providers AnthropicCLI --provider AnthropicCLI --auth credentials
+```
+
 ```bash
 export GOOGLE_API_KEY=...
 sagent/bin/cli.py --provider Google --model gemini-3.1-pro-preview
