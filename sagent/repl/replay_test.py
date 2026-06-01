@@ -326,10 +326,10 @@ def test_replay_renders_resolved_view_after_compaction_splice() -> None:
     assert "original answer" not in p.markdowns
     # Splice payload renders via the same match ladder.
     assert "summary payload" in p.user_bars
-    # CompactStarted / CompactComplete are ReferrableTapeEvent's events,
-    # not masked, so their dim lines still surface.
+    # CompactStarted is a transient "in-progress" marker; replaying it would
+    # print a misleading "[compacting history…]" into static scrollback, so
+    # it is suppressed on resume. Only the durable completion summary shows.
     assert p.dim_lines == [
-        "[compacting history…]",
         "[compaction complete: ~100 → ~10 tokens, 1 entries]",
     ]
 

@@ -6,11 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, cast, override
 
+import logging
+
 import httpx
 import pytest
 
 from sagent.agent.context import resolve_context
-from sagent.compaction import summary
 from sagent.compaction.summary import (
     SummaryCompactor,
     _attach_markers,
@@ -214,42 +215,54 @@ def test_summary_compactor_proactive_property() -> None:
     assert SummaryCompactor(proactive=False).proactive is False
 
 
-@pytest.mark.asyncio
-async def test_should_compact_under_threshold_false() -> None:
-    compactor = SummaryCompactor(buffer_tokens=10_000)
-    assert await compactor.should_compact(50_000, 200_000) is False
+def test_should_compact_plain_window_at_full_utilization_no_compression() -> None:
+    # u=1, c=0: body >= (window - system). With system=0, fires at current>=window.
+    compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.0)
+    assert compactor.should_compact(200_000, 200_000, 0) is True
+    assert compactor.should_compact(199_999, 200_000, 0) is False
 
 
-@pytest.mark.asyncio
-async def test_should_compact_at_threshold_true() -> None:
-    compactor = SummaryCompactor(buffer_tokens=10_000)
-    # threshold = max(0, 200_000 - 0 - 10_000) = 190_000
-    assert await compactor.should_compact(190_000, 200_000) is True
+def test_should_compact_subtracts_system() -> None:
+    # u=1, c=0: body = current - system >= window - system.
+    # system=50k, window=200k: fires when current-50k >= 150k -> current >= 200k.
+    compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.0)
+    assert compactor.should_compact(200_000, 200_000, 50_000) is True
+    assert compactor.should_compact(199_999, 200_000, 50_000) is False
 
 
-@pytest.mark.asyncio
-async def test_should_compact_subtracts_response_tokens() -> None:
-    compactor = SummaryCompactor(buffer_tokens=10_000)
-    # effective = 200_000 - 8_000 = 192_000; threshold = 182_000.
-    assert await compactor.should_compact(181_999, 200_000, 8_000) is False
-    assert await compactor.should_compact(182_000, 200_000, 8_000) is True
+def test_should_compact_utilization_trigger_reserves_usable_window() -> None:
+    # u=0.95, c=0, system=0: body >= 0.95 * 200_000 = 190_000.
+    compactor = SummaryCompactor(utilization_trigger=0.95, compression=0.0)
+    assert compactor.should_compact(190_000, 200_000, 0) is True
+    assert compactor.should_compact(189_999, 200_000, 0) is False
 
 
-@pytest.mark.asyncio
-async def test_should_compact_default_buffer_scales_with_window() -> None:
-    """The default headroom scales with the window, matching the budget.
+def test_should_compact_compression_reserves_response() -> None:
+    # u=1, c=0.25, system=0: body >= 200_000 / 1.25 = 160_000.
+    compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.25)
+    assert compactor.should_compact(160_000, 200_000, 0) is True
+    assert compactor.should_compact(159_999, 200_000, 0) is False
 
-    A flat default under-reserves on large-window models: ``should_compact``
-    must fire at the same proportional headroom ``ContextBudget.from_model``
-    reserves (66_666 for a 1M window), not a fixed 13_000 -- otherwise a 1M
-    session rides ~53k tokens past the budgeted ceiling before compacting.
+
+def test_should_compact_default_no_token_constant() -> None:
+    """Rule: ``body >= u*(W-S)/(1+c*u)``; every term proportional.
+
+    Defaults u=0.95, c=0.075. On a 1M window, system=0:
+    threshold = 0.95 * 1_000_000 / (1 + 0.075*0.95) = 950_000 / 1.07125
+    = 886_814.47 -> fires at body >= 886_814.47, i.e. current >= 886_815.
     """
-    compactor = SummaryCompactor()  # default buffer derives from the window
-    # 1M window: proportional buffer 66_666, effective 872_000,
-    # threshold 805_334. An 810k prompt is past the reserved headroom.
-    assert await compactor.should_compact(810_000, 1_000_000, 128_000) is True
-    # Just under the proportional threshold: still room, no compaction.
-    assert await compactor.should_compact(800_000, 1_000_000, 128_000) is False
+    compactor = SummaryCompactor()
+    assert compactor.should_compact(886_815, 1_000_000, 0) is True
+    assert compactor.should_compact(886_814, 1_000_000, 0) is False
+
+
+def test_should_compact_buffer_adds_live_slack() -> None:
+    # u=1, c=0, system=0, buffer=10_000: body + 10_000 >= 200_000 -> body >= 190_000.
+    compactor = SummaryCompactor(
+        utilization_trigger=1.0, compression=0.0, buffer_tokens=10_000
+    )
+    assert compactor.should_compact(190_000, 200_000, 0) is True
+    assert compactor.should_compact(189_999, 200_000, 0) is False
 
 
 @pytest.mark.asyncio
@@ -361,6 +374,32 @@ async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
     result = await _apply_compact(compactor, history, model)
     assert isinstance(result[0], UserMessage)
     assert body in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_compact_warns_when_keep_recent_dropped_by_unresolved_prefix(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the whole prefix is unresolved tool_use, the split keeps no tail,
+    silently overriding ``keep_recent``. That degradation must be logged.
+    """
+    model = _ScriptedModel(stream_responses=[_summary_resp("summary")])
+    compactor = SummaryCompactor(keep_recent=2)
+    # Every boundary is unsafe: AMs with tool_calls, no matching ToolResults.
+    history: list[ModelContextEvent] = [
+        AssistantMessage(
+            text="", tool_calls=(ToolCall(id=f"t{i}", name="Bash", args={}),)
+        )
+        for i in range(5)
+    ]
+    with caplog.at_level(logging.WARNING, logger="sagent.compaction.summary"):
+        await _apply_compact(compactor, history, model)
+    assert any(
+        "kept no" in r.getMessage() and "keep_recent" in r.getMessage()
+        for r in caplog.records
+    ), (
+        f"expected keep_recent-drop warning; got {[r.getMessage() for r in caplog.records]!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1050,34 @@ def test_coalesce_adjacent_users_merges_same_source_agent_sends() -> None:
     assert "b" in only.text
 
 
+def test_coalesce_adjacent_users_does_not_merge_cross_type() -> None:
+    """User and AgentSend are different sources: never merged, types preserved.
+
+    Codifies the contract behind the (now-removed) cross-type merge branches:
+    ``_same_source`` returns False for cross-type pairs, so they stay distinct
+    and structured attribution is not falsified.
+    """
+    out = _coalesce_adjacent_users(
+        [
+            UserMessage(text="human"),
+            AgentSendMessage(source="X", text="bot"),
+        ]
+    )
+    assert len(out) == 2
+    assert isinstance(out[0], UserMessage)
+    assert isinstance(out[1], AgentSendMessage)
+    # And the reverse order, likewise unmerged.
+    out2 = _coalesce_adjacent_users(
+        [
+            AgentSendMessage(source="X", text="bot"),
+            UserMessage(text="human"),
+        ]
+    )
+    assert len(out2) == 2
+    assert isinstance(out2[0], AgentSendMessage)
+    assert isinstance(out2[1], UserMessage)
+
+
 # --- H6: empty model output must record summary_fallback ------------------
 
 
@@ -1139,37 +1206,6 @@ def test_summary_compactor_rejects_invalid_direction() -> None:
 
 
 # --- H8: recipe switch propagates to next compaction ---------------------
-
-
-def test_default_compact_prompt_resolves_through_live_recipe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Module-import-time reads froze prompts against the initial recipe;
-    after ``set_recipe`` the new asset must take effect immediately.
-    """
-    calls: list[str] = []
-
-    def fake_read_asset(path: object) -> str:
-        s = str(path)
-        calls.append(s)
-        return f"PROMPT_FOR::{s}"
-
-    def fake_compactor_path(key: str) -> str:
-        return f"recipe-X/{key}.md"
-
-    monkeypatch.setattr(summary, "read_asset", fake_read_asset)
-    monkeypatch.setattr(summary, "_compactor_path", fake_compactor_path)
-
-    first = summary.default_compact_prompt()
-    assert first == "PROMPT_FOR::recipe-X/full.md"
-
-    def fake_compactor_path_b(key: str) -> str:
-        return f"recipe-Y/{key}.md"
-
-    monkeypatch.setattr(summary, "_compactor_path", fake_compactor_path_b)
-    second = summary.default_compact_prompt()
-    assert second == "PROMPT_FOR::recipe-Y/full.md"
-    assert first != second
 
 
 # --- H3: orphan-filter equivalent two-pass behavior ----------------------

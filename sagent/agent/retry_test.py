@@ -252,6 +252,56 @@ def test_extract_retry_after_anthropic_unified_reset() -> None:
     assert 25.0 <= delay <= 30.5
 
 
+def test_extract_retry_after_unified_reset_ignored_when_allowed() -> None:
+    # Incident repro (repl.log line 554): a transient in-band rate_limit_error
+    # on a 200 stream carries unified-status=allowed plus the always-present
+    # unified-reset (= next window rollover, hours away). It must NOT be read
+    # as a retry-after, or the call sleeps for hours on a non-limited request.
+    reset = time.time() + 15_000.0
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "allowed",
+                "anthropic-ratelimit-unified-5h-status": "allowed",
+                "anthropic-ratelimit-unified-overage-status": "rejected",
+                "anthropic-ratelimit-unified-reset": str(reset),
+            },
+        )
+    )
+    assert extract_retry_after(err) is None
+
+
+def test_extract_retry_after_unified_reset_honored_when_rejected() -> None:
+    # When the request actually hit the limit (status header says rejected),
+    # the unified-reset clock IS a real retry-after.
+    reset = time.time() + 30.0
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-reset": str(reset),
+            },
+        )
+    )
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert 25.0 <= delay <= 30.5
+
+
+def test_extract_retry_after_unified_reset_honored_on_429_without_status() -> None:
+    # A bare 429 is itself proof of rejection; honor the reset even when no
+    # unified status header is present.
+    reset = time.time() + 30.0
+    err = _HTTPError(
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(reset)})
+    )
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert 25.0 <= delay <= 30.5
+
+
 def test_extract_retry_after_invalid_unified_reset_returns_none() -> None:
     err = _HTTPError(
         _FakeResponse(429, {"anthropic-ratelimit-unified-reset": "not-a-time"})
@@ -453,6 +503,41 @@ async def test_send_with_retry_429_raises_rate_limit_when_not_persistent() -> No
             persistent_retry=False,
             publish_recoverable=_silent,
         )
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_interactive_halts_on_long_server_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A retryable, non-429 error (e.g. in-band rate_limit_error on a 200
+    # stream) that carries a multi-hour server backoff must NOT become a
+    # blocking sleep in interactive mode -- it halts as a RateLimitError.
+    slept: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        slept.append(d)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-reset": str(time.time() + 15_000.0),
+            },
+        )
+    )
+    model = _ScriptedModel(stream_responses=[err], is_retryable_provider=True)
+    with pytest.raises(RateLimitError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=3,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert slept == [], "interactive mode must not sleep on a long server delay"
 
 
 @pytest.mark.asyncio
@@ -863,12 +948,24 @@ async def test_send_with_retry_honors_resume_retry_at(
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_does_not_emit_banner_into_on_text() -> None:
-    """Retry waits no longer pollute ``on_text``; suspensions go through callbacks."""
-    err = _HTTPError(_FakeResponse(503))
+async def test_send_with_retry_does_not_emit_banner_into_on_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry waits no longer pollute ``on_text``; suspensions go through callbacks.
+
+    Uses a server-advertised delay so the suspension banner is ``notable``
+    (sub-second transport retries are intentionally silent -- see
+    ``test_send_with_retry_silent_on_short_transient_retry``).
+    """
+    err = _HTTPError(_FakeResponse(503, {"retry-after": "1"}))
     model = _ScriptedModel(stream_responses=[err, _resp("ok")])
     chunks: list[str] = []
     suspensions: list[float] = []
+
+    async def fake_sleep(_d: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     def _record(
         retry_at: float, delay_sec: float, server_supplied: bool, error: Exception
@@ -888,6 +985,49 @@ async def test_send_with_retry_does_not_emit_banner_into_on_text() -> None:
     assert "retrying" not in "".join(chunks)
     assert "resumes at" not in "".join(chunks)
     assert len(suspensions) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_silent_on_short_transient_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sub-second transport blip retries WITHOUT a suspension banner.
+
+    Regression: every recovered httpx ``ReadError`` was publishing a
+    ``ModelServiceSuspended`` event that rendered "[model service suspended:
+    temporarily blocked; resumes in 1s]" -- alarming the user over a wait
+    they never perceive. Local backoffs under ``SUSPENSION_NOTICE_SEC`` with
+    no server-advertised delay must stay silent (still logged via
+    ``publish_recoverable``).
+    """
+    err = httpx.ReadError("")
+    model = _ScriptedModel(stream_responses=[err, _resp("ok")])
+    suspensions: list[float] = []
+    notes: list[str] = []
+
+    async def fake_sleep(_d: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    def _record(
+        retry_at: float, delay_sec: float, server_supplied: bool, error: Exception
+    ) -> None:
+        del delay_sec, server_supplied, error
+        suspensions.append(retry_at)
+
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=notes.append,
+        on_service_suspended=_record,
+    )
+    assert resp.message.text == "ok"
+    assert suspensions == [], "short transient retry must not publish a suspension"
+    assert any(n.startswith("retry attempt") for n in notes), "still logged"
 
 
 @pytest.mark.asyncio

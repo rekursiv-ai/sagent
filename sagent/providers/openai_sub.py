@@ -1043,11 +1043,11 @@ async def _consume_stream(
                 elif isinstance(event, oai_responses.ResponseOutputItemDoneEvent):
                     item = event.item
                     if item.type == "function_call":
-                        tc_id = str(item.call_id or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
-                        tc_name = str(item.name or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                        tc_id = str(item.call_id or "")
+                        tc_name = str(item.name or "")
                         item_id = item.id or ""
                         delta_args = "".join(tool_args.get(item_id, []))
-                        done_args = str(item.arguments or "")  # ty: ignore[unresolved-attribute] -- narrowed by item.type == "function_call" but ty can't follow
+                        done_args = str(item.arguments or "")
                         args = _parse_tool_arguments(
                             delta_args,
                             done_args,

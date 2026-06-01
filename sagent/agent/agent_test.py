@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import re
+import time
 
 import pytest
 
@@ -1002,13 +1003,13 @@ def test_swap_model_rescales_response_window_to_smaller_model() -> None:
 
 @dataclass(slots=True, kw_only=True)
 class _NoopCompactor:
-    async def should_compact(
+    def should_compact(
         self,
-        input_tokens: int,
+        current_tokens: int,
         max_request_tokens: int,
-        max_response_tokens: int = 0,
+        system_tokens: int = 0,
     ) -> bool:
-        del input_tokens, max_request_tokens, max_response_tokens
+        del current_tokens, max_request_tokens, system_tokens
         return False
 
     async def compact(
@@ -1482,6 +1483,50 @@ async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
 
 
 @pytest.mark.asyncio
+async def test_relogin_clears_suspension_and_halts_inflight_call() -> None:
+    """``relogin`` recovers a call wedged in a service-suspension sleep.
+
+    The retry loop sleeps uninterruptibly until ``retry_at``; without this,
+    fresh credentials sit unused for the rest of that wait. ``relogin`` must
+    clear the stale suspension timestamps and ``Halt`` the live call so the
+    user regains control immediately.
+    """
+    a = _build_agent_with_spec()
+    a.runtime.service_suspended_until = time.time() + 15_000.0
+    a.runtime.resume_retry_at = time.time() + 15_000.0
+
+    async def _never() -> None:
+        await asyncio.sleep(3600)
+
+    a.runtime.model_call = asyncio.ensure_future(_never())
+    try:
+        fake_cls = MagicMock()
+        fake_cls.login = MagicMock()
+        with patch.object(providers_module, "Anthropic", fake_cls, create=True):
+            await a.relogin()
+        assert a.runtime.service_suspended_until is None
+        assert a.runtime.resume_retry_at is None
+        items = a.runtime.inbox.drain_nowait()
+        assert any(isinstance(it, types.runtime.Halt) for it in items)
+    finally:
+        a.runtime.model_call.cancel()
+
+
+@pytest.mark.asyncio
+async def test_relogin_no_halt_when_idle() -> None:
+    """With no in-flight call, ``relogin`` clears suspension but queues no Halt."""
+    a = _build_agent_with_spec()
+    a.runtime.service_suspended_until = time.time() + 100.0
+    fake_cls = MagicMock()
+    fake_cls.login = MagicMock()
+    with patch.object(providers_module, "Anthropic", fake_cls, create=True):
+        await a.relogin()
+    assert a.runtime.service_suspended_until is None
+    items = a.runtime.inbox.drain_nowait()
+    assert not any(isinstance(it, types.runtime.Halt) for it in items)
+
+
+@pytest.mark.asyncio
 async def test_relogin_raises_when_provider_has_no_login() -> None:
     """Providers without a ``login`` classmethod surface as ``ValueError``."""
     a = _build_agent_with_spec()
@@ -1628,13 +1673,13 @@ async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -
 async def test_compact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -1686,13 +1731,13 @@ async def test_public_compact_returns_when_halt_cancels_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _HangingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -1727,13 +1772,13 @@ async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _HangingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -1766,13 +1811,13 @@ async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
 async def test_recompact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2135,13 +2180,13 @@ async def test_compact_now_no_compactor_is_noop() -> None:
 async def test_compact_now_replaces_history_in_place() -> None:
     @dataclass(slots=True, kw_only=True)
     class _ReplaceCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2185,13 +2230,13 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
 
     @dataclass(slots=True, kw_only=True)
     class _BlockingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2260,13 +2305,13 @@ async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> N
 async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2313,13 +2358,13 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
 async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2363,13 +2408,13 @@ async def test_compact_now_returns_true_on_success() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2415,13 +2460,13 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2473,14 +2518,19 @@ class _ThresholdCompactor:
 
     compacted: bool = False
 
-    async def should_compact(
+    def should_compact(
         self,
-        input_tokens: int,
+        current_tokens: int,
         max_request_tokens: int,
-        max_response_tokens: int = 0,
+        system_tokens: int = 0,
     ) -> bool:
-        buffer = types.model.default_buffer_tokens(max_request_tokens)
-        return input_tokens >= max(0, max_request_tokens - max_response_tokens - buffer)
+        # Mirror SummaryCompactor (u=0.95, c=0.075):
+        #   body >= u * (window - system) / (1 + c*u)
+        u, c = 0.95, 0.075
+        body = max(0, current_tokens - system_tokens)
+        max_window = max(0, max_request_tokens - system_tokens)
+        threshold = u * max_window / (1.0 + c * u)
+        return body >= threshold
 
     async def compact(
         self,
@@ -2537,13 +2587,13 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
 
     @dataclass(slots=True, kw_only=True)
     class _NeverCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2583,9 +2633,9 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     A crude local estimator can under-count the true context (opus packs
     ~2.83 chars/token, not 4), so a 990k-token context can estimate to 100k
     and never cross the threshold. Anchoring on the provider's reported total
-    -- the way claude-code, codex, and gemini-cli all do -- fixes it: once a
-    response reports 990k, the next gate compacts regardless of the estimate.
-    The first turn (no response yet) falls back to the estimate.
+    fixes it: once a response reports 990k, the next gate compacts regardless
+    of the estimate. The first turn (no response yet) falls back to the
+    estimate.
     """
 
     class _UndercountModel(StubModel):
@@ -2611,8 +2661,8 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     assert await a.compact_if_needed(history, a.model) is True
     assert rec.compacted is False
 
-    # Provider reports the sent request at 990k. Threshold: 1_000_000 -
-    # 128_000 - default_buffer(1M)=66_666 = 805_334. The estimate still
+    # Provider reports the sent request at 990k. Rule: (1 + 0.1) * input >=
+    # window, i.e. 1.1 * 990_000 = 1_089_000 >= 1_000_000. The estimate still
     # under-counts at 100k, but the gate must now use the real 990k.
     a.record_response(
         types.model.ModelResponse(
@@ -2622,6 +2672,66 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     )
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> None:
+    """The gate adds entries appended after the last response to the anchor.
+
+    Rule: ``X + min(0.075*X, max_response) >= window``. Anchor 800k alone
+    does not fire (800k + 0.075*800k = 860k < 1M), but a tool-result appended
+    since (~150k est tokens) does: X=950k, 950k + 0.075*950k = 1_021_250 >=
+    1M. Without the since-term the gate would lag a turn and skip compaction.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
+        tools=[],
+        compactor=rec,
+    )
+    # Anchor: provider counted the last request at 800k.
+    a.record_response(
+        types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text=""),
+            tokens=types.model.TokenCount(input_tokens=800_000),
+        )
+    )
+    # History ends with the response's AssistantMessage, then a fresh
+    # ToolResult appended this turn: 600_000 chars / 4 = ~150_000 est tokens
+    # (StubModel: len // 4). X=950k; 950k + 0.075*950k = 1_021_250 >= 1M.
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.AssistantMessage(text=""),
+        types.runtime.ToolResult(call_id="c", content="x" * 600_000),
+    ]
+    await a.compact_if_needed(history, a.model)
+    assert rec.compacted is True
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
+    """When history ends at the last response, the since-term is zero.
+
+    Anchor 800k: 800k + 0.075*800k = 860k < 1M window, and nothing has been
+    appended since the last ``AssistantMessage``, so the gate must NOT compact.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
+        tools=[],
+        compactor=rec,
+    )
+    a.record_response(
+        types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text=""),
+            tokens=types.model.TokenCount(input_tokens=800_000),
+        )
+    )
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(text="q"),
+        types.runtime.AssistantMessage(text=""),
+    ]
+    assert await a.compact_if_needed(history, a.model) is True
+    assert rec.compacted is False
 
 
 @pytest.mark.asyncio
@@ -2651,7 +2761,7 @@ async def test_compact_if_needed_counts_cached_input_tokens() -> None:
             ),
         )
     )
-    # 5_000 + 985_000 = 990_000 >= 805_334 -> compaction fires.
+    # 5_000 + 985_000 = 990_000; 1.1 * 990_000 = 1_089_000 >= 1M -> fires.
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is True
 
@@ -2667,13 +2777,13 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _CompactBrokenButGatedTrue:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -2714,13 +2824,13 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
     class _AlwaysBroken:
         call_count: int = 0
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -2772,13 +2882,13 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _SuccessfulCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -2864,13 +2974,13 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
 
     @dataclass(slots=True, kw_only=True)
     class _ExternalAmCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -2961,14 +3071,14 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     class _OversizedCompactor:
         compact_calls: int = 0
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            effective = max_request_tokens - max_response_tokens
-            return input_tokens >= max(0, effective - 10)
+            effective = max_request_tokens - system_tokens
+            return current_tokens >= max(0, effective - 10)
 
         async def compact(
             self,
@@ -3044,6 +3154,280 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
 
 
 @pytest.mark.asyncio
+async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
+    """A raising token estimator in the willRetriggerNextTurn probe must not
+    abort an otherwise-successful compaction.
+
+    The retrigger probe formerly caught only ``(TypeError, ValueError)``; a
+    provider-backed estimator can raise arbitrary errors (e.g. a CLI
+    subprocess ``RuntimeError``). It must degrade like the sibling estimate
+    blocks, not propagate.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _FlakyEstimateModel(StubModel):
+        n: int = 0
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            del request
+            self.n += 1
+            # The third estimate call is the willRetriggerNextTurn probe;
+            # blow up only there so enrich/pre-scrunch estimates succeed.
+            if self.n >= 3:
+                raise RuntimeError("tokenizer subprocess gone")
+            return 1
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=_FlakyEstimateModel(), tools=[], compactor=_OkCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    # Must not raise -- the RuntimeError inside the retrigger probe is caught.
+    assert await a.compact_now() is True
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
+    """Scrunch output is re-repaired so no AM tool_call is left unpaired.
+
+    Scrunch re-runs the producer per partition and can emit a fresh
+    ``AssistantMessage`` whose ``tool_calls`` have no local ``ToolResult``.
+    Without a post-scrunch repair, ``unpaired_call_ids`` would declare those
+    ids ``paired_externally`` even though no external partner exists, and the
+    next provider call would 400. The bridge must synthesize an
+    ``[interrupted]`` result so the splice declares nothing externally paired.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _UnpairedScrunchCompactor:
+        compact_calls: int = 0
+
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            self.compact_calls += 1
+            if self.compact_calls == 1:
+                # First pass: oversized so the bridge triggers scrunch.
+                return _summary_override(
+                    [types.runtime.UserMessage(text="X" * 5_000)],
+                    mint_ref,
+                    tape=tape or None,
+                )
+            # Scrunch passes: emit an AM with a tool_call but NO ToolResult.
+            return _summary_override(
+                [
+                    types.runtime.AssistantMessage(
+                        text="partial",
+                        tool_calls=(
+                            types.runtime.ToolCall(id="orphan", name="x", args={}),
+                        ),
+                    )
+                ],
+                mint_ref,
+                tape=tape or None,
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    @dataclass(slots=True, kw_only=True)
+    class _OverflowModel(StubModel):
+        max_request_tokens: int = 1_000
+        max_response_tokens: int = 100
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            return sum(
+                len(m.text) // 4
+                for m in request.messages
+                if isinstance(
+                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
+                )
+            )
+
+    budget = types.model.ContextBudget(
+        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+    )
+    a = Agent(
+        model=_OverflowModel(),
+        compactor=_UnpairedScrunchCompactor(),
+        budget=budget,
+    )
+    a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+
+    assert await a.compact_now() is True
+
+    splice = next(r for r in reversed(a.runtime.tape) if isinstance(r, ContextSplice))
+    # No call_id may be declared externally paired without a real partner;
+    # the post-scrunch repair must have synthesized a local TR for "orphan".
+    assert "orphan" not in splice.paired_externally
+    am_ids = {
+        tc.id
+        for e in splice.payload
+        if isinstance(e, types.runtime.AssistantMessage)
+        for tc in e.tool_calls
+    }
+    tr_ids = {
+        e.call_id for e in splice.payload if isinstance(e, types.runtime.ToolResult)
+    }
+    # Every AM tool_call in the payload has a local TR pair.
+    assert am_ids <= tr_ids, f"unpaired AM tool_calls in payload: {am_ids - tr_ids}"
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None:
+    """Scrunch target uses the agent's (possibly lowered) ``max_request_tokens``.
+
+    A user may set ``max_request_tokens`` below the model cap. Scrunch must fit
+    that budget, not the raw model window, or a payload skips scrunch yet the
+    willRetriggerNextTurn check (which uses the agent budget) flags it -- an
+    inconsistent state that re-compacts every turn.
+    """
+    seen_targets: list[int] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _RecordingScrunchCompactor:
+        compact_calls: int = 0
+
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            self.compact_calls += 1
+            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
+            return _summary_override(
+                [types.runtime.UserMessage(text=payload_text)],
+                mint_ref,
+                tape=tape or None,
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    @dataclass(slots=True, kw_only=True)
+    class _OverflowModel(StubModel):
+        max_request_tokens: int = 1_000_000  # model cap is huge
+        max_response_tokens: int = 100
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            return sum(
+                len(m.text) // 4
+                for m in request.messages
+                if isinstance(
+                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
+                )
+            )
+
+    # Agent budget far below the model cap.
+    budget = types.model.ContextBudget(
+        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+    )
+    a = Agent(
+        model=_OverflowModel(),
+        compactor=_RecordingScrunchCompactor(),
+        budget=budget,
+    )
+
+    async def _spy(
+        self: _AgentCompactor,
+        *,
+        payload: list[types.runtime.ModelContextEvent],
+        mint_ref: Callable[[], TapeRef],
+        target_input_tokens: int,
+    ) -> list[types.runtime.ModelContextEvent]:
+        del self, mint_ref
+        seen_targets.append(target_input_tokens)
+        return list(payload)
+
+    with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
+        a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+        await a.compact_now()
+
+    assert seen_targets, "scrunch was never invoked"
+    expected = a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+    assert seen_targets[0] == expected, (
+        f"scrunch target {seen_targets[0]} != agent budget {expected}"
+        f" (model cap is {a.model.max_request_tokens})"
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
     """Bridge does NOT run scrunch when the inner producer's output fits.
 
@@ -3056,13 +3440,13 @@ async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
     class _NormalCompactor:
         compact_calls: int = 0
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3097,13 +3481,13 @@ async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
 async def test_compact_now_failure_appends_error_user_message() -> None:
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -3296,13 +3680,13 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _CountingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -3364,13 +3748,13 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
     class _OneShotCompactor:
         triggered: bool = False
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             if self.triggered:
                 return False
             self.triggered = True
@@ -3480,13 +3864,13 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3547,13 +3931,13 @@ async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3604,13 +3988,13 @@ async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None
 
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3675,13 +4059,13 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     class _BrokenProactiveCompactor:
         calls: int = 0
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3737,13 +4121,13 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
 
     @dataclass(slots=True, kw_only=True)
     class _OverflowingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -3798,13 +4182,13 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _NoOpCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -3873,13 +4257,13 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     class _BrokenCompactor:
         calls: int = 0
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -3939,13 +4323,13 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
 
     @dataclass(slots=True, kw_only=True)
     class _CountingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -4006,9 +4390,13 @@ async def test_agent_tool_emits_label_and_delegates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_invalid_input_suppresses_label() -> None:
-    """Invalid input short-circuits before ``ToolLabel`` -- the UI must
-    not show a "running" label for a call that never executed.
+async def test_agent_tool_invalid_input_labels_then_errors() -> None:
+    """Invalid input short-circuits dispatch but still publishes a label.
+
+    The label renders as a plain dim tool-call line (not a "running"
+    indicator), so emitting it keeps scrollback consistent with every other
+    tool outcome -- each is preceded by its tool-call line. The inner tool is
+    not invoked; the result is an ``InputValidationError`` naming the tool.
     """
     inner = StubTool(
         directive_schema=json_freeze(
@@ -4035,7 +4423,8 @@ async def test_agent_tool_invalid_input_suppresses_label() -> None:
     assert result.is_error
     assert "InputValidationError" in result.content
     assert inner.calls == []
-    assert labels == []
+    # A label IS published (tool name), before the error result.
+    assert [label.text for label in labels] == ["Echo"]
 
 
 @pytest.mark.asyncio
@@ -4353,7 +4742,7 @@ async def test_agent_tool_background_exception_is_logged(
     assert any(
         "background tool 'Echo' failed" in r.getMessage() for r in caplog.records
     )
-    items = await a.runtime.inbox.drain()
+    items = a.runtime.inbox.drain_nowait()
     detached = [i for i in items if isinstance(i, types.runtime.DetachedResult)]
     assert len(detached) == 1
     assert detached[0].is_error
@@ -4367,13 +4756,13 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
 
     @dataclass(slots=True, kw_only=True)
     class _AssistantTerminatedCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -4421,13 +4810,13 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -4775,13 +5164,13 @@ async def test_compact_if_needed_uses_agent_request_cap() -> None:
     class _RecorderCompactor:
         seen_max_request_tokens: list[int] = field(default_factory=list)
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_response_tokens
+            del current_tokens, system_tokens
             self.seen_max_request_tokens.append(max_request_tokens)
             return False
 
@@ -4812,13 +5201,13 @@ async def test_compact_if_needed_uses_agent_request_cap() -> None:
 async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
     @dataclass(slots=True, kw_only=True)
     class _HealthyCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -4858,13 +5247,13 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return False
 
         async def compact(
@@ -4900,13 +5289,13 @@ async def test_agent_compactor_receives_canonical_context() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _RecordingCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -4957,13 +5346,13 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -5000,13 +5389,13 @@ async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -
     """Post-compact tail repair must preserve tool-call pairing."""
 
     class _ToolCallCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -5050,13 +5439,13 @@ async def test_compact_now_awaits_active_runtime_compact_task() -> None:
     call_count = 0
 
     class _SlowCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -5109,14 +5498,14 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
     class _RecordingCompactor:
         should_compact_calls: list[tuple[int, int, int]] = field(default_factory=list)
 
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
             self.should_compact_calls.append(
-                (input_tokens, max_request_tokens, max_response_tokens),
+                (current_tokens, max_request_tokens, system_tokens),
             )
             return True
 
@@ -5193,13 +5582,13 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(
@@ -5648,13 +6037,13 @@ async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
 
     @dataclass(slots=True, kw_only=True)
     class _AlwaysCompactCompactor:
-        async def should_compact(
+        def should_compact(
             self,
-            input_tokens: int,
+            current_tokens: int,
             max_request_tokens: int,
-            max_response_tokens: int = 0,
+            system_tokens: int = 0,
         ) -> bool:
-            del input_tokens, max_request_tokens, max_response_tokens
+            del current_tokens, max_request_tokens, system_tokens
             return True
 
         async def compact(

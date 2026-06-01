@@ -223,9 +223,10 @@ def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
     match. A ``UserMessage`` paired with an ``AgentSendMessage`` is
     *not* same-source: the human did not author the agent's content
     and the agent did not author the human's. Cross-type or
-    cross-source pairs still need merging for wire alternation, but
-    the merge path (see :func:`_coalesce_adjacent_users`) demotes them
-    to ``UserMessage`` so structured attribution is not falsified.
+    cross-source pairs are therefore left unmerged by
+    :func:`_coalesce_adjacent_users` so structured attribution is not
+    falsified; they remain distinct entries and reach the provider as
+    separate (both user-role) turns.
     """
     if type(left) is not type(right):
         return False

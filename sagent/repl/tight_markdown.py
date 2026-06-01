@@ -12,7 +12,7 @@ yielded between rendered blocks, never before the first one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from rich.markdown import (
     Link,
@@ -31,7 +31,8 @@ if TYPE_CHECKING:
 class TightMarkdown(Markdown):
     """Markdown without a spurious leading blank line."""
 
-    def __rich_console__(  # pyright: ignore[reportImplicitOverride] -- vendored override
+    @override
+    def __rich_console__(
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
         style = console.get_style(self.style, default="none")

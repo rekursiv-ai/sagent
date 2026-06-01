@@ -26,8 +26,8 @@ That's the entire engine.
 History
 ~~~~~~~
 
-``list[UserMessage | AssistantMessage | ToolResult]``. Three types.
-Match on type, not string descriptors.
+``list[UserMessage | AgentSendMessage | AssistantMessage | ToolResult]``
+(the ``ModelContextEvent`` union). Match on type, not string descriptors.
 
 Tool task lifecycle
 ~~~~~~~~~~~~~~~~~~~

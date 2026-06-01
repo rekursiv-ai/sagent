@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 RETRY_BASE_SEC = 0.5
 MAX_RETRY_DELAY = 32.0
+# Interactive ceiling: in non-persistent mode a server-advertised backoff
+# longer than this is surfaced as a ``RateLimitError`` halt rather than a
+# blocking sleep, so a multi-hour rate-limit reset can't freeze the REPL.
+INTERACTIVE_MAX_SLEEP_SEC = 60.0
+# Below this, a local-backoff retry is a transient transport blip that
+# recovers before the user notices; it retries silently rather than
+# publishing a "model service suspended" banner. Server-advertised waits
+# always notify regardless of length.
+SUSPENSION_NOTICE_SEC = 5.0
 PERSISTENT_MAX_BACKOFF_SEC = 300.0
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 
@@ -170,6 +179,16 @@ def extract_retry_after(error: Exception) -> float | None:
             dt = None
         if dt is not None:
             return _clamp_retry_after(dt.timestamp() - time.time())
+    # ``anthropic-ratelimit-unified-reset`` is present on EVERY response --
+    # it is the wall-clock when the current usage window rolls over (often
+    # hours away, e.g. midnight), NOT a retry instruction. Honoring it
+    # unconditionally turns a transient in-band ``rate_limit_error`` on an
+    # otherwise-``allowed`` 200 stream into a multi-hour backoff. Only treat
+    # it as a retry-after when the limit was actually hit: either a real
+    # 429 status, or a unified status header reporting the request was
+    # rejected/blocked.
+    if _error_status(error, 0) != 429 and not _unified_limit_rejected(headers):
+        return None
     reset = headers.get("anthropic-ratelimit-unified-reset")
     if reset is not None:
         try:
@@ -178,6 +197,27 @@ def extract_retry_after(error: Exception) -> float | None:
             return None
         return _clamp_retry_after(delta)
     return None
+
+
+# Anthropic's per-window status headers. A value other than ``allowed``
+# (``rejected`` / ``blocked``) on the representative window means the
+# request was actually throttled, so the ``-reset`` clock becomes a real
+# retry-after. ``-overage-status`` is excluded: it describes overage
+# billing eligibility, not whether THIS request was limited.
+_UNIFIED_STATUS_HEADERS = (
+    "anthropic-ratelimit-unified-status",
+    "anthropic-ratelimit-unified-5h-status",
+    "anthropic-ratelimit-unified-7d-status",
+)
+
+
+def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
+    """True when a unified-ratelimit status header reports a rejected request."""
+    for name in _UNIFIED_STATUS_HEADERS:
+        status = headers.get(name)
+        if status is not None and status.strip().lower() != "allowed":
+            return True
+    return False
 
 
 _MAX_SERVER_RETRY_AFTER_SEC = 24 * 60 * 60
@@ -425,6 +465,17 @@ async def send_with_retry(
                     delay = max(delay, server_delay)
                 attempt -= 1
             else:
+                # Interactive (non-persistent) mode: never silently sleep for
+                # a long server-advertised backoff. A multi-minute+ wait
+                # blocks the whole REPL on one uninterruptible ``asyncio.sleep``
+                # (the user can't even ``/login`` out of it). Surface it as a
+                # ``RateLimitError`` halt carrying the reset time so the user
+                # can switch models or wait deliberately.
+                if (
+                    server_delay is not None
+                    and server_delay > INTERACTIVE_MAX_SLEEP_SEC
+                ):
+                    raise RateLimitError(time.time() + server_delay, e) from e
                 base = RETRY_BASE_SEC * (2.0**attempt)
                 delay = min(
                     base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
@@ -449,7 +500,16 @@ async def send_with_retry(
                 f" {diagnostics}" if diagnostics else "",
             )
             retry_at = time.time() + delay
-            if on_service_suspended is not None:
+            # Only surface the user-facing "model service suspended" banner
+            # for waits that are actually worth interrupting the user over:
+            # a server-advertised backoff, or a local backoff past a short
+            # threshold. Sub-second transport blips (e.g. an httpx ReadError
+            # that recovers on the next attempt) retry silently -- otherwise
+            # every transient network hiccup paints a scary suspension banner
+            # for a wait the user never even perceives. The retry is still
+            # logged via ``publish_recoverable`` above.
+            notable = server_delay is not None or delay >= SUSPENSION_NOTICE_SEC
+            if on_service_suspended is not None and notable:
                 on_service_suspended(retry_at, delay, server_delay is not None, e)
             await asyncio.sleep(delay)
     raise RetriesExhaustedError(

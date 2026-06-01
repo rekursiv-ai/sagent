@@ -32,7 +32,6 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     PromptTooLongError,
-    default_buffer_tokens,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -53,8 +52,6 @@ from sagent.types.tape import (
 __all__ = [
     "SummaryCompactor",
     "build_continuation",
-    "default_compact_prompt",
-    "default_partial_compact_prompt",
     "entry_chars",
 ]
 
@@ -62,64 +59,16 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def _compactor_path(key: str) -> str:
-    """Look up an asset path under the recipe's ``compactor`` section."""
-    comp = recipe_dict("compactor")
-    if key not in comp:
-        raise FileNotFoundError(f"compactor.{key} not in recipe")
-    return comp[key]
-
-
-def _recipe_asset(key: str) -> str:
-    """Resolve a compactor recipe asset against the *live* recipe.
-
-    Reading at module-import time froze every template against the
-    initial recipe; a subsequent ``set_recipe`` had no effect on the
-    compactor. Resolving at each call (six reads per compaction) is
-    free at this rate and removes the staleness class.
-    """
-    return read_asset(_compactor_path(key))
-
-
-def default_compact_prompt() -> str:
-    """Return the full-compaction prompt from the live recipe."""
-    return _recipe_asset("full")
-
-
-def default_partial_compact_prompt() -> str:
-    """Return the partial-compaction prompt from the live recipe."""
-    return _recipe_asset("partial")
-
-
 _RE_ANALYSIS = re.compile(r"<analysis>[\s\S]*?</analysis>")
 _RE_SUMMARY = re.compile(r"<summary>([\s\S]*?)</summary>")
 
-_COMPACTOR_TOOL_RESULT_CHARS = 8_000
+_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS = 8_000
 _COMPACTOR_TOOL_RESULT_NOTICE = "[tool result truncated for compaction]"
 _SKILL_TOOL_NAME = "Skill"
 _SKILL_BODY_ELIDED_NOTICE = (
     "[Skill body elided for compaction; the skill catalog still lists triggers"
     " and the agent can re-invoke Skill on demand.]"
 )
-
-
-def _groups_to_drop(
-    groups: list[list[ModelContextEvent]],
-    error: PromptTooLongError,
-    chars_per_token: int = 4,
-) -> int:
-    """How many leading groups to drop to cover the token gap."""
-    gap = error.token_gap
-    if gap is None:
-        return max(1, len(groups) // 5)
-    target_chars = gap * chars_per_token
-    chars = 0
-    for i, g in enumerate(groups):
-        for entry in g:
-            chars += entry_chars(entry)
-        if chars >= target_chars:
-            return i + 1
-    return max(1, len(groups) // 5)
 
 
 class SummaryCompactor:
@@ -138,10 +87,19 @@ class SummaryCompactor:
           next ``compact``.
       partial_prompt: Prompt used when ``keep_recent`` preserves a tail.
           ``None`` resolves ``compactor.partial`` from the live recipe.
-      buffer_tokens: Headroom before ``should_compact`` returns True. ``0``
-          (the default) derives the headroom proportionally from the
-          window via ``default_buffer_tokens``, matching the budget's
-          reservation; pass a positive value to pin a fixed headroom.
+      buffer_tokens: Optional extra slack (tokens) added to the live side of
+          the ``should_compact`` inequality. ``0`` (the default) leaves the
+          gate purely proportional.
+      utilization_trigger: Fraction of the usable (non-system,
+          post-compaction) window the request may fill before compaction
+          fires; the ``(1 - utilization_trigger)`` slack is the reservation
+          for the model's response and estimation safety. Dimensionless in
+          ``(0, 1]``. Default ``0.95``.
+      compression: Compaction compression factor
+          (``post_compact_size / pre_compact_size``) for the non-system body,
+          reserved out of the window. Default ``0.075`` -- the p95 of observed
+          summary compactions (n=48; p50 0.051, p95 0.075, max 0.091). See
+          ``should_compact`` for the full inequality.
       chars_per_token: Conversion factor for token-gap to char-gap math.
       max_attempts: Retries on ``PromptTooLongError`` before giving up.
       keep_recent: Default ``keep_recent`` when ``compact`` doesn't override.
@@ -163,6 +121,8 @@ class SummaryCompactor:
         prompt: str | None = None,
         partial_prompt: str | None = None,
         buffer_tokens: int = 0,
+        utilization_trigger: float = 0.95,
+        compression: float = 0.075,
         chars_per_token: int = 4,
         max_attempts: int = 3,
         keep_recent: int = 0,
@@ -173,6 +133,12 @@ class SummaryCompactor:
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+        if not 0.0 < utilization_trigger <= 1.0:
+            raise ValueError(
+                f"utilization_trigger must be in (0.0, 1.0], got {utilization_trigger}"
+            )
+        if compression < 0.0:
+            raise ValueError(f"compression must be >= 0.0, got {compression}")
         # Static type is ``Literal["from", "up_to"]`` but callers can pass
         # an arbitrary string at runtime (untyped CLI/config plumbing);
         # the explicit check turns silent ``up_to`` fall-through into a
@@ -184,6 +150,8 @@ class SummaryCompactor:
         self._prompt = prompt
         self._partial_prompt = partial_prompt
         self._buffer_tokens = buffer_tokens
+        self._utilization_trigger = utilization_trigger
+        self._compression = compression
         self._chars_per_token = chars_per_token
         self._max_attempts = max_attempts
         self._keep_recent = keep_recent
@@ -194,29 +162,86 @@ class SummaryCompactor:
 
     @property
     def proactive(self) -> bool:
-        """Whether the compactor resumes autonomously after compaction."""
+        """Whether the post-compaction continuation tells the model to resume
+        autonomously (vs. await the user). Controls only the resume-directive
+        wording in :func:`build_continuation`; resume itself always occurs.
+        """
         return self._proactive
 
-    async def should_compact(
+    def should_compact(
         self,
-        input_tokens: int,
+        current_tokens: int,
         max_request_tokens: int,
-        max_response_tokens: int = 0,
+        system_tokens: int = 0,
     ) -> bool:
-        """Return True when ``input_tokens`` crosses the compact threshold.
+        """Compact if the non-system request exceeds the usable input window.
+
+        Compact when the current ``body`` is at least ``utilization_trigger``
+        of the usable window that remains after setting aside ``compression *
+        body`` for the compacted result itself.
+
+        Three things are reserved out of the raw context window before the
+        body is allowed to fill it:
+
+          - the system prompt: non-negotiable lost window, subtracted from
+            both sides as ``max_usable = window - system`` (it is fixed
+            overhead compaction never shrinks);
+          - the compacted result: ``compression * body`` of room kept so the
+            summary this compaction produces has somewhere to land;
+          - the model's response: covered by ``utilization_trigger < 1`` --
+            the ``(1 - u)`` slack below ``max_usable`` is the reservation for
+            the reply the next call will generate (plus estimation safety).
+
+        Definitions (``c = compression`` = post_compact_size /
+        pre_compact_size of the non-system body; ``u = utilization_trigger``)::
+
+            max_usable            = ContextWindow - approx(SystemPrompt)
+            body                  = approx(TotalRequest) - approx(SystemPrompt)
+            expected_compact_size = c * body
+            expected_usable       = max_usable - expected_compact_size
+
+        Compact when::
+
+                 body >= u * expected_usable
+            <==> body >= u * (max_usable - c * body)
+            <==> body * (1 + c * u) >= u * max_usable
+            <==> body >= u * max_usable / (1 + c * u)
+
+        where ``approx(TotalRequest) = Last + approx(since(Last))`` and
+        ``body = current_tokens - system_tokens``. At ``c = 0`` and ``u = 1``
+        this reduces to ``body >= max_usable`` i.e.
+        ``approx(TotalRequest) >= ContextWindow`` -- no compaction- or
+        response-headroom, fire only at the hard window.
+
+        Concerns:
+          - ``body`` (``current - system``) cannot go meaningfully negative:
+            ``current`` is the provider's exact request total which contains
+            the system prompt, so ``current >= system`` holds; a small
+            estimation overshoot in ``system_tokens`` is clamped to ``0``.
+          - Mis-estimating ``system``/``c`` only shifts the threshold by a
+            ``u``-scaled amount and is bounded since ``system <=
+            ContextWindow`` by assumption.
 
         Args:
-          input_tokens: Estimated current input token count.
-          max_request_tokens: Budget cap for input tokens.
-          max_response_tokens: Reserved output tokens; subtracted from cap.
+          current_tokens: ``approx(TotalRequest)`` -- provider's exact last
+              request total plus an estimate of entries appended since.
+          max_request_tokens: ``ContextWindow`` -- the model's input-token
+              window.
+          system_tokens: ``approx(System)`` -- estimated system-prompt
+              tokens, incompressible overhead reserved out of the window.
 
         Returns:
           should: True when compaction should run before the next call.
 
         """
-        effective = max_request_tokens - max_response_tokens
-        buffer = self._buffer_tokens or default_buffer_tokens(max_request_tokens)
-        return input_tokens >= max(0, effective - buffer)
+        return _should_compact(
+            current_tokens=current_tokens,
+            max_request_tokens=max_request_tokens,
+            system_tokens=system_tokens,
+            utilization_trigger=self._utilization_trigger,
+            compression=self._compression,
+            buffer_tokens=self._buffer_tokens,
+        )
 
     async def compact(
         self,
@@ -269,6 +294,17 @@ class SummaryCompactor:
                 to_keep, to_summarize = _safe_split(
                     history, effective_keep, direction="up_to"
                 )
+            if not to_keep:
+                # ``_safe_split`` snaps the boundary left past unresolved
+                # tool_use; when the entire prefix is unsafe it keeps
+                # nothing, silently overriding the requested ``keep_recent``.
+                # Log so the lost-tail degradation is observable.
+                logger.warning(
+                    "compaction keep_recent=%d requested but the split kept no"
+                    " tail (unresolved tool_use spans the boundary); summarizing"
+                    " the full history.",
+                    effective_keep,
+                )
         else:
             to_summarize = history
             to_keep = []
@@ -287,7 +323,9 @@ class SummaryCompactor:
             )
 
         if to_keep:
-            body = self._partial_prompt or default_partial_compact_prompt()
+            body = self._partial_prompt or read_asset(
+                recipe_dict("compactor")["partial"]
+            )
             if direction == "up_to":
                 body = (
                     body.rstrip() + "\n\nNote: in this compaction the EARLIER messages"
@@ -296,13 +334,14 @@ class SummaryCompactor:
                     " conversation, after the retained prefix."
                 )
         else:
-            body = self._prompt or default_compact_prompt()
+            body = self._prompt or read_asset(recipe_dict("compactor")["full"])
         if custom_instructions and custom_instructions.strip():
             body = _append_user_guidance(body, custom_instructions)
+        compactor_recipe = recipe_dict("compactor")
         prompt = (
-            _recipe_asset("no_tools_preamble")
+            read_asset(compactor_recipe["no_tools_preamble"])
             + body
-            + _recipe_asset("no_tools_trailer")
+            + read_asset(compactor_recipe["no_tools_trailer"])
         )
 
         groups = _group_history_by_round(to_summarize)
@@ -312,7 +351,7 @@ class SummaryCompactor:
             entries = _request_entries(groups)
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=prompt)],
-                system=_recipe_asset("system").strip(),
+                system=read_asset(recipe_dict("compactor")["system"]).strip(),
                 tools=None,
             )
             try:
@@ -437,7 +476,7 @@ class SummaryCompactor:
         for attempt in range(self._max_attempts):
             request = ModelRequest(
                 messages=[*_request_entries(groups), UserMessage(text=probe)],
-                system=_recipe_asset("system").strip(),
+                system=read_asset(recipe_dict("compactor")["system"]).strip(),
                 tools=None,
             )
             try:
@@ -473,6 +512,47 @@ class SummaryCompactor:
         if not improved or improved.upper() == "IDENTICAL":
             return raw_summary
         return improved
+
+
+def _should_compact(
+    *,
+    current_tokens: int,
+    max_request_tokens: int,
+    system_tokens: int,
+    utilization_trigger: float,
+    compression: float,
+    buffer_tokens: int,
+) -> bool:
+    """Compaction-trigger arithmetic; see ``SummaryCompactor.should_compact``.
+
+    body >= u * max_usable / (1 + c * u)   (+ buffer slack on the live side).
+    ``>=`` so the at-boundary case compacts.
+    """
+    body = max(0, current_tokens - system_tokens)
+    max_usable = max(0, max_request_tokens - system_tokens)
+    threshold = (
+        max_usable * utilization_trigger / (1.0 + compression * utilization_trigger)
+    )
+    return body + buffer_tokens >= threshold
+
+
+def _groups_to_drop(
+    groups: list[list[ModelContextEvent]],
+    error: PromptTooLongError,
+    chars_per_token: int = 4,
+) -> int:
+    """How many leading groups to drop to cover the token gap."""
+    gap = error.token_gap
+    if gap is None:
+        return max(1, len(groups) // 5)
+    target_chars = gap * chars_per_token
+    chars = 0
+    for i, g in enumerate(groups):
+        for entry in g:
+            chars += entry_chars(entry)
+        if chars >= target_chars:
+            return i + 1
+    return max(1, len(groups) // 5)
 
 
 def _build_fallback_splice(
@@ -567,7 +647,7 @@ def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool
         for entry in group:
             if (
                 isinstance(entry, ToolResult)
-                and len(entry.content) > _COMPACTOR_TOOL_RESULT_CHARS
+                and len(entry.content) > _COMPACT_RETRY_TOOL_RESULT_CAP_CHARS
                 and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
             ):
                 shrunk.append(
@@ -575,7 +655,7 @@ def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool
                         entry,
                         content=(
                             f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n"
-                            f"{entry.content[:_COMPACTOR_TOOL_RESULT_CHARS]}"
+                            f"{entry.content[:_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS]}"
                         ),
                     )
                 )
@@ -680,29 +760,17 @@ def _coalesce_adjacent_users(
             and wire_role(out[-1]) == "user"
             and _same_source(out[-1], entry)
         ):
+            # The gate (`_same_source`) only admits same-type pairs:
+            # AgentSend+AgentSend (same source) or User+User. Cross-type
+            # pairs return ``_same_source == False`` and never reach here,
+            # so merging into ``prev`` preserves the (shared) type.
             prev = out[-1]
             assert isinstance(prev, (UserMessage, AgentSendMessage))
-            text = f"{prev.text}\n\n{entry.text}"
-            attachments = (*prev.attachments, *entry.attachments)
-            if isinstance(prev, AgentSendMessage):
-                out[-1] = dataclasses.replace(
-                    prev,
-                    text=text,
-                    attachments=attachments,
-                )
-            elif isinstance(entry, AgentSendMessage):
-                # Preserve agent attribution by adopting the agent type.
-                out[-1] = dataclasses.replace(
-                    entry,
-                    text=text,
-                    attachments=attachments,
-                )
-            else:
-                out[-1] = dataclasses.replace(
-                    prev,
-                    text=text,
-                    attachments=attachments,
-                )
+            out[-1] = dataclasses.replace(
+                prev,
+                text=f"{prev.text}\n\n{entry.text}",
+                attachments=(*prev.attachments, *entry.attachments),
+            )
         else:
             out.append(entry)
     return tuple(out)
@@ -777,7 +845,7 @@ def build_continuation(
             " etc.). Proceed as though no interruption occurred."
         )
     return (
-        _recipe_asset("continuation")
+        read_asset(recipe_dict("compactor")["continuation"])
         .replace("{{summary}}", summary)
         .replace("{{recent}}", recent)
         .replace("{{resume}}", resume)
