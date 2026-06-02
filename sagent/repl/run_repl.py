@@ -55,6 +55,7 @@ from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
     AgentIdle,
     AssistantMessage,
+    ClearComplete,
     RuntimeEvent,
 )
 
@@ -177,7 +178,10 @@ def install_input_queue_committer(
       previous hook is preserved and called first; if it returns an
       event, that event wins and the queue stays put.
     - Appends an observer to ``agent.runtime.observers`` that commits
-      urgent / deferred queues on each ``AgentIdle``.
+      urgent / deferred queues on each ``AgentIdle`` or ``ClearComplete``
+      (the latter releases deferred input staged after a model self-clear,
+      which never reaches ``AgentIdle`` because the ``Clear`` armed
+      ``AWAIT_USER``).
 
     The caller invokes the returned uninstall in ``finally`` to detach
     the observer and restore the prior ``before_tool_spawn``. Without
@@ -250,7 +254,16 @@ def _commit_local_queues(
     agent: Agent,
     queues: InputQueues,
 ) -> None:
-    if isinstance(event, AgentIdle) and not queues.commit_urgent(agent):
+    # ``ClearComplete`` flushes alongside ``AgentIdle``: a self-issued
+    # ``Clear`` arms ``AWAIT_USER`` so ``_fully_drained`` stays False and
+    # ``AgentIdle`` never publishes -- without this, deferred (Tab) input
+    # staged after a model self-clear would wedge until Ctrl+D. ``Clear`` is
+    # the only ``AWAIT_USER`` arm that publishes a distinguishing terminal
+    # event (Halt / ModelResponseError do not), so the released input lands
+    # exactly where a fresh user redirect would.
+    if isinstance(event, (AgentIdle, ClearComplete)) and not queues.commit_urgent(
+        agent
+    ):
         queues.commit_deferred_on_idle(agent)
 
 

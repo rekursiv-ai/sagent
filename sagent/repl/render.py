@@ -50,6 +50,7 @@ from sagent.types.runtime import (
     ModelServiceSuspended,
     ModelSwitchRejected,
     RuntimeEvent,
+    SessionMessage,
     StatusChanged,
     ToolLabel,
     ToolResult,
@@ -379,6 +380,11 @@ class RenderObserver:
             logger.exception("render observer failed for %s", type(event).__name__)
 
     def _dispatch(self, event: RuntimeEvent) -> None:
+        # A ``hidden`` message reaches the model but not the human: flush any
+        # pending stream so ordering holds, then render nothing for it.
+        if isinstance(event, SessionMessage) and event.hidden:
+            self._flush_stream()
+            return
         match event:
             case UserMessage(text=text):
                 self._flush_stream()

@@ -10,11 +10,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import dataclasses
 import itertools
 import threading
 import time
+
+
+if TYPE_CHECKING:
+    from sagent.types.tape import ContextSplice
 
 
 _id_counter: Iterator[int] = itertools.count()
@@ -45,6 +50,9 @@ def _empty_headers() -> dict[str, str]:
 
 __all__ = [
     "CANCELLED_PLACEHOLDER",
+    "DETACHED_ARRIVAL_SUFFIX",
+    "DETACHED_ARRIVED_SYSTEM_NOTE",
+    "DETACHED_ARRIVED_TOOL",
     "DETACHED_PLACEHOLDER",
     "RUNNING_PREFIX",
     "AgentIdle",
@@ -68,6 +76,7 @@ __all__ = [
     "DetachedResult",
     "Halt",
     "Kill",
+    "LazyEvent",
     "ModelCallStarted",
     "ModelContextEvent",
     "ModelIdle",
@@ -145,6 +154,11 @@ class SessionMessage:
 
     timestamp: float = dataclasses.field(default_factory=time.time)
     """Unix wall-clock seconds when the message was created."""
+
+    hidden: bool = False
+    """Render-only suppression: the model still receives this message on the
+    wire, but the REPL does not display it to the human. Used for
+    system-injected context (e.g. deferred reminders) the human need not see."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -250,9 +264,14 @@ class ToolResult(SessionMessage):
 # to carry its own contract:
 #
 # - ``DETACHED_PLACEHOLDER`` (``is_error=False``): the tool is still
-#   running after a user preempt/Compact/Clear; the real result splices
-#   into this slot later via ``DetachedResult``. The splice matches on
-#   ``call_id``, never on this text, so the wording is free.
+#   running after a user preempt/Compact/Clear. It is the permanent,
+#   honest answer to the original ``tool_use``: the real result is NOT
+#   back-patched into this slot. When the tool completes, the runtime
+#   delivers the real result as NEW forward context -- a synthetic
+#   ``DETACHED_ARRIVED_TOOL`` tool_use/tool_result pair -- so nothing the
+#   model already read is silently rewritten (see
+#   ``docs/private/design_detached_tool_results.md``). The matcher keys on
+#   ``call_id``, never this text, so the wording is free.
 # - ``CANCELLED_PLACEHOLDER`` (``is_error=True``): the tool was killed
 #   (operator Kill, cooperative abort, background cancellation); no
 #   result will follow. Terminal -- the model must not wait or retry.
@@ -269,6 +288,30 @@ CANCELLED_PLACEHOLDER = (
     "[cancelled: tool killed before completion; no result will follow]"
 )
 RUNNING_PREFIX = "[Running in background: "
+
+# Synthetic tool name for the forward delivery of a detached tool's real
+# result. The runtime appends an ``AssistantMessage`` carrying a
+# ``DETACHED_ARRIVED_TOOL`` tool_use plus the real ``ToolResult`` (its
+# ``call_id`` is ``f"{original_call_id}{DETACHED_ARRIVAL_SUFFIX}"``) so a
+# completed detached tool arrives as new context rather than a silent
+# back-patch of its stub slot. The synthetic pair is inert: it is appended
+# to history directly and never dispatched through ``_run_tool_and_post``.
+DETACHED_ARRIVED_TOOL = "DetachedArrived"
+DETACHED_ARRIVAL_SUFFIX = ":detached"
+
+# System-prompt note teaching the model that ``DetachedArrived`` turns in its
+# history are runtime-synthesized result deliveries, not a callable tool --
+# otherwise a model copies the pattern and emits its own ``DetachedArrived``
+# call (which the runtime then has to reject). Paired with the runtime guard in
+# ``_run_tool_and_post`` (belt and suspenders).
+DETACHED_ARRIVED_SYSTEM_NOTE = (
+    f"Note on `{DETACHED_ARRIVED_TOOL}`: when a tool you ran is detached to the"
+    " background (e.g. you sent a message while it was running), its completed"
+    f" result is delivered back to you as a synthesized `{DETACHED_ARRIVED_TOOL}`"
+    " tool turn in your history. This is a runtime marker, NOT a tool you can"
+    f" call. Never emit a `{DETACHED_ARRIVED_TOOL}` call yourself; detached"
+    " results arrive automatically as each tool finishes."
+)
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
@@ -297,6 +340,26 @@ class CompactComplete:
 
     preserved_tail_count: int = 0
     """Number of tail entries preserved verbatim in fallback mode."""
+
+    @classmethod
+    def from_override(cls, override: ContextSplice) -> CompactComplete:
+        """Build the completion event from a compactor's override.
+
+        Both compaction tails -- the async ``_compact_and_post`` and the
+        synchronous ``compact_now`` overflow-recovery path -- emit
+        ``CompactComplete`` for the same override. Deriving every field
+        here keeps them from drifting: a field added to the event is
+        populated for both callers, and the token counts can never be
+        silently dropped (which rendered ``~0 → ~0 tokens`` in the REPL).
+        """
+        return cls(
+            records=(override,),
+            token_before=override.token_before,
+            token_after=override.token_after,
+            payload_entries=len(override.payload),
+            fallback_reason=override.fallback_reason,
+            preserved_tail_count=override.preserved_tail_count,
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -601,6 +664,31 @@ class DetachedResult:
         return self.result.is_error
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LazyEvent:
+    """Defer a message to the next real turn.
+
+    A general "deliver this, but don't spend a turn on it" envelope: the
+    runtime holds the ``payload`` and commits it to the tape alongside the
+    next event that genuinely drives a model round, rather than firing a
+    round for the payload alone. Used e.g. to ride a system reminder on the
+    next user message or tool completion instead of waking the model just to
+    say it. ``payload.hidden`` controls whether the human sees it.
+
+    The payload is a ``UserMessage`` (injected context the model reads) or a
+    ``ToolResult`` (a deferred pairing for a tool call -- e.g. the error reply
+    to a mimicked ``DetachedArrived`` call, held so it pairs on the next real
+    turn without firing a round of its own). (Widen :data:`Payload` later if a
+    use case needs attributed lazy delivery, e.g. ``AgentSendMessage``.)
+    """
+
+    type Payload = UserMessage | ToolResult
+    """The single source of truth for what a ``LazyEvent`` may carry."""
+
+    payload: Payload
+    """The message to commit on the next real turn."""
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class CohortComplete:
     """All tool results for the current cohort have arrived."""
@@ -707,6 +795,7 @@ type RuntimeEvent = (
     | ToolResultPartial
     | ToolResult
     | DetachedResult
+    | LazyEvent
     | CohortComplete
     | Compact
     | Recompact

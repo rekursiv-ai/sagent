@@ -20,7 +20,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
 import asyncio
-import dataclasses
 import time
 
 from sagent.agent.background import BackgroundTaskEntry
@@ -33,20 +32,15 @@ from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
     RUNNING_PREFIX,
-    AssistantMessage,
     DetachedResult,
-    ModelContextEvent,
     RuntimeEvent,
     ToolResult,
 )
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from sagent.agent import Agent
     from sagent.tools.core import AgentLike
-    from sagent.types.tape import TapeRef
 
 agent_lib = lazy_import("sagent.agent")
 
@@ -427,57 +421,16 @@ def _splice_from_inbox_items(
 
 
 def _splice_detached(agent: AgentLike, event: DetachedResult) -> ToolResult:
-    """Splice a detached event into history and return the foreground result."""
-    spliced = _replace_placeholder(agent, event)
-    if spliced is not None:
-        return spliced
+    """Return the foreground result for a drained ``DetachedResult``.
+
+    The result is returned as the ``BackgroundTask foreground`` tool's own
+    answer (forward delivery -- the model asked for it). The original
+    ``[Running in background]`` placeholder is left in place: it is the honest
+    record that the call was backgrounded, and rewriting it in-slot would be a
+    silent back-patch (see ``docs/private/design_detached_tool_results.md``).
+    """
+    del agent
     return _tool_result_from_detached(event)
-
-
-def _replace_placeholder(agent: AgentLike, event: DetachedResult) -> ToolResult | None:
-    """Replace the latest visible placeholder for ``event.call_id``."""
-    resolved = agent.runtime.context()
-    parent_origin = _find_parent_origin(
-        resolved.messages, resolved.origins, event.call_id
-    )
-    if parent_origin is None:
-        return None
-    for entry, origin in reversed(
-        tuple(zip(resolved.messages, resolved.origins, strict=True))
-    ):
-        if (
-            isinstance(entry, ToolResult)
-            and entry.call_id == event.call_id
-            and _is_background_placeholder(entry.content)
-        ):
-            real = dataclasses.replace(
-                entry,
-                content=event.content,
-                is_error=event.is_error,
-            )
-            agent.runtime.append_splice(
-                mask=((origin, origin),),
-                insert_after=parent_origin,
-                payload=(real,),
-                strategy="foreground_detached_splice",
-                paired_externally=frozenset({event.call_id}),
-            )
-            return real
-    return None
-
-
-def _find_parent_origin(
-    messages: Sequence[ModelContextEvent],
-    origins: Sequence[TapeRef],
-    call_id: str,
-) -> TapeRef | None:
-    """Return the visible assistant origin for ``call_id``, if present."""
-    for entry, origin in reversed(tuple(zip(messages, origins, strict=True))):
-        if isinstance(entry, AssistantMessage) and any(
-            tool_call.id == call_id for tool_call in entry.tool_calls
-        ):
-            return origin
-    return None
 
 
 def _tool_result_from_detached(event: DetachedResult) -> ToolResult:

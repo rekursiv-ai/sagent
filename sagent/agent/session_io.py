@@ -220,6 +220,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "id": entry.id,
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
         }
     if isinstance(entry, AgentSendMessage):
         return {
@@ -230,6 +231,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "id": entry.id,
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
         }
     if isinstance(entry, AssistantMessage):
         return {
@@ -243,6 +245,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "id": entry.id,
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
         }
     return {
         "type": "tool_result",
@@ -257,6 +260,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
         "id": entry.id,
         "parent_id": entry.parent_id,
         "timestamp": entry.timestamp,
+        "hidden": entry.hidden,
     }
 
 
@@ -522,6 +526,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
     entry_id = int_val(d.get("id"), 0)
     parent_id = int_val(d.get("parent_id"), -1)
     timestamp = float_val(d.get("timestamp"), 0.0)
+    hidden = bool(d.get("hidden"))
     if t == "user":
         return UserMessage(
             text=str(d.get("text") or ""),
@@ -529,6 +534,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             id=entry_id,
             parent_id=parent_id,
             timestamp=timestamp,
+            hidden=hidden,
         )
     if t == "agent_send":
         return AgentSendMessage(
@@ -538,6 +544,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             id=entry_id,
             parent_id=parent_id,
             timestamp=timestamp,
+            hidden=hidden,
         )
     if t == "assistant":
         raw_tcs = d.get("tool_calls")
@@ -567,6 +574,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             id=entry_id,
             parent_id=parent_id,
             timestamp=timestamp,
+            hidden=hidden,
         )
     if t == "tool_result":
         return ToolResult(
@@ -581,6 +589,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             id=entry_id,
             parent_id=parent_id,
             timestamp=timestamp,
+            hidden=hidden,
         )
     return None
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import contextlib
@@ -14,9 +15,12 @@ import pytest
 
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.runtime import Tool
+from sagent.repl.input_queues import InputQueues
+from sagent.repl.run_repl import _input_queue_committer_observer
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
+    DETACHED_ARRIVED_TOOL,
     DETACHED_PLACEHOLDER,
     AgentIdle,
     AgentSendDeferredMessage,
@@ -35,6 +39,7 @@ from sagent.types.runtime import (
     DetachedResult,
     Halt,
     Kill,
+    LazyEvent,
     ModelContextEvent,
     ModelIdle,
     ModelResponseCancelled,
@@ -62,6 +67,10 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from sagent.agent.agent import Agent
 
 
 def _summary_override(
@@ -252,6 +261,49 @@ def _assistant_texts(agent: agent_runtime.AgentRuntime) -> list[str]:
         for entry in agent.context().messages
         if isinstance(entry, AssistantMessage) and entry.text
     ]
+
+
+@pytest.mark.asyncio
+async def test_lazy_event_does_not_trigger_a_round_alone() -> None:
+    """A ``LazyEvent`` alone fires no model round; it waits for a real turn."""
+    agent, _ = make_agent([AssistantMessage(text="should not fire")])
+    agent.inbox.push_back(
+        LazyEvent(payload=UserMessage(text="<system-reminder>x</system-reminder>"))
+    )
+    agent.inbox.push_back(Quit())
+    await run_until_quit(agent, timeout_sec=2.0)
+
+    # The model never ran (nothing drove a round); the payload stays pending,
+    # not committed, since no real turn ever arrived to carry it.
+    assert not any(
+        isinstance(m, AssistantMessage) and m.text for m in agent.context().messages
+    )
+    assert agent._pending_commits
+
+
+@pytest.mark.asyncio
+async def test_lazy_event_rides_next_real_turn() -> None:
+    """A pending ``LazyEvent`` payload commits alongside the next real event."""
+    agent, _ = make_agent([AssistantMessage(text="answer")])
+    agent.inbox.push_back(
+        LazyEvent(payload=UserMessage(text="<system-reminder>nudge</system-reminder>"))
+    )
+    agent.inbox.push_back(UserMessage(text="hello"))
+
+    await run_with_quit(agent, timeout_sec=2.0)
+
+    # The reminder rode the real turn: its text is in context (possibly
+    # coalesced with the user message) and the model ran once.
+    all_user_text = " ".join(
+        m.text for m in agent.context().messages if isinstance(m, UserMessage)
+    )
+    assert "<system-reminder>nudge</system-reminder>" in all_user_text
+    assert "hello" in all_user_text
+    assert any(
+        isinstance(m, AssistantMessage) and m.text == "answer"
+        for m in agent.context().messages
+    )
+    assert not agent._pending_commits
 
 
 @pytest.mark.asyncio
@@ -923,37 +975,35 @@ async def test_kill_one_tool() -> None:
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_detach_and_result_arrives_later() -> None:
-    """Detached tool completes; ``DetachedResult`` splices into placeholder.
+    """Detached tool completes; the real result arrives as forward context.
 
-    H8/M1/M2 fix: late ``DetachedResult`` splices into the
-    ``[detached]`` placeholder so history stays linear and the real
-    result lives in the slot the model already expects. No phantom
-    user message; no extra model round.
+    The ``[detached]`` stub stays as the honest answer to the original call;
+    the real result is delivered forward as a ``DetachedArrived`` pair (no
+    silent back-patch). See ``docs/private/design_detached_tool_results.md``.
     """
     slow = StubTool(response="late result", delay_sec=0.1)
     agent, _ = make_agent(
         [
             AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
             AssistantMessage(text="detached"),
+            AssistantMessage(text="saw result"),
         ],
         tools=[slow],
     )
     agent.inbox.push_back(UserMessage(text="go"))
 
-    detached_seen = asyncio.Event()
+    def _quit_when_arrived(event: RuntimeEvent) -> None:
+        del event
 
-    def _quit_when_done(event: RuntimeEvent) -> None:
-        if isinstance(event, DetachedResult):
-            detached_seen.set()
-
-    agent.observers.append(_quit_when_done)
+    agent.observers.append(_quit_when_arrived)
 
     async def detach_then_wait() -> None:
         await asyncio.sleep(0.02)
         agent.inbox.push_back(Detach(call_id="t1"))
-        await detached_seen.wait()
-        # Drain one more iteration so the splice publish lands.
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -961,19 +1011,19 @@ async def test_detach_and_result_arrives_later() -> None:
         detach_then_wait(),
     )
 
-    stubs = [
-        t
-        for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
-    ]
-    assert stubs == []
-    spliced = [
-        t
-        for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.call_id == "t1"
-    ]
-    assert len(spliced) == 1
-    assert spliced[0].content == "late result"
+    # The stub remains the honest answer to the original call -- not rewritten.
+    stub = _stub_for(agent, "t1")
+    assert stub is not None
+    assert stub.content == DETACHED_PLACEHOLDER
+    # The real result is delivered forward under the arrival id.
+    arrival = _detached_arrival_result(agent, "t1")
+    assert arrival is not None
+    assert arrival.content == "late result"
+    # No back-patch splice.
+    assert not any(
+        isinstance(r, ContextSplice) and r.strategy == "detached_splice"
+        for r in agent.tape
+    )
 
 
 @pytest.mark.asyncio
@@ -1011,23 +1061,19 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
         [
             AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
             AssistantMessage(text="detached"),
+            AssistantMessage(text="saw result"),
         ],
         tools=[slow],
     )
     agent.inbox.push_back(UserMessage(text="go"))
-    detached_seen = asyncio.Event()
-
-    def _quit_when_done(event: RuntimeEvent) -> None:
-        if isinstance(event, DetachedResult):
-            detached_seen.set()
-
-    agent.observers.append(_quit_when_done)
 
     async def detach_then_wait() -> None:
         await asyncio.sleep(0.02)
         agent.inbox.push_back(Detach(call_id="t1"))
-        await detached_seen.wait()
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -1035,13 +1081,9 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
         detach_then_wait(),
     )
 
-    results = [
-        t
-        for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.call_id == "t1"
-    ]
-    assert len(results) == 1
-    result = results[0]
+    # Full structure survives forward delivery (not flattened to text).
+    result = _detached_arrival_result(agent, "t1")
+    assert result is not None
     assert result.attachments == (att,)
     assert result.diff == "diff"
     assert result.diff_file_path == "file.txt"
@@ -1050,373 +1092,33 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detached_result_splices_when_parent_is_reemitted() -> None:
-    agent, _ = make_agent([])
+async def test_detached_result_delivered_with_tail_toolresult() -> None:
+    """A detached result lands forward even when the tail is a ``ToolResult``.
+
+    Forward delivery does not depend on any surviving parent anchor: it
+    appends a ``DetachedArrived`` pair at the tail. With a ``ToolResult`` tail
+    (a settled cohort), the synthetic assistant turn may append directly.
+    """
+    agent, _ = make_agent([AssistantMessage(text="saw result")])
     call = ToolCall(id="t1", name="echo", args={})
     agent.append_history(UserMessage(text="go"))
-    original_parent = agent.append_history(AssistantMessage(tool_calls=(call,)))
+    agent.append_history(AssistantMessage(tool_calls=(call,)))
     agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-    parent_reemit = ContextSplice(
-        ref=agent.mint_ref(),
-        mask=((original_parent, original_parent),),
-        insert_after=original_parent,
-        payload=(AssistantMessage(tool_calls=(call,)),),
-        strategy="test_parent_reemit",
-        paired_externally=frozenset({"t1"}),
-    )
-    agent.adopt_record(parent_reemit)
     agent.inbox.push_back(
         DetachedResult(
             result=ToolResult(call_id="t1", content="late result", is_error=False)
         )
     )
-    agent.inbox.push_back(Quit())
 
-    await run_until_quit(agent)
+    await run_with_quit(agent, timeout_sec=3.0)
 
-    results = [
-        entry
-        for entry in agent.context().messages
-        if isinstance(entry, ToolResult) and entry.call_id == "t1"
-    ]
-    assert [result.content for result in results] == ["late result"]
-
-
-@pytest.mark.asyncio
-async def test_detached_result_after_compaction_barrier_drops_silently() -> None:
-    """Compaction barrier without preserved AM drops late DetachedResult.
-
-    The barrier masked the placeholder and didn't preserve the parent
-    assistant in its payload, so the late tool result has no valid
-    splice slot. Surfacing a synthetic ``[Tool t1 completed]``
-    ``UserMessage`` post-compaction would inject stale tool noise into
-    the now-summarized session. Drop the result instead.
-    """
-    agent, _ = make_agent([])
-    agent.append_history(UserMessage(text="go"))
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
-    )
-    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-    summary = ContextSplice(
-        ref=agent.mint_ref(),
-        mask=((agent.tape[0].ref, agent.tape[-1].ref),),
-        insert_after=None,
-        payload=(UserMessage(text="[summary]"),),
-        strategy="test_compaction",
-    )
-    agent.adopt_record(summary)
-    agent.inbox.push_back(
-        DetachedResult(
-            result=ToolResult(call_id="t1", content="late result", is_error=False)
-        )
-    )
-    agent.inbox.push_back(Quit())
-
-    await run_until_quit(agent)
-
-    fallbacks = [
-        entry
-        for entry in agent.context().messages
-        if isinstance(entry, UserMessage) and "[Tool t1 completed]" in entry.text
-    ]
-    assert not fallbacks, (
-        f"stale tool-completion fallback leaked past compaction barrier;"
-        f" messages={agent.context().messages!r}"
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.real_sleep
-async def test_compaction_absorbs_detached_splices_landing_during_await() -> None:
-    compact_started = asyncio.Event()
-    release_compact = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class BlockingCompactor:
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            mask = ((tape[0].ref, tape[-1].ref),)
-            compact_started.set()
-            await release_compact.wait()
-            return ContextSplice(
-                ref=mint_ref(),
-                mask=mask,
-                insert_after=None,
-                payload=(UserMessage(text="[summary]"),),
-                strategy="summary",
-            )
-
-    agent, _ = make_agent([AssistantMessage(text="done")])
-    agent.compactor = BlockingCompactor()
-    agent.append_history(UserMessage(text="go"))
-    agent.append_history(
-        AssistantMessage(
-            tool_calls=(
-                ToolCall(id="t1", name="echo", args={}),
-                ToolCall(id="t2", name="echo", args={}),
-                ToolCall(id="t3", name="echo", args={}),
-            ),
-        ),
-    )
-    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-    agent.append_history(ToolResult(call_id="t2", content=DETACHED_PLACEHOLDER))
-    agent.append_history(ToolResult(call_id="t3", content=DETACHED_PLACEHOLDER))
-    agent.append_history(UserMessage(text="resume"))
-
-    task = asyncio.create_task(agent.run_forever())
-    try:
-        agent.inbox.push_back(Compact(args=""))
-        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
-        agent.inbox.push_back(
-            DetachedResult(
-                result=ToolResult(call_id="t1", content="one", is_error=False)
-            )
-        )
-        agent.inbox.push_back(
-            DetachedResult(
-                result=ToolResult(call_id="t2", content="two", is_error=False)
-            )
-        )
-        agent.inbox.push_back(
-            DetachedResult(
-                result=ToolResult(call_id="t3", content="three", is_error=False)
-            )
-        )
-        await wait_until(
-            lambda: (
-                sum(
-                    isinstance(record, ContextSplice)
-                    and record.strategy == "detached_splice"
-                    for record in agent.tape
-                )
-                == 3
-            ),
-            timeout_sec=1.0,
-        )
-        release_compact.set()
-        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
-        agent.inbox.push_back(Quit())
-        await asyncio.wait_for(task, timeout=1.0)
-    finally:
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    splices = [record for record in agent.tape if isinstance(record, ContextSplice)]
-    detached_splices = [
-        record for record in splices if record.strategy == "detached_splice"
-    ]
-    summary = next(record for record in splices if record.strategy == "summary")
-    mask_lo = summary.mask[0][0].ordinal
-    mask_hi = summary.mask[0][1].ordinal
-    assert all(mask_lo <= record.ref.ordinal <= mask_hi for record in detached_splices)
-    assert not any(record.strategy == "context_rescue" for record in splices)
-
-
-def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
-    agent, _ = make_agent([])
-    agent.append_history(UserMessage(text="go"))
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
-    )
-    placeholder_ref = agent.append_history(
-        ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER)
-    )
-    compact_ref = agent.mint_ref()
-    _ = agent._splice_detached_result(
-        ToolResult(call_id="t1", content="real", is_error=False)
-    )
-    summary = ContextSplice(
-        ref=compact_ref,
-        mask=((agent.tape[0].ref, agent.tape[-1].ref),),
-        insert_after=None,
-        payload=(UserMessage(text="[summary]"),),
-        strategy="test_compaction",
-    )
-    agent.adopt_record(summary)
-
-    agent.append_clear()
-
-    assert agent.context().messages == []
-    assert placeholder_ref not in agent.context().origins
-
-
-def test_splice_detached_result_replaces_prior_detached_splice() -> None:
-    """A second detached result for the same call_id replaces the first.
-
-    Repro for SAGENT-REV-001: the first splice indexes the new TR into
-    ``_placeholder_refs`` keyed on the splice's own ref. The second
-    detached result lookup found a ``ContextSplice`` (not a
-    ``ReferrableTapeEvent``) and bailed before reaching the
-    splice-the-splice fallback, leaving the first replacement permanent.
-    """
-    agent, _ = make_agent([])
-    agent.append_history(UserMessage(text="go"))
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="c1", name="t", args={}),))
-    )
-    agent.append_history(ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER))
-
-    first = agent._splice_detached_result(ToolResult(call_id="c1", content="first"))
-    second = agent._splice_detached_result(ToolResult(call_id="c1", content="second"))
-
-    assert first is not None
-    assert second is not None
-    tool_results = [
-        m.content for m in agent.context().messages if isinstance(m, ToolResult)
-    ]
-    assert tool_results == ["second"]
-
-
-def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
-    agent, _ = make_agent([])
-    agent.append_history(UserMessage(text="first"))
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
-    )
-    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-    assert (
-        agent._splice_detached_result(
-            ToolResult(call_id="t1", content="old-real", is_error=False)
-        )
-        is not None
-    )
-    agent.append_clear()
-    agent.append_history(UserMessage(text="second"))
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
-    )
-    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-
-    result = agent._splice_detached_result(
-        ToolResult(call_id="t1", content="new-real", is_error=False)
-    )
-
-    assert result is not None
-    texts = [
-        entry.content
-        for entry in agent.context().messages
-        if isinstance(entry, ToolResult)
-    ]
-    assert texts == ["new-real"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.real_sleep
-async def test_splice_wakes_model_after_round_ended() -> None:
-    """Splicing a ``DetachedResult`` after the round ended wakes the model.
-
-    Scenario:
-      1. User sends "go"; model returns a tool call.
-      2. Tool starts running (slow).
-      3. User preempts mid-cohort with a fresh ``UserMessage``.
-      4. Runtime stubs the tool with ``[detached]`` and fires round 2.
-      5. Round 2 responds with text; model goes idle.
-      6. Detached tool eventually completes; ``DetachedResult`` splices
-         the real content into the placeholder slot.
-      7. **Fix**: because history tail was an ``AssistantMessage``, the
-         splice path appends a terse user-side notification so the
-         end-of-loop gate fires a fresh round and the model sees the
-         now-real tool output. The third scripted response is consumed.
-
-    The fallback branch (no placeholder match) already appended a
-    full-content ``UserMessage``. This guarantees the splice branch
-    also wakes the model, with the terse notification keeping history
-    clean (the real content lives in its proper ``ToolResult`` slot).
-    """
-    tool_started = asyncio.Event()
-    release_tool = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class SignalingTool:
-        _name: str = "echo"
-
-        @property
-        def name(self) -> str:
-            return self._name
-
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            tool_started.set()
-            await release_tool.wait()
-            return ToolResult(call_id="", content="real output")
-
-    agent, _ = make_agent(
-        [
-            AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
-            AssistantMessage(text="preempted response"),
-            AssistantMessage(text="post-splice response"),
-        ],
-        tools=[SignalingTool()],
-    )
-    agent.inbox.push_back(UserMessage(text="go"))
-
-    async def preempt_then_wait_for_splice() -> None:
-        await tool_started.wait()
-        agent.inbox.push_back(UserMessage(text="preempt"))
-        await wait_until(lambda: "preempted response" in _assistant_texts(agent))
-        release_tool.set()
-        await wait_until(lambda: "post-splice response" in _assistant_texts(agent))
-        agent.inbox.push_back(Quit())
-
-    await asyncio.gather(
-        run_until_quit(agent, timeout_sec=3.0),
-        preempt_then_wait_for_splice(),
-    )
-
-    # Splice succeeded: no [detached] placeholders remain, and the real
-    # tool output is in the call_id="t1" slot.
-    stubs = [
-        t
-        for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
-    ]
-    assert stubs == [], (
-        "splice should have replaced the placeholder with the real result"
-    )
-    spliced = [
-        t
-        for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.call_id == "t1"
-    ]
-    assert len(spliced) == 1
-    assert spliced[0].content == "real output"
-
-    # Fix: the model woke after the splice and consumed the third
-    # scripted response. Without the wake, only round 2 would have
-    # fired.
-    assistant_texts = [
-        m.text
-        for m in agent.context().messages
-        if isinstance(m, AssistantMessage) and m.text
-    ]
-    assert assistant_texts == ["preempted response", "post-splice response"], (
-        f"splice should wake the model; got assistant texts {assistant_texts!r}"
-    )
-
-    # The wake cue is a terse ``UserMessage`` notification; the real
-    # content stays in the ``ToolResult`` slot above and is not
-    # duplicated into the notification.
-    notifications = [
-        m
-        for m in agent.context().messages
-        if isinstance(m, UserMessage) and m.text.startswith("[Detached tool ")
-    ]
-    assert len(notifications) == 1
-    assert "real output" not in notifications[0].text
+    # Stub stays; real result delivered forward under the arrival id.
+    stub = _stub_for(agent, "t1")
+    assert stub is not None
+    assert stub.content == DETACHED_PLACEHOLDER
+    arrival = _detached_arrival_result(agent, "t1")
+    assert arrival is not None
+    assert arrival.content == "late result"
 
 
 @pytest.mark.asyncio
@@ -1570,7 +1272,7 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
          ``UserMessage`` into the post-``Clear`` history.
 
     Fix: ``Clear`` cancels everything in ``self.detached`` and clears
-    the dict + ``_pending_detached_user``; the cancelled task's
+    the dict + ``_pending_commits``; the cancelled task's
     eventual completion is silently dropped (matches neither cohort
     nor detached membership).
     """
@@ -1633,6 +1335,94 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
         f"detached task leaked orphan content into post-Clear history: "
         f"{[e.text for e in leaked]!r}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
+    """A model self-``Clear`` must not strand REPL deferred (Tab) input.
+
+    The wedge: ``AgentSelf context=clear`` pushes a ``Clear`` that arms
+    ``AWAIT_USER``. While that gate is armed ``_fully_drained`` stays
+    ``False`` (``inbox.gate_armed``), so the runtime never publishes
+    ``AgentIdle``. The REPL deferred queue flushed *only* on ``AgentIdle``,
+    so Tab-staged input never reached the inbox, never released the gate,
+    and the session wedged until ``Ctrl+D``.
+
+    This drives the runtime through the production REPL committer observer
+    (not a re-implementation): deferred input is staged before the
+    self-``Clear``; the committer must flush it on ``ClearComplete`` so the
+    gate releases and the staged input drives the next model round.
+
+    Pre-fix this times out (model never sees "resumed"); post-fix the
+    committer flushes on ``ClearComplete`` and the round fires.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            return ToolResult(call_id="", content="t1")
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="resumed reply"),
+        ],
+        tools=[SlowTool()],
+    )
+
+    # The deferred (Tab) block is staged while the agent is busy -- the
+    # case the cold-start ``AgentIdle`` cannot prematurely flush.
+    queues = InputQueues()
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+
+    holder = _Holder(runtime=agent)
+    agent.observers.append(
+        _input_queue_committer_observer(cast("Agent", holder), queues)
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()  # tool running: agent is busy, not idle
+        queues.stage_deferred("resumed")  # user hits Tab while busy
+        agent.inbox.push_back(Clear())  # model self-clears
+        # ``AgentIdle`` never fires while ``AWAIT_USER`` is armed, so the
+        # committer must release the staged block on ``ClearComplete``.
+        await wait_until(
+            lambda: "resumed reply" in _assistant_texts(agent),
+            timeout_sec=2.0,
+        )
+        release.set()
+        await asyncio.sleep(0.02)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        driver(),
+    )
+
+    assert not queues.has_any()
+    user_texts = [
+        m.text for m in agent.context().messages if isinstance(m, UserMessage)
+    ]
+    assert "resumed" in user_texts
+    assert "resumed reply" in _assistant_texts(agent)
 
 
 @pytest.mark.asyncio
@@ -1856,89 +1646,6 @@ async def test_late_model_response_complete_during_compaction_is_ignored() -> No
         assert "stale response" not in _assistant_texts(agent)
         release_compact.set()
         await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
-        messages = agent.context().messages
-        assert len(messages) == 1
-        assert isinstance(messages[0], UserMessage)
-        assert messages[0].text == "[summary]"
-        agent.inbox.push_back(Quit())
-        await asyncio.wait_for(task, timeout=2.0)
-    finally:
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-
-@pytest.mark.asyncio
-@pytest.mark.real_sleep
-async def test_compact_and_post_widens_mask_to_absorb_concurrent_splice() -> None:
-    """Inbox compaction absorbs detached splices appended during compact."""
-    compact_started = asyncio.Event()
-    release_compact = asyncio.Event()
-
-    class _BlockingCompactor:
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
-                ((tape[0].ref, tape[-1].ref),) if tape else ()
-            )
-            compact_started.set()
-            await release_compact.wait()
-            return ContextSplice(
-                ref=mint_ref(),
-                mask=mask,
-                insert_after=None,
-                payload=(UserMessage(text="[summary]"),),
-                strategy="summary",
-            )
-
-    agent, _collector = make_agent([AssistantMessage(text="post-compact")])
-    agent.compactor = _BlockingCompactor()
-    agent.append_history(UserMessage(text="please run a tool"))
-    tc = ToolCall(id="tc-1", name="echo", args={})
-    agent.append_history(AssistantMessage(text="", tool_calls=(tc,)))
-    agent.append_history(ToolResult(call_id="tc-1", content="[Running in background]"))
-    agent.append_history(UserMessage(text="[worker is idle] ping"))
-
-    task = asyncio.create_task(agent.run_forever())
-    try:
-        agent.inbox.push_back(Compact(args=""))
-        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
-        agent.inbox.push_back(
-            DetachedResult(
-                result=ToolResult(call_id="tc-1", content="real output", is_error=False)
-            )
-        )
-        await wait_until(
-            lambda: any(
-                isinstance(r, ContextSplice) and r.strategy == "detached_splice"
-                for r in agent.tape
-            ),
-            timeout_sec=1.0,
-        )
-        release_compact.set()
-        await wait_until(lambda: agent.compact_task is None, timeout_sec=1.0)
-        summary_splice = next(
-            r
-            for r in agent.tape
-            if isinstance(r, ContextSplice) and r.strategy == "summary"
-        )
-        detached_splice = next(
-            r
-            for r in agent.tape
-            if isinstance(r, ContextSplice) and r.strategy == "detached_splice"
-        )
-        assert detached_splice.ref.ordinal < summary_splice.ref.ordinal
-        mask_lo = summary_splice.mask[0][0].ordinal
-        mask_hi = summary_splice.mask[0][1].ordinal
-        assert mask_lo <= detached_splice.ref.ordinal <= mask_hi
         messages = agent.context().messages
         assert len(messages) == 1
         assert isinstance(messages[0], UserMessage)
@@ -4226,84 +3933,6 @@ def _assert_exactly_one_surface(
 
 
 @pytest.mark.asyncio
-async def test_pending_detached_user_flush_publishes_coalesced_history_entry() -> None:
-    """Detached fallback flush publishes the committed coalesced entry.
-
-    Both t0 and t1 have a parent assistant ref (so the late
-    ``DetachedResult`` isn't dropped per the post-Clear / post-Compact
-    rule), but their placeholders are masked by an unrelated barrier,
-    forcing the visibility-fail fallback to ``_pending_detached_user``.
-    The flush at ``CohortComplete`` coalesces both into one UserMessage
-    so a follow-up round sees them after the in-flight cohort closes.
-    """
-    agent, collector = make_agent([AssistantMessage(text="unused")])
-    agent.append_history(UserMessage(text="go"))
-    # t0 / t1 AMs land on the tape (registering parent anchors).
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
-    )
-    placeholder_t1 = agent.append_history(
-        ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER),
-    )
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t0", name="echo", args={}),))
-    )
-    placeholder_t0 = agent.append_history(
-        ToolResult(call_id="t0", content=DETACHED_PLACEHOLDER),
-    )
-    # Mask the two placeholders WITHOUT touching the AMs -- the splice's
-    # visibility check then rejects the late DetachedResult and the
-    # fallback path fires.
-    agent.append_splice(
-        mask=((placeholder_t1, placeholder_t1), (placeholder_t0, placeholder_t0)),
-        insert_after=None,
-        payload=(),
-        strategy="test_mask_placeholders",
-    )
-    # Now stage the cohort that delays the fallback flush.
-    agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t2", name="echo", args={}),))
-    )
-    agent.cohort.add("t2")
-    agent.running_tools["t2"] = asyncio.create_task(asyncio.sleep(10.0))
-    agent._cohort_seen = True
-    flushed = asyncio.Event()
-
-    def _watch(event: RuntimeEvent) -> None:
-        if isinstance(event, UserMessage) and "[Tool t0 completed]" in event.text:
-            flushed.set()
-
-    agent.observers.append(_watch)
-    agent.inbox.push_back(
-        DetachedResult(result=ToolResult(call_id="t1", content="one", is_error=False))
-    )
-    agent.inbox.push_back(
-        DetachedResult(result=ToolResult(call_id="t0", content="zero", is_error=False))
-    )
-    agent.inbox.push_back(ToolResult(call_id="t2", content="two"))
-
-    async def quit_after_flush() -> None:
-        await asyncio.wait_for(flushed.wait(), timeout=1.0)
-        agent.inbox.push_back(Quit())
-
-    await asyncio.gather(run_until_quit(agent, timeout_sec=2.0), quit_after_flush())
-
-    user_messages = [
-        entry for entry in agent.context().messages if isinstance(entry, UserMessage)
-    ]
-    assert user_messages[-1].text == (
-        "[Tool t1 completed]\none\n\n[Tool t0 completed]\nzero"
-    )
-    published = [
-        event.text for event in collector.events if isinstance(event, UserMessage)
-    ]
-    assert published[-2:] == [
-        "[Tool t1 completed]\none",
-        "[Tool t1 completed]\none\n\n[Tool t0 completed]\nzero",
-    ]
-
-
-@pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_lifecycle_idle_enter_commits_immediately() -> None:
     """Idle Enter: no pending state. Straight to committed."""
@@ -6263,6 +5892,498 @@ async def test_same_file_rew_run_sequentially_others_parallel() -> None:
     # Different-file Bash runs in parallel: it starts before the same-file
     # group drains (it interleaves with e1/e2 rather than waiting).
     assert ("b1", "start") in order[: order.index(("e2", "finish")) + 1], order
+
+
+# --------------------------------------------------------------------------
+# Detached-result delivery invariant (design_detached_tool_results.md).
+#
+# Invariant: every ``ToolCall`` delivers a ``ToolResult`` that reaches the
+# model -- guaranteed -- except when ``Clear`` / ``Kill`` removed it from
+# ``self.detached``. Delivery survives compaction. The real result arrives
+# as NEW forward context (Option A: a synthetic ``DetachedArrived`` tool
+# pair), never by silently back-patching the ``[detached]`` stub slot.
+#
+# These tests assert the Option A target behavior and FAIL against the
+# current back-patch implementation (which emits a ``detached_splice``
+# masking the stub).
+# --------------------------------------------------------------------------
+
+
+def _detached_arrival_result(
+    agent: agent_runtime.AgentRuntime, original_call_id: str
+) -> ToolResult | None:
+    """Return the forward-delivered real result for ``original_call_id``.
+
+    Option A delivers it as a ``ToolResult`` whose ``call_id`` is the
+    arrival id derived from the original, paired with a synthetic
+    ``DetachedArrived`` tool_use. ``None`` when no such forward delivery
+    exists in the resolved context.
+    """
+    arrival_id = f"{original_call_id}:detached"
+    for entry in agent.context().messages:
+        if isinstance(entry, ToolResult) and entry.call_id == arrival_id:
+            return entry
+    return None
+
+
+def _stub_for(agent: agent_runtime.AgentRuntime, call_id: str) -> ToolResult | None:
+    """Return the ``[detached]`` stub ``ToolResult`` for ``call_id``, if present."""
+    for entry in agent.context().messages:
+        if isinstance(entry, ToolResult) and entry.call_id == call_id:
+            return entry
+    return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_detached_result_delivered_forward_stub_unchanged() -> None:
+    """A detached tool's real result arrives forward; the stub is not rewritten.
+
+    The bug this fixes: back-patching masks the ``[detached]`` stub with the
+    real result in-place, silently editing a slot the model already reasoned
+    about. Option A instead leaves the stub as the (honest) answer to the
+    original call and delivers the real result as new forward context.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            return ToolResult(call_id="", content="REAL-OUTPUT", is_error=False)
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="answering the user"),
+            AssistantMessage(text="saw the detached result"),
+        ],
+        tools=[SlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()
+        # User message mid-tool -> tool detaches, stub appended.
+        agent.inbox.push_back(UserMessage(text="redirect"))
+        await wait_until(lambda: "answering the user" in _assistant_texts(agent))
+        release.set()
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    # The stub is still the answer to the original call, content unchanged.
+    stub = _stub_for(agent, "t1")
+    assert stub is not None
+    assert stub.content == DETACHED_PLACEHOLDER, (
+        "the original [detached] stub must NOT be back-patched; it stays honest"
+    )
+    # The real result is delivered forward, with structure intact.
+    arrival = _detached_arrival_result(agent, "t1")
+    assert arrival is not None, "real result must be delivered forward"
+    assert arrival.content == "REAL-OUTPUT"
+    assert arrival.is_error is False
+    # No back-patch splice was used.
+    assert not any(
+        isinstance(r, ContextSplice) and r.strategy == "detached_splice"
+        for r in agent.tape
+    ), "Option A must not back-patch via a detached_splice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_detached_result_is_error_survives_forward_delivery() -> None:
+    """A failed detached tool delivers ``is_error=True`` forward, not flattened."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class FailingSlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            return ToolResult(call_id="", content="boom", is_error=True)
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="answering"),
+            AssistantMessage(text="saw failure"),
+        ],
+        tools=[FailingSlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()
+        agent.inbox.push_back(UserMessage(text="redirect"))
+        await wait_until(lambda: "answering" in _assistant_texts(agent))
+        release.set()
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    arrival = _detached_arrival_result(agent, "t1")
+    assert arrival is not None
+    assert arrival.is_error is True, (
+        "tool failure must survive as is_error, not be flattened into text"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_detached_result_survives_compaction() -> None:
+    """A detached result completing AFTER a compaction barrier is still delivered.
+
+    Today's back-patch ties delivery to tape anchors a barrier evicts, so the
+    result is dropped. Forward delivery (Option A) keys off ``self.detached``
+    (runtime state, compaction-immune) and must still deliver.
+    """
+    # Two responses: one after the barrier (tail becomes ``[summary]``), one
+    # after the forward delivery wakes the model to observe the arrival.
+    agent, _ = make_agent(
+        [AssistantMessage(text="done"), AssistantMessage(text="saw it")]
+    )
+
+    @dataclass(kw_only=True, slots=True)
+    class BarrierCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return ContextSplice(
+                ref=mint_ref(),
+                mask=((tape[0].ref, tape[-1].ref),),
+                insert_after=None,
+                payload=(UserMessage(text="[summary]"),),
+                strategy="summary",
+            )
+
+    agent.compactor = BarrierCompactor()
+    # Seed a detached, still-pending call: parent AM + stub + detached membership.
+    agent.append_history(UserMessage(text="go"))
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+    )
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
+
+    async def _pending() -> None:
+        await asyncio.Event().wait()
+
+    task_t1 = asyncio.create_task(_pending())
+    agent.detached["t1"] = task_t1
+
+    driver = asyncio.create_task(agent.run_forever())
+    try:
+        # Compact (barrier masks the stub's slot); the post-barrier model
+        # response lands ("done"), then the detached result arrives.
+        agent.inbox.push_back(Compact(args=""))
+        await wait_until(lambda: "done" in _assistant_texts(agent), timeout_sec=2.0)
+        agent.inbox.push_back(
+            DetachedResult(
+                result=ToolResult(call_id="t1", content="REAL", is_error=False)
+            )
+        )
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+        await asyncio.wait_for(driver, timeout=2.0)
+    finally:
+        task_t1.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task_t1
+        if not driver.done():
+            driver.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await driver
+
+    arrival = _detached_arrival_result(agent, "t1")
+    assert arrival is not None, "detached result must survive compaction"
+    assert arrival.content == "REAL"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_clear_then_completion_is_not_delivered() -> None:
+    """The carve-out: a detached tool cancelled by ``Clear`` delivers nothing."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            return ToolResult(call_id="", content="late", is_error=False)
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="fresh"),
+        ],
+        tools=[SlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()
+        agent.inbox.push_back(Clear())
+        await wait_until(lambda: len(agent.context().messages) == 0, timeout_sec=2.0)
+        agent.inbox.push_back(UserMessage(text="fresh"))
+        await wait_until(lambda: "fresh" in _assistant_texts(agent), timeout_sec=2.0)
+        release.set()
+        await asyncio.sleep(0.05)  # let any late completion process
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    # Cleared: nothing about t1 -- not the stub, not a forward arrival, and
+    # crucially not the tool's real content "late" anywhere in context.
+    assert _detached_arrival_result(agent, "t1") is None
+    assert _stub_for(agent, "t1") is None
+    texts = " ".join(
+        getattr(m, "text", "") or getattr(m, "content", "") or ""
+        for m in agent.context().messages
+    )
+    assert "late" not in texts, (
+        "a Clear-cancelled detached tool must deliver nothing, including "
+        "its real content via any forward channel"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_multiple_detached_results_each_correlate_by_unique_id() -> None:
+    """Concurrent detached completions each deliver under their own arrival id."""
+    started: dict[str, asyncio.Event] = {"a": asyncio.Event(), "b": asyncio.Event()}
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class NamedSlowTool:
+        _name: str
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started[self._name].set()
+            await release.wait()
+            return ToolResult(call_id="", content=f"out-{self._name}", is_error=False)
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall(id="a", name="a", args={}),
+                    ToolCall(id="b", name="b", args={}),
+                ),
+            ),
+            AssistantMessage(text="answering"),
+            AssistantMessage(text="saw both"),
+        ],
+        tools=[NamedSlowTool(_name="a"), NamedSlowTool(_name="b")],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started["a"].wait()
+        await started["b"].wait()
+        agent.inbox.push_back(UserMessage(text="redirect"))
+        await wait_until(lambda: "answering" in _assistant_texts(agent))
+        release.set()
+        await wait_until(
+            lambda: (
+                _detached_arrival_result(agent, "a") is not None
+                and _detached_arrival_result(agent, "b") is not None
+            ),
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    res_a = _detached_arrival_result(agent, "a")
+    res_b = _detached_arrival_result(agent, "b")
+    assert res_a is not None
+    assert res_b is not None
+    # Each arrival carries its own tool's output -- no cross-contamination.
+    assert res_a.content == "out-a"
+    assert res_b.content == "out-b"
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_model_emitted_detached_arrived_call_is_deferred_not_unknown() -> None:
+    """A mimicked ``DetachedArrived`` call costs no round; its error rides next turn.
+
+    Forward delivery synthesizes ``DetachedArrived`` tool turns into history.
+    A model can copy that pattern and emit a real ``DetachedArrived`` call
+    (observed live in session a955d5ec). The runtime pairs it with an error
+    result delivered LAZILY -- no ``Unknown tool``, no dedicated round; the
+    hidden error lands on the next real turn.
+    """
+    # First model turn: solely a mimicked DetachedArrived call. Second turn
+    # (after the user follow-up) is the only round that should fire.
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(ToolCall(id="m1", name=DETACHED_ARRIVED_TOOL, args={}),),
+            ),
+            AssistantMessage(text="answer"),
+        ],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        # The bogus call's error is deferred (no round fires for it alone).
+        await wait_until(lambda: bool(agent._pending_commits), timeout_sec=2.0)
+        # A real follow-up carries the deferred error and drives the one round.
+        agent.inbox.push_back(UserMessage(text="real follow-up"))
+        await wait_until(lambda: "answer" in _assistant_texts(agent), timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    results = [
+        m
+        for m in agent.context().messages
+        if isinstance(m, ToolResult) and m.call_id == "m1"
+    ]
+    assert len(results) == 1
+    err = results[0]
+    # Paired error: not ``Unknown tool``, names the marker, hidden from human.
+    assert err.is_error
+    assert "Unknown tool" not in err.content
+    assert DETACHED_ARRIVED_TOOL in err.content
+    assert err.hidden is True
+    # Exactly the scripted rounds ran: the bogus call alone fired none extra.
+    assert _assistant_texts(agent) == ["answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_pending_pairing_alone_fires_no_round() -> None:
+    """A pending mimicked-tool error pairing fires no round on its own.
+
+    The pairing is non-waking: with nothing else driving a round it stays
+    deferred (does not wake the model just to say it cannot call the tool).
+    """
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(ToolCall(id="m1", name=DETACHED_ARRIVED_TOOL, args={}),),
+            ),
+            AssistantMessage(text="answer"),
+        ],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await wait_until(lambda: bool(agent._pending_commits), timeout_sec=2.0)
+        # Nothing else arrives; the pairing must not fire a round of its own.
+        await asyncio.sleep(0.05)
+        assert _assistant_texts(agent) == []
+        assert agent._pending_commits
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_pending_lazy_pairing_survives_interleaved_detached_delivery() -> None:
+    """A detached delivery must not strand a pending lazy pairing (bug 3).
+
+    With a mimicked-``DetachedArrived`` error pending, an unrelated detached
+    tool completing (``DetachedResult``) must not interleave turns that strand
+    the mimic's ``tool_use`` -- otherwise orphan-repair replaces the real
+    hidden error with ``[interrupted]``.
+    """
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(ToolCall(id="m1", name=DETACHED_ARRIVED_TOOL, args={}),),
+            ),
+            AssistantMessage(text="answer"),
+        ],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await wait_until(lambda: bool(agent._pending_commits), timeout_sec=2.0)
+        # An unrelated detached tool completes while the mimic error is pending.
+        agent.inbox.push_back(
+            DetachedResult(
+                result=ToolResult(call_id="d1", content="real-d1", is_error=False)
+            )
+        )
+        agent.inbox.push_back(UserMessage(text="real follow-up"))
+        await wait_until(lambda: "answer" in _assistant_texts(agent), timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    # The mimic's real hidden error survives -- not replaced by [interrupted].
+    m1 = [
+        m
+        for m in agent.context().messages
+        if isinstance(m, ToolResult) and m.call_id == "m1"
+    ]
+    assert len(m1) == 1
+    assert m1[0].is_error
+    assert DETACHED_ARRIVED_TOOL in m1[0].content
+    assert "[interrupted]" not in m1[0].content
+    assert m1[0].hidden is True
 
 
 def test_runtime_has_no_dead_system_param() -> None:

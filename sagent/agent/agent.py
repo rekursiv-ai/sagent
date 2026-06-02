@@ -1031,7 +1031,14 @@ class Agent:
         login_fn = getattr(prov_cls, "login", None)
         if login_fn is None:
             raise ValueError(f"provider {spec.provider!r} has no login method")
-        login_fn()
+        # ``login`` blocks on a browser-callback wait (or ``input()`` in
+        # manual mode) for up to several minutes. Running it inline would
+        # freeze the single-threaded REPL event loop: the input pump
+        # could not drain, so keystrokes pile up in the terminal and a
+        # failed/never-returning auth wedges the whole session. Off-load
+        # to a worker thread so the loop keeps servicing input and the
+        # wait stays cancellable.
+        await asyncio.to_thread(login_fn)
         live_provider = getattr(self.model, "_provider", None)
         if isinstance(live_provider, types.providers.AuthReloadable):
             await live_provider.handle_auth_error()
@@ -1431,7 +1438,24 @@ class Agent:
             contribution = tool.prompt()
             if contribution:
                 parts.append(contribution)
+        # Teach the model that ``DetachedArrived`` history turns are runtime
+        # result deliveries, not a callable tool -- but only once such a turn
+        # is actually in context, so prompts without detached activity stay
+        # lean. Paired with the runtime guard in ``_run_tool_and_post``.
+        if self._history_has_detached_arrival():
+            parts.append(types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE)
         return "\n\n".join(parts)
+
+    def _history_has_detached_arrival(self) -> bool:
+        """True when context holds a synthesized ``DetachedArrived`` tool turn."""
+        return any(
+            isinstance(entry, types.runtime.AssistantMessage)
+            and any(
+                tc.name == types.runtime.DETACHED_ARRIVED_TOOL
+                for tc in entry.tool_calls
+            )
+            for entry in self.runtime.context().messages
+        )
 
     # -- Observers ----------------------------------------------------
 
@@ -1857,11 +1881,7 @@ class Agent:
             return False
         override = agent_runtime.widen_barrier_mask(override, self.runtime.tape)
         self.runtime.adopt_record(override)
-        complete = types.runtime.CompactComplete(
-            records=(override,),
-            fallback_reason=override.fallback_reason,
-            preserved_tail_count=override.preserved_tail_count,
-        )
+        complete = types.runtime.CompactComplete.from_override(override)
         self.runtime.append_history(complete)
         self.publish(complete)
         self.last_compact_error = None

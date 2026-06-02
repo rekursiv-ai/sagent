@@ -49,6 +49,7 @@ from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AgentIdle,
     AssistantMessage,
+    ClearComplete,
     ModelContextEvent,
     ModelIdle,
     ModelResponseComplete,
@@ -1022,7 +1023,7 @@ async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() ->
 
 
 def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
-    """Non-``AgentIdle`` events leave ``queued_input`` and the inbox untouched."""
+    """Non-flush events leave ``queued_input`` and the inbox untouched."""
     queues = InputQueues(deferred=[QueuedInputBlock(text="elephant")])
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
@@ -1032,6 +1033,30 @@ def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
     observer(ModelIdle())
     assert [b.text for b in queues.deferred] == ["elephant"]
     assert runtime.inbox._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete() -> (
+    None
+):
+    """``ClearComplete`` flushes deferred input the same as ``AgentIdle``.
+
+    A self-issued ``Clear`` (``AgentSelf context=clear``) arms ``AWAIT_USER``,
+    so ``_fully_drained`` stays False and ``AgentIdle`` never publishes -- the
+    deferred queue would wedge until Ctrl+D. ``ClearComplete`` is the signal
+    Halt / error do not emit, so keying the deferred flush on it releases the
+    wedge without claiming ``AWAIT_USER`` is idle.
+    """
+    queues = InputQueues(deferred=[QueuedInputBlock(text="resume me")])
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    holder = _RuntimeHolder(runtime=runtime)
+    observer = _input_queue_committer_observer(cast(Agent, holder), queues)
+    observer(ClearComplete())
+    assert not queues.has_any()
+    pushed = await runtime.inbox.drain()
+    assert len(pushed) == 1
+    assert isinstance(pushed[0], UserDeferredMessage)
+    assert pushed[0].text == "resume me"
 
 
 def test_input_queue_committer_observer_ignores_agent_idle_when_empty() -> None:

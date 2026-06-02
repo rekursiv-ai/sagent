@@ -627,6 +627,23 @@ def test_anthropic_build_kwargs_omits_unknown_service_tier() -> None:
     assert "service_tier" not in kwargs
 
 
+def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> None:
+    # ``thinking="enabled"`` must never push ``max_tokens`` past the
+    # model's output cap. opus-4-8's profile cap equals the API ceiling
+    # (128k), so the old unconditional ``max_tok * 2`` emitted 256k and
+    # the API rejected it. ``budget_tokens`` must stay strictly below
+    # ``max_tokens`` per Anthropic's contract.
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8")
+    req = ModelRequest(messages=[UserMessage(text="x")], thinking="enabled")
+    kwargs = m._build_kwargs(req, [])
+    max_tokens = cast(int, kwargs["max_tokens"])
+    thinking = cast(dict[str, object], kwargs["thinking"])
+    budget = cast(int, thinking["budget_tokens"])
+    assert max_tokens <= m.max_response_tokens
+    assert budget < max_tokens
+
+
 def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
     p = Anthropic.from_key("k")
     assert p.model("claude-opus-4-8").valid_latency_modes == ("fast",)

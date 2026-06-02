@@ -232,9 +232,31 @@ class AuthCodeListener:
         ("127.0.0.1", 0) silently never sees the callback.
 
         """
+        return self.redirect_uri_for_host("127.0.0.1")
+
+    def redirect_uri_for_host(self, host: str) -> str:
+        """Return the redirect URI advertised with an explicit host.
+
+        Some OAuth providers (Ory Hydra, used by OpenAI's Codex client)
+        match ``redirect_uri`` against a registered allow-list by exact
+        string. Those allow-lists register the ``localhost`` form, not
+        ``127.0.0.1``, so sending the literal IPv4 loopback is rejected
+        with ``authorize_hydra_invalid_request``. Advertise ``localhost``
+        to satisfy the allow-list; the browser still reaches our IPv4
+        listener because ``localhost`` resolves to ``127.0.0.1`` for the
+        outbound callback request.
+
+        Args:
+          host: Host to embed in the URI (e.g. ``"localhost"`` or
+            ``"127.0.0.1"``).
+
+        Returns:
+          uri: ``http://<host>:<port><callback_path>`` string.
+
+        """
         assert self._server is not None
         port = self._server.server_address[1]
-        return f"http://127.0.0.1:{port}{self.callback_path}"
+        return f"http://{host}:{port}{self.callback_path}"
 
     def start(self) -> None:
         """Start the localhost HTTP server in a background thread."""

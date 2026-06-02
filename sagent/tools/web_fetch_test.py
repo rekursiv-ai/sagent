@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import unquote, urlparse
 
 import asyncio
-import json
 import socket
 import sys
 
@@ -31,8 +30,6 @@ from sagent.tools.web_fetch import (
     _ADAPTERS,
     _KIND_HTML,
     _KIND_MARKDOWN,
-    _KIND_REDDIT,
-    _KIND_REDDIT_LISTING,
     _KIND_RSS,
     WebFetch,
     _format_rss,
@@ -41,6 +38,7 @@ from sagent.tools.web_fetch import (
     _parse_rss_cluster,
     _RedditAdapter,
     _request_bodies,
+    _rss_url,
     _url_is_safe,
     _validated_host,
     _XAdapter,
@@ -347,14 +345,23 @@ def test_run_post_form_passes_through() -> None:
     assert body["a"] == "b"
 
 
-def test_run_handles_reddit_thread_format() -> None:
-    """Reddit thread JSON triggers _format_reddit_json."""
-    json_bytes = (
-        b'[{"kind":"Listing","data":{"children":[{"data":{"title":"T","author":"u",'
-        b'"score":10,"selftext":"body"}}]}},'
-        b'{"kind":"Listing","data":{"children":['
-        b'{"kind":"t1","data":{"author":"u2","score":5,"body":"hi"}}'
-        b"]}}]"
+def test_run_handles_reddit_thread_via_rss() -> None:
+    """A Reddit thread is fetched as an Atom feed and rendered to markdown.
+
+    Reddit's anonymous JSON API is bot-walled; the ``.rss`` feed is the
+    only path that still serves. A thread feed carries the post plus
+    top-level comments as Atom entries.
+    """
+    feed = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<feed xmlns="http://www.w3.org/2005/Atom">'
+        b"<title>Post title : LocalLLaMA</title>"
+        b"<entry><title>Post title</title>"
+        b"<author><name>/u/op</name></author>"
+        b"<content type='html'>&lt;p&gt;body&lt;/p&gt;</content></entry>"
+        b"<entry><title>/u/commenter on Post title</title>"
+        b"<content type='html'>&lt;p&gt;hi&lt;/p&gt;</content></entry>"
+        b"</feed>"
     )
 
     async def fake_fetch_body(
@@ -365,7 +372,7 @@ def test_run_handles_reddit_thread_format() -> None:
         form_body: object,
     ) -> tuple[bytes, str]:
         del raw_url, method, json_body, form_body
-        return json_bytes, _KIND_REDDIT
+        return feed, _KIND_RSS
 
     with patch(
         "sagent.tools.web_fetch._fetch_body",
@@ -374,8 +381,8 @@ def test_run_handles_reddit_thread_format() -> None:
         result = asyncio.run(
             WebFetch().run({"url": "https://reddit.com/r/foo/comments/abc"}),
         )
-    assert "# T" in result.content
-    assert "u/u2" in result.content
+    assert "Post title" in result.content
+    assert "/u/commenter" in result.content
 
 
 def test_run_fetch_error_oserror() -> None:
@@ -405,182 +412,36 @@ def test_fetch_body_non_reddit_path() -> None:
     assert kind == _KIND_HTML
 
 
-def test_fetch_body_reddit_thread_takes_json_path() -> None:
-    """Reddit comments URL is rewritten to a ``.json`` endpoint."""
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b'[{"kind":"Listing","data":{"children":[]}}]'
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://reddit.com/r/foo/comments/abc",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    url = captured["url"]
-    assert isinstance(url, str)
-    assert url.endswith(".json")
-    assert "www.reddit.com" in url
-    assert kind == _KIND_REDDIT
-    assert body.startswith(b"[")
-
-
-def test_fetch_body_reddit_root_no_thread_pattern() -> None:
-    """Reddit non-thread URL: simple GET, not JSON-mode."""
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        return_value=b"<html>regular page</html>",
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://reddit.com/r/foo",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    assert kind == _KIND_HTML
-    assert b"regular" in body
-
-
-def test_fetch_body_reddit_listing_json_path() -> None:
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b'{"kind":"Listing","data":{"children":[]}}'
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://www.reddit.com/r/foo/new/.json?limit=25",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    assert kind == _KIND_REDDIT_LISTING
-    assert body.startswith(b"{")
-    assert captured["url"] == "https://www.reddit.com/r/foo/new/.json?limit=25"
-
-
-def test_fetch_body_reddit_listing_json_403_falls_back_to_feed() -> None:
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
-    fetched: list[str] = []
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        fetched.append(url)
-        if url.endswith(".json?limit=25"):
-            raise FetchError(url=url, status=403, headers={}, body=b"blocked")
-        return (
-            b'<feed xmlns="http://www.w3.org/2005/Atom"><title>fallback</title></feed>'
-        )
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://www.reddit.com/r/foo/new.json?limit=25",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    assert kind == _KIND_RSS
-    assert body.startswith(b"<feed")
-    assert fetched == [
-        "https://www.reddit.com/r/foo/new.json?limit=25",
-        "https://www.reddit.com/r/foo/new/.rss?limit=25",
-    ]
-
-
-def test_fetch_body_reddit_direct_feed_is_rss() -> None:
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        return_value=b'<feed xmlns="http://www.w3.org/2005/Atom"><title>feed</title></feed>',
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://www.reddit.com/r/foo/new/.rss",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    assert kind == _KIND_RSS
-    assert body.startswith(b"<feed")
-
-
-def test_extract_text_reddit_listing_formats_posts() -> None:
-    from sagent.tools.web_fetch import _extract_text  # noqa: PLC0415
-
-    payload = json.dumps(
-        {
-            "kind": "Listing",
-            "data": {
-                "children": [
-                    {
-                        "kind": "t3",
-                        "data": {
-                            "title": "First post",
-                            "author": "alice",
-                            "score": 12,
-                            "num_comments": 3,
-                            "created_utc": 1_779_731_536,
-                            "permalink": "/r/foo/comments/abc/first/",
-                            "url": "https://example.com/a",
-                            "link_flair_text": "Discussion",
-                            "selftext": "Body text for the listing item.",
-                        },
-                    },
-                    {
-                        "kind": "t3",
-                        "data": {
-                            "title": "Second post",
-                            "author": "bob",
-                            "score": 1,
-                            "num_comments": 0,
-                            "created_utc": 1_779_731_600,
-                            "permalink": "/r/foo/comments/def/second/",
-                            "url": "https://www.reddit.com/r/foo/comments/def/second/",
-                            "selftext": "",
-                        },
-                    },
-                ]
-            },
-        }
-    ).encode()
-    out = asyncio.run(_extract_text(payload, kind=_KIND_REDDIT_LISTING, method="GET"))
-    assert "# Reddit listing" in out
-    assert "First post" in out
-    assert "u/alice" in out
-    assert "2026-05-25T17:52:16+00:00" in out
-    assert "https://www.reddit.com/r/foo/comments/abc/first/" in out
-    assert "Body text for the listing item." in out
-    assert "Second post" in out
-    assert '"kind"' not in out
+@pytest.mark.parametrize(
+    ("input_url", "expected_url"),
+    [
+        # Thread permalink → append /.rss.
+        (
+            "https://reddit.com/r/foo/comments/abc/",
+            "https://reddit.com/r/foo/comments/abc/.rss",
+        ),
+        # Thread with title slug.
+        (
+            "https://www.reddit.com/r/foo/comments/abc/some_title/",
+            "https://www.reddit.com/r/foo/comments/abc/some_title/.rss",
+        ),
+        # Legacy .json listing URL → strip .json, append /.rss, keep query.
+        (
+            "https://www.reddit.com/r/foo/new.json?limit=25",
+            "https://www.reddit.com/r/foo/new/.rss?limit=25",
+        ),
+        # Subreddit root.
+        ("https://reddit.com/r/foo", "https://reddit.com/r/foo/.rss"),
+        # Already an .rss feed → unchanged.
+        (
+            "https://www.reddit.com/r/foo/new/.rss?limit=10",
+            "https://www.reddit.com/r/foo/new/.rss?limit=10",
+        ),
+    ],
+)
+def test_rss_url_normalizes_reddit_urls(input_url: str, expected_url: str) -> None:
+    """Every Reddit URL shape maps to its ``.rss`` feed equivalent."""
+    assert _rss_url(input_url) == expected_url
 
 
 def test_extract_text_html_path_uses_trafilatura() -> None:
@@ -621,75 +482,6 @@ def test_extract_text_html_fallback_when_extract_none() -> None:
             ),
         )
     assert "raw fallback" in out
-
-
-def test_extract_text_reddit_invalid_json_returns_truncated_content() -> None:
-    """Reddit JSON parse failure falls back to raw content slice."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _extract_text,
-    )
-
-    out = asyncio.run(
-        _extract_text(b"not json at all", kind=_KIND_REDDIT, method="GET"),
-    )
-    assert out == "not json at all"
-
-
-def test_format_reddit_comments_handles_nested_replies() -> None:
-    """Nested ``replies`` recursion produces an indented child line."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _format_reddit_json,
-    )
-
-    payload: list[object] = [
-        {
-            "kind": "Listing",
-            "data": {
-                "children": [
-                    {
-                        "data": {
-                            "title": "Top",
-                            "author": "u1",
-                            "score": 5,
-                            "selftext": "",
-                        }
-                    }
-                ]
-            },
-        },
-        {
-            "kind": "Listing",
-            "data": {
-                "children": [
-                    {
-                        "kind": "t1",
-                        "data": {
-                            "author": "p",
-                            "score": 1,
-                            "body": "parent\nline2",
-                            "replies": {
-                                "data": {
-                                    "children": [
-                                        {
-                                            "kind": "t1",
-                                            "data": {
-                                                "author": "c",
-                                                "score": 2,
-                                                "body": "child",
-                                            },
-                                        }
-                                    ]
-                                }
-                            },
-                        },
-                    }
-                ]
-            },
-        },
-    ]
-    out = _format_reddit_json(payload)
-    assert "**u/p**" in out
-    assert "**u/c**" in out
 
 
 def test_extract_text_markdown_kind_returns_as_is() -> None:

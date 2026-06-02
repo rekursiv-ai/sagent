@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import re
+import threading
 import time
 
 import pytest
@@ -66,6 +67,8 @@ def _summary_override(
     strategy: str = "summary",
     fallback_reason: str = "",
     preserved_tail_count: int = 0,
+    token_before: int = 0,
+    token_after: int = 0,
 ) -> ContextSplice:
     """Build a barrier splice carrying ``summary`` as its payload.
 
@@ -86,6 +89,8 @@ def _summary_override(
         strategy=strategy,
         fallback_reason=fallback_reason,
         preserved_tail_count=preserved_tail_count,
+        token_before=token_before,
+        token_after=token_after,
     )
 
 
@@ -931,6 +936,24 @@ def test_system_property_rebuilds_each_access() -> None:
     assert a.system == "root"
 
 
+def test_system_prompt_adds_detached_arrived_note_only_when_in_history() -> None:
+    """The ``DetachedArrived`` note appears once such a turn is in context."""
+    a = _build_agent(system="root")
+    # No detached activity yet -> lean prompt, no note.
+    assert types.runtime.DETACHED_ARRIVED_TOOL not in a.system
+    # A synthesized DetachedArrived turn in history -> the note is added.
+    a.runtime.append_history(
+        types.runtime.AssistantMessage(
+            tool_calls=(
+                types.runtime.ToolCall(
+                    id="x:detached", name=types.runtime.DETACHED_ARRIVED_TOOL, args={}
+                ),
+            ),
+        ),
+    )
+    assert types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE in a.system
+
+
 def test_background_merges_detached_and_explicit() -> None:
     a = _build_agent()
     loop = asyncio.new_event_loop()
@@ -1445,6 +1468,40 @@ async def test_relogin_calls_login_classmethod() -> None:
     with patch.object(providers_module, "Anthropic", fake_provider_cls, create=True):
         await a.relogin()
     login_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_relogin_runs_blocking_login_off_event_loop() -> None:
+    """``login`` blocks (browser/``input()`` wait); it must not freeze the loop.
+
+    Running it inline would wedge the single-threaded REPL: the input
+    pump could not drain and a stuck auth would freeze the session.
+    Assert the event loop keeps making progress while ``login`` blocks.
+    """
+    a = _build_agent_with_spec()
+    login_entered = threading.Event()
+    release = threading.Event()
+    loop_progressed = False
+
+    def _blocking_login() -> None:
+        login_entered.set()
+        # Hold the worker thread until the event loop proves it advanced.
+        assert release.wait(timeout=5.0)
+
+    fake_provider_cls = MagicMock()
+    fake_provider_cls.login = _blocking_login
+
+    async def _drive() -> None:
+        nonlocal loop_progressed
+        await asyncio.to_thread(login_entered.wait, 5.0)
+        # The loop scheduled and ran this coroutine while login blocks.
+        loop_progressed = True
+        release.set()
+
+    with patch.object(providers_module, "Anthropic", fake_provider_cls, create=True):
+        await asyncio.gather(a.relogin(), _drive())
+
+    assert loop_progressed
 
 
 @pytest.mark.asyncio
@@ -2220,85 +2277,6 @@ async def test_compact_now_replaces_history_in_place() -> None:
     entry = a.runtime.context().messages[0]
     assert isinstance(entry, types.runtime.UserMessage)
     assert entry.text == "[summary]"
-
-
-@pytest.mark.asyncio
-async def test_compact_now_absorbs_detached_splice_landing_during_compact() -> None:
-    """The compact barrier covers detached splices appended during compact."""
-    compact_started = asyncio.Event()
-    release_compact = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class _BlockingCompactor:
-        def should_compact(
-            self,
-            current_tokens: int,
-            max_request_tokens: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            mask: tuple[tuple[TapeRef, TapeRef], ...] = (
-                ((tape[0].ref, tape[-1].ref),) if tape else ()
-            )
-            compact_started.set()
-            await release_compact.wait()
-            return ContextSplice(
-                ref=mint_ref(),
-                mask=mask,
-                insert_after=None,
-                payload=(types.runtime.UserMessage(text="[summary]"),),
-                strategy="summary",
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_BlockingCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="please run a tool"))
-    tc = types.runtime.ToolCall(id="tc-1", name="echo", args={})
-    a.runtime.append_history(types.runtime.AssistantMessage(text="", tool_calls=(tc,)))
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="tc-1", content="[Running in background]"),
-    )
-    a.runtime.append_history(types.runtime.UserMessage(text="[worker is idle] ping"))
-
-    compact_task = asyncio.create_task(a.compact_now())
-    try:
-        await asyncio.wait_for(compact_started.wait(), timeout=1.0)
-        spliced = a.runtime._splice_detached_result(
-            types.runtime.ToolResult(call_id="tc-1", content="real output")
-        )
-        assert spliced is not None
-        release_compact.set()
-        await asyncio.wait_for(compact_task, timeout=1.0)
-    finally:
-        if not compact_task.done():
-            compact_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await compact_task
-
-    messages = a.runtime.context().messages
-    assert len(messages) == 1
-    assert isinstance(messages[0], types.runtime.UserMessage)
-    assert messages[0].text == "[summary]"
 
 
 @pytest.mark.asyncio
@@ -3918,6 +3896,71 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_compact_now_reports_token_counts_from_override() -> None:
+    """The sync ``compact_now`` path must report the override's token counts.
+
+    Regression: the synchronous emit site built ``CompactComplete``
+    without ``token_before`` / ``token_after`` / ``payload_entries``,
+    so its fields defaulted to 0. The REPL then rendered
+    ``~0 → ~0 tokens, 0 entries`` for every overflow-recovery
+    compaction even though the override carried real counts. The async
+    ``_compact_and_post`` path forwarded them; the two diverged. Both
+    must derive the counts from the override.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _OkCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return True
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
+                token_before=120,
+                token_after=10,
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    events: list[types.runtime.RuntimeEvent] = []
+    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.observers.append(events.append)
+
+    assert await a.compact_now() is True
+
+    complete = events[-1]
+    assert isinstance(complete, types.runtime.CompactComplete)
+    assert complete.token_before == 120
+    assert complete.token_after == 10
+    assert complete.payload_entries == 1
+
+
+@pytest.mark.asyncio
 async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
     """Sync compaction path appends CompactStarted + CompactComplete to tape.
 
@@ -4512,16 +4555,14 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     ]
     assert len(detached) == 1
 
-    spliced = a.runtime._splice_detached_result(detached[0].result)
-
-    assert spliced is not None
-    assert spliced.content == types.runtime.CANCELLED_PLACEHOLDER
-    assert spliced.is_error
-    assert not any(
-        isinstance(entry, types.runtime.ToolResult)
-        and entry.content.startswith("[Running in background")
-        for entry in a.history
-    )
+    # The cancelled background job posts a ``[cancelled]`` result. Its
+    # delivery into history (foreground-splice) is the BackgroundTask
+    # foreground path, tracked separately under
+    # ``docs/private/design_detached_tool_results.md`` scope 2; here we
+    # assert the posted result itself.
+    result = detached[0].result
+    assert result.content == types.runtime.CANCELLED_PLACEHOLDER
+    assert result.is_error
 
 
 @pytest.mark.asyncio
