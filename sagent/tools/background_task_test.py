@@ -28,6 +28,7 @@ from sagent.tools.background_task import (
 from sagent.tools.core import current_agent_var
 from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
 from sagent.types.runtime import (
+    RUNNING_PREFIX,
     AssistantMessage,
     DetachedResult,
     RuntimeEvent,
@@ -668,7 +669,7 @@ async def test_foreground_running_background_job_drains_queued_result_and_splice
         agent.runtime.append_history(
             ToolResult(
                 call_id="j-running",
-                content="[Running in background: Dummy]",
+                content=f"{RUNNING_PREFIX}Dummy]",
             ),
         )
 
@@ -722,7 +723,7 @@ async def test_foreground_running_background_job_drains_queued_result_and_splice
     assert not any(
         isinstance(message, ToolResult)
         and message.call_id == "j-running"
-        and message.content == "[Running in background: Dummy]"
+        and message.content == f"{RUNNING_PREFIX}Dummy]"
         for message in messages
     )
     assert not agent.events_of(DetachedResult)

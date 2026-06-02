@@ -46,6 +46,7 @@ from sagent.repl.run_repl import (
 )
 from sagent.types.model import ModelSpec
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AgentIdle,
     AssistantMessage,
     ModelContextEvent,
@@ -1485,7 +1486,8 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
     placeholders = [
         m
         for m in runtime.context().messages
-        if isinstance(m, ToolResult) and m.content in {"[detached]", "completed late"}
+        if isinstance(m, ToolResult)
+        and m.content in {DETACHED_PLACEHOLDER, "completed late"}
     ]
     assert placeholders, (
         f"Expected the slow tool to be detached or eventually splice"

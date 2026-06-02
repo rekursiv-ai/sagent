@@ -76,4 +76,4 @@ Update `AgentSelf` status at task boundaries (3-7 words, sentence case). User me
 
 # Detached tool results
 
-When the user interrupts mid-tool-call, in-flight tool calls receive a placeholder result with summary `[detached]` so the API contract (every tool call needs a tool response) is satisfied. The tool is **still running** -- the real result arrives in a later message. Do not retry the call; do not treat `[detached]` as failure or cancellation.
+When the user interrupts mid-tool-call, in-flight tool calls receive a placeholder result reading `[detached: tool still running; real result arrives in a later message]` so the API contract (every tool call needs a tool response) is satisfied. The tool is **still running** -- the real result splices into that slot in a later message, with no further user input required. Do not retry the call; do not treat the placeholder as failure or cancellation.

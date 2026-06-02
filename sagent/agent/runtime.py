@@ -249,6 +249,8 @@ from sagent.types.exceptions import (
     log_task_exception,
 )
 from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
+    DETACHED_PLACEHOLDER,
     AgentIdle,
     AgentSendDeferredMessage,
     AgentSendMessage,
@@ -1847,7 +1849,7 @@ class AgentRuntime:
                                         ToolResult(
                                             call_id=tc.id,
                                             parent_id=msg.id,
-                                            content="[detached]",
+                                            content=DETACHED_PLACEHOLDER,
                                         ),
                                     )
                                     detached_task = asyncio.create_task(
@@ -1879,7 +1881,7 @@ class AgentRuntime:
                                         ToolResult(
                                             call_id=tc.id,
                                             parent_id=msg.id,
-                                            content="[detached]",
+                                            content=DETACHED_PLACEHOLDER,
                                         ),
                                     )
                                     detached_task = asyncio.create_task(
@@ -2542,7 +2544,9 @@ class AgentRuntime:
         without leaving the cohort (Halt) must NOT call this.
         """
         placeholder, is_error = (
-            ("[cancelled]", True) if mode == "kill" else ("[detached]", False)
+            (CANCELLED_PLACEHOLDER, True)
+            if mode == "kill"
+            else (DETACHED_PLACEHOLDER, False)
         )
         # Carry parent_id through; every other placeholder/result append site
         # (1666, 1698, _run_tool_and_post) does so. Without it, downstream
@@ -2776,7 +2780,7 @@ class AgentRuntime:
             result = ToolResult(
                 call_id=call.id,
                 parent_id=parent_id,
-                content="[cancelled]",
+                content=CANCELLED_PLACEHOLDER,
                 is_error=True,
             )
         except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors

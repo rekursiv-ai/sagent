@@ -44,6 +44,9 @@ def _empty_headers() -> dict[str, str]:
 
 
 __all__ = [
+    "CANCELLED_PLACEHOLDER",
+    "DETACHED_PLACEHOLDER",
+    "RUNNING_PREFIX",
     "AgentIdle",
     "AgentSendDeferredMessage",
     "AgentSendMessage",
@@ -238,6 +241,34 @@ class ToolResult(SessionMessage):
 
     summary: str = ""
     """Optional short post-execution receipt line."""
+
+
+# Bodies for the synthetic ``ToolResult`` stubs the runtime appends when
+# a tool's real result is unavailable at history-linearization time.
+# Both fill the ``content`` slot the model reads, far from any
+# system-prompt section explaining the convention -- so each is written
+# to carry its own contract:
+#
+# - ``DETACHED_PLACEHOLDER`` (``is_error=False``): the tool is still
+#   running after a user preempt/Compact/Clear; the real result splices
+#   into this slot later via ``DetachedResult``. The splice matches on
+#   ``call_id``, never on this text, so the wording is free.
+# - ``CANCELLED_PLACEHOLDER`` (``is_error=True``): the tool was killed
+#   (operator Kill, cooperative abort, background cancellation); no
+#   result will follow. Terminal -- the model must not wait or retry.
+# - ``RUNNING_PREFIX`` (``is_error=False``): a tool explicitly promoted
+#   to a background job; the synchronous return is
+#   ``f"{RUNNING_PREFIX}<name>]"`` and the real result splices in later,
+#   exactly like ``DETACHED_PLACEHOLDER``. Producer and the
+#   ``_is_background_placeholder`` matcher share this one prefix so the
+#   pair cannot drift apart.
+DETACHED_PLACEHOLDER = (
+    "[detached: tool still running; real result arrives in a later message]"
+)
+CANCELLED_PLACEHOLDER = (
+    "[cancelled: tool killed before completion; no result will follow]"
+)
+RUNNING_PREFIX = "[Running in background: "
 
 
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]

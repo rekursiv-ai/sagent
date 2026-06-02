@@ -39,6 +39,7 @@ from sagent.types.model import (
     TokenCount,
 )
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
     ToolCall,
@@ -170,7 +171,7 @@ def test_user_after_tool_results_coalesces_into_same_wire_msg() -> None:
     HTTP 400. The fix coalesces both into the same wire user message.
     """
     asst = AssistantMessage(tool_calls=(ToolCall(id="c1", name="N", args={}),))
-    tool_result = ToolResult(call_id="c1", content="[detached]")
+    tool_result = ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER)
     user_redirect = UserMessage(text="actually do something else")
     msgs = _build_messages(_make_request([asst, tool_result, user_redirect]))
     # Expect 2 messages: assistant(tool_use) + user(tool_result + text).

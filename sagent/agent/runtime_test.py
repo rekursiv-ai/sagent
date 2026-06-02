@@ -16,6 +16,8 @@ from sagent.agent import runtime as agent_runtime
 from sagent.agent.runtime import Tool
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
+    DETACHED_PLACEHOLDER,
     AgentIdle,
     AgentSendDeferredMessage,
     AgentSendMessage,
@@ -399,7 +401,8 @@ async def test_before_tool_spawn_user_detaches_tools_before_cohort_start() -> No
             m for m in agent.context().messages if isinstance(m, ToolResult)
         ]
         assert any(
-            r.call_id == "t1" and r.content == "[detached]" for r in tool_results
+            r.call_id == "t1" and r.content == DETACHED_PLACEHOLDER
+            for r in tool_results
         )
         user_texts = [
             m.text for m in agent.context().messages if isinstance(m, UserMessage)
@@ -532,7 +535,7 @@ async def test_user_message_detaches_running_tools() -> None:
     detached = [
         t
         for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == "[detached]"
+        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
     ]
     assert len(detached) == 1
     assert detached[0].call_id == "t1"
@@ -907,7 +910,7 @@ async def test_kill_one_tool() -> None:
     # ``tool_use ids were found without tool_result blocks``.
     slow_results = [r for r in results if r.call_id == "s1"]
     assert len(slow_results) == 1
-    assert slow_results[0].content == "[cancelled]"
+    assert slow_results[0].content == CANCELLED_PLACEHOLDER
     assert slow_results[0].is_error
     for msg in agent.context().messages:
         if isinstance(msg, AssistantMessage) and msg.tool_calls:
@@ -961,7 +964,7 @@ async def test_detach_and_result_arrives_later() -> None:
     stubs = [
         t
         for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == "[detached]"
+        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
     ]
     assert stubs == []
     spliced = [
@@ -1052,7 +1055,7 @@ async def test_detached_result_splices_when_parent_is_reemitted() -> None:
     call = ToolCall(id="t1", name="echo", args={})
     agent.append_history(UserMessage(text="go"))
     original_parent = agent.append_history(AssistantMessage(tool_calls=(call,)))
-    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
     parent_reemit = ContextSplice(
         ref=agent.mint_ref(),
         mask=((original_parent, original_parent),),
@@ -1094,7 +1097,7 @@ async def test_detached_result_after_compaction_barrier_drops_silently() -> None
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
-    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
     summary = ContextSplice(
         ref=agent.mint_ref(),
         mask=((agent.tape[0].ref, agent.tape[-1].ref),),
@@ -1163,9 +1166,9 @@ async def test_compaction_absorbs_detached_splices_landing_during_await() -> Non
             ),
         ),
     )
-    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
-    agent.append_history(ToolResult(call_id="t2", content="[detached]"))
-    agent.append_history(ToolResult(call_id="t3", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
+    agent.append_history(ToolResult(call_id="t2", content=DETACHED_PLACEHOLDER))
+    agent.append_history(ToolResult(call_id="t3", content=DETACHED_PLACEHOLDER))
     agent.append_history(UserMessage(text="resume"))
 
     task = asyncio.create_task(agent.run_forever())
@@ -1226,7 +1229,7 @@ def test_clear_masks_out_of_order_compaction_absorbed_splice() -> None:
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
     placeholder_ref = agent.append_history(
-        ToolResult(call_id="t1", content="[detached]")
+        ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER)
     )
     compact_ref = agent.mint_ref()
     _ = agent._splice_detached_result(
@@ -1261,7 +1264,7 @@ def test_splice_detached_result_replaces_prior_detached_splice() -> None:
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="c1", name="t", args={}),))
     )
-    agent.append_history(ToolResult(call_id="c1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER))
 
     first = agent._splice_detached_result(ToolResult(call_id="c1", content="first"))
     second = agent._splice_detached_result(ToolResult(call_id="c1", content="second"))
@@ -1280,7 +1283,7 @@ def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
-    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
     assert (
         agent._splice_detached_result(
             ToolResult(call_id="t1", content="old-real", is_error=False)
@@ -1292,7 +1295,7 @@ def test_detached_splice_ignores_stale_prior_splice_after_barrier() -> None:
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
-    agent.append_history(ToolResult(call_id="t1", content="[detached]"))
+    agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
 
     result = agent._splice_detached_result(
         ToolResult(call_id="t1", content="new-real", is_error=False)
@@ -1379,7 +1382,7 @@ async def test_splice_wakes_model_after_round_ended() -> None:
     stubs = [
         t
         for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == "[detached]"
+        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
     ]
     assert stubs == [], (
         "splice should have replaced the placeholder with the real result"
@@ -2718,7 +2721,7 @@ async def test_detach_all_tools() -> None:
     detached = [
         t
         for t in agent.context().messages
-        if isinstance(t, ToolResult) and t.content == "[detached]"
+        if isinstance(t, ToolResult) and t.content == DETACHED_PLACEHOLDER
     ]
     assert len(detached) == 2
 
@@ -3572,7 +3575,7 @@ async def test_append_splice_indexes_preserved_payload_anchors() -> None:
         ),
     )
     placeholder_ref = agent.append_history(
-        ToolResult(call_id="c1", content="[detached]"),
+        ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER),
     )
     # Compactor preserves the AM in its payload with paired_externally.
     splice_ref = agent.append_splice(
@@ -3605,7 +3608,7 @@ async def test_append_splice_indexes_preserved_payload_anchors() -> None:
         ),
     )
     agent.append_history(
-        ToolResult(call_id="c1", content="[detached]"),
+        ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER),
     )
     agent.append_clear()
     # Pre-condition: anchors must be empty post-Clear.
@@ -4240,13 +4243,13 @@ async def test_pending_detached_user_flush_publishes_coalesced_history_entry() -
         AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
     )
     placeholder_t1 = agent.append_history(
-        ToolResult(call_id="t1", content="[detached]"),
+        ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER),
     )
     agent.append_history(
         AssistantMessage(tool_calls=(ToolCall(id="t0", name="echo", args={}),))
     )
     placeholder_t0 = agent.append_history(
-        ToolResult(call_id="t0", content="[detached]"),
+        ToolResult(call_id="t0", content=DETACHED_PLACEHOLDER),
     )
     # Mask the two placeholders WITHOUT touching the AMs -- the splice's
     # visibility check then rejects the late DetachedResult and the
@@ -6110,7 +6113,7 @@ async def test_stop_tool_kill_carries_parent_id_to_synth_result() -> None:
     cancelled = next(
         m for m in messages if isinstance(m, ToolResult) and m.call_id == "k1"
     )
-    assert cancelled.content == "[cancelled]"
+    assert cancelled.content == CANCELLED_PLACEHOLDER
     assert cancelled.parent_id == parent_assistant.id, (
         f"expected parent_id={parent_assistant.id}, got {cancelled.parent_id}"
     )
