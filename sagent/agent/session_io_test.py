@@ -194,6 +194,17 @@ def test_user_message_round_trip(tmp_path: Path) -> None:
     out = _round_trip(UserMessage(text="hello"), tmp_path)
     assert isinstance(out, UserMessage)
     assert out.text == "hello"
+    assert out.hidden is False
+
+
+def test_hidden_flag_round_trips(tmp_path: Path) -> None:
+    """``hidden`` survives serialization (default ``False``, set ``True``)."""
+    visible = _round_trip(UserMessage(text="plain"), tmp_path / "a")
+    assert isinstance(visible, UserMessage)
+    assert visible.hidden is False
+    hidden = _round_trip(UserMessage(text="reminder", hidden=True), tmp_path / "b")
+    assert isinstance(hidden, UserMessage)
+    assert hidden.hidden is True
 
 
 def test_agent_send_message_round_trip(tmp_path: Path) -> None:

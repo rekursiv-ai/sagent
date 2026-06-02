@@ -98,6 +98,16 @@ def test_user_message_flushes_stream_then_writes_bar() -> None:
     assert p.user_bars == ["hello"]
 
 
+def test_hidden_user_message_is_not_rendered() -> None:
+    """A ``hidden`` message is sent to the model but not shown to the human."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(UserMessage(text="visible"))
+    obs(UserMessage(text="<system-reminder>nudge</system-reminder>", hidden=True))
+    # The visible one renders; the hidden one does not.
+    assert p.user_bars == ["visible"]
+
+
 def test_agent_send_message_routes_to_agent_bar_with_source() -> None:
     """Incoming ``AgentSendMessage`` renders attributed to its source.
 

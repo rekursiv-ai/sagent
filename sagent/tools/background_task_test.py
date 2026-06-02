@@ -35,6 +35,7 @@ from sagent.types.runtime import (
     ToolCall,
     ToolResult,
 )
+from sagent.types.tape import ContextSplice
 
 
 class _PersistentChild(FakeAgent):
@@ -653,9 +654,7 @@ async def test_foreground_crashed_task_returns_tool_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_foreground_running_background_job_drains_queued_result_and_splices_placeholder() -> (
-    None
-):
+async def test_foreground_running_background_job_returns_result_stub_stays() -> None:
     foreground_waiting = asyncio.Event()
     finish_background = asyncio.Event()
 
@@ -713,18 +712,22 @@ async def test_foreground_running_background_job_drains_queued_result_and_splice
             if not foreground.done():
                 foreground.cancel()
     messages = agent.runtime.context().messages
+    # The foregrounder receives the real result as its own tool answer.
     assert result.content == "queued payload"
+    # The original ``[Running in background]`` placeholder STAYS (it is the
+    # honest record that the call was backgrounded; the result arrived via
+    # foreground). It is not silently back-patched in-slot.
     assert any(
-        isinstance(message, ToolResult)
-        and message.call_id == "j-running"
-        and message.content == "queued payload"
-        for message in messages
-    )
-    assert not any(
         isinstance(message, ToolResult)
         and message.call_id == "j-running"
         and message.content == f"{RUNNING_PREFIX}Dummy]"
         for message in messages
+    )
+    # No foreground back-patch splice was appended.
+    assert not any(
+        isinstance(record, ContextSplice)
+        and record.strategy == "foreground_detached_splice"
+        for record in agent.runtime.tape
     )
     assert not agent.events_of(DetachedResult)
     assert "j-running" not in agent.background

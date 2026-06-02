@@ -328,7 +328,12 @@ class OpenAISubscription(OpenAI):
         state = secrets.token_urlsafe(32)
 
         listener: AuthCodeListener | None = None
-        redirect_uri = f"http://127.0.0.1:{_CALLBACK_PORT}/auth/callback"
+        # Hydra (OpenAI's OAuth server) matches redirect_uri against a
+        # registered allow-list by exact string; that list holds the
+        # ``localhost`` form, so ``127.0.0.1`` is rejected with
+        # ``authorize_hydra_invalid_request``. Advertise ``localhost``
+        # while the listener still binds IPv4 loopback.
+        redirect_uri = f"http://localhost:{_CALLBACK_PORT}/auth/callback"
         if not manual:
             listener = AuthCodeListener(
                 state,
@@ -337,7 +342,7 @@ class OpenAISubscription(OpenAI):
             )
             try:
                 listener.start()
-                redirect_uri = listener.redirect_uri
+                redirect_uri = listener.redirect_uri_for_host("localhost")
             except OSError as e:
                 raise RuntimeError(f"Failed to start callback listener: {e}") from e
 

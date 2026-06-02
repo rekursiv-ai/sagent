@@ -988,11 +988,17 @@ class _AnthropicModel:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["temperature"] = 1.0
         elif thinking == "enabled":
+            # Anthropic counts thinking against ``max_tokens``, so the
+            # total must leave room for the visible reply. Double the
+            # request, but clamp to the model cap (opus-4-8's cap equals
+            # the API ceiling, where the raw double overflows). Split the
+            # total so ``budget_tokens`` stays strictly below ``max_tokens``.
+            total = min(max_tok * 2, self.max_response_tokens)
             kwargs["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": max_tok,
+                "budget_tokens": total // 2,
             }
-            kwargs["max_tokens"] = max_tok * 2
+            kwargs["max_tokens"] = total
             kwargs["temperature"] = 1.0
         if request.tools:
             kwargs["tools"] = [

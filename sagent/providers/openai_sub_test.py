@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
 import base64
+import io
 import json
 import time
 
@@ -18,7 +19,7 @@ import openai
 import pytest
 
 from sagent.lib.json import JSONValue
-from sagent.providers import OpenAI
+from sagent.providers import OpenAI, openai_sub
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
@@ -387,6 +388,61 @@ def _make_jwt(payload: dict[str, object]) -> str:
     header_b = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=")
     body_b = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=")
     return f"{header_b.decode()}.{body_b.decode()}.sig"
+
+
+def test_login_manual_advertises_localhost_redirect_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual login must send the ``localhost`` redirect_uri Hydra allow-lists.
+
+    ``127.0.0.1`` is rejected with ``authorize_hydra_invalid_request``.
+    """
+    monkeypatch.setattr(openai_sub, "DEFAULT_CREDENTIALS_PATH", tmp_path / "auth.json")
+    access = _make_jwt(
+        {
+            "exp": time.time() + 3600,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-123",
+                "chatgpt_plan_type": "pro",
+            },
+        }
+    )
+    token_resp = MagicMock()
+    token_resp.status_code = 200
+    token_resp.json.return_value = {
+        "access_token": access,
+        "refresh_token": "refresh-xyz",
+        "expires_in": 3600,
+    }
+    captured: dict[str, object] = {}
+
+    def _post(_url: str, *, data: dict[str, str], **_kw: object) -> MagicMock:
+        captured["redirect_uri"] = data["redirect_uri"]
+        return token_resp
+
+    http_client = MagicMock()
+    http_client.__enter__.return_value.post.side_effect = _post
+
+    out = io.StringIO()
+    with (
+        patch(
+            "sagent.providers.openai_sub.httpx.Client",
+            return_value=http_client,
+        ),
+        patch.object(
+            openai_sub,
+            "parse_manual_auth_code",
+            return_value="the-code",
+        ),
+        patch("builtins.input", return_value="the-code#state"),
+    ):
+        OpenAISubscription.login(out, manual=True)
+
+    printed = out.getvalue()
+    assert "localhost" in printed
+    assert "127.0.0.1" not in printed
+    assert captured["redirect_uri"] == "http://localhost:1455/auth/callback"
 
 
 def test_jwt_payload_round_trip() -> None:

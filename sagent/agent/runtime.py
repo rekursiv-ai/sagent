@@ -250,6 +250,8 @@ from sagent.types.exceptions import (
 )
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
+    DETACHED_ARRIVAL_SUFFIX,
+    DETACHED_ARRIVED_TOOL,
     DETACHED_PLACEHOLDER,
     AgentIdle,
     AgentSendDeferredMessage,
@@ -268,6 +270,7 @@ from sagent.types.runtime import (
     DetachedResult,
     Halt,
     Kill,
+    LazyEvent,
     ModelCallStarted,
     ModelContextEvent,
     ModelIdle,
@@ -518,6 +521,30 @@ class Await:
 
     types: tuple[type, ...]
     """Event classes that satisfy the gate (``Quit`` always does)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PendingCommit:
+    """One deferred tape commit, flushed at the next gate (see ``_flush_pending``).
+
+    The single mechanism behind every "hold this, commit it on the next real
+    turn" need -- a mimicked-tool error pairing, a completed detached tool's
+    forward delivery, and ride-along system context all share it. ``kind``
+    selects the placement:
+
+    - ``"pairing"``: ``result`` answers an already-emitted ``tool_use`` whose
+      result was deferred (a mimicked ``DetachedArrived``). Committed adjacent
+      to its parent ``AssistantMessage`` so it pairs in-slot, never stranded.
+    - ``"forward"``: ``result`` is a completed detached tool's real output,
+      delivered as a synthetic ``DetachedArrived`` pair (the original stub
+      stays). A user-role separator precedes it after an assistant tail.
+    - ``"ride_along"``: ``user`` is system-injected context (e.g. a reminder)
+      coalesced onto the user side.
+    """
+
+    kind: Literal["pairing", "forward", "ride_along"]
+    result: ToolResult | None = None
+    user: UserMessage | None = None
 
 
 AWAIT_USER = Await(
@@ -905,13 +932,13 @@ class AgentRuntime:
         # / ``_parent_assistant_refs`` cache the call_id -> ref mappings the
         # same sites need.
         self._tape_by_ref: dict[TapeRef, TapeRecord] = {}
-        # ``_placeholder_refs[call_id]`` always points to the most recent
-        # ref carrying the ``ToolResult`` for ``call_id`` -- the original
-        # ``ReferrableTapeEvent`` placeholder until a detached splice
-        # lands, then the splice's own ref. ``_index_record`` keeps it
-        # current. ``_splice_detached_result`` masks whatever it points
-        # at, so the second detached result for the same call replaces
-        # the first splice rather than wedging behind a type check.
+        # ``_parent_assistant_refs[call_id]`` maps a tool call to the ref of
+        # the ``AssistantMessage`` that requested it; ``_parent_id_for_call``
+        # reads it so a detached tool's ``[detached]`` stub is stamped with
+        # the right ``parent_id``. ``_placeholder_refs[call_id]`` tracks the
+        # ref carrying that call's ``ToolResult``. ``_index_record`` keeps both
+        # current; barriers evict masked entries via
+        # ``_invalidate_masked_anchors`` / ``_clear_detached_anchors``.
         self._placeholder_refs: dict[str, TapeRef] = {}
         self._parent_assistant_refs: dict[str, TapeRef] = {}
         self.inbox: GatedDeque[RuntimeEvent] = GatedDeque()
@@ -952,13 +979,13 @@ class AgentRuntime:
         # ("type to redirect" UX during streaming, matching the
         # mid-cohort behavior of stub-and-detach).
         self._mid_stream_queue: list[UserMessage | AgentSendMessage] = []
-        # Detached-tool results whose splice failed (no placeholder
-        # survived, typically post-``Clear``) AND a fresh cohort is in
-        # flight. Held here until ``CohortComplete`` so the user-facing
-        # notification doesn't interleave between the cohort's
-        # ``tool_use`` and its forthcoming ``tool_result``. Drained at
-        # the same site that publishes ``CohortComplete``.
-        self._pending_detached_user: list[UserMessage] = []
+        # The single deferred-commit queue: tape entries held until the next
+        # real turn, then committed (in-slot) by ``_flush_pending``. Covers
+        # forward detached-tool deliveries, mimicked-tool error pairings, and
+        # ride-along system context -- one mechanism, one flush site, so no
+        # per-feature special case can re-derive commit timing/placement
+        # (which is how the earlier split caused stranding / lone-round bugs).
+        self._pending_commits: list[_PendingCommit] = []
         # ``AgentIdle`` is edge-triggered: published once when the
         # runtime is about to block on an empty inbox with no work
         # in flight, then suppressed until the next ``drain()`` returns
@@ -1374,12 +1401,10 @@ class AgentRuntime:
 
         ``ContextSplice`` payloads also contribute anchors: a compactor
         that preserves an ``AssistantMessage(tool_calls=...)`` paired
-        externally (e.g. fallback mode keeping the parent assistant so
-        a still-running tool can splice in later) must register its
-        ``tool_calls`` ids against the splice ref, otherwise a
-        subsequent ``_splice_detached_result`` lookup misses the
-        preserved anchor and falls through to the fallback
-        ``UserMessage`` path.
+        externally (e.g. fallback mode keeping the parent assistant)
+        registers its ``tool_calls`` ids against the splice ref so
+        ``_parent_id_for_call`` still resolves the right ``parent_id`` for a
+        detached tool's stub after the barrier.
         """
         self._tape_by_ref[record.ref] = record
         if isinstance(record, ReferrableTapeEvent):
@@ -1398,77 +1423,112 @@ class AgentRuntime:
             elif isinstance(entry, ToolResult):
                 self._placeholder_refs[entry.call_id] = record.ref
 
-    def _splice_detached_result(
-        self,
-        result: ToolResult,
-    ) -> ToolResult | None:
-        """Replace a placeholder ``ToolResult`` with the real detached result.
+    def _defer_detached_forward(self, result: ToolResult) -> None:
+        """Queue a completed detached tool's real result for forward delivery.
 
-        Appends an override that suppresses the placeholder and injects
-        the real ``ToolResult`` at the parent assistant's anchor, keeping
-        provider-valid tool_use/tool_result pairing.
-
-        Args:
-          result: Real detached tool result.
-
-        Returns:
-          spliced: The injected ``ToolResult`` instance, or ``None`` when
-              no placeholder survives in the resolved context (e.g. a
-              compaction barrier hid it before the result arrived).
-
+        The original ``tool_use`` keeps its permanent ``[detached]`` stub; the
+        real result is committed later as a synthetic ``DetachedArrived`` pair
+        (``_flush_pending``), preserving full ``ToolResult`` structure. See
+        ``docs/private/design_detached_tool_results.md``.
         """
-        call_id = result.call_id
-        placeholder_ref = self._placeholder_refs.get(call_id)
-        parent_ref = self._parent_assistant_refs.get(call_id)
-        if placeholder_ref is None or parent_ref is None:
-            return None
-        prior = self._tool_result_for_call(placeholder_ref, call_id)
-        if prior is None:
-            return None
-        if placeholder_ref not in set(self.context().origins):
-            return None
-        # When ``placeholder_ref`` is itself a prior detached splice, its
-        # mask already covers the original placeholder. The new splice
-        # must absorb the prior splice's mask in addition to masking
-        # the prior splice itself -- otherwise killing the prior splice
-        # under once-overwrite semantics would resurrect the original
-        # placeholder, causing both the new content AND the original
-        # ``[Running ...]``/``[detached]`` text to render side-by-side.
-        # Same pattern as the user-coalesce splice at
-        # ``_append_or_coalesce_user``.
-        prior_record = self._tape_by_ref.get(placeholder_ref)
-        absorbed = prior_record.mask if isinstance(prior_record, ContextSplice) else ()
-        mask = (*absorbed, (placeholder_ref, placeholder_ref))
-        real = dataclasses.replace(result, id=prior.id, parent_id=prior.parent_id)
+        self._pending_commits.append(_PendingCommit(kind="forward", result=result))
+
+    def _defer_pairing(self, result: ToolResult) -> None:
+        """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``.
+
+        Used for a mimicked ``DetachedArrived`` call: its error is committed
+        in-slot (adjacent to the parent assistant) on the next real turn, so
+        the bogus call spends no round of its own.
+        """
+        self._pending_commits.append(_PendingCommit(kind="pairing", result=result))
+
+    def _defer_ride_along(self, user: UserMessage) -> None:
+        """Queue system-injected user-side context to ride the next real turn."""
+        self._pending_commits.append(_PendingCommit(kind="ride_along", user=user))
+
+    def _flush_pending(self) -> None:
+        """Commit every queued :class:`_PendingCommit`, in arrival order, in-slot.
+
+        The single drain for all deferred tape commits. Called at the model
+        gate once a round is confirmed firing (so nothing here wakes the model
+        on its own) and immediately before ``_assert_alternation_invariant``,
+        so the committed context is what the provider receives.
+
+        Placement is by ``kind``:
+
+        - ``pairing``: insert the result immediately after its parent
+          ``AssistantMessage`` (``insert_after``), so a mimicked ``tool_use``
+          pairs in-slot and can never be stranded by intervening turns.
+        - ``forward``: append the synthetic ``DetachedArrived`` pair (a
+          user-role separator first when the tail is an assistant turn).
+        - ``ride_along``: coalesce onto the user side.
+        """
+        pending, self._pending_commits = self._pending_commits, []
+        for commit in pending:
+            if commit.kind == "pairing":
+                assert commit.result is not None
+                self._commit_pairing(commit.result)
+            elif commit.kind == "forward":
+                assert commit.result is not None
+                self._append_detached_arrival(commit.result)
+            else:
+                assert commit.user is not None
+                self.publish(self._append_or_coalesce_user(commit.user))
+
+    def _has_waking_commit(self) -> bool:
+        """True when a queued commit should itself drive a round.
+
+        Only ``forward`` (a completed detached tool's real result) wakes the
+        model: a finished tool is worth surfacing promptly. ``pairing`` /
+        ``ride_along`` are non-urgent and must ride a round driven by real
+        content, never fire one alone.
+        """
+        return any(c.kind == "forward" for c in self._pending_commits)
+
+    def _commit_pairing(self, result: ToolResult) -> None:
+        """Insert ``result`` immediately after the ``AssistantMessage`` that
+        emitted its ``call_id``, pairing the dangling ``tool_use`` in-slot.
+
+        Slot placement (not tail append) is load-bearing: an intervening user
+        turn or a forward detached delivery must not strand the ``tool_use``
+        and trip orphan-repair into an ``[interrupted]`` substitution.
+        """
+        parent_ref = self._parent_assistant_refs.get(result.call_id)
+        if parent_ref is None or parent_ref not in set(self.context().origins):
+            # Parent assistant gone (compaction/Clear); nothing to pair. The
+            # call is no longer visible, so dropping the result is correct.
+            return
         self.append_splice(
-            mask=mask,
+            mask=(),
             insert_after=parent_ref,
-            payload=(real,),
-            strategy="detached_splice",
-            paired_externally=frozenset({call_id}),
+            payload=(result,),
+            strategy="lazy_pairing",
+            paired_externally=frozenset({result.call_id}),
         )
-        return real
+        self.publish(result)
 
-    def _tool_result_for_call(self, ref: TapeRef, call_id: str) -> ToolResult | None:
-        """Return the ``ToolResult`` for ``call_id`` carried by ``ref``.
+    def _append_detached_arrival(self, result: ToolResult) -> None:
+        """Append the synthetic ``DetachedArrived`` tool pair for ``result``.
 
-        ``_placeholder_refs[call_id]`` may point either at a
-        ``ReferrableTapeEvent`` (the original placeholder appended by
-        ``_run_tool_and_post``) or at a ``ContextSplice`` (a prior
-        ``detached_splice`` whose payload carries the replacement
-        ``ToolResult``). The caller needs the carried ``ToolResult`` to
-        copy its stamped ``id``/``parent_id`` onto the new splice's
-        payload so wire-pairing stays stable.
+        A user-role separator precedes the synthetic ``AssistantMessage`` when
+        the history tail is itself an assistant turn, since the provider
+        forbids assistant->assistant. The separator names the arriving call so
+        the model has a forward, in-band signal that the awaited tool finished.
         """
-        record = self._tape_by_ref.get(ref)
-        if isinstance(record, ReferrableTapeEvent):
-            event = record.event
-            return event if isinstance(event, ToolResult) else None
-        if isinstance(record, ContextSplice):
-            for entry in record.payload:
-                if isinstance(entry, ToolResult) and entry.call_id == call_id:
-                    return entry
-        return None
+        messages = self.context().messages
+        if messages and isinstance(messages[-1], AssistantMessage):
+            self._append_or_coalesce_user(
+                UserMessage(text=f"[detached tool {result.call_id} completed]"),
+            )
+        arrival_id = f"{result.call_id}{DETACHED_ARRIVAL_SUFFIX}"
+        self.append_history(
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall(id=arrival_id, name=DETACHED_ARRIVED_TOOL, args={}),
+                ),
+            ),
+        )
+        self.append_history(dataclasses.replace(result, call_id=arrival_id))
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
@@ -1594,16 +1654,24 @@ class AgentRuntime:
                             for task in self.detached.values():
                                 task.cancel()
                             self.detached.clear()
-                            self._pending_detached_user.clear()
+                            self._pending_commits.clear()
                             queued.clear()
                             deferred.clear()
                             self._mid_stream_queue.clear()
                             self.append_clear()
-                            self.publish(ClearComplete())
                             self.inbox.push_front(
                                 AWAIT_USER,
                                 *items[item_idx + 1 :],
                             )
+                            # Publish *after* arming ``AWAIT_USER`` so an
+                            # observer that responds by pushing user input
+                            # (the REPL committer flushing deferred Tab input
+                            # on ``ClearComplete``) lands as a genuinely-new
+                            # post-arm item. Publishing first would let that
+                            # push count toward the gate baseline, so it would
+                            # satisfy the baseline without exceeding it and the
+                            # gate would never release -- re-wedging.
+                            self.publish(ClearComplete())
                             awaiting_user = True
                             break
 
@@ -1954,97 +2022,44 @@ class AgentRuntime:
                             # ``self.detached`` check before the stub), but a
                             # peer item in the same drain batch (e.g. a
                             # tool-pushed ``UserMessage``) triggered a preempt
-                            # that cleared the cohort. Without this case the
-                            # result would fall through to ``_`` and leave
-                            # the assistant's ``tool_use`` paired only with
-                            # the ``[detached]`` placeholder forever. Splice
-                            # the real content into the placeholder exactly
-                            # like ``DetachedResult`` does.
+                            # that cleared the cohort. The original ``tool_use``
+                            # is already answered by its ``[detached]`` stub;
+                            # deliver the real content forward, exactly like
+                            # ``DetachedResult``.
                             del self.detached[cid]
-                            self._splice_detached_result(item)
+                            self._defer_detached_forward(item)
                             self.publish(item)
 
                         case DetachedResult():
                             self.cohort.discard(item.call_id)
-                            # When the parent assistant ref was wiped from
-                            # the index (``Clear`` / ``append_clear`` or a
-                            # compaction barrier called
-                            # ``_clear_detached_anchors``), there is no
-                            # valid splice slot. Drop the late result
-                            # rather than synthesizing a UserMessage that
-                            # would surface ``[Tool ... completed]``
-                            # noise after the session was intentionally
-                            # cleared or compacted away. Tasks already
-                            # cancelled by ``Clear`` post a ``ToolResult``
-                            # (not ``DetachedResult``) that falls through
-                            # to the default no-op; this branch only
-                            # catches the narrower race where the task
-                            # completed naturally between the wipe and
-                            # the inbox drain.
-                            if self._parent_assistant_refs.get(item.call_id) is None:
-                                self.publish(item)
-                                continue
-                            # Splice the real result into the placeholder's
-                            # slot via a tape override so the model sees
-                            # the real result where it already expects one.
-                            # ``[detached]`` (preempt) and ``[Running in
-                            # background: ...]`` (explicit-bg) placeholders
-                            # both match by ``call_id``.
-                            spliced_entry = self._splice_detached_result(item.result)
-                            spliced = spliced_entry is not None
-                            if not spliced:
-                                # No placeholder to splice into (rare:
-                                # the parent ref was indexed but the
-                                # placeholder slot is no longer visible).
-                                # Surface the content as a ``UserMessage``
-                                # so it isn't silently dropped. If a
-                                # fresh cohort is in flight, defer to
-                                # ``CohortComplete`` -- appending now
-                                # would interleave between the cohort's
-                                # ``tool_use`` and its forthcoming
-                                # ``tool_result``.
-                                fallback = UserMessage(
-                                    text=(
-                                        f"[Tool {item.call_id} completed]\n"
-                                        f"{item.content}"
-                                    ),
-                                )
-                                if self.cohort:
-                                    self._pending_detached_user.append(fallback)
-                                else:
-                                    self._append_or_coalesce_user(fallback)
-                            elif (
-                                isinstance(
-                                    self.context().messages[-1], AssistantMessage
-                                )
-                                and not self.cohort
-                            ):
-                                # Splice landed after the preempted round
-                                # already idled with text. History tail
-                                # is an ``AssistantMessage`` with no
-                                # pending cohort, so the end-of-loop
-                                # gate won't fire on its own. Append a
-                                # terse notification (real content lives
-                                # in its proper slot above) to wake the
-                                # model. The ``not self.cohort`` guard
-                                # is essential: with an in-flight cohort
-                                # the tail assistant carries an
-                                # unanswered ``tool_use`` and appending
-                                # here interleaves a ``UserMessage``
-                                # between ``tool_use`` and its
-                                # forthcoming ``tool_result``
-                                # (Anthropic rejects with HTTP 400).
-                                # ``CohortComplete`` will wake the model
-                                # with the spliced content already
-                                # visible in its proper slot.
-                                self.append_history(
-                                    UserMessage(
-                                        text=(
-                                            f"[Detached tool {item.call_id} completed]"
-                                        ),
-                                    ),
-                                )
+                            # Deliver the real result as NEW forward context
+                            # (a synthetic ``DetachedArrived`` tool pair), never
+                            # by back-patching the ``[detached]`` stub slot. The
+                            # stub stays the honest answer to the original call;
+                            # the result arrives forward so nothing the model
+                            # already read is silently rewritten. Compaction
+                            # cannot drop it -- delivery keys off the inbox, not
+                            # a tape anchor. See
+                            # ``docs/private/design_detached_tool_results.md``.
+                            self._defer_detached_forward(item.result)
                             self.publish(item)
+
+                        case LazyEvent(payload=payload):
+                            # Defer the payload to the next real turn via the
+                            # one pending-commit queue. A ``ToolResult`` payload
+                            # answers an already-emitted ``tool_use`` (a mimicked
+                            # ``DetachedArrived``): settle that call's cohort /
+                            # running-tools membership now -- otherwise the
+                            # cohort never empties, the model-call gate
+                            # (``not self.cohort``) never fires, and the deferred
+                            # pairing never flushes (deadlock). A ``UserMessage``
+                            # payload is ride-along system context.
+                            if isinstance(payload, ToolResult):
+                                self.cohort.discard(payload.call_id)
+                                self.running_tools.pop(payload.call_id, None)
+                                self._defer_pairing(payload)
+                            else:
+                                self._defer_ride_along(payload)
 
                         case ModelSwitch():
                             # Buffer the switch; applied below once the
@@ -2097,15 +2112,6 @@ class AgentRuntime:
                     )
                     self.publish(CohortComplete())
                     self._cohort_seen = False
-                    # Flush any ``DetachedResult`` fallbacks that landed
-                    # mid-cohort. Tail is now a ``ToolResult`` (the
-                    # cohort just settled), so appending here is safe.
-                    # ``_append_or_coalesce_user`` collapses consecutive
-                    # entries when the model gate fires next.
-                    for pending_user in self._pending_detached_user:
-                        committed = self._append_or_coalesce_user(pending_user)
-                        self.publish(committed)
-                    self._pending_detached_user.clear()
 
                 # ``UserQueuedMessage`` drains at ``ModelIdle``, not
                 # ``CohortComplete``. The ``not self._should_call_model()``
@@ -2131,6 +2137,26 @@ class AgentRuntime:
                         for committed in self._commit_queued_user_side(deferred):
                             self.publish(committed)
                         deferred.clear()
+
+                # The one deferred-commit flush. ``_flush_pending`` commits each
+                # queued entry in-slot. ``waking`` entries (a completed detached
+                # tool's forward delivery) *should* surface promptly, so they
+                # flush whenever the tail is appendable; their ``ToolResult``
+                # tail then drives the round below so the model observes them.
+                # Non-waking entries (a mimicked-tool error pairing, ride-along
+                # context) must not fire a round of their own, so they wait for
+                # a round already being driven by real content
+                # (``_should_call_model``). A gate-armed ``AWAIT_USER`` (Halt)
+                # blocks both until the user resumes.
+                if (
+                    self._pending_commits
+                    and not self.cohort
+                    and self.model_call is None
+                    and self.compact_task is None
+                    and not self.inbox.gate_armed
+                    and (self._should_call_model() or self._has_waking_commit())
+                ):
+                    self._flush_pending()
 
                 if (
                     not self.cohort
@@ -2729,6 +2755,41 @@ class AgentRuntime:
         the late completion arrives as context rather than being
         silently dropped by the cohort gate.
         """
+        if call.name == DETACHED_ARRIVED_TOOL:
+            # ``DetachedArrived`` is not a real tool: the runtime synthesizes
+            # turns with this name to deliver completed detached results. A
+            # model can copy that pattern and emit a real ``DetachedArrived``
+            # call (seen live). Pair it with an error result, but deliver that
+            # result LAZILY: held until the next real turn so the bogus call
+            # spends no model round of its own (there is no urgency to tell the
+            # model it cannot do a thing it cannot do). ``hidden`` keeps the
+            # correction out of the human's view; the model still sees it.
+            logger.debug(
+                "runtime detached-arrived mimic: call_id=%s parent_id=%s",
+                call.id,
+                parent_id,
+            )
+            self.inbox.push_back(
+                LazyEvent(
+                    payload=ToolResult(
+                        call_id=call.id,
+                        parent_id=parent_id,
+                        # Terse on purpose; the model self-corrects. This short
+                        # form is unproven, though. The longer form below is the
+                        # one observed to work live -- revert to it if the short
+                        # form ever fails:
+                        #   f"{DETACHED_ARRIVED_TOOL} is not a tool you can call; "
+                        #   "it is a runtime marker for a completed detached "
+                        #   "tool's result. Detached results arrive automatically "
+                        #   "-- do not call it."
+                        content=f"{DETACHED_ARRIVED_TOOL} is not callable; detached "
+                        "results arrive automatically.",
+                        is_error=True,
+                        hidden=True,
+                    ),
+                ),
+            )
+            return
         tool = self.tools_map.get(call.name)
         if tool is None:
             logger.debug(
@@ -2860,13 +2921,4 @@ class AgentRuntime:
             return
         override = widen_barrier_mask(override, self.tape)
         self.adopt_record(override)
-        self.inbox.push_back(
-            CompactComplete(
-                records=(override,),
-                token_before=override.token_before,
-                token_after=override.token_after,
-                payload_entries=len(override.payload),
-                fallback_reason=override.fallback_reason,
-                preserved_tail_count=override.preserved_tail_count,
-            ),
-        )
+        self.inbox.push_back(CompactComplete.from_override(override))

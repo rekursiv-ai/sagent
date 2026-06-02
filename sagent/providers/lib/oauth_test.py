@@ -141,6 +141,20 @@ def test_auth_code_listener_redirect_uri_assigned_port() -> None:
         listener.stop()
 
 
+def test_auth_code_listener_redirect_uri_for_host() -> None:
+    listener = AuthCodeListener("state", port=0, callback_path="/cb")
+    listener.start()
+    try:
+        uri = listener.redirect_uri_for_host("localhost")
+        assert uri.startswith("http://localhost:")
+        assert uri.endswith("/cb")
+        # Port matches the IPv4 bind even though host is advertised differently.
+        port = listener.redirect_uri.split(":")[2].split("/")[0]
+        assert f":{port}/cb" in uri
+    finally:
+        listener.stop()
+
+
 def test_auth_code_listener_stop_idempotent() -> None:
     listener = AuthCodeListener("state", port=0)
     listener.start()

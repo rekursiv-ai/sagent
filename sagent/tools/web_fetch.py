@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 from urllib.parse import quote, urlparse
 from xml.etree.ElementTree import Element, ParseError
@@ -11,7 +10,6 @@ from xml.etree.ElementTree import Element, ParseError
 import asyncio
 import html
 import ipaddress
-import json
 import os
 import re
 import socket
@@ -36,11 +34,8 @@ trafilatura = lazy_import("trafilatura")
 
 # Response kinds returned by ``_fetch_body``; controls extraction.
 _KIND_HTML = "html"  # raw HTML, needs trafilatura
-_KIND_REDDIT = "reddit_thread"  # Reddit JSON, needs comment formatter
-_KIND_REDDIT_LISTING = "reddit_listing"  # Reddit listing JSON, needs post formatter
 _KIND_MARKDOWN = "markdown"  # already-extracted markdown (reader proxy)
-_KIND_RSS = "rss"  # RSS 2.0 XML, needs feed formatter
-
+_KIND_RSS = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
 # HTTP statuses that trigger the bot-wall fallback ladder. Other
 # 4xx/5xx (404, 410, 451, 500, ...) are not signs of bot detection and
 # surface to the caller immediately.
@@ -269,9 +264,7 @@ async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
     """Extract tool result text from a response body.
 
     ``kind`` selects the post-processing path:
-      - ``_KIND_REDDIT``: parse as Reddit thread JSON.
-      - ``_KIND_REDDIT_LISTING``: parse as Reddit post-listing JSON.
-      - ``_KIND_RSS``: parse as RSS 2.0 XML and format as markdown.
+      - ``_KIND_RSS``: parse as RSS 2.0 / Atom XML and format as markdown.
       - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already
         rendered to markdown; running trafilatura on it would strip
         structure).
@@ -279,18 +272,7 @@ async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
         raw-content fallback when extraction returns nothing.
     """
     content = body.decode("utf-8", errors="replace")
-    if kind == _KIND_REDDIT:
-        try:
-            data = json.loads(content)
-        except (ValueError, TypeError):
-            return content[:TOOL_RESULT_MAX_CHARS]
-        return _format_reddit_json(data)
-    if kind == _KIND_REDDIT_LISTING:
-        try:
-            data = json.loads(content)
-        except (ValueError, TypeError):
-            return content[:TOOL_RESULT_MAX_CHARS]
-        return _format_reddit_listing(data)
+
     if kind == _KIND_RSS:
         return _format_rss(body)
     if kind == _KIND_MARKDOWN:
@@ -542,17 +524,17 @@ class HostAdapter(Protocol):
 
 
 class _RedditAdapter:
-    """Reddit threads via the JSON API; listings via JSON with feed fallback."""
+    """Reddit via the public RSS/Atom feed.
 
-    _THREAD_RE = re.compile(
-        r"^https?://(?:\w+\.)?reddit\.com/r/\w+/comments/\w+",
-    )
-    _LISTING_RE = re.compile(
-        r"^https?://(?:\w+\.)?reddit\.com/r/[^/?#]+/(?:new|hot|top|rising|controversial)?/?\.json(?:[?#].*)?$",
-    )
-    _FEED_RE = re.compile(
-        r"^https?://(?:\w+\.)?reddit\.com/r/[^/?#]+/(?:new|hot|top|rising|controversial)?/?\.rss(?:[?#].*)?$",
-    )
+    Reddit bot-walls every datacenter-IP request to its JSON API
+    (``.json``), HTML pages, and ``old.reddit.com`` with a 403 wall;
+    reader proxies are blocked too. The ``.rss`` feed still serves
+    anonymously: a thread feed carries top-level comments as Atom
+    entries, so we keep titles, bodies, and comment text. Every Reddit
+    URL is normalized to its ``.rss`` form and parsed by ``_format_rss``.
+    """
+
+    _THREAD_RE = re.compile(r"/r/[^/?#]+/comments/\w+")
 
     def matches(self, url: str) -> bool:
         """Match ``reddit.com`` and any subdomain (``old``, ``np``, ``new``)."""
@@ -560,62 +542,9 @@ class _RedditAdapter:
         return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
     async def fetch(self, url: str) -> tuple[bytes, str]:
-        """Fetch a Reddit URL via JSON, feed, or HTML fallback."""
-        if self._THREAD_RE.search(url):
-            json_url = re.sub(
-                r"^(https?://)(?:\w+\.)?reddit\.com/",
-                r"\1www.reddit.com/",
-                url.rstrip("/"),
-            )
-            if not json_url.endswith(".json"):
-                json_url += ".json"
-            body = await asyncio.to_thread(_safe_fetch, json_url)
-            return body, _KIND_REDDIT
-        if self._LISTING_RE.search(url):
-            try:
-                body = await asyncio.to_thread(_safe_fetch, url)
-                return body, _KIND_REDDIT_LISTING
-            except FetchError as e:
-                if e.status not in _FALLBACK_STATUSES:
-                    raise
-                feed = await asyncio.to_thread(_safe_fetch, self._feed_url(url))
-                return feed, _KIND_RSS
-        if self._FEED_RE.search(url):
-            body = await asyncio.to_thread(_safe_fetch, url)
-            return body, _KIND_RSS
-
-        try:
-            body = await asyncio.to_thread(_safe_fetch, url)
-        except FetchError as e:
-            if not _is_reddit_verification_page(e.body):
-                raise
-            return await self._fetch_old_reddit(url), _KIND_HTML
-        if _is_reddit_verification_page(body):
-            return await self._fetch_old_reddit(url), _KIND_HTML
-        return body, _KIND_HTML
-
-    @staticmethod
-    def _feed_url(raw_url: str) -> str:
-        """Return the Reddit feed URL equivalent of a JSON listing URL."""
-        parsed = urlparse(raw_url)
-        path = re.sub(r"/?\.json$", "/.rss", parsed.path)
-        return parsed._replace(path=path).geturl()
-
-    @staticmethod
-    async def _fetch_old_reddit(raw_url: str) -> bytes:
-        """Fetch a Reddit HTML page through the legacy host."""
-        url = re.sub(
-            r"^(https?://)(?:www\.)?reddit\.com/",
-            r"\1old.reddit.com/",
-            raw_url,
-        )
-        try:
-            return await asyncio.to_thread(_safe_fetch, url)
-        except (FetchError, ValueError, OSError) as e:
-            raise ValueError(
-                "Reddit returned a JavaScript verification page for "
-                f"{raw_url}; old Reddit fallback failed: {e}"
-            ) from e
+        """Fetch the Reddit feed (RSS), or richer JSON when configured."""
+        body = await asyncio.to_thread(_safe_fetch, _rss_url(url))
+        return body, _KIND_RSS
 
 
 # Google News front-page paths that route to the top-stories RSS feed.
@@ -718,107 +647,19 @@ _ADAPTERS: tuple[HostAdapter, ...] = (
 )
 
 
-def _is_reddit_verification_page(content: bytes) -> bool:
-    """Return whether Reddit returned its JavaScript verification page."""
-    text = content.decode("utf-8", errors="replace")
-    return "Reddit - Please wait for verification" in text and "js_challenge" in text
+def _rss_url(raw_url: str) -> str:
+    """Return the ``.rss`` feed URL for any Reddit URL.
 
-
-def _format_reddit_json(data: list[Any] | dict[str, Any]) -> str:
-    """Extract readable text from Reddit's JSON API response."""
-    listings = data if isinstance(data, list) else [data]
-    lines: list[str] = []
-    if listings and listings[0].get("kind") == "Listing":
-        posts = listings[0].get("data", {}).get("children", [])
-        if posts:
-            post = posts[0].get("data", {})
-            lines.append(f"# {post.get('title', '')}")
-            lines.append(
-                f"by u/{post.get('author', '[deleted]')} "
-                f"({post.get('score', 0)} points)\n"
-            )
-            if post.get("selftext", ""):
-                lines.append(str(post.get("selftext", "")))
-                lines.append("")
-    if len(listings) > 1 and listings[1].get("kind") == "Listing":
-        comments = listings[1].get("data", {}).get("children", [])
-        _format_reddit_comments(comments, lines, depth=0)
-    return "\n".join(lines)
-
-
-def _format_reddit_listing(data: list[Any] | dict[str, Any]) -> str:
-    """Extract readable text from Reddit listing JSON."""
-    listing_obj: object = data[0] if isinstance(data, list) and data else data
-    if not isinstance(listing_obj, dict):
-        return ""
-    listing = cast(dict[str, object], listing_obj)
-    listing_data_obj = listing.get("data", {})
-    if not isinstance(listing_data_obj, dict):
-        return ""
-    listing_data = cast(dict[str, object], listing_data_obj)
-    children_obj = listing_data.get("children", [])
-    if not isinstance(children_obj, list):
-        return ""
-    children = cast(list[object], children_obj)
-    lines = ["# Reddit listing", ""]
-    for idx, child_obj in enumerate(children, start=1):
-        if not isinstance(child_obj, dict):
-            continue
-        child = cast(dict[str, object], child_obj)
-        if child.get("kind") != "t3":
-            continue
-        post_obj = child.get("data", {})
-        if not isinstance(post_obj, dict):
-            continue
-        post = cast(dict[str, object], post_obj)
-        created_raw = post.get("created_utc", 0)
-        if not isinstance(created_raw, (int, float, str)):
-            created_raw = 0
-        created = datetime.fromtimestamp(float(created_raw), UTC)
-        permalink = str(post.get("permalink", ""))
-        reddit_url = f"https://www.reddit.com{permalink}" if permalink else ""
-        lines.append(f"{idx}. {post.get('title', '')}")
-        lines.append(
-            f"   - u/{post.get('author', '[deleted]')} | "
-            f"{post.get('score', 0)} points | "
-            f"{post.get('num_comments', 0)} comments | {created.isoformat()}"
-        )
-        flair = post.get("link_flair_text")
-        if flair:
-            lines.append(f"   - flair: {flair}")
-        if reddit_url:
-            lines.append(f"   - reddit: {reddit_url}")
-        outbound = str(post.get("url", ""))
-        if outbound and outbound != reddit_url:
-            lines.append(f"   - link: {outbound}")
-        selftext = " ".join(str(post.get("selftext", "")).split())
-        if selftext:
-            lines.append(f"   - excerpt: {selftext[:500]}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
-
-
-def _format_reddit_comments(children: list[Any], lines: list[str], depth: int) -> None:
-    """Append formatted Reddit comment JSON to ``lines``."""
-    indent = "  " * depth
-    for child in children:
-        if child.get("kind") != "t1":
-            continue
-        comment = child.get("data", {})
-        lines.append(
-            f"{indent}**u/{comment.get('author', '[deleted]')}** "
-            f"({comment.get('score', 0)} pts):"
-        )
-        lines.extend(
-            f"{indent}  {body_line}"
-            for body_line in comment.get("body", "").splitlines()
-        )
-        lines.append("")
-        replies = comment.get("replies")
-        if isinstance(replies, dict):
-            replies_dict = cast(dict[str, Any], replies)
-            reply_children = replies_dict.get("data", {}).get("children", [])
-            _format_reddit_comments(reply_children, lines, depth + 1)
+    Rewrites the path to end in ``.rss`` (dropping a trailing ``.json``
+    if present) while preserving the query string, which carries feed
+    options like ``?limit=100`` and ``?sort=top``. URLs whose path
+    already ends in ``.rss`` are returned unchanged.
+    """
+    parsed = urlparse(raw_url)
+    if parsed.path.endswith(".rss"):
+        return raw_url
+    path = re.sub(r"/?\.json$", "", parsed.path).rstrip("/")
+    return parsed._replace(path=f"{path}/.rss").geturl()
 
 
 # Matches one ``<li>`` entry in a Google News RSS cluster description.
