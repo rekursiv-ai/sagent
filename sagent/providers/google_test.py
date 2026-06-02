@@ -23,6 +23,7 @@ from sagent.types.model import (
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
     ToolCall,
@@ -127,7 +128,7 @@ def test_user_after_tool_results_coalesces_into_same_wire_content() -> None:
     asst = AssistantMessage(
         tool_calls=(ToolCall(id="c1", name="MyTool", args={}),),
     )
-    tool_result = ToolResult(call_id="c1", content="[detached]")
+    tool_result = ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER)
     user_redirect = UserMessage(text="actually do something else")
     body = _build_request(_make_request([asst, tool_result, user_redirect]))
     contents = cast(list[MutableJSON], body["contents"])

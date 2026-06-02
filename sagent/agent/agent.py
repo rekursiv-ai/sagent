@@ -2403,7 +2403,7 @@ class _AgentTool:
             )
             return types.runtime.ToolResult(
                 call_id=call_id,
-                content=f"[Running in background: {self._inner.name}]",
+                content=f"{types.runtime.RUNNING_PREFIX}{self._inner.name}]",
             )
         result = await self._inner.run(clean_args)
         if not result.call_id:
@@ -2503,7 +2503,7 @@ class _AgentTool:
                 types.runtime.DetachedResult(
                     result=types.runtime.ToolResult(
                         call_id=call_id,
-                        content="[cancelled]",
+                        content=types.runtime.CANCELLED_PLACEHOLDER,
                         is_error=True,
                     ),
                 ),

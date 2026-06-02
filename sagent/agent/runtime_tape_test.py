@@ -19,6 +19,7 @@ from sagent.agent.context import (
 )
 from sagent.agent.runtime import AgentRuntime, Model
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
     ToolCall,
@@ -210,7 +211,7 @@ def test_append_splice_detached_splice_pattern() -> None:
         AssistantMessage(tool_calls=(ToolCall(id="c1", name="t", args={}),)),
     )
     placeholder_ref = runtime.append_history(
-        ToolResult(call_id="c1", content="[detached]"),
+        ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER),
     )
     real_result = ToolResult(call_id="c1", content="real")
     runtime.append_splice(

@@ -4515,7 +4515,7 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     spliced = a.runtime._splice_detached_result(detached[0].result)
 
     assert spliced is not None
-    assert spliced.content == "[cancelled]"
+    assert spliced.content == types.runtime.CANCELLED_PLACEHOLDER
     assert spliced.is_error
     assert not any(
         isinstance(entry, types.runtime.ToolResult)
@@ -4712,7 +4712,7 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
         for entry in a.history
         if isinstance(entry, types.runtime.UserMessage)
     ]
-    assert not any("[cancelled]" in text for text in user_texts)
+    assert not any(types.runtime.CANCELLED_PLACEHOLDER in text for text in user_texts)
     assert not any(text.startswith("[Tool ") for text in user_texts)
 
 

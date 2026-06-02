@@ -36,6 +36,7 @@ from sagent.agent.session_io import (
 from sagent.tools.core import ReadCacheEntry, ToolState
 from sagent.types.model import ModelRequest, ModelResponse, Pricing
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AgentSendMessage,
     AssistantMessage,
     BytesMessage,
@@ -225,7 +226,7 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
         text="",
         tool_calls=(ToolCall(id="toolu_bash_1", name="Bash", args={}),),
     )
-    original = ToolResult(call_id="toolu_bash_1", content="[detached]")
+    original = ToolResult(call_id="toolu_bash_1", content=DETACHED_PLACEHOLDER)
     append_session(
         session_file,
         meta=meta.serialize(),

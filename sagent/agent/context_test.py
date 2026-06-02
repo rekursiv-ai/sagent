@@ -21,6 +21,7 @@ from sagent.agent.context import (
     validate_context,
 )
 from sagent.types.runtime import (
+    DETACHED_PLACEHOLDER,
     AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
@@ -560,7 +561,7 @@ def test_detached_splice_keeps_tool_pairing_valid() -> None:
     tape = [
         _hr(0, _user("go")),
         _hr(1, _assistant(tool_calls=(_tool_call("t1"),))),
-        _hr(2, _tool_result("t1", content="[detached]")),
+        _hr(2, _tool_result("t1", content=DETACHED_PLACEHOLDER)),
         _splice(
             3,
             mask=((_ref(2), _ref(2)),),

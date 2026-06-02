@@ -30,6 +30,9 @@ from sagent.lib.json import JSON, json_freeze
 from sagent.lib.lazy_import import lazy_import
 from sagent.tools.core import current_agent_var, load_tool_description
 from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
+    DETACHED_PLACEHOLDER,
+    RUNNING_PREFIX,
     AssistantMessage,
     DetachedResult,
     ModelContextEvent,
@@ -338,7 +341,7 @@ def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
 
 def _is_background_placeholder(content: str) -> bool:
     """Return true for background placeholders awaiting detached content."""
-    return content == "[detached]" or content.startswith("[Running in background:")
+    return content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX)
 
 
 async def _await_detached(
@@ -366,7 +369,9 @@ async def _await_detached(
             if event is not None:
                 return event
             if job.task.cancelled():
-                return ToolResult(call_id=call_id, content="[cancelled]", is_error=True)
+                return ToolResult(
+                    call_id=call_id, content=CANCELLED_PLACEHOLDER, is_error=True
+                )
             raise
         except Exception as exc:  # noqa: BLE001
             if fut.done():
