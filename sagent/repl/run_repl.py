@@ -340,23 +340,25 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
 
     """
     current = agent.thinking_state or _infer_thinking_state(agent)
+    if not command:
+        valid = ", ".join(agent.model.valid_thinking_states)
+        _write(printer, f"[/thinking] {current}\n[/thinking] options: {valid}")
+        return
     try:
         state = resolve_thinking_command(command, current)
     except ValueError as exc:
         _write(printer, f"[/thinking] {exc}")
         return
-    if state != "off-hide" and not agent.model.supports_thinking:
+    valid = agent.model.valid_thinking_states
+    if state not in valid:
+        options = ", ".join(valid)
         _write(
             printer,
-            f"[/thinking] model {agent.model.model_id!r} does not support thinking",
+            f"[/thinking] {state} not supported by {agent.model.model_id!r};"
+            f" options: {options}",
         )
         return
     supports_redact = _provider_accepts_arg(agent, "redact_thinking")
-    if state == "redact-hide" and not supports_redact:
-        _write(
-            printer, "[/thinking] current provider does not support redacted thinking"
-        )
-        return
     if agent.thinking_state == state and (
         supports_redact or "redact_thinking" not in agent.provider_args
     ):
@@ -386,6 +388,37 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
             agent.set_provider_arg("redact_thinking", old_redact)
         return
     _write(printer, f"[/thinking] {state}")
+
+
+def do_switch_effort(agent: Agent, value: str, printer: Printer | None) -> None:
+    """Render an ``/effort`` slash command against agent/model state.
+
+    Bare ``/effort`` (empty ``value``) prints the current effort plus the
+    model's valid options. A non-empty value sets the effort; ``off`` /
+    ``unset`` clears it. ``none`` is NOT a clear alias -- some providers
+    (OpenAI, self-hosted) accept a literal ``none`` effort, so clearing
+    uses unambiguous words only. Invalid values error with the option
+    list -- a rejected request, never a silent no-op.
+
+    Args:
+      agent: Agent to mutate.
+      value: Effort value, ``""`` for status, or a clear alias.
+      printer: Optional sink for status messages.
+
+    """
+    valid = agent.model.valid_efforts
+    if not value:
+        current = agent.effort or "unset"
+        options = ", ".join(valid) or "(none)"
+        _write(printer, f"[/effort] {current}\n[/effort] options: {options}")
+        return
+    target = None if value in ("off", "unset") else value
+    try:
+        agent.effort = target
+    except ValueError as exc:
+        _write(printer, f"[/effort] {exc}")
+        return
+    _write(printer, f"[/effort] {agent.effort or 'unset'}")
 
 
 def _infer_thinking_state(agent: Agent) -> ThinkingState:

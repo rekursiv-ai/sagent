@@ -16,6 +16,7 @@ import sys
 
 import pytest
 
+from sagent import thinking
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
@@ -38,6 +39,7 @@ from sagent.repl.run_repl import (
     _parse_model_args,
     _subagent_phase,
     do_login,
+    do_switch_effort,
     do_switch_model,
     do_switch_thinking,
     format_tasks,
@@ -364,7 +366,18 @@ def test_provider_switch_preserves_current_model_when_new_provider_knows_it() ->
 class _FakeModel:
     model_id: str = "claude-opus-4-7"
     supports_thinking: bool = True
+    supports_redaction: bool = True
+    valid_efforts: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
     _provider: object | None = None
+
+    @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        return thinking.valid_thinking_states(
+            thinking.ThinkingCapability(
+                supports_thinking=self.supports_thinking,
+                supports_redaction=self.supports_redaction,
+            ),
+        )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -411,6 +424,18 @@ class _FakeAgent:
     show_thinking: bool = True
     provider_args: dict[str, object] = field(default_factory=dict)
     background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+    _effort: str | None = None
+
+    @property
+    def effort(self) -> str | None:
+        return self._effort
+
+    @effort.setter
+    def effort(self, value: str | None) -> None:
+        if value is not None and value not in self.model.valid_efforts:
+            quoted = ", ".join(repr(e) for e in self.model.valid_efforts)
+            raise ValueError(f"effort must be one of {quoted}, got {value!r}")
+        self._effort = value
 
     def set_thinking_state(self, state: str) -> None:
         self.thinking_state = state
@@ -672,7 +697,8 @@ def test_do_switch_thinking_rejects_models_without_thinking() -> None:
     agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert "does not support thinking" in printer.slash_blocks[0]
+    assert "not supported" in printer.slash_blocks[0]
+    assert "off-hide" in printer.slash_blocks[0]
     assert agent.change_model_calls == []
 
 
@@ -708,11 +734,13 @@ def test_do_switch_thinking_skips_redact_arg_without_provider_support() -> None:
 
 def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro")
+        model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
+        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "redact", printer)
-    assert "does not support redacted thinking" in printer.slash_blocks[0]
+    assert "not supported" in printer.slash_blocks[0]
+    assert "redact-hide" not in printer.slash_blocks[0].split("options:")[1]
     assert agent.change_model_calls == []
 
 
@@ -734,6 +762,84 @@ def test_do_switch_thinking_rebuild_failure_preserves_state() -> None:
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is True
     assert "rebuild failed" in printer.slash_blocks[0]
+
+
+def test_do_switch_effort_bare_lists_current_and_options() -> None:
+    """Bare ``/effort`` prints current effort plus the model's valid options."""
+    agent = _FakeAgent()
+    printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "", printer)
+    block = printer.slash_blocks[0]
+    assert "unset" in block
+    assert "options:" in block
+    assert "high" in block
+
+
+def test_do_switch_effort_sets_value() -> None:
+
+    agent = _FakeAgent()
+    printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "high", printer)
+    assert agent.effort == "high"
+    assert "high" in printer.slash_blocks[0]
+
+
+def test_do_switch_effort_rejects_invalid_value() -> None:
+
+    agent = _FakeAgent()
+    printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "bogus", printer)
+    assert agent.effort is None
+    assert "must be one of" in printer.slash_blocks[0]
+
+
+def test_do_switch_effort_clears_with_alias() -> None:
+    agent = _FakeAgent(_effort="high")
+    printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "off", printer)
+    assert agent.effort is None
+    assert "unset" in printer.slash_blocks[0]
+
+
+def test_do_switch_effort_none_sets_literal_not_clears() -> None:
+    """``none`` is a real effort value on some providers, not a clear alias."""
+    agent = _FakeAgent(
+        model=_FakeModel(valid_efforts=("none", "low", "high")), _effort="high"
+    )
+    printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "none", printer)
+    assert agent.effort == "none"
+    assert "none" in printer.slash_blocks[0]
+
+
+def test_do_switch_thinking_bare_lists_state_and_options() -> None:
+    """Bare ``/thinking`` prints current state plus provider's valid options."""
+    agent = _FakeAgent(
+        model_spec=ModelSpec(
+            provider="Anthropic", auth="env", model_id="claude-opus-4-7"
+        ),
+        thinking_state="adaptive-hide",
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "", printer)
+    block = printer.slash_blocks[0]
+    assert "adaptive-hide" in block
+    assert "options:" in block
+    assert "redact-hide" in block
+    assert agent.change_model_calls == []
+
+
+def test_do_switch_thinking_bare_options_provider_specific() -> None:
+    """A no-redaction provider omits ``redact-hide`` from the listed options."""
+    agent = _FakeAgent(
+        model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
+        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
+    )
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "", printer)
+    options = printer.slash_blocks[0].split("options:")[1]
+    assert "adaptive-show" in options
+    assert "redact-hide" not in options
 
 
 def test_do_switch_thinking_show_errors_from_redact() -> None:

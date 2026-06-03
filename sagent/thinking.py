@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, assert_never, cast
 
 
@@ -45,6 +46,85 @@ THINKING_COMMANDS: tuple[ThinkingCommand, ...] = (
     "show",
     "hide",
 )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ThinkingCapability:
+    """A provider/model's thinking capability, orthogonal bits.
+
+    The valid ``ThinkingState`` set is derived from these bits via
+    :func:`valid_thinking_states`; providers declare the capability
+    rather than enumerating states, so the state set can never drift
+    from the wire behavior.
+
+    Attributes:
+      supports_thinking: Whether the model can reason at all. When
+          ``False``, the only valid state is ``off-hide``.
+      readable_text: Whether requested thinking returns readable text to
+          the client. ``False`` for models that return a signed but empty
+          thinking block -- the model reasons, but plaintext is never
+          delivered (measured: opus-4-8) -- making every ``-show`` state
+          unsatisfiable and thus invalid.
+      supports_adaptive_mode: Whether the model accepts the ``adaptive``
+          thinking request mode (the ``adaptive-*`` states, and
+          ``redact-hide`` which also requests ``adaptive``). ``False`` for
+          the 4-5 generation, which rejects ``thinking.type=adaptive``
+          with HTTP 400 and requires ``enabled``.
+      supports_enabled_mode: Whether the model accepts the ``enabled``
+          thinking request mode (the ``on-*`` states). ``False`` for
+          adaptive-only models that reject ``thinking.type=enabled`` with
+          HTTP 400 (measured: opus-4-8, opus-4-7), making ``on-show`` /
+          ``on-hide`` invalid.
+      supports_redaction: Whether the provider exposes an explicit
+          redacted-thinking mode (the ``redact-hide`` state). Only the
+          Anthropic API transport advertises this; it also requires
+          ``supports_adaptive_mode`` since redaction rides ``adaptive``.
+
+    """
+
+    supports_thinking: bool
+    readable_text: bool = True
+    supports_adaptive_mode: bool = True
+    supports_enabled_mode: bool = True
+    supports_redaction: bool = False
+
+
+def valid_thinking_states(capability: ThinkingCapability) -> tuple[ThinkingState, ...]:
+    """Return the ``ThinkingState`` values valid for ``capability``.
+
+    ``off-hide`` is always valid (thinking off is universal). The
+    ``adaptive-*`` states require ``adaptive`` mode; the ``on-*`` states
+    require ``enabled`` mode; ``redact-hide`` requires both server-side
+    redaction and ``adaptive`` mode (redaction rides ``adaptive``). A
+    ``-show`` state is valid only when the model returns readable text,
+    since a state that can never render is a failed request, not a no-op.
+
+    Args:
+      capability: The provider/model thinking capability bits.
+
+    Returns:
+      states: Valid canonical states, in canonical order.
+
+    """
+    if not capability.supports_thinking:
+        return ("off-hide",)
+    states: list[ThinkingState] = []
+    for state in THINKING_STATES:
+        if state == "off-hide":
+            states.append(state)
+            continue
+        if state == "redact-hide":
+            if capability.supports_redaction and capability.supports_adaptive_mode:
+                states.append(state)
+            continue
+        if state.startswith("adaptive-") and not capability.supports_adaptive_mode:
+            continue
+        if state.startswith("on-") and not capability.supports_enabled_mode:
+            continue
+        if state.endswith("-show") and not capability.readable_text:
+            continue
+        states.append(state)
+    return tuple(states)
 
 
 def resolve_thinking_command(

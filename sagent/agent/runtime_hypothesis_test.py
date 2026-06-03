@@ -3,8 +3,10 @@
 Hypothesis emits random message sequences and asserts structural
 properties that should hold across every input shape. Targets pure
 functions (no async, no state): ``_label_agent_sends``,
-``_coalesce_adjacent_users``, ``materialize_messages``, and
-``_last_assistant_result``. Async runtime state-machine fuzzing lives
+``_coalesce_adjacent_users``, ``materialize_messages``,
+``_last_assistant_result``, and ``_sanitize_for_send`` (the runtime's
+tool-pairing rescue path -- the executable form of the ToolCall ->
+ToolResult wire invariant). Async runtime state-machine fuzzing lives
 elsewhere; the runtime's async coupling is a poor fit for hypothesis.
 
 Each test below would have caught at least one bug we've fixed this
@@ -18,6 +20,7 @@ session:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import cast
 
 from hypothesis import given, settings
@@ -31,6 +34,12 @@ from hypothesis.strategies import (
     text,
 )
 
+from sagent.agent.context import (
+    InvalidContextError,
+    validate_context,
+    wire_role,
+)
+from sagent.agent.runtime import _sanitize_for_send
 from sagent.request_materialization import (
     _coalesce_adjacent_users,
     _label_agent_sends,
@@ -303,6 +312,216 @@ def test_last_assistant_result_picks_most_recent_send(
     assert r.content == expected, (
         f"expected last AgentSend's content {expected!r}; got {r.content!r}"
     )
+
+
+# -- _sanitize_for_send: the ToolCall -> ToolResult wire invariant ----------
+#
+# ``_sanitize_for_send`` is the runtime's rescue path: it takes any history
+# and returns a tool-pairing-correct sequence. The invariant it enforces --
+# "every ``tool_use`` gets exactly one ``tool_result``; no orphan results; no
+# duplicates; no user turn while a call is pending" -- is the load-bearing
+# wire contract behind every detached / mimicked / compacted edge case. These
+# properties make that invariant executable across arbitrary input shapes,
+# so a future change to the rescue path that silently strands a call is
+# caught by a counterexample rather than a live HTTP 400.
+
+
+def _tool_pairing_violation(entries: Sequence[ModelContextEvent]) -> str | None:
+    """Return a description of the first tool-pairing violation, or ``None``.
+
+    Independent re-implementation of the pairing half of
+    :func:`validate_context` (no role-alternation check), so the property
+    asserts against a second witness rather than the function under test's
+    own logic.
+    """
+    pending: set[str] = set()
+    seen: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, AssistantMessage):
+            if pending:
+                return f"new assistant turn with unanswered calls: {sorted(pending)}"
+            pending = {tc.id for tc in entry.tool_calls}
+        elif isinstance(entry, ToolResult):
+            if entry.call_id in seen:
+                return f"duplicate ToolResult for {entry.call_id!r}"
+            if entry.call_id not in pending:
+                return f"orphan ToolResult for {entry.call_id!r}"
+            pending.discard(entry.call_id)
+            seen.add(entry.call_id)
+        elif pending:
+            return f"user turn while calls pending: {sorted(pending)}"
+    if pending:
+        return f"unanswered calls at end: {sorted(pending)}"
+    return None
+
+
+@composite
+def _unique_id_history(draw: DrawFn) -> list[ModelContextEvent]:
+    """Random history with GLOBALLY-UNIQUE tool-call ids, like real tape.
+
+    The runtime mints a fresh id per ``ToolCall``; an id is never reused
+    across two ``AssistantMessage`` turns. The generic ``_message_history``
+    strategy can collide ids (``f"tc-{i}-{rand}"``), which would let the same
+    id be "unpaired" twice and make ``_sanitize_for_send`` synthesize two
+    ``[interrupted]`` results for it -- a duplicate that the real id scheme
+    makes impossible. This strategy re-stamps every call id from a single
+    counter so the pairing properties test the input shape the runtime
+    actually produces. Tool results, orphans, and unpaired calls are all
+    still emitted (the rescue path's job) -- only id-collision is excluded.
+    """
+    counter = 0
+    history: list[ModelContextEvent] = []
+    pending: list[str] = []
+    n = draw(integers(min_value=0, max_value=12))
+    for _ in range(n):
+        choice = draw(sampled_from(["user", "agent", "assistant", "tool_result"]))
+        if choice == "user":
+            history.append(draw(_user_message()))
+        elif choice == "agent":
+            history.append(draw(_agent_send_message()))
+        elif choice == "assistant":
+            am = draw(_assistant_message())
+            calls = tuple(
+                ToolCall(id=f"u{counter + i}", name=tc.name, args=tc.args)
+                for i, tc in enumerate(am.tool_calls)
+            )
+            counter += len(calls)
+            history.append(AssistantMessage(text=am.text, tool_calls=calls))
+            pending.extend(tc.id for tc in calls)
+        elif choice == "tool_result" and pending:
+            history.append(ToolResult(call_id=pending.pop(0), content=draw(_TEXT)))
+    # Emit a few genuine orphan results (ids never requested) so the rescue
+    # path's orphan-drop is exercised; these are distinct from id-collision.
+    if draw(booleans()):
+        history.append(ToolResult(call_id=f"orphan{counter}", content=draw(_TEXT)))
+    return history
+
+
+@composite
+def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
+    """Random history that never emits two consecutive same-wire-role turns.
+
+    Mirrors the real tape the runtime builds (it never appends
+    assistant-after-assistant or user-after-user). Tool results always
+    immediately follow their declaring assistant, before the next turn --
+    the shape a wire-valid context requires -- so ``_sanitize_for_send`` on
+    this input should produce fully :func:`validate_context`-clean output,
+    not merely pairing-clean output.
+    """
+    n = draw(integers(min_value=0, max_value=10))
+    history: list[ModelContextEvent] = []
+    prev_role: str | None = None
+    counter = 0
+    for _ in range(n):
+        want_user = draw(booleans())
+        if prev_role != "user" and want_user:
+            history.append(
+                draw(_user_message())
+                if draw(booleans())
+                else draw(_agent_send_message())
+            )
+            prev_role = "user"
+        elif prev_role != "assistant":
+            am = draw(_assistant_message())
+            # Re-stamp call ids unique across the whole history.
+            calls = tuple(
+                ToolCall(id=f"c{counter + i}", name=tc.name, args=tc.args)
+                for i, tc in enumerate(am.tool_calls)
+            )
+            counter += len(calls)
+            am = AssistantMessage(text=am.text, tool_calls=calls)
+            history.append(am)
+            # Answer every call immediately (wire-valid pairing); randomly
+            # drop some so the rescue path has orphans/unpaired to repair.
+            for tc in calls:
+                # Not list.extend: each append is gated on a fresh per-call
+                # ``draw`` (drop-or-keep) and a fresh ``draw`` for content.
+                if draw(booleans()):
+                    history.append(  # noqa: PERF401
+                        ToolResult(call_id=tc.id, content=draw(_TEXT))
+                    )
+            prev_role = None if calls else "assistant"
+    return history
+
+
+@settings(max_examples=300, deadline=None)
+@given(_unique_id_history())
+def test_sanitize_output_satisfies_tool_pairing(
+    history: list[ModelContextEvent],
+) -> None:
+    """``_sanitize_for_send`` output is tool-pairing-correct for ANY input.
+
+    The core ToolCall -> ToolResult invariant: regardless of orphans,
+    duplicates, or unpaired calls in the input, the sanitized output has
+    every ``tool_use`` answered exactly once, no orphan results, and no
+    user turn interleaved with pending calls.
+    """
+    out = _sanitize_for_send(history)
+    violation = _tool_pairing_violation(out)
+    assert violation is None, (
+        f"sanitized output violates pairing: {violation}\nout={out!r}"
+    )
+
+
+@settings(max_examples=300, deadline=None)
+@given(_unique_id_history())
+def test_sanitize_is_idempotent(history: list[ModelContextEvent]) -> None:
+    """Sanitizing twice equals sanitizing once.
+
+    A repair pass that is not a fixed point would keep mutating already-valid
+    context (e.g. re-synthesizing ``[interrupted]`` results), drifting history
+    on every gate iteration.
+    """
+    once = _sanitize_for_send(history)
+    twice = _sanitize_for_send(once)
+    assert once == twice, f"not idempotent:\nonce={once!r}\ntwice={twice!r}"
+
+
+@settings(max_examples=300, deadline=None)
+@given(_unique_id_history())
+def test_sanitize_never_invents_call_ids(
+    history: list[ModelContextEvent],
+) -> None:
+    """Every ToolResult in the output answers a call id present in the input.
+
+    The rescue path may synthesize ``[interrupted]`` results for unpaired
+    *input* calls, but it must never fabricate a result for a call id that
+    was never requested -- that would be an orphan the provider rejects.
+    """
+    input_call_ids = {
+        tc.id for m in history if isinstance(m, AssistantMessage) for tc in m.tool_calls
+    }
+    out = _sanitize_for_send(history)
+    for entry in out:
+        if isinstance(entry, ToolResult):
+            assert entry.call_id in input_call_ids, (
+                f"sanitize invented a result for unknown call id {entry.call_id!r}"
+            )
+
+
+@settings(max_examples=300, deadline=None)
+@given(_alternating_history())
+def test_sanitize_of_alternating_history_fully_validates(
+    history: list[ModelContextEvent],
+) -> None:
+    """On wire-alternation-respecting input, output passes ``validate_context``.
+
+    ``_sanitize_for_send`` repairs tool pairing but NOT assistant/user role
+    alternation (the runtime maintains that by construction, never appending
+    two same-role turns). So full ``validate_context`` cleanliness is asserted
+    only for input that already respects alternation -- the shape the runtime
+    actually produces. This pins that the rescue path closes every pairing
+    gap such input can contain.
+    """
+    out = _sanitize_for_send(history)
+    try:
+        validate_context(out)
+    except InvalidContextError as exc:  # pragma: no cover - failure path
+        roles = [wire_role(m) for m in out]
+        raise AssertionError(
+            f"sanitized alternating history failed validate_context: {exc}\n"
+            f"roles={roles}\nout={out!r}"
+        ) from exc
 
 
 if __name__ == "__main__":

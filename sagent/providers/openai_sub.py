@@ -793,9 +793,16 @@ class _OpenAISubModel(_OpenAIModel):
         # Responses API knobs, including ``temperature`` and
         # ``max_output_tokens``.
         reasoning_effort = self._reasoning_effort(request)
+        # The Responses API only streams reasoning-text deltas when a
+        # ``summary`` is requested; without it the model reasons silently
+        # and ``on_thinking`` never fires. Request the auto summary whenever
+        # thinking is on so the reasoning surface is actually populated.
+        # (OpenAI never returns raw reasoning, only summaries; ``auto`` is
+        # the broadest tier and is chosen by the model.)
         reasoning: oai_shared.Reasoning | openai.Omit | None = (
             oai_shared.Reasoning(
                 effort=cast("oai_shared.ReasoningEffort", reasoning_effort),
+                summary="auto",
             )
             if reasoning_effort is not None
             else openai.omit

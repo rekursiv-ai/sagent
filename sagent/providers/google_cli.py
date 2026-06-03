@@ -52,6 +52,7 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -294,9 +295,21 @@ class _GoogleCLIModel:
         return self._profile.supports_thinking
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Gemini CLI surfaces readable thought chunks; no redaction mode."""
+        return valid_thinking_states(
+            ThinkingCapability(supports_thinking=self.supports_thinking),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """``False``: ACP has no effort knob on ``session/prompt``."""
         return False
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """No effort knob on the ACP transport."""
+        return ()
 
     @property
     def supports_cache_control(self) -> bool:

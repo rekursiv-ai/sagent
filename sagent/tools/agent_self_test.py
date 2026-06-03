@@ -696,6 +696,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
     @dataclass(slots=True, kw_only=True)
     class EffortStubModel(StubProviderModel):
         supports_effort: bool = True
+        valid_efforts: tuple[str, ...] = ("low", "medium", "high")
 
     agent = Agent(
         model=EffortStubModel(model_id="rich-stub"),

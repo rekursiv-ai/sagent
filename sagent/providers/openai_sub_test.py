@@ -686,6 +686,52 @@ async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> No
     assert effort == "high"
 
 
+async def _reasoning_for(request: ModelRequest) -> object:
+    """Return the ``reasoning`` object passed to ``responses.create``."""
+    provider = _make_provider()
+    sdk = MagicMock()
+    sdk.responses = MagicMock()
+    sdk.responses.create = AsyncMock(
+        return_value=_DelayedStream([_CompletedEvent()], delay_sec=0.0)
+    )
+    with (
+        patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
+        patch(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        ),
+    ):
+        model = provider.model("gpt-5.5")
+        await model.stream(request)
+    await_args = sdk.responses.create.await_args
+    assert await_args is not None
+    return await_args.kwargs["reasoning"]
+
+
+@pytest.mark.anyio
+async def test_subscription_stream_requests_reasoning_summary_when_thinking() -> None:
+    """Thinking on must request a reasoning summary, else no text streams.
+
+    The OpenAI Responses API only emits reasoning-text deltas when
+    ``reasoning.summary`` is set; without it the model reasons silently
+    and ``on_thinking`` never fires. Requesting thinking must therefore
+    set ``summary`` so the reasoning surface is actually populated.
+    """
+    reasoning = await _reasoning_for(
+        ModelRequest(messages=[UserMessage(text="hi")], thinking="adaptive")
+    )
+    assert getattr(reasoning, "summary", None) == "auto"
+
+
+@pytest.mark.anyio
+async def test_subscription_stream_omits_reasoning_summary_without_thinking() -> None:
+    """No thinking requested -> no reasoning object (and no summary)."""
+    reasoning = await _reasoning_for(
+        ModelRequest(messages=[UserMessage(text="hi")], thinking=None)
+    )
+    assert getattr(reasoning, "summary", None) is None
+
+
 class TestHandleAuthError:
     """After ``/login`` writes fresh creds, the live provider must reload.
 

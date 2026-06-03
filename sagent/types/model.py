@@ -333,8 +333,33 @@ class Model(Protocol):
         ...
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Accepted ``/thinking`` states for this provider/model.
+
+        Provider-specific, derived from the model's thinking capability
+        (see :func:`sagent.thinking.valid_thinking_states`).
+        Always contains ``off-hide``. Excludes ``-show`` states when the
+        provider forces server-side redaction (no readable text), and
+        excludes ``redact-hide`` when the provider exposes no redaction
+        mode. A state outside this set is a rejected request, not a no-op.
+        """
+        ...
+
+    @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
+        ...
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """Accepted ``effort`` values; empty when unsupported.
+
+        Provider-specific. Anthropic exposes ``low`` / ``medium`` /
+        ``high`` / ``xhigh`` / ``max``; OpenAI reasoning models and Google
+        expose their own sets. An empty tuple means the model takes no
+        effort hint (``supports_effort`` is ``False``). A value outside
+        this set is a rejected request, not a silent no-op.
+        """
         ...
 
     @property

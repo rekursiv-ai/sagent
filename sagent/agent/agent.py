@@ -476,17 +476,25 @@ class Agent:
 
     @effort.setter
     def effort(self, value: str | None) -> None:
-        """Set the provider effort hint; rejected if the model lacks support.
+        """Set the provider effort hint; rejected when invalid for the model.
 
         Args:
           value: Effort hint string, or ``None`` to clear.
 
         Raises:
-          ValueError: If the model does not support effort hints.
+          ValueError: If the model takes no effort hint, or ``value`` is
+              not one of the model's accepted efforts.
 
         """
-        if value is not None and not self.model.supports_effort:
-            raise ValueError(f"Model {self.model.model_id!r} does not support effort.")
+        if value is not None:
+            valid = self.model.valid_efforts
+            if not valid:
+                raise ValueError(
+                    f"Model {self.model.model_id!r} does not support effort.",
+                )
+            if value not in valid:
+                quoted = ", ".join(repr(e) for e in valid)
+                raise ValueError(f"effort must be one of {quoted}, got {value!r}")
         self._effort = value
 
     @property

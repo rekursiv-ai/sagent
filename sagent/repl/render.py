@@ -623,6 +623,7 @@ sagent commands
   /model    [args]            switch model
   /provider <name>            switch provider
   /thinking <state|partial>   adaptive/on/off/redact/show/hide
+  /effort [level]             show or set effort; bare lists options
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)

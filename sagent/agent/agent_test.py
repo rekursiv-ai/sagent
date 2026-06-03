@@ -104,6 +104,7 @@ class StubModel:
     supports_streaming: bool = True
     supports_thinking: bool = False
     supports_effort: bool = False
+    valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()
@@ -114,6 +115,14 @@ class StubModel:
     max_image_bytes: int = 5 * 1024 * 1024
     responses: list[types.runtime.AssistantMessage] = field(default_factory=list)
     received: list[types.model.ModelRequest] = field(default_factory=list)
+
+    @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        return (
+            ("adaptive-hide", "on-hide", "off-hide")
+            if self.supports_thinking
+            else ("off-hide",)
+        )
 
     @property
     def pricing(self) -> types.model.Pricing:
@@ -813,10 +822,17 @@ def test_effort_setter_rejects_when_model_lacks_support() -> None:
 
 
 def test_effort_setter_accepts_when_model_supports() -> None:
-    model = StubModel(supports_effort=True)
+    model = StubModel(supports_effort=True, valid_efforts=("low", "medium", "high"))
     a = _build_agent(model=model)
     a.effort = "medium"
     assert a.effort == "medium"
+
+
+def test_effort_setter_rejects_value_outside_valid_efforts() -> None:
+    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
+    a = _build_agent(model=model)
+    with pytest.raises(ValueError, match="effort must be one of"):
+        a.effort = "medium"
 
 
 def test_effort_setter_accepts_none_unconditionally() -> None:
@@ -3510,7 +3526,9 @@ class _OverflowModel:
     max_response_tokens: int = 1_024
     supports_streaming: bool = True
     supports_thinking: bool = False
+    valid_thinking_states: tuple[str, ...] = ("off-hide",)
     supports_effort: bool = False
+    valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()
@@ -3588,7 +3606,9 @@ class _RawOverflowModel:
     max_response_tokens: int = 1_024
     supports_streaming: bool = True
     supports_thinking: bool = False
+    valid_thinking_states: tuple[str, ...] = ("off-hide",)
     supports_effort: bool = False
+    valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()
@@ -3771,7 +3791,9 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         max_response_tokens: int = 1_024
         supports_streaming: bool = True
         supports_thinking: bool = False
+        valid_thinking_states: tuple[str, ...] = ("off-hide",)
         supports_effort: bool = False
+        valid_efforts: tuple[str, ...] = ()
         supports_cache_control: bool = False
         valid_service_tiers: tuple[str, ...] = ()
         valid_latency_modes: tuple[str, ...] = ()

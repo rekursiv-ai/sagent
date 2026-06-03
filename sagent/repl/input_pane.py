@@ -122,6 +122,7 @@ from sagent.repl.slash import (
     Clear as SlashClear,
     Compact as SlashCompact,
     Defer as SlashDefer,
+    Effort as SlashEffort,
     Halt as SlashHalt,
     Help as SlashHelp,
     Kill as SlashKill,
@@ -335,6 +336,9 @@ def _dispatch_target_control(
     if isinstance(action, SlashThinking):
         _run_repl.do_switch_thinking(target, action.command, printer)
         return
+    if isinstance(action, SlashEffort):
+        _run_repl.do_switch_effort(target, action.value, printer)
+        return
     if isinstance(action, SlashHalt):
         target.halt()
         return
@@ -505,6 +509,8 @@ async def _dispatch(
             _run_repl.do_switch_model(agent, args, printer)
         case SlashThinking(command=command):
             _run_repl.do_switch_thinking(agent, command, printer)
+        case SlashEffort(value=value):
+            _run_repl.do_switch_effort(agent, value, printer)
         case SlashLogin():
             await _run_repl.do_login(agent, printer)
             if queues is not None:

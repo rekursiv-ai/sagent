@@ -46,7 +46,9 @@ class ScriptedModel:
     max_response_tokens = 1024
     supports_streaming = False
     supports_thinking = False
+    valid_thinking_states: tuple[str, ...] = ("off-hide",)
     supports_effort = False
+    valid_efforts: tuple[str, ...] = ()
     supports_cache_control = False
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()

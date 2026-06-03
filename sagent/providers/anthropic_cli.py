@@ -38,6 +38,7 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -293,9 +294,26 @@ class _AnthropicCLIModel:
         return self._profile.supports_thinking
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """CLI transport returns readable thinking; redaction is inert here.
+
+        The subprocess cannot send the redact-thinking beta header, so
+        ``redact_thinking`` has no effect and no ``redact-hide`` mode is
+        offered.
+        """
+        return valid_thinking_states(
+            ThinkingCapability(supports_thinking=self.supports_thinking),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """``False``: the CLI does not expose the effort knob on stream-json."""
         return False
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """No effort knob on the CLI transport."""
+        return ()
 
     @property
     def supports_cache_control(self) -> bool:
