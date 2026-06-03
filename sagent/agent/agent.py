@@ -89,6 +89,7 @@ from sagent.thinking import (
     request_thinking,
     should_redact_thinking,
     should_show_thinking,
+    thinking_mode_supported,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -870,11 +871,27 @@ class Agent:
         self.model_spec = spec
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
-        if not model.supports_thinking:
+        # Reset thinking when it is not valid for the new model.
+        # ``supports_thinking`` alone is insufficient: a model may support
+        # thinking yet reject the current wire mode (e.g. the 4-5
+        # generation rejects ``adaptive``; opus-4-8 rejects ``enabled``),
+        # which would 400 on the next turn. Two carriers must be checked --
+        # the canonical ``_thinking_state`` (REPL / CLI) and the legacy
+        # ``_thinking`` wire mode set by ``Agent.thinking`` with no state
+        # (``AgentSelf`` / direct assignment). Fall back to ``off-hide``
+        # (always valid) rather than guess a replacement.
+        state_invalid = (
+            self._thinking_state is not None
+            and self._thinking_state not in model.valid_thinking_states
+        )
+        mode_invalid = not thinking_mode_supported(
+            self._thinking, model.valid_thinking_states
+        )
+        if state_invalid or mode_invalid or not model.supports_thinking:
             self._thinking_state = "off-hide"
             self._thinking = None
             self._show_thinking = False
-        if not model.supports_effort:
+        if self._effort is not None and self._effort not in model.valid_efforts:
             self._effort = None
         if not model.valid_service_tiers:
             self._service_tier = None

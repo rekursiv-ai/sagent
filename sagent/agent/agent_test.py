@@ -5216,6 +5216,74 @@ def test_swap_model_clears_unsupported_thinking() -> None:
     assert a.thinking is None
 
 
+def test_swap_model_resets_thinking_state_invalid_for_new_model() -> None:
+    """Swapping to a model that supports thinking but rejects the current
+    state's wire mode must reset the state, not leave it to 400.
+
+    Mirrors the live generation split: an ``adaptive-*`` state is valid on
+    opus-4-8 but the 4-5 generation rejects ``adaptive`` (only ``on-*``).
+    The swap must drop the now-invalid state to ``off-hide`` rather than
+    send ``thinking.type=adaptive`` and 400 on the next turn.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _EnabledOnlyModel(StubModel):
+        # Supports thinking, but only the ``on-*`` (enabled) states.
+        @property
+        @override
+        def valid_thinking_states(self) -> tuple[str, ...]:
+            return ("on-show", "on-hide", "off-hide")
+
+    a = Agent(model=StubModel(), tools=[], thinking_state="adaptive-hide")
+    assert a.thinking_state == "adaptive-hide"
+    a.swap_model(_EnabledOnlyModel())
+    assert a.thinking_state == "off-hide"
+    assert a.thinking is None
+    assert a.show_thinking is False
+
+
+def test_swap_model_keeps_thinking_state_valid_for_new_model() -> None:
+    """A state still valid for the new model survives the swap unchanged."""
+    a = Agent(
+        model=StubModel(supports_thinking=True), tools=[], thinking_state="on-hide"
+    )
+    a.swap_model(StubModel(model_id="other", supports_thinking=True))
+    assert a.thinking_state == "on-hide"
+
+
+def test_swap_model_resets_legacy_thinking_mode_invalid_for_new_model() -> None:
+    """The legacy ``agent.thinking = "adaptive"`` path (state ``None``, set by
+    ``AgentSelf`` and direct assignment) must also reset on an incompatible
+    swap, or the materialized request sends a rejected wire mode and 400s.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _EnabledOnlyModel(StubModel):
+        supports_thinking: bool = True  # supports thinking, but enabled-only
+
+        @property
+        @override
+        def valid_thinking_states(self) -> tuple[str, ...]:
+            return ("on-show", "on-hide", "off-hide")
+
+    a = _build_agent(model=StubModel(supports_thinking=True))
+    a.thinking = "adaptive"  # state=None, wire mode "adaptive"
+    assert a.thinking_state is None
+    a.swap_model(_EnabledOnlyModel())
+    # "adaptive" is unsatisfiable on an enabled-only model; must be cleared.
+    assert a.thinking is None
+
+
+def test_swap_model_resets_effort_invalid_for_new_model() -> None:
+    """Effort outside the new model's ``valid_efforts`` resets to unset."""
+    a = _build_agent(
+        model=StubModel(supports_effort=True, valid_efforts=("low", "high"))
+    )
+    a.effort = "high"
+    a.swap_model(StubModel(supports_effort=True, valid_efforts=("low", "medium")))
+    assert a.effort is None
+
+
 def test_recompact_docstring_describes_alias_semantics() -> None:
     assert Agent.recompact.__doc__ is not None
     assert "alias" in Agent.recompact.__doc__.lower()
