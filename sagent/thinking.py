@@ -171,6 +171,30 @@ def request_thinking(state: ThinkingState) -> str | None:
     return None
 
 
+def thinking_mode_supported(mode: str | None, valid_states: tuple[str, ...]) -> bool:
+    """Return whether wire ``mode`` is reachable given ``valid_states``.
+
+    ``mode`` is the provider-facing thinking value (``"adaptive"`` /
+    ``"enabled"`` / ``None``) carried by ``Agent._thinking``, which the
+    legacy ``Agent.thinking`` setter writes without a canonical state.
+    A swap must clear it when the new model exposes no valid state mapping
+    to it (else the next request sends a rejected mode and 400s).
+    ``None`` (thinking off) is always supported.
+
+    Args:
+      mode: Wire thinking mode, or ``None`` for off.
+      valid_states: The model's ``valid_thinking_states``.
+
+    Returns:
+      supported: True when ``mode`` is ``None`` or some valid state maps
+          to it.
+
+    """
+    if mode is None:
+        return True
+    return any(request_thinking(cast(ThinkingState, s)) == mode for s in valid_states)
+
+
 def should_show_thinking(state: ThinkingState) -> bool:
     """Return whether readable thinking should render locally."""
     return state.endswith("-show")

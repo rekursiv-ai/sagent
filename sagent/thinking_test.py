@@ -11,6 +11,7 @@ from sagent.thinking import (
     resolve_thinking_command,
     should_redact_thinking,
     should_show_thinking,
+    thinking_mode_supported,
     valid_thinking_states,
 )
 
@@ -151,6 +152,23 @@ def test_valid_thinking_states_always_includes_off() -> None:
         ThinkingCapability(supports_thinking=True, supports_redaction=True),
     ):
         assert "off-hide" in valid_thinking_states(cap)
+
+
+@pytest.mark.parametrize(
+    ("mode", "valid_states", "expected"),
+    [
+        (None, ("off-hide",), True),  # off always supported
+        ("adaptive", ("adaptive-hide", "off-hide"), True),
+        ("adaptive", ("on-hide", "off-hide"), False),  # enabled-only model
+        ("enabled", ("on-hide", "off-hide"), True),
+        ("enabled", ("adaptive-hide", "off-hide"), False),  # adaptive-only model
+        ("adaptive", ("off-hide",), False),  # thinking effectively off
+    ],
+)
+def test_thinking_mode_supported(
+    mode: str | None, valid_states: tuple[str, ...], expected: bool
+) -> None:
+    assert thinking_mode_supported(mode, valid_states) is expected
 
 
 if __name__ == "__main__":
