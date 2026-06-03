@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
 import asyncio
@@ -14,14 +14,21 @@ import logging
 import pytest
 
 from sagent.agent import runtime as agent_runtime
+from sagent.agent.context import (
+    InvalidContextError,
+    validate_context,
+)
 from sagent.agent.runtime import Tool
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.run_repl import _input_queue_committer_observer
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
+    DETACHED_ARRIVAL_SUFFIX,
+    DETACHED_ARRIVED_MIMIC_PREFIX,
     DETACHED_ARRIVED_TOOL,
     DETACHED_PLACEHOLDER,
+    RUNNING_PREFIX,
     AgentIdle,
     AgentSendDeferredMessage,
     AgentSendMessage,
@@ -29,6 +36,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
     Clear,
+    ClearComplete,
     CohortComplete,
     CohortStarted,
     Compact,
@@ -40,6 +48,7 @@ from sagent.types.runtime import (
     Halt,
     Kill,
     LazyEvent,
+    ModelCallStarted,
     ModelContextEvent,
     ModelIdle,
     ModelResponseCancelled,
@@ -54,6 +63,7 @@ from sagent.types.runtime import (
     RuntimeEvent,
     ToolCall,
     ToolResult,
+    ToolResultKind,
     ToolResultPartial,
     Undetach,
     UserDeferredMessage,
@@ -63,9 +73,11 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    InvalidSpliceError,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    mask_contains_ref,
 )
 
 
@@ -878,6 +890,143 @@ def test_rescue_context_partitions_mask_by_session_id() -> None:
     sessions_in_mask = {r_from.session_id for r_from, _ in rescue.mask}
     assert sessions_in_mask == {"", "99edb2d0"}
     assert all(r_from.session_id == r_to.session_id for r_from, r_to in rescue.mask)
+
+
+def test_append_splice_insert_after_check_is_session_scoped() -> None:
+    """``insert_after`` inside the mask is rejected per session, not by ordinal.
+
+    A raw ordinal compare false-rejected a cross-session ``insert_after`` anchor
+    whose ordinal happened to fall in a same-numbered range of a different
+    session (multi-session resumed/legacy tapes). The check must compare
+    ``session_id`` first (via ``mask_contains_ref``).
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    mask = ((TapeRef(session_id="A", ordinal=0), TapeRef(session_id="A", ordinal=10)),)
+
+    # Cross-session anchor whose ordinal (5) falls in the session-A range must
+    # NOT be rejected -- different session.
+    agent.append_splice(
+        mask=mask,
+        insert_after=TapeRef(session_id="B", ordinal=5),
+        payload=(),
+        strategy="cross_session_ok",
+    )
+
+    # Same-session anchor inside the mask must still be rejected.
+    with pytest.raises(InvalidSpliceError):
+        agent.append_splice(
+            mask=(
+                (
+                    TapeRef(session_id="A", ordinal=20),
+                    TapeRef(session_id="A", ordinal=30),
+                ),
+            ),
+            insert_after=TapeRef(session_id="A", ordinal=25),
+            payload=(),
+            strategy="same_session_reject",
+        )
+
+
+def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
+    """Coalesce must not absorb a prior splice's cross-session mask ordinals.
+
+    ``_append_or_coalesce_user`` builds the new coalesce mask in the tail's
+    session. If the prior coalesce splice's mask spans other sessions, taking
+    the minimum ordinal across all of them would mask unrelated current-session
+    records (overbroad deletion under undelete semantics). The absorbed low
+    ordinal must come only from same-session mask ranges.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    sid = agent.session_id
+    # Seed prior records so the coalesce splice lands at a high ordinal (its
+    # ``insert_after`` anchor exists). The prior splice's mask spans a foreign
+    # session whose low ordinal (1) is BELOW the splice's own ordinal, so a
+    # cross-session ``min`` would pull the new mask's low to 1 and mask
+    # unrelated session-``sid`` records. The fix scopes the absorbed low to
+    # same-session ranges only.
+    for i in range(6):
+        agent.append_history(UserMessage(text=f"u{i}"))  # ordinals 0..5
+    prior_ref = agent.append_splice(
+        mask=(
+            (
+                TapeRef(session_id="legacy", ordinal=1),
+                TapeRef(session_id="legacy", ordinal=1),
+            ),
+            (TapeRef(session_id=sid, ordinal=5), TapeRef(session_id=sid, ordinal=5)),
+        ),
+        insert_after=TapeRef(session_id=sid, ordinal=4),
+        payload=(UserMessage(text="prior"),),
+        strategy="user_coalesce",
+    )
+    assert isinstance(agent.context().messages[-1], UserMessage)
+
+    agent._append_or_coalesce_user(UserMessage(text="more"))
+
+    new_splice = next(
+        r
+        for r in reversed(agent.tape)
+        if isinstance(r, ContextSplice)
+        and r.strategy == "user_coalesce"
+        and r.ref != prior_ref
+    )
+    # The new mask must live entirely in the tail session: a leaked ``legacy``
+    # range is the bug.
+    assert all(r_from.session_id == sid for r_from, _ in new_splice.mask), (
+        "coalesce mask absorbed a cross-session range: "
+        f"{[(f.session_id, f.ordinal) for f, _ in new_splice.mask]}"
+    )
+    # The absorbed low must come from the same-session range (5) or the prior
+    # splice's own ordinal -- never pulled down to the foreign low (1).
+    assert min(r_from.ordinal for r_from, _ in new_splice.mask) >= 5
+    # The insertion anchor must be same-session too (F43-COALESCE-004): the
+    # scan skips foreign-session records so a ``legacy`` ordinal cannot
+    # mis-anchor the splice.
+    assert new_splice.insert_after is None or new_splice.insert_after.session_id == sid
+
+
+def test_user_coalesce_preserves_sparse_prior_mask_gaps() -> None:
+    """Coalesce must not fill gaps in a sparse prior same-session mask.
+
+    Regression for ``f43f811c9``'s F43-COALESCE-005: collapsing a sparse prior
+    mask ``((s:1,s:1),(s:10,s:10))`` to one contiguous ``s:1..tail`` range
+    would mask the intervening ``s:5`` record the prior splice intentionally
+    left visible. The absorbed ranges must preserve their gaps.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    sid = agent.session_id
+    # Records at ordinals 0..11. The prior coalesce splice masks 1 and the tail
+    # range 10..11 (so its payload becomes the visible tail) but deliberately
+    # leaves the gap at 5 unmasked.
+    for i in range(12):
+        agent.append_history(UserMessage(text=f"u{i}"))
+    prior_ref = agent.append_splice(
+        mask=(
+            (TapeRef(session_id=sid, ordinal=1), TapeRef(session_id=sid, ordinal=1)),
+            (TapeRef(session_id=sid, ordinal=10), TapeRef(session_id=sid, ordinal=11)),
+        ),
+        insert_after=TapeRef(session_id=sid, ordinal=9),
+        payload=(UserMessage(text="prior"),),
+        strategy="user_coalesce",
+    )
+    assert isinstance(agent.context().messages[-1], UserMessage)
+
+    agent._append_or_coalesce_user(UserMessage(text="more"))
+
+    new_splice = next(
+        r
+        for r in reversed(agent.tape)
+        if isinstance(r, ContextSplice)
+        and r.strategy == "user_coalesce"
+        and r.ref != prior_ref
+    )
+    # The gap between the sparse ranges must be preserved: ordinal 5 must NOT
+    # be covered by the new mask.
+    assert not mask_contains_ref(new_splice.mask, TapeRef(session_id=sid, ordinal=5)), (
+        f"sparse gap filled; mask={[(f.ordinal, t.ordinal) for f, t in new_splice.mask]}"
+    )
+    # The originally-masked ordinals (1, 10) are still absorbed.
+    assert mask_contains_ref(new_splice.mask, TapeRef(session_id=sid, ordinal=1))
+    assert mask_contains_ref(new_splice.mask, TapeRef(session_id=sid, ordinal=10))
 
 
 @pytest.mark.asyncio
@@ -6294,10 +6443,17 @@ async def test_model_emitted_detached_arrived_call_is_deferred_not_unknown() -> 
 
     await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
 
+    # The forged id never enters history; the runtime rewrote it into its own
+    # mimic namespace, so the error pairs the rewritten id (``Issue#297``).
+    assert not any(
+        isinstance(m, ToolResult) and m.call_id == "m1"
+        for m in agent.context().messages
+    )
     results = [
         m
         for m in agent.context().messages
-        if isinstance(m, ToolResult) and m.call_id == "m1"
+        if isinstance(m, ToolResult)
+        and m.call_id.startswith(DETACHED_ARRIVED_MIMIC_PREFIX)
     ]
     assert len(results) == 1
     err = results[0]
@@ -6374,16 +6530,647 @@ async def test_pending_lazy_pairing_survives_interleaved_detached_delivery() -> 
     await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
 
     # The mimic's real hidden error survives -- not replaced by [interrupted].
+    # Keyed on the rewritten mimic id (the forged ``m1`` never enters history).
     m1 = [
         m
         for m in agent.context().messages
-        if isinstance(m, ToolResult) and m.call_id == "m1"
+        if isinstance(m, ToolResult)
+        and m.call_id.startswith(DETACHED_ARRIVED_MIMIC_PREFIX)
     ]
     assert len(m1) == 1
     assert m1[0].is_error
     assert DETACHED_ARRIVED_TOOL in m1[0].content
     assert "[interrupted]" not in m1[0].content
     assert m1[0].hidden is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_model_forged_detached_arrived_id_collision_does_not_wedge() -> None:
+    """A forged ``DetachedArrived`` id colliding with a real arrival stays live.
+
+    The ``Issue#297`` strand: a real forward delivery for original ``c1`` mints
+    arrival id ``c1:detached``. If the model then emits its own
+    ``DetachedArrived`` call with id ``c1:detached``, the two
+    ``AssistantMessage``s would share that tool_call id -- breaking wire
+    validity and stranding one pairing, wedging the loop. The runtime must
+    rewrite the forged call's id into its own mimic namespace at the entry
+    boundary, so the collision never forms and the conversation proceeds.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "c1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            return ToolResult(call_id="", content="REAL-c1", is_error=False)
+
+    # Second model turn forges a DetachedArrived call whose id collides with
+    # c1's real arrival id (``c1:detached``).
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="c1", args={}),)),
+            AssistantMessage(
+                text="forging",
+                tool_calls=(
+                    ToolCall(
+                        id=f"c1{DETACHED_ARRIVAL_SUFFIX}",
+                        name=DETACHED_ARRIVED_TOOL,
+                        args={},
+                    ),
+                ),
+            ),
+            AssistantMessage(text="survived the collision"),
+        ],
+        tools=[SlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()
+        # Redirect detaches c1; its forward delivery (arrival id c1:detached)
+        # is now pending.
+        agent.inbox.push_back(UserMessage(text="redirect"))
+        await wait_until(lambda: "forging" in _assistant_texts(agent), timeout_sec=2.0)
+        release.set()
+        # A real follow-up drives the round that flushes the deferred pairing.
+        agent.inbox.push_back(UserMessage(text="still there?"))
+        await wait_until(
+            lambda: "survived the collision" in _assistant_texts(agent),
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=5.0), driver())
+
+    # No two AssistantMessages share the real arrival id: the forgery was
+    # rewritten into the runtime's mimic namespace.
+    assert _detached_arrival_assistant_count(agent, "c1") == 1
+    forged = [
+        tc.id
+        for m in agent.context().messages
+        if isinstance(m, AssistantMessage)
+        for tc in m.tool_calls
+        if tc.name == DETACHED_ARRIVED_TOOL
+        and tc.id.startswith(DETACHED_ARRIVED_MIMIC_PREFIX)
+    ]
+    assert len(forged) == 1, "the forged DetachedArrived id must be rewritten"
+    # The loop never wedged and the provider context is wire-valid.
+    assert "survived the collision" in _assistant_texts(agent)
+    validate_context(agent.context().messages)
+
+
+def _detached_arrival_assistant_count(
+    agent: agent_runtime.AgentRuntime, original_call_id: str
+) -> int:
+    """Count resolved ``AssistantMessage``s carrying the forward arrival id."""
+    arrival_id = f"{original_call_id}{DETACHED_ARRIVAL_SUFFIX}"
+    return sum(
+        1
+        for entry in agent.context().messages
+        if isinstance(entry, AssistantMessage)
+        and any(tc.id == arrival_id for tc in entry.tool_calls)
+    )
+
+
+def test_forward_delivery_is_idempotent_per_call_id() -> None:
+    """A second forward delivery for one call_id must not duplicate the pair.
+
+    The forward-delivery invariant: at most one ``DetachedArrived`` pair
+    per original ``call_id``, ever. Two ``_defer_detached_forward`` calls
+    for the same id (e.g. the in-batch ``ToolResult`` race branch and a
+    later ``DetachedResult`` both firing) must collapse to one pair --
+    otherwise the resolved context carries two ``AssistantMessage``s with
+    the arrival id, which ``validate_context`` rejects as a duplicate
+    ``ToolResult`` and the gate's rescue path cannot repair.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
+    agent.append_history(parent)
+    agent.append_history(
+        ToolResult(call_id="c1", parent_id=parent.id, content=DETACHED_PLACEHOLDER),
+    )
+    result = ToolResult(call_id="c1", content="REAL-OUTPUT")
+
+    agent._defer_detached_forward(result)
+    agent._defer_detached_forward(result)
+    agent._flush_pending()
+
+    assert _detached_arrival_assistant_count(agent, "c1") == 1
+    validate_context(agent.context().messages)
+
+
+def test_detached_forward_skips_running_placeholder_keeps_real_result() -> None:
+    """Forwarding a background placeholder must not suppress the real result.
+
+    Regression for the ``Issue#294`` review: a ``background:true`` tool's
+    cohort task returns a ``PENDING`` ``[Running in background]`` placeholder.
+    When that call_id is detached (an in-batch race), the placeholder reaches
+    ``_defer_detached_forward`` first. If forwarding it marked the id delivered,
+    the real result later posted by the background task's own ``DetachedResult``
+    would be suppressed and the model would never see the tool's output. The
+    ``PENDING`` stub must be skipped entirely (no forward, no id consumed) so
+    the real result forwards normally. Keyed on ``kind``, not ``content``.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    placeholder = ToolResult(
+        call_id="c1",
+        content=f"{RUNNING_PREFIX}T]",
+        kind=ToolResultKind.PENDING,
+    )
+    real = ToolResult(call_id="c1", content="REAL-OUTPUT")
+
+    agent._defer_detached_forward(placeholder)
+    # The placeholder neither forwarded nor consumed the id.
+    assert not agent._pending_commits
+    assert "c1" not in agent._forwarded_call_ids
+
+    agent._defer_detached_forward(real)
+    forwards = [c for c in agent._pending_commits if c.kind == "forward"]
+    assert len(forwards) == 1
+    assert forwards[0].result is not None
+    assert forwards[0].result.content == "REAL-OUTPUT"
+
+
+def test_cancelled_forward_skipped_when_answered_in_slot() -> None:
+    """A cancellation already answered in-slot is not forward-delivered again.
+
+    Regression for ``f43f811c9``'s F43-CANCEL-002: a cohort ``Kill`` writes a
+    ``CANCELLED`` answer in-slot via ``_stop_tool``, then the cancelled task's
+    unwind posts a second ``CANCELLED`` result. Forwarding the second would
+    tell the model the same cancellation twice. The forward is skipped when the
+    call's in-slot result is already terminal. A background cancellation, whose
+    in-slot answer is a ``PENDING`` running-stub, still forwards (its only
+    delivery).
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="T", args={}),))
+    agent.append_history(parent)
+    # Cohort-kill: in-slot CANCELLED answer already present.
+    agent.append_history(
+        ToolResult(
+            call_id="c1",
+            parent_id=parent.id,
+            content=CANCELLED_PLACEHOLDER,
+            is_error=True,
+            kind=ToolResultKind.CANCELLED,
+        ),
+    )
+    agent._defer_detached_forward(
+        ToolResult(
+            call_id="c1",
+            content=CANCELLED_PLACEHOLDER,
+            is_error=True,
+            kind=ToolResultKind.CANCELLED,
+        ),
+    )
+    assert not agent._pending_commits, "cancellation already answered in-slot"
+
+    # Background-cancel: in-slot is a PENDING running-stub -> the cancellation
+    # is the only delivery and must forward.
+    other = AssistantMessage(tool_calls=(ToolCall(id="c2", name="T", args={}),))
+    agent.append_history(other)
+    agent.append_history(
+        ToolResult(
+            call_id="c2",
+            parent_id=other.id,
+            content=f"{RUNNING_PREFIX}T]",
+            kind=ToolResultKind.PENDING,
+        ),
+    )
+    agent._defer_detached_forward(
+        ToolResult(
+            call_id="c2",
+            content=CANCELLED_PLACEHOLDER,
+            is_error=True,
+            kind=ToolResultKind.CANCELLED,
+        ),
+    )
+    forwards = [c for c in agent._pending_commits if c.kind == "forward"]
+    assert len(forwards) == 1
+    assert forwards[0].result is not None
+    assert forwards[0].result.call_id == "c2"
+
+
+def test_inslot_terminal_through_splice_payload_skips_cancel_forward() -> None:
+    """A terminal result preserved in a splice payload still blocks re-forward.
+
+    Regression for ``77bf1d67f`` review C3: ``_index_record`` registers
+    ``_placeholder_refs`` for ``ToolResult``s in ``ContextSplice`` payloads
+    (a result preserved across compaction), but ``_inslot_result_is_terminal``
+    only inspected plain history records. So a ``CANCELLED`` result whose
+    terminal answer lived in a splice payload read as non-terminal and a
+    duplicate cancellation forwarded. Both record shapes must be inspected.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="T", args={}),))
+    parent_ref = agent.append_history(parent)
+    # The terminal CANCELLED answer lives inside a splice payload (as a
+    # compaction barrier preserving it would).
+    agent.append_splice(
+        mask=(),
+        insert_after=parent_ref,
+        payload=(
+            ToolResult(
+                call_id="c1",
+                content=CANCELLED_PLACEHOLDER,
+                is_error=True,
+                kind=ToolResultKind.CANCELLED,
+            ),
+        ),
+        strategy="lazy_pairing",
+        paired_externally=frozenset({"c1"}),
+    )
+    assert agent._inslot_result_is_terminal("c1")
+
+    agent._defer_detached_forward(
+        ToolResult(
+            call_id="c1",
+            content=CANCELLED_PLACEHOLDER,
+            is_error=True,
+            kind=ToolResultKind.CANCELLED,
+        ),
+    )
+    assert not [c for c in agent._pending_commits if c.kind == "forward"]
+
+
+def test_user_coalesce_drops_legacy_cross_session_prior_range() -> None:
+    """A replayed legacy cross-session mask range must not crash coalesce.
+
+    Regression for ``77bf1d67f`` review C6: ``ContextSplice.replay`` skips mask
+    validation, so a resumed legacy splice can carry a range whose endpoints
+    span sessions. ``_append_or_coalesce_user`` filtered prior ranges by the
+    ``from`` endpoint only, so such a range slipped through into
+    ``merge_mask_ranges`` (cross-session -> assertion / invalid splice). Both
+    endpoints must match the tail session; a malformed range is dropped.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    sid = agent.session_id
+    splice = ContextSplice.replay(
+        ref=TapeRef(session_id=sid, ordinal=2),
+        mask=(
+            (
+                TapeRef(session_id=sid, ordinal=0),
+                TapeRef(session_id="legacy", ordinal=1),
+            ),
+        ),
+        insert_after=None,
+        payload=(UserMessage(text="prior"),),
+        strategy="legacy",
+    )
+    agent.tape.append(splice)
+    agent._index_record(splice)
+    agent._cached_resolved = None
+    assert isinstance(agent.context().messages[-1], UserMessage)
+
+    # Must not raise: the cross-session range is dropped, not merged.
+    combined = agent._append_or_coalesce_user(UserMessage(text="more"))
+    assert isinstance(combined, UserMessage)
+    new_splice = next(
+        r
+        for r in reversed(agent.tape)
+        if isinstance(r, ContextSplice)
+        and r.strategy == "user_coalesce"
+        and r.ref != splice.ref
+    )
+    # Every range in the new mask is fully same-session.
+    assert all(
+        r_from.session_id == sid and r_to.session_id == sid
+        for r_from, r_to in new_splice.mask
+    )
+
+
+def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:
+    """A forged ``DetachedArrived`` id must not collide with another call's id.
+
+    Regression for the ``Issue#297`` namespace fix: a model can emit a normal
+    tool call whose id already lies in the mimic namespace
+    (``DetachedArrived:mimic:0``) alongside a forged ``DetachedArrived`` call.
+    The rewrite must advance past the taken id rather than mint a duplicate
+    (which would fail ``AssistantMessage`` validation and lose the whole turn).
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    msg = AssistantMessage(
+        tool_calls=(
+            ToolCall(id=f"{DETACHED_ARRIVED_MIMIC_PREFIX}0", name="Read", args={}),
+            ToolCall(id="x", name=DETACHED_ARRIVED_TOOL, args={}),
+        ),
+    )
+    out = agent._sanitize_forged_arrivals(msg)
+    ids = [tc.id for tc in out.tool_calls]
+    assert len(set(ids)) == len(ids), f"rewrite produced a duplicate id: {ids}"
+    assert f"{DETACHED_ARRIVED_MIMIC_PREFIX}0" in ids  # the normal call kept its id
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_gate_recovery_admits_clear_control_event() -> None:
+    """The unrepairable-context recovery gate must not strand ``Clear``.
+
+    Regression for the ``Issue#294`` review: arming a bare ``AWAIT_USER`` after
+    an unrepairable gate context buffers control verbs behind the gate, so the
+    user's ``/clear`` -- the most direct way to fix a broken tape -- cannot
+    reach the loop until an ordinary message arrives. The recovery gate must
+    admit ``Clear`` (and the other tape-mutating verbs) directly.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+
+    def _raise() -> None:
+        raise InvalidContextError("unrepairable context")
+
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+    collector = EventCollector()
+    agent.observers.append(collector)
+
+    async def driver() -> None:
+        agent.inbox.push_back(UserMessage(text="trigger the gate"))
+        await wait_until(lambda: collector.has(ModelResponseError), timeout_sec=2.0)
+        # A Clear alone -- no follow-up user message -- must release the gate.
+        agent.inbox.push_back(Clear())
+        await wait_until(lambda: collector.has(ClearComplete), timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), driver())
+
+    assert collector.has(ClearComplete), (
+        "Clear must release the recovery gate without an intervening user "
+        "message; it was stranded behind AWAIT_USER"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_gate_recovery_arms_before_publish_so_observer_clear_releases() -> None:
+    """Recovery must arm the gate before publishing, like the ``Clear`` arm.
+
+    Publishing ``ModelResponseError`` before arming ``AWAIT_RECOVERY`` lets an
+    observer that reacts by pushing a recovery verb (``Clear``) land a pre-arm
+    item, which ``push_front`` counts into the gate baseline -- so the gate
+    never releases on that push and the automatic recovery is stranded
+    (``f43f811c9`` review, same baseline hazard the ``Clear`` arm documents).
+    The arm must precede the publish.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+
+    def _raise() -> None:
+        raise InvalidContextError("unrepairable context")
+
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+    collector = EventCollector()
+
+    pushed = False
+
+    def _auto_clear(event: RuntimeEvent) -> None:
+        nonlocal pushed
+        if isinstance(event, ModelResponseError) and not pushed:
+            pushed = True
+            agent.inbox.push_back(Clear())
+
+    agent.observers.append(_auto_clear)
+    agent.observers.append(collector)
+
+    async def driver() -> None:
+        agent.inbox.push_back(UserMessage(text="trigger the gate"))
+        # The observer's Clear (pushed during the error publish) must release
+        # the recovery gate without any further user input.
+        await wait_until(lambda: collector.has(ClearComplete), timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), driver())
+
+    assert collector.has(ClearComplete), (
+        "an observer-pushed Clear during the ModelResponseError publish was "
+        "stranded behind the gate baseline; arm AWAIT_RECOVERY before publishing"
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_detached_result_producers_one_call_id_single_forward() -> None:
+    """Two ``DetachedResult`` events for one call_id deliver exactly one forward.
+
+    The isolated ``Issue#296`` production race: a detached tool's completion is
+    reported by two independent producers in separate registries -- the runtime
+    ``_run_tool_and_post`` (keyed on ``runtime.detached``) and the agent-layer
+    ``_AgentTool._run_bg`` (keyed on ``Agent._bg``). Both push a
+    ``DetachedResult`` for the same id. The forward-delivery invariant must hold
+    end-to-end through ``run_forever``: one ``DetachedArrived`` pair, wire-valid
+    context, no wedge -- not just when the duplicate is injected synthetically.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
+    agent.append_history(parent)
+    agent.append_history(
+        ToolResult(call_id="c1", parent_id=parent.id, content=DETACHED_PLACEHOLDER),
+    )
+    # Producer 1 and producer 2, same call_id, distinct content.
+    agent.inbox.push_back(
+        DetachedResult(result=ToolResult(call_id="c1", content="producer-1")),
+    )
+    agent.inbox.push_back(
+        DetachedResult(result=ToolResult(call_id="c1", content="producer-2")),
+    )
+    agent.inbox.push_back(UserMessage(text="proceed"))
+
+    async def driver() -> None:
+        await wait_until(
+            lambda: _detached_arrival_assistant_count(agent, "c1") >= 1,
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
+
+    assert _detached_arrival_assistant_count(agent, "c1") == 1
+    validate_context(agent.context().messages)
+    # The duplicate was prevented at the source by the idempotency guard, not
+    # papered over by the gate's emergency rescue (which the sanitizer fix
+    # would also absorb). No ``context_rescue`` barrier means the guard held.
+    assert not [
+        record
+        for record in agent.tape
+        if isinstance(record, ContextSplice) and record.strategy == "context_rescue"
+    ], "the duplicate forward formed; the idempotency guard must prevent it"
+
+
+def test_sanitize_for_send_drops_duplicate_tool_call_ids() -> None:
+    """A tool_call id repeated across ``AssistantMessage``s collapses to one.
+
+    The rescue path (``_rescue_context``) feeds ``_sanitize_for_send``'s
+    output to ``ContextSplice``'s validating constructor, which rejects a
+    duplicate tool_call id across assistant turns. For rescue to be the
+    promised total sanitizer, the duplicate second assistant turn (and any
+    result it pairs) must be dropped here rather than propagated into a
+    payload the constructor then refuses.
+    """
+    am1 = AssistantMessage(tool_calls=(ToolCall(id="c1:detached", name="x", args={}),))
+    tr1 = ToolResult(call_id="c1:detached", content="first")
+    am2 = AssistantMessage(tool_calls=(ToolCall(id="c1:detached", name="x", args={}),))
+    tr2 = ToolResult(call_id="c1:detached", content="second")
+    out = agent_runtime._sanitize_for_send([am1, tr1, am2, tr2])
+
+    assistant_ids = [
+        tc.id for e in out if isinstance(e, AssistantMessage) for tc in e.tool_calls
+    ]
+    assert assistant_ids.count("c1:detached") == 1
+    validate_context(list(out))
+
+
+@pytest.mark.asyncio
+async def test_gate_failure_surfaces_model_response_error() -> None:
+    """An unrepairable gate-context failure publishes a UI-visible error.
+
+    The forward-delivery and sanitizer fixes make rescue total for every
+    context the runtime produces today, so this exercises the gate's
+    defense-in-depth contract directly: if ``_assert_alternation_invariant``
+    ever raises a context-validity error (a future producer rescue cannot
+    repair), the dispatch loop must publish a ``ModelResponseError`` and
+    park on ``AWAIT_USER`` -- never swallow it silently and wedge the loop
+    on a frozen prompt (the ``Issue#294`` symptom), and never spin
+    re-validating the same tape.
+    """
+    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+
+    def _raise() -> None:
+        raise InvalidContextError("unrepairable context (simulated future producer)")
+
+    # Test mock: patch the bound method to simulate a future producer whose
+    # context rescue cannot repair.
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+
+    collector = EventCollector()
+    agent.observers.append(collector)
+    # A user message drives a drain cycle and a gate fire; the patched
+    # invariant then raises, which the gate must surface.
+    agent.inbox.push_back(UserMessage(text="please proceed"))
+
+    async def driver() -> None:
+        await wait_until(lambda: collector.has(ModelResponseError), timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), driver())
+
+    assert collector.has(ModelResponseError), (
+        "gate-context failure must publish ModelResponseError so the UI "
+        "surfaces it; got events: "
+        f"{[type(e).__name__ for e in collector.events]}"
+    )
+    # The model must NOT fire on the unrepaired context: the gate's spawn is
+    # skipped, not merely preceded by an error. Firing the provider on the
+    # broken tape is the failure this guard exists to prevent.
+    assert not collector.has(ModelCallStarted), (
+        "the model-call gate spawned the provider despite an unrepairable "
+        "context; the spawn must be skipped when the invariant fails"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_e2e_duplicate_detached_delivery_does_not_wedge_runtime() -> None:
+    """End-to-end: a second detached delivery for one call_id keeps the loop live.
+
+    The ``Issue#294`` regression, exercised through the full ``run_forever``
+    FSM rather than internals. A tool detaches on a mid-cohort redirect,
+    completes, and forward-delivers once. A SECOND ``DetachedResult`` for the
+    same ``call_id`` -- the exact event a stale or racing second completion
+    pushes -- then arrives through the inbox.
+
+    Before the fix this duplicates the synthetic ``DetachedArrived`` pair, so
+    every model-call gate iteration fails ``validate_context``, rescue itself
+    raises, the dispatch loop swallows it, and the runtime wedges with no UI
+    feedback: the follow-up user turn never gets an answer and the test times
+    out. After the fix the second delivery is a no-op, the duplicate never
+    forms, and the conversation proceeds to a final assistant turn.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    captured: list[ToolResult] = []
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowTool:
+        @property
+        def name(self) -> str:
+            return "t1"
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started.set()
+            await release.wait()
+            result = ToolResult(call_id="", content="REAL-OUTPUT", is_error=False)
+            captured.append(result)
+            return result
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="t1", args={}),)),
+            AssistantMessage(text="answering the redirect"),
+            AssistantMessage(text="acknowledged after duplicate"),
+        ],
+        tools=[SlowTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def driver() -> None:
+        await started.wait()
+        # Mid-cohort redirect: t1 detaches, [detached] stub appended.
+        agent.inbox.push_back(UserMessage(text="redirect"))
+        await wait_until(lambda: "answering the redirect" in _assistant_texts(agent))
+        release.set()
+        # First forward delivery lands.
+        await wait_until(
+            lambda: _detached_arrival_result(agent, "t1") is not None,
+            timeout_sec=2.0,
+        )
+        # Inject a DUPLICATE detached delivery for the same call_id -- the
+        # stale/racing second completion that wedged the runtime pre-fix.
+        assert captured, "tool should have produced a result"
+        agent.inbox.push_back(
+            DetachedResult(result=replace(captured[0], call_id="t1")),
+        )
+        # The runtime must stay live: a fresh user turn still gets answered.
+        agent.inbox.push_back(UserMessage(text="still there?"))
+        await wait_until(
+            lambda: "acknowledged after duplicate" in _assistant_texts(agent),
+            timeout_sec=2.0,
+        )
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(run_until_quit(agent, timeout_sec=5.0), driver())
+
+    # Exactly one forward arrival pair for t1: the duplicate was suppressed.
+    assert _detached_arrival_assistant_count(agent, "t1") == 1
+    # The conversation reached its final turn -- the loop never wedged.
+    assert "acknowledged after duplicate" in _assistant_texts(agent)
+    # The resolved context the provider would receive is wire-valid.
+    validate_context(agent.context().messages)
+    # The duplicate was prevented at the source, not papered over by the
+    # gate's emergency rescue barrier (which the sanitizer fix would also
+    # absorb). No ``context_rescue`` splice means the root idempotency guard
+    # held -- this is what distinguishes a real fix from the rescue masking
+    # the symptom.
+    assert not [
+        record
+        for record in agent.tape
+        if isinstance(record, ContextSplice) and record.strategy == "context_rescue"
+    ], (
+        "a context_rescue barrier was appended, meaning the duplicate forward "
+        "formed and only the emergency sanitizer caught it; the root "
+        "idempotency guard must prevent it from forming at all"
+    )
 
 
 def test_runtime_has_no_dead_system_param() -> None:

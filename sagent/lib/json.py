@@ -360,6 +360,12 @@ def int_val(v: object, default: int) -> int:
 # matching, so aliases and forward refs work.
 
 _TYPE_TAG = "__type__"
+_SCALAR_TAG = "__scalar__"
+_VALUE_TAG = "__value__"
+
+# Scalar types JSON cannot represent natively; encoded as strings (Enum as its
+# value). A non-Optional union of two or more of these is ambiguous on decode.
+_SPECIAL_SCALARS: tuple[type, ...] = (bytes, Path, UUID, datetime, Enum)
 
 
 @cache
@@ -377,6 +383,39 @@ def _union_members(annotation: object) -> dict[str, type]:
     }
 
 
+def _is_special_scalar(member: object) -> bool:
+    """Whether ``member`` is a special scalar type the codec string-encodes."""
+    return isinstance(member, type) and issubclass(member, _SPECIAL_SCALARS)
+
+
+def _matching_scalar_member(annotation: object, value: object) -> type | None:
+    """Return the special-scalar union member ``value`` is, if union ambiguous.
+
+    Returns ``None`` unless ``annotation`` is a non-Optional union of two or
+    more special scalars, in which case it returns the member type matching
+    ``value`` so the encoder can tag the otherwise-ambiguous bare string.
+    """
+    ann = _resolve_alias(annotation)
+    if not (isinstance(ann, UnionType) or get_origin(ann) is UnionType):
+        return None
+    args = get_args(ann)
+    specials = [m for m in args if _is_special_scalar(m)]
+    if len(specials) < 2 or len(specials) != len(args):
+        return None
+    for m in specials:
+        if isinstance(value, m):
+            return m
+    return None
+
+
+def _scalar_member(members: tuple[object, ...], name: str) -> type | None:
+    """Return the union member type whose name matches ``name``."""
+    for m in members:
+        if isinstance(m, type) and m.__name__ == name:
+            return m
+    return None
+
+
 def dataclass_to_json(obj: object) -> JSON:
     """Encode a dataclass instance to a tagged JSON object.
 
@@ -386,9 +425,10 @@ def dataclass_to_json(obj: object) -> JSON:
     """
     if not is_dataclass(obj) or isinstance(obj, type):
         raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
+    hints = _hints(type(obj))
     out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
     for f in fields(obj):
-        out[f.name] = _encode(getattr(obj, f.name))
+        out[f.name] = _encode(getattr(obj, f.name), hints.get(f.name))
     return out
 
 
@@ -409,9 +449,15 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
     return cls(**kwargs)
 
 
-def _encode(value: object) -> JSONValue:
+def _encode(value: object, annotation: object = None) -> JSONValue:
     if is_dataclass(value) and not isinstance(value, type):
         return dataclass_to_json(value)
+    # Ambiguous non-Optional union of special scalars (e.g. ``Path | bytes``):
+    # tag the encoded value with the concrete member name so decode can tell
+    # the members apart -- both would otherwise serialize to a bare string.
+    member = _matching_scalar_member(annotation, value)
+    if member is not None:
+        return {_SCALAR_TAG: member.__name__, _VALUE_TAG: _encode(value)}
     if isinstance(value, bool | int | float | str) or value is None:
         return value
     if isinstance(value, bytes):
@@ -458,6 +504,25 @@ def _decode(annotation: object, raw: object) -> object:
         elem: object = args[0] if args else object
         decoded = [_decode(elem, v) for v in cast("list[object]", raw)]
         return tuple(decoded) if origin is tuple else decoded
+    # Mapping (dict[K, V]): decode each value against the value annotation.
+    if origin in (dict, Mapping) and isinstance(raw, Mapping):
+        args = get_args(ann)
+        val_ann: object = args[1] if len(args) == 2 else object
+        return {
+            k: _decode(val_ann, v)
+            for k, v in cast("Mapping[object, object]", raw).items()
+        }
+    # Non-Optional union of special scalars (e.g. ``Path | bytes``): the
+    # encoder tags these with a ``{"__scalar__": name, "__value__": ...}``
+    # wrapper because both members would otherwise serialize to a bare string
+    # with no way to tell them apart on decode.
+    if (isinstance(ann, UnionType) or origin is UnionType) and isinstance(raw, Mapping):
+        raw_map = cast("Mapping[str, object]", raw)
+        name = raw_map.get(_SCALAR_TAG)
+        if isinstance(name, str):
+            member = _scalar_member(get_args(ann), name)
+            if member is not None:
+                return _decode(member, raw_map.get(_VALUE_TAG))
     # Scalar special-cases.
     if ann is bytes and isinstance(raw, str):
         return base64.b64decode(raw)

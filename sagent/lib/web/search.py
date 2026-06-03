@@ -7,6 +7,7 @@ configured and scraped backends.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -19,7 +20,7 @@ import re
 import urllib.error
 
 from sagent.lib.lazy_import import lazy_import
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import FetchError, fetch
 
 
 if TYPE_CHECKING:
@@ -74,18 +75,12 @@ def _clean_text(text: str) -> str:
 
 
 _GSA_USERAGENTS_PATH = Path(__file__).with_name("gsa_useragents.txt")
-_gsa_useragents_cache: list[tuple[str, ...]] = []
 
 
+@cache
 def _get_gsa_useragents() -> tuple[str, ...]:
     """Return cached GSA user-agent strings, loading on first call."""
-    if not _gsa_useragents_cache:
-        _gsa_useragents_cache.append(
-            tuple(
-                line for line in _GSA_USERAGENTS_PATH.read_text().splitlines() if line
-            )
-        )
-    return _gsa_useragents_cache[0]
+    return tuple(line for line in _GSA_USERAGENTS_PATH.read_text().splitlines() if line)
 
 
 def _gsa_headers_for_query(query: str) -> dict[str, str]:
@@ -171,7 +166,10 @@ def duckduckgo(
 
     """
     if len(query) > _DUCKDUCKGO_MAX_QUERY_CHARS:
-        return []
+        raise SearchError(
+            f"DuckDuckGo query exceeds {_DUCKDUCKGO_MAX_QUERY_CHARS} characters "
+            f"(got {len(query)})."
+        )
     request_headers = _gsa_headers_for_query(query) | {
         "Accept": "*/*",
         "Sec-Fetch-Dest": "document",
@@ -183,11 +181,15 @@ def duckduckgo(
     }
     if headers:
         request_headers.update(headers)
+    # Send exactly these headers: the GSA mobile User-Agent must not be paired
+    # with fetch's default desktop Chrome ``sec-ch-ua``/``sec-ch-ua-platform``,
+    # whose drift from the UA can trip DuckDuckGo's bot check.
     body = fetch(
         _DUCKDUCKGO_URL,
         method="POST",
         data={"q": _duckduckgo_quote_bangs(query), "b": "", "kl": "wt-wt"},
         headers=request_headers,
+        raw_headers=True,
         retries=2,
     )
     html = body.decode("utf-8")
@@ -294,6 +296,12 @@ def search(
         if backend == "searxng":
             return searxng(query, num_results, headers)
 
-    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as e:
+    except (
+        FetchError,
+        OSError,
+        TimeoutError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+    ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e
     raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime

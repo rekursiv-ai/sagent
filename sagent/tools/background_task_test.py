@@ -34,6 +34,7 @@ from sagent.types.runtime import (
     RuntimeEvent,
     ToolCall,
     ToolResult,
+    ToolResultKind,
 )
 from sagent.types.tape import ContextSplice
 
@@ -669,6 +670,7 @@ async def test_foreground_running_background_job_returns_result_stub_stays() -> 
             ToolResult(
                 call_id="j-running",
                 content=f"{RUNNING_PREFIX}Dummy]",
+                kind=ToolResultKind.PENDING,
             ),
         )
 

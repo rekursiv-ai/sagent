@@ -30,11 +30,10 @@ from sagent.lib.lazy_import import lazy_import
 from sagent.tools.core import current_agent_var, load_tool_description
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
-    DETACHED_PLACEHOLDER,
-    RUNNING_PREFIX,
     DetachedResult,
     RuntimeEvent,
     ToolResult,
+    ToolResultKind,
 )
 
 
@@ -322,20 +321,19 @@ def _get_agent_class() -> type[Agent]:
 
 
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Return the most recent non-placeholder result matching ``call_id``."""
+    """Return the most recent final (non-``PENDING``) result for ``call_id``.
+
+    A ``CANCELLED`` result is a valid final answer here (a killed job's outcome
+    is "cancelled"); only a still-running ``PENDING`` stub is skipped.
+    """
     for entry in reversed(agent.runtime.context().messages):
         if (
             isinstance(entry, ToolResult)
             and entry.call_id == call_id
-            and not _is_background_placeholder(entry.content)
+            and entry.kind is not ToolResultKind.PENDING
         ):
             return entry
     return None
-
-
-def _is_background_placeholder(content: str) -> bool:
-    """Return true for background placeholders awaiting detached content."""
-    return content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX)
 
 
 async def _await_detached(
@@ -364,7 +362,10 @@ async def _await_detached(
                 return event
             if job.task.cancelled():
                 return ToolResult(
-                    call_id=call_id, content=CANCELLED_PLACEHOLDER, is_error=True
+                    call_id=call_id,
+                    content=CANCELLED_PLACEHOLDER,
+                    is_error=True,
+                    kind=ToolResultKind.CANCELLED,
                 )
             raise
         except Exception as exc:  # noqa: BLE001
