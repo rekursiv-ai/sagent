@@ -952,12 +952,35 @@ def test_system_property_rebuilds_each_access() -> None:
     assert a.system == "root"
 
 
-def test_system_prompt_adds_detached_arrived_note_only_when_in_history() -> None:
-    """The ``DetachedArrived`` note appears once such a turn is in context."""
+def test_system_prompt_adds_detached_arrived_note_proactively() -> None:
+    """The ``DetachedArrived`` note appears the moment any tool detaches.
+
+    Proactive injection: the prohibition must precede the imitable
+    ``DetachedArrived`` pattern, not co-occur with it. So a live
+    ``runtime.detached`` task is enough to surface the note, before any
+    synthesized ``DetachedArrived`` turn exists.
+    """
     a = _build_agent(system="root")
     # No detached activity yet -> lean prompt, no note.
     assert types.runtime.DETACHED_ARRIVED_TOOL not in a.system
-    # A synthesized DetachedArrived turn in history -> the note is added.
+
+    loop = asyncio.new_event_loop()
+    try:
+        # A detached task alone (no DetachedArrived turn yet) -> note present.
+        det_task = loop.create_task(asyncio.sleep(0))
+        a.runtime.detached["det-1"] = det_task
+        assert types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE in a.system, (
+            "note must appear while a tool is detached, before its forward "
+            "DetachedArrived pair lands"
+        )
+        _ = det_task.cancel()
+        loop.run_until_complete(asyncio.gather(det_task, return_exceptions=True))
+    finally:
+        loop.close()
+    a.runtime.detached.clear()
+
+    # After the task completes, a synthesized DetachedArrived turn in history
+    # still surfaces the note.
     a.runtime.append_history(
         types.runtime.AssistantMessage(
             tool_calls=(

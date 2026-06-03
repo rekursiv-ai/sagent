@@ -42,6 +42,9 @@ from sagent.lib.json import float_val, int_val
 from sagent.lib.lazy_import import lazy_import
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
+    DETACHED_PLACEHOLDER,
+    RUNNING_PREFIX,
     AgentSendMessage,
     AssistantMessage,
     BytesMessage,
@@ -56,6 +59,7 @@ from sagent.types.runtime import (
     StatusChanged,
     ToolCall,
     ToolResult,
+    ToolResultKind,
     UserMessage,
     reset_id_counter,
 )
@@ -66,6 +70,7 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
     full_tape_mask,
+    mask_contains_ref,
 )
 
 
@@ -251,6 +256,10 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
         "type": "tool_result",
         "call_id": entry.call_id,
         "content": entry.content,
+        # ``result_kind``, not ``kind``: the history-record wrapper spreads this
+        # dict under its own ``"kind": "history"`` tag, so the lifecycle field
+        # must use a distinct JSON key.
+        "result_kind": entry.kind.value,
         "is_error": entry.is_error,
         "diff": entry.diff,
         "diff_file_path": entry.diff_file_path,
@@ -577,9 +586,11 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             hidden=hidden,
         )
     if t == "tool_result":
+        content = str(d.get("content") or "")
         return ToolResult(
             call_id=str(d.get("call_id") or ""),
-            content=str(d.get("content") or ""),
+            content=content,
+            kind=_tool_result_kind_from_json(d.get("result_kind"), content),
             is_error=bool(d.get("is_error")),
             attachments=_atts_from_json(d.get("attachments")),
             diff=str(d.get("diff") or ""),
@@ -592,6 +603,26 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             hidden=hidden,
         )
     return None
+
+
+def _tool_result_kind_from_json(raw: object, content: str) -> ToolResultKind:
+    """Decode ``result_kind``; legacy records (no field) infer from content.
+
+    Sessions persisted before the ``kind`` discriminator carry no
+    ``result_kind``. For those, recover the lifecycle from the placeholder
+    content one last time so a resumed old session does not mis-forward a stub.
+    New records always carry the explicit field.
+    """
+    if isinstance(raw, str):
+        try:
+            return ToolResultKind(raw)
+        except ValueError:
+            return ToolResultKind.FINAL
+    if content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX):
+        return ToolResultKind.PENDING
+    if content == CANCELLED_PLACEHOLDER:
+        return ToolResultKind.CANCELLED
+    return ToolResultKind.FINAL
 
 
 def serialize_tool_state(state: ToolState) -> dict[str, object]:
@@ -1455,17 +1486,18 @@ def _has_later_barrier(
 
 
 def _is_barrier_splice(splice: ContextSplice, tape: Sequence[TapeRecord]) -> bool:
-    """Return True when ``splice`` masks all earlier tape records."""
+    """Return True when ``splice`` masks every earlier tape record.
+
+    Membership is by full ``TapeRef`` identity (session_id + ordinal), not raw
+    ordinal: on a multi-session tape, distinct sessions can share an ordinal, so
+    an ordinal-only test would judge a splice masking only ``A:0`` as also
+    masking ``B:0`` and wrongly classify a non-barrier as a barrier (discarding
+    a valid ``ToolState`` snapshot).
+    """
     earlier = [record.ref for record in tape if record.ref.ordinal < splice.ref.ordinal]
     if not earlier or splice.insert_after is not None:
         return False
-    masked = {
-        ref.ordinal
-        for r_from, r_to in splice.mask
-        for ref in earlier
-        if r_from.ordinal <= ref.ordinal <= r_to.ordinal
-    }
-    return masked == {ref.ordinal for ref in earlier}
+    return all(mask_contains_ref(splice.mask, ref) for ref in earlier)
 
 
 def _next_tape_ref(tape: Sequence[TapeRecord]) -> TapeRef:
@@ -1514,10 +1546,17 @@ def _apply_update_in_place(
             continue
         event = record.event
         if isinstance(event, ToolResult) and event.id == target_id:
+            new_content = str(rec.get("content") or "")
+            # ``kind=update`` is a pre-discriminator legacy shape; the patch
+            # rewrites the content (e.g. a ``[detached]`` stub back-patched to
+            # the real result), so the lifecycle must be recomputed from the new
+            # content -- otherwise a stale ``PENDING`` survives onto a real
+            # result and the forward path would wrongly skip it.
             patched = dataclasses.replace(
                 event,
-                content=str(rec.get("content") or ""),
+                content=new_content,
                 is_error=bool(rec.get("is_error", False)),
+                kind=_tool_result_kind_from_json(rec.get("result_kind"), new_content),
             )
             tape[i] = dataclasses.replace(record, event=patched)
             return

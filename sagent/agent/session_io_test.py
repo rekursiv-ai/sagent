@@ -23,6 +23,9 @@ from sagent.agent.context import resolve_context, validate_context
 from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
+    _apply_update_in_place,
+    _entry_from_json,
+    _is_barrier_splice,
     append_context_repair,
     append_session,
     load_persistent_agents,
@@ -36,6 +39,7 @@ from sagent.agent.session_io import (
 from sagent.tools.core import ReadCacheEntry, ToolState
 from sagent.types.model import ModelRequest, ModelResponse, Pricing
 from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
     AgentSendMessage,
     AssistantMessage,
@@ -46,6 +50,7 @@ from sagent.types.runtime import (
     ServiceErrorSnapshot,
     ToolCall,
     ToolResult,
+    ToolResultKind,
     UserMessage,
 )
 from sagent.types.tape import (
@@ -348,6 +353,110 @@ def test_tool_result_round_trip(tmp_path: Path) -> None:
     assert out.call_id == "c1"
     assert out.content == "ran"
     assert out.diff == "--- a\n+++ b\n"
+    # Default kind is FINAL and survives the round-trip.
+    assert out.kind is ToolResultKind.FINAL
+
+
+def test_tool_result_kind_round_trips(tmp_path: Path) -> None:
+    """A non-default ``ToolResult.kind`` survives serialize/reload.
+
+    ``kind`` is serialized under ``result_kind`` (the history-record wrapper
+    owns the JSON ``kind`` key); a collision would silently drop the field.
+    """
+    tc = ToolCall(id="c1", name="Echo", args={})
+    asst = AssistantMessage(tool_calls=(tc,))
+    res = ToolResult(
+        call_id="c1",
+        content=DETACHED_PLACEHOLDER,
+        kind=ToolResultKind.PENDING,
+    )
+    history = _round_trip_history([asst, res], tmp_path)
+    out = history[1]
+    assert isinstance(out, ToolResult)
+    assert out.kind is ToolResultKind.PENDING
+
+
+def test_legacy_tool_result_infers_kind_from_content() -> None:
+    """A pre-discriminator record (no ``result_kind``) recovers kind by content.
+
+    Sessions persisted before the ``kind`` field carry only ``content``; the
+    loader infers ``PENDING`` / ``CANCELLED`` from the placeholder text one last
+    time so a resumed old session does not mis-forward a stub.
+    """
+    pending = _entry_from_json(
+        {"type": "tool_result", "call_id": "c1", "content": DETACHED_PLACEHOLDER}
+    )
+    assert isinstance(pending, ToolResult)
+    assert pending.kind is ToolResultKind.PENDING
+
+    cancelled = _entry_from_json(
+        {"type": "tool_result", "call_id": "c1", "content": CANCELLED_PLACEHOLDER}
+    )
+    assert isinstance(cancelled, ToolResult)
+    assert cancelled.kind is ToolResultKind.CANCELLED
+
+    final = _entry_from_json(
+        {"type": "tool_result", "call_id": "c1", "content": "real output"}
+    )
+    assert isinstance(final, ToolResult)
+    assert final.kind is ToolResultKind.FINAL
+
+
+def test_legacy_update_recomputes_kind_from_patched_content() -> None:
+    """A legacy ``kind=update`` patch must not leave a stale ``PENDING`` kind.
+
+    Regression for ``77bf1d67f`` review C4: a pre-discriminator session can
+    back-patch a ``[detached]`` stub (inferred ``PENDING``) to the real result
+    via ``kind=update``. The patch rewrote content but left ``kind=PENDING``,
+    so the real result would be skipped by the forward path / history lookup.
+    The kind is recomputed from the patched content.
+    """
+    stub = ToolResult(
+        call_id="c1",
+        content=DETACHED_PLACEHOLDER,
+        kind=ToolResultKind.PENDING,
+        id=7,
+    )
+    tape: list[TapeRecord] = [
+        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=0), event=stub)
+    ]
+    _apply_update_in_place(
+        tape,
+        {"kind": "update", "id": 7, "content": "real output", "is_error": False},
+    )
+    patched = tape[0]
+    assert isinstance(patched, ReferrableTapeEvent)
+    assert isinstance(patched.event, ToolResult)
+    assert patched.event.content == "real output"
+    assert patched.event.kind is ToolResultKind.FINAL
+
+
+def test_is_barrier_splice_is_session_scoped() -> None:
+    """Barrier detection compares full TapeRef identity, not raw ordinal.
+
+    Regression for ``77bf1d67f`` review C7: distinct sessions can share an
+    ordinal, so an ordinal-only membership test judged a splice masking only
+    ``A:0`` as also masking ``B:0`` -- wrongly classifying a non-barrier as a
+    barrier and discarding a valid ``ToolState`` snapshot.
+    """
+    a0 = ReferrableTapeEvent(
+        ref=TapeRef(session_id="A", ordinal=0), event=UserMessage(text="a")
+    )
+    b0 = ReferrableTapeEvent(
+        ref=TapeRef(session_id="B", ordinal=0), event=UserMessage(text="b")
+    )
+    # A splice that masks only A:0 (not B:0), inserted at head.
+    splice = ContextSplice.replay(
+        ref=TapeRef(session_id="A", ordinal=1),
+        mask=(
+            (TapeRef(session_id="A", ordinal=0), TapeRef(session_id="A", ordinal=0)),
+        ),
+        insert_after=None,
+        payload=(),
+        strategy="x",
+    )
+    # B:0 is an earlier record left unmasked -> not a full barrier.
+    assert not _is_barrier_splice(splice, [a0, b0, splice])
 
 
 def test_load_session_missing_returns_none(tmp_path: Path) -> None:

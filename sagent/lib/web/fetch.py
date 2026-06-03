@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal, overload, override
+from typing import IO, Literal, overload, override
 from urllib.parse import unquote, urlencode, urlparse
 
 import base64
@@ -71,19 +71,20 @@ class ValidatedHost:
 
 ValidatedHosts = Callable[[str], ValidatedHost]
 
-# Chrome request signature -- (major version, sec-ch-ua brand list,
-# platform). UA, sec-ch-ua, and sec-ch-ua-platform must agree; servers
-# that observe these headers flag drift between them. Hardcoding
-# "Linux" (rather than platform.system()) keeps the signature
-# reproducible across machines and matches the UA token.
-_CHROME_SIGNATURE: tuple[str, str, str] = (
-    "125",
-    '"Chromium";v="125", "Not.A/Brand";v="24", "Google Chrome";v="125"',
-    '"Linux"',
+# Chrome request signature. UA, sec-ch-ua, and sec-ch-ua-platform must agree;
+# servers that observe these headers flag drift between them. Everything is
+# derived from a single major version so a bump touches one constant, and
+# "Linux" is hardcoded (rather than platform.system()) to keep the signature
+# reproducible across machines and matching the UA token.
+_CHROME_MAJOR = "125"
+_CHROME_PLATFORM = '"Linux"'
+_CHROME_SEC_CH_UA = (
+    f'"Chromium";v="{_CHROME_MAJOR}", "Not.A/Brand";v="24", '
+    f'"Google Chrome";v="{_CHROME_MAJOR}"'
 )
 _CHROME_UA = (
     f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    f"(KHTML, like Gecko) Chrome/{_CHROME_SIGNATURE[0]}.0.0.0 Safari/537.36"
+    f"(KHTML, like Gecko) Chrome/{_CHROME_MAJOR}.0.0.0 Safari/537.36"
 )
 _NAV_ACCEPT = (
     "text/html,application/xhtml+xml,application/xml;q=0.9,"
@@ -126,9 +127,9 @@ def _build_headers(
         return dict(extra or {})
     h: dict[str, str] = {
         "Connection": "keep-alive",
-        "sec-ch-ua": _CHROME_SIGNATURE[1],
+        "sec-ch-ua": _CHROME_SEC_CH_UA,
         "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": _CHROME_SIGNATURE[2],
+        "sec-ch-ua-platform": _CHROME_PLATFORM,
     }
     if method in ("GET", "HEAD"):
         h["Upgrade-Insecure-Requests"] = "1"
@@ -263,7 +264,11 @@ def fetch(
       max_redirects: Maximum redirects to follow. 0 to disable.
       on_redirect: Called with the redirect target URL before following.
         Raise to abort the redirect.
-      validated_hosts: Optional resolver that returns a validated IP for each host.
+      validated_hosts: Optional resolver returning a validated IP per hostname.
+        It receives the bare hostname (never ``host:port``) and must be pure:
+        a given hostname always resolves to the same IP for the lifetime of a
+        call. A redirect that stays on the same hostname, port, and scheme
+        reuses the prior resolution without re-invoking the resolver.
       return_connection: If True, return ``(bytes, HTTPConn)`` for reuse.
       http_conn: Existing connection to reuse (same-host only).
 
@@ -309,7 +314,6 @@ def fetch(
         or on_redirect is not None
         or validated_hosts is not None
     )
-    last_err: Exception | None = None
     for attempt in range(1 + retries):
         try:
             if use_conn_path:
@@ -334,9 +338,9 @@ def fetch(
                 headers=merged,
                 body=body_bytes,
                 timeout_sec=timeout_sec,
+                max_redirects=max_redirects,
             )
         except FetchError as e:
-            last_err = e
             http_conn = None
             if e.status not in _RETRYABLE_STATUSES or attempt == retries:
                 raise
@@ -349,7 +353,6 @@ def fetch(
             )
             time.sleep(delay_sec)
         except (OSError, TimeoutError) as e:
-            last_err = e
             http_conn = None
             if attempt == retries:
                 raise
@@ -361,12 +364,26 @@ def fetch(
                 delay_sec,
             )
             time.sleep(delay_sec)
-    assert last_err is not None
-    raise last_err
+    # The loop returns on success and re-raises on the final attempt, so this
+    # is unreachable; it exists only to satisfy the type checker.
+    raise AssertionError("retry loop exited without returning or raising")
 
 
 def _backoff_delay(attempt: int, headers: dict[str, str]) -> float:
-    """Exponential backoff with jitter; respects Retry-After."""
+    """Exponential backoff with jitter.
+
+    Honors a ``Retry-After`` header when one is present in ``headers``. Only
+    the HTTP-status retry path supplies response headers; network-error
+    retries pass an empty mapping, so they always use the computed backoff.
+
+    Args:
+      attempt: Zero-based retry attempt number.
+      headers: Response headers; consulted for ``retry-after``.
+
+    Returns:
+      delay_sec: Seconds to wait before the next attempt.
+
+    """
     retry_after = headers.get("retry-after")
     if retry_after is not None:
         try:
@@ -412,6 +429,10 @@ def _split_userinfo(url: str) -> tuple[str, str | None]:
     full ``u:p@host`` string as a hostname (``Errno -2``). Pre-strip the
     userinfo and emit an ``Authorization: Basic`` header instead.
 
+    IPv6 hosts are handled: the split keys off the final ``@`` (a literal
+    ``@`` in userinfo is invalid per RFC 3986), so a bracketed
+    ``user:pass@[::1]:8443`` cleanly yields ``[::1]:8443``.
+
     Args:
       url: Fully-qualified URL, possibly with ``user:pass@`` userinfo.
 
@@ -452,8 +473,17 @@ def _fetch_simple(
     headers: dict[str, str],
     body: bytes | None,
     timeout_sec: float,
+    max_redirects: int,
 ) -> bytes:
-    """Simple path: urllib.request.urlopen, no connection reuse."""
+    """Simple path: urllib with a redirect handler that honors the cap.
+
+    Note: a ``FetchError`` raised here reports the *original* ``url``, not the
+    intermediate URL urllib was following when the error occurred. The
+    connection path preserves the in-flight ``current_url``; the simple path
+    cannot, because urllib hides the redirect chain. Callers needing the exact
+    failing URL should use the connection path (any redirect-related option
+    routes there).
+    """
     request = urllib.request.Request(  # noqa: S310 -- caller-supplied URL; validation at trust boundary
         url,
         headers=headers,
@@ -461,10 +491,7 @@ def _fetch_simple(
         data=body,
     )
     try:
-        response = urllib.request.urlopen(  # noqa: S310 -- caller-supplied URL; validation at trust boundary
-            request,
-            timeout=timeout_sec,
-        )
+        response = _open_request(request, timeout_sec=timeout_sec, cap=max_redirects)
     except urllib.error.HTTPError as e:
         resp_body = e.read()
         raise FetchError(
@@ -478,16 +505,59 @@ def _fetch_simple(
     return _decompress(raw, encoding)
 
 
+def _open_request(
+    request: urllib.request.Request, *, timeout_sec: float, cap: int
+) -> http.client.HTTPResponse:
+    """Open ``request`` through a redirect-capped opener."""
+    return _capped_redirect_opener(cap).open(request, timeout=timeout_sec)
+
+
+class _CappedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that enforces an exact total-redirect cap.
+
+    ``urllib``'s default handler caps at ``max_redirections`` (10) with a
+    per-URL ``max_repeats`` (4) policy, ignoring the caller's intent. This
+    handler instead follows at most ``max_redirects`` redirects and raises
+    :class:`FetchError` when the cap is exceeded.
+    """
+
+    def __init__(self, max_redirects: int) -> None:
+        super().__init__()
+        self._max_redirects = max_redirects
+        self._count = 0
+
+    @override
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if self._count >= self._max_redirects:
+            raise FetchError(newurl, code, {}, b"Exceeded redirect limit")
+        self._count += 1
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _capped_redirect_opener(max_redirects: int) -> urllib.request.OpenerDirector:
+    """Build a urllib opener whose redirects are capped at ``max_redirects``."""
+    return urllib.request.build_opener(_CappedRedirectHandler(max_redirects))
+
+
 class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(
         self,
         host: str,
         *,
+        port: int | None = None,
         server_hostname: str,
         timeout: float,
         context: ssl.SSLContext,
     ) -> None:
-        super().__init__(host, timeout=timeout, context=context)
+        super().__init__(host, port=port, timeout=timeout, context=context)
         self._server_hostname = server_hostname
         self._ssl_context = context
 
@@ -501,9 +571,14 @@ class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
         )
 
 
-def _hostname(netloc: str) -> str:
-    parsed = urlparse(f"//{netloc}")
-    return parsed.hostname or netloc
+def _default_port(scheme: str) -> int:
+    """Return the default TCP port for an HTTP scheme."""
+    return 443 if scheme == "https" else 80
+
+
+def _netloc(hostname: str, port: int | None) -> str:
+    """Recombine a hostname and optional port into a netloc."""
+    return f"{hostname}:{port}" if port is not None else hostname
 
 
 def _bracket_ipv6(host: str) -> str:
@@ -521,27 +596,43 @@ def _bracket_ipv6(host: str) -> str:
 
 def _open_connection(
     scheme: str,
-    host: str,
+    hostname: str,
     timeout_sec: float,
+    *,
+    port: int | None = None,
     resolved_ip: str = "",
 ) -> HTTPConn:
-    """Open a new HTTP or HTTPS connection."""
-    connect_host = _bracket_ipv6(resolved_ip or host)
+    """Open a new HTTP or HTTPS connection.
+
+    Args:
+      scheme: ``http`` or ``https``.
+      hostname: Bare host without port; used for SNI and the Host header.
+      timeout_sec: Socket timeout in seconds.
+      port: Explicit port, or ``None`` for the scheme default.
+      resolved_ip: Pre-resolved IP to connect to, bypassing DNS.
+
+    Returns:
+      conn: An unconnected HTTP or HTTPS connection.
+
+    """
+    connect_host = _bracket_ipv6(resolved_ip or hostname)
     if scheme == "https":
         ctx = ssl.create_default_context()
         if resolved_ip:
             return _ValidatedHTTPSConnection(
                 connect_host,
-                server_hostname=_hostname(host),
+                port=port,
+                server_hostname=hostname,
                 timeout=timeout_sec,
                 context=ctx,
             )
         return http.client.HTTPSConnection(
             connect_host,
+            port=port,
             timeout=timeout_sec,
             context=ctx,
         )
-    return http.client.HTTPConnection(connect_host, timeout=timeout_sec)
+    return http.client.HTTPConnection(connect_host, port=port, timeout=timeout_sec)
 
 
 def _fetch_connection(
@@ -559,12 +650,13 @@ def _fetch_connection(
     """Connection path: http.client with manual redirect following."""
     parsed = urlparse(url)
     scheme = parsed.scheme
-    host = parsed.netloc
+    hostname = parsed.hostname or parsed.netloc
+    port = parsed.port
     path = parsed.path or "/"
     if parsed.query:
         path = f"{path}?{parsed.query}"
 
-    validated = validated_hosts(host) if validated_hosts is not None else None
+    validated = validated_hosts(hostname) if validated_hosts is not None else None
     connect_host = validated.ip if validated is not None else ""
     request_headers = headers
     if validated is not None:
@@ -573,14 +665,19 @@ def _fetch_connection(
         # that observe header order return 403 when Host is trailing.
         request_headers = {"Host": validated.host, **headers}
 
+    # http.client stores a bare ``.host`` (port lives in ``.port``), so reuse
+    # must compare the hostname and port separately, never the host:port netloc.
     if (
         http_conn is not None
-        and http_conn.host == (connect_host or host)
+        and http_conn.host == hostname
+        and http_conn.port == (port or _default_port(scheme))
         and isinstance(http_conn, http.client.HTTPSConnection) == (scheme == "https")
     ):
         raw_conn = http_conn
     else:
-        raw_conn = _open_connection(scheme, host, timeout_sec, resolved_ip=connect_host)
+        raw_conn = _open_connection(
+            scheme, hostname, timeout_sec, port=port, resolved_ip=connect_host
+        )
 
     current_url = url
     remaining = max_redirects
@@ -603,23 +700,31 @@ def _fetch_connection(
                 )
             redir = urlparse(location)
             redir_scheme = redir.scheme or scheme
-            redir_host = redir.netloc or host
+            redir_netloc = redir.netloc or _netloc(hostname, port)
             redirect_url = (
                 location
                 if redir.netloc
                 else (
-                    f"{redir_scheme}://{redir_host}{redir.path or '/'}"
+                    f"{redir_scheme}://{redir_netloc}{redir.path or '/'}"
                     + (f"?{redir.query}" if redir.query else "")
                 )
             )
             if on_redirect is not None:
                 on_redirect(redirect_url)
-            if redir_host != host or redir_scheme != scheme:
+            redir_parsed = urlparse(redirect_url)
+            redir_hostname = redir_parsed.hostname or hostname
+            redir_port = redir_parsed.port
+            if (
+                redir_hostname != hostname
+                or redir_port != port
+                or redir_scheme != scheme
+            ):
                 raw_conn.close()
                 scheme = redir_scheme
-                host = redir_host
+                hostname = redir_hostname
+                port = redir_port
                 validated = (
-                    validated_hosts(host) if validated_hosts is not None else None
+                    validated_hosts(hostname) if validated_hosts is not None else None
                 )
                 connect_host = validated.ip if validated is not None else ""
                 request_headers = headers
@@ -627,8 +732,9 @@ def _fetch_connection(
                     request_headers = {"Host": validated.host, **headers}
                 raw_conn = _open_connection(
                     scheme,
-                    host,
+                    hostname,
                     timeout_sec,
+                    port=port,
                     resolved_ip=connect_host,
                 )
             path = redir.path or "/"

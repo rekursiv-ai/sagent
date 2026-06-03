@@ -22,6 +22,7 @@ from sagent.types.tape import (
     ContextSplice,
     InvalidPayloadError,
     TapeRef,
+    merge_mask_ranges,
 )
 
 
@@ -31,6 +32,43 @@ _REF = TapeRef(session_id="s", ordinal=0)
 def _ref(ordinal: int) -> TapeRef:
     """Test helper: build a TapeRef with the standard session id."""
     return TapeRef(session_id="s", ordinal=ordinal)
+
+
+def test_merge_mask_ranges_preserves_gaps() -> None:
+    """Sparse ranges stay sparse; a real gap is not filled."""
+    merged = merge_mask_ranges(((_ref(1), _ref(1)), (_ref(10), _ref(10))))
+    assert merged == ((_ref(1), _ref(1)), (_ref(10), _ref(10)))
+
+
+def test_merge_mask_ranges_coalesces_overlapping_and_touching() -> None:
+    """Overlapping or adjacent (abutting) ranges merge into one."""
+    # Touching: 1..3 and 4..5 abut (gap 0) -> one range.
+    assert merge_mask_ranges(((_ref(1), _ref(3)), (_ref(4), _ref(5)))) == (
+        (_ref(1), _ref(5)),
+    )
+    # Overlapping: 1..5 and 3..8 -> one range.
+    assert merge_mask_ranges(((_ref(1), _ref(5)), (_ref(3), _ref(8)))) == (
+        (_ref(1), _ref(8)),
+    )
+
+
+def test_merge_mask_ranges_partitions_by_session() -> None:
+    """Ranges in different sessions never merge across the boundary."""
+    a = TapeRef(session_id="a", ordinal=1)
+    b = TapeRef(session_id="b", ordinal=1)
+    merged = merge_mask_ranges(((a, a), (b, b)))
+    assert set(merged) == {(a, a), (b, b)}
+
+
+def test_merge_mask_ranges_rejects_cross_session_range() -> None:
+    """A range whose endpoints span sessions fails fast (review C5).
+
+    The helper's same-session precondition is unenforceable downstream silently:
+    a cross-session input would produce a malformed range. Fail at the source.
+    """
+    cross = (TapeRef(session_id="a", ordinal=0), TapeRef(session_id="b", ordinal=1))
+    with pytest.raises(AssertionError):
+        merge_mask_ranges((cross,))
 
 
 def _splice(

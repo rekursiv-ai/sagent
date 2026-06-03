@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import dataclasses
@@ -51,6 +52,7 @@ def _empty_headers() -> dict[str, str]:
 __all__ = [
     "CANCELLED_PLACEHOLDER",
     "DETACHED_ARRIVAL_SUFFIX",
+    "DETACHED_ARRIVED_MIMIC_PREFIX",
     "DETACHED_ARRIVED_SYSTEM_NOTE",
     "DETACHED_ARRIVED_TOOL",
     "DETACHED_PLACEHOLDER",
@@ -98,6 +100,7 @@ __all__ = [
     "ToolCall",
     "ToolLabel",
     "ToolResult",
+    "ToolResultKind",
     "ToolResultPartial",
     "Undetach",
     "UserDeferredMessage",
@@ -228,6 +231,32 @@ class AssistantMessage(SessionMessage):
             seen.add(tc.id)
 
 
+class ToolResultKind(Enum):
+    """Lifecycle status of a ``ToolResult`` -- the load-bearing discriminator.
+
+    Replaces sniffing ``content`` for placeholder text (fragile: a real tool
+    output could match a placeholder prefix). Consumers branch on this enum,
+    not on the result string.
+
+    - ``FINAL``: the tool's real output (cohort or completed background job).
+      Forward-deliverable; terminal. Default for plain ``ToolResult``s,
+      including tool *failures* (a raised tool is a real terminal answer).
+    - ``PENDING``: a non-final stub for a still-running tool (preempt/detach or
+      a backgrounded job). The real result arrives later as a forward
+      ``DetachedArrived`` pair; this stub must never itself be forwarded.
+    - ``CANCELLED``: terminal -- the tool was killed and no result will follow.
+
+    Orthogonal to ``is_error``: ``kind`` is the lifecycle axis, ``is_error`` the
+    success axis. A failed tool is ``FINAL`` + ``is_error=True``; the
+    ``[cancelled]`` answer is ``CANCELLED`` + ``is_error=True``; the
+    ``[detached]`` stub is ``PENDING`` + ``is_error=False``.
+    """
+
+    FINAL = "final"
+    PENDING = "pending"
+    CANCELLED = "cancelled"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolResult(SessionMessage):
     """Result of one tool invocation."""
@@ -237,6 +266,13 @@ class ToolResult(SessionMessage):
 
     content: str
     """Result text shown to the model."""
+
+    kind: ToolResultKind = ToolResultKind.FINAL
+    """Lifecycle status; ``FINAL`` (a real result) unless a stub. Load-bearing
+    discriminator -- consumers branch on this, never on ``content`` text. The
+    ``FINAL`` default keeps tool authors and legacy sessions correct without
+    change (a plain ``ToolResult(call_id=..., content=...)`` is a real result).
+    """
 
     is_error: bool = False
     """True when the tool raised or signalled failure."""
@@ -257,30 +293,23 @@ class ToolResult(SessionMessage):
     """Optional short post-execution receipt line."""
 
 
-# Bodies for the synthetic ``ToolResult`` stubs the runtime appends when
-# a tool's real result is unavailable at history-linearization time.
-# Both fill the ``content`` slot the model reads, far from any
-# system-prompt section explaining the convention -- so each is written
-# to carry its own contract:
+# Display text for the synthetic ``ToolResult`` stubs the runtime appends when
+# a tool's real result is unavailable at history-linearization time. These fill
+# the ``content`` slot the model reads; the LIFECYCLE meaning is carried by
+# ``ToolResult.kind`` (``PENDING`` / ``CANCELLED``), never inferred from this
+# text -- so the wording is free to change and a real tool output that happens
+# to resemble a stub is never misclassified.
 #
-# - ``DETACHED_PLACEHOLDER`` (``is_error=False``): the tool is still
-#   running after a user preempt/Compact/Clear. It is the permanent,
-#   honest answer to the original ``tool_use``: the real result is NOT
-#   back-patched into this slot. When the tool completes, the runtime
-#   delivers the real result as NEW forward context -- a synthetic
-#   ``DETACHED_ARRIVED_TOOL`` tool_use/tool_result pair -- so nothing the
-#   model already read is silently rewritten (see
-#   ``docs/private/design_detached_tool_results.md``). The matcher keys on
-#   ``call_id``, never this text, so the wording is free.
-# - ``CANCELLED_PLACEHOLDER`` (``is_error=True``): the tool was killed
-#   (operator Kill, cooperative abort, background cancellation); no
-#   result will follow. Terminal -- the model must not wait or retry.
-# - ``RUNNING_PREFIX`` (``is_error=False``): a tool explicitly promoted
-#   to a background job; the synchronous return is
-#   ``f"{RUNNING_PREFIX}<name>]"`` and the real result splices in later,
-#   exactly like ``DETACHED_PLACEHOLDER``. Producer and the
-#   ``_is_background_placeholder`` matcher share this one prefix so the
-#   pair cannot drift apart.
+# - ``DETACHED_PLACEHOLDER`` (``kind=PENDING``): the tool is still running
+#   after a user preempt/Compact/Clear. The permanent, honest answer to the
+#   original ``tool_use``; the real result is NOT back-patched into this slot
+#   but delivered later as a forward ``DETACHED_ARRIVED_TOOL`` pair (see
+#   ``docs/private/design_detached_tool_results.md``).
+# - ``CANCELLED_PLACEHOLDER`` (``kind=CANCELLED``, ``is_error=True``): the tool
+#   was killed; no result will follow. Terminal.
+# - ``RUNNING_PREFIX`` (``kind=PENDING``): a tool promoted to a background job;
+#   the synchronous return is ``f"{RUNNING_PREFIX}<name>]"`` and the real result
+#   splices in later, exactly like ``DETACHED_PLACEHOLDER``.
 DETACHED_PLACEHOLDER = (
     "[detached: tool still running; real result arrives in a later message]"
 )
@@ -288,6 +317,7 @@ CANCELLED_PLACEHOLDER = (
     "[cancelled: tool killed before completion; no result will follow]"
 )
 RUNNING_PREFIX = "[Running in background: "
+
 
 # Synthetic tool name for the forward delivery of a detached tool's real
 # result. The runtime appends an ``AssistantMessage`` carrying a
@@ -298,6 +328,17 @@ RUNNING_PREFIX = "[Running in background: "
 # to history directly and never dispatched through ``_run_tool_and_post``.
 DETACHED_ARRIVED_TOOL = "DetachedArrived"
 DETACHED_ARRIVAL_SUFFIX = ":detached"
+
+# Reserved id namespace for a *model-forged* ``DetachedArrived`` call. The
+# ``DETACHED_ARRIVED_TOOL`` name and the ``:detached`` arrival-id scheme are the
+# runtime's alone, but a model can emit its own ``DetachedArrived`` call with an
+# arbitrary id -- including one that collides with a real arrival id, which
+# would put two ``AssistantMessage``s under the same tool_call id and break the
+# wire payload. The runtime rewrites every model-forged call's id into this
+# namespace at the response boundary (``f"{MIMIC}{n}"``), so a forgery can never
+# occupy a real call's or arrival's id. Never produced by the genuine forward
+# path; the matcher and the rewriter share this one constant.
+DETACHED_ARRIVED_MIMIC_PREFIX = "DetachedArrived:mimic:"
 
 # System-prompt note teaching the model that ``DetachedArrived`` turns in its
 # history are runtime-synthesized result deliveries, not a callable tool --

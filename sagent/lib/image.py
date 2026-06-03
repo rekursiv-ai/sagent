@@ -301,14 +301,18 @@ def resize(
     if not needs_resize and not needs_shrink:
         return data, mime
 
+    # img.resize() clears img.format, so capture it before resizing and
+    # derive the returned mime from the format actually saved -- not the
+    # stale original mime.
+    fmt = img.format or "PNG"
     if needs_resize:
         new_size = (int(width * scale), int(height * scale))
         img = img.resize(new_size, Image.Resampling.LANCZOS)
 
-    fmt = img.format or "PNG"
     buf = io.BytesIO()
     img.save(buf, format=fmt)
     out = buf.getvalue()
+    mime = Image.MIME.get(fmt, mime)
 
     # Still too big? Fall back to JPEG quality ramp.
     if len(out) > max_bytes and fmt != "JPEG":

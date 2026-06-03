@@ -1464,15 +1464,26 @@ class Agent:
             if contribution:
                 parts.append(contribution)
         # Teach the model that ``DetachedArrived`` history turns are runtime
-        # result deliveries, not a callable tool -- but only once such a turn
-        # is actually in context, so prompts without detached activity stay
+        # result deliveries, not a callable tool. Injected the moment any tool
+        # detaches -- before the first synthesized ``DetachedArrived`` pair
+        # lands -- so the prohibition precedes the imitable pattern rather than
+        # co-occurring with it (the reactive injection taught the model the
+        # exact shape it then copied). Prompts without detached activity stay
         # lean. Paired with the runtime guard in ``_run_tool_and_post``.
-        if self._history_has_detached_arrival():
+        if self._has_detached_activity():
             parts.append(types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE)
         return "\n\n".join(parts)
 
-    def _history_has_detached_arrival(self) -> bool:
-        """True when context holds a synthesized ``DetachedArrived`` tool turn."""
+    def _has_detached_activity(self) -> bool:
+        """True when a tool is detached or a ``DetachedArrived`` turn is present.
+
+        Proactive: a live ``runtime.detached`` task means a ``[detached]`` stub
+        is already in context and a forward delivery is pending, so the note
+        must appear now. The history check covers the window after the task
+        completed but its synthesized pair still resolves into context.
+        """
+        if self.runtime.detached:
+            return True
         return any(
             isinstance(entry, types.runtime.AssistantMessage)
             and any(
@@ -2449,6 +2460,7 @@ class _AgentTool:
             return types.runtime.ToolResult(
                 call_id=call_id,
                 content=f"{types.runtime.RUNNING_PREFIX}{self._inner.name}]",
+                kind=types.runtime.ToolResultKind.PENDING,
             )
         result = await self._inner.run(clean_args)
         if not result.call_id:
@@ -2550,6 +2562,7 @@ class _AgentTool:
                         call_id=call_id,
                         content=types.runtime.CANCELLED_PLACEHOLDER,
                         is_error=True,
+                        kind=types.runtime.ToolResultKind.CANCELLED,
                     ),
                 ),
             )

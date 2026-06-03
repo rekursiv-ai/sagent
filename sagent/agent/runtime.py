@@ -216,10 +216,10 @@ Agent -- which is the hard part. Keeping Model/Tool in the runtime
 concentrates the inbox-arm dispatch logic in one ``match`` block.
 Tape mutations and event publications that happen on the model and
 tool worker tasks (``_compact_and_post``'s ``adopt_record``,
-``_stream_and_post``'s ``ModelResponseCancelled`` publish, the
-``_handle_*`` helpers split out for readability) intentionally live
-outside that ``match`` block; the inbox arm dispatches and the
-worker arms drive the next events back through the inbox.
+``_stream_and_post``'s ``ModelResponseCancelled`` publish,
+``_run_tool_and_post``'s result routing) intentionally live outside
+that ``match`` block; the inbox arm dispatches and the worker arms
+drive the next events back through the inbox.
 """
 
 from __future__ import annotations
@@ -251,6 +251,7 @@ from sagent.types.exceptions import (
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_ARRIVAL_SUFFIX,
+    DETACHED_ARRIVED_MIMIC_PREFIX,
     DETACHED_ARRIVED_TOOL,
     DETACHED_PLACEHOLDER,
     AgentIdle,
@@ -287,6 +288,7 @@ from sagent.types.runtime import (
     SaveSession,
     ToolCall,
     ToolResult,
+    ToolResultKind,
     ToolResultPartial,
     Undetach,
     UserDeferredMessage,
@@ -295,6 +297,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    InvalidPayloadError,
     InvalidSpliceError,
     ReferrableTapeEvent,
     TapeEvent,
@@ -303,6 +306,7 @@ from sagent.types.tape import (
     full_tape_mask,
     mask_contains_ref,
     mask_ranges_overlap,
+    merge_mask_ranges,
     unpaired_call_ids,
 )
 
@@ -463,8 +467,26 @@ def _sanitize_for_send(
     for entry in entries:
         if isinstance(entry, AssistantMessage):
             _flush_pending()
-            out.append(entry)
-            pending.update(tc.id for tc in entry.tool_calls)
+            # Drop tool_calls whose id was already emitted by an earlier
+            # AssistantMessage (already paired in ``seen`` or open in
+            # ``pending``). A duplicate forward-delivery pair resolves to two
+            # AssistantMessages sharing a ``f"{id}:detached"`` id; keeping both
+            # makes ``_rescue_context``'s constructor reject the payload, the
+            # exact wedge this sanitizer exists to absorb (``Issue#294``).
+            deduped = tuple(
+                tc
+                for tc in entry.tool_calls
+                if tc.id not in seen and tc.id not in pending
+            )
+            if not deduped and not entry.text and not entry.thinking_blocks:
+                continue  # wholly-duplicate turn: drop, preserving alternation
+            message = (
+                entry
+                if deduped == entry.tool_calls
+                else dataclasses.replace(entry, tool_calls=deduped)
+            )
+            out.append(message)
+            pending.update(tc.id for tc in message.tool_calls)
         elif isinstance(entry, ToolResult):
             if entry.call_id in seen:
                 continue
@@ -558,6 +580,14 @@ AWAIT_USER = Await(
         Quit,
     )
 )
+
+
+# Recovery gate for an unrepairable model-call context: like ``AWAIT_USER`` but
+# also admits the tape-mutating control verbs. A broken tape is most directly
+# fixed by ``Clear`` / ``Compact`` / ``Recompact``, and ``Halt`` / ``Kill``
+# must still reach the loop; ``AWAIT_USER`` alone buffers all of these behind
+# the gate, stranding the very recovery actions the user reaches for.
+AWAIT_RECOVERY = Await((*AWAIT_USER.types, Clear, Compact, Recompact, Halt, Kill))
 
 
 class GatedDeque[T]:
@@ -986,6 +1016,24 @@ class AgentRuntime:
         # per-feature special case can re-derive commit timing/placement
         # (which is how the earlier split caused stranding / lone-round bugs).
         self._pending_commits: list[_PendingCommit] = []
+        # Original ``call_id``s whose detached result has already been
+        # forward-delivered (or is queued to be). The forward-delivery
+        # invariant is "at most one ``DetachedArrived`` pair per original
+        # ``call_id``, ever": two deliveries for one id would resolve to two
+        # ``AssistantMessage``s sharing the ``f"{id}:detached"`` tool_call id,
+        # which ``validate_context`` rejects and ``_rescue_context`` cannot
+        # repair (wedging the gate). ``_defer_detached_forward`` consults this
+        # set so any second producer -- the in-batch ``ToolResult`` race and a
+        # later ``DetachedResult``, a re-spawned task, any future path -- is a
+        # no-op rather than a duplicate. Never cleared except by ``Clear``
+        # (which wipes history, so the ids no longer resolve).
+        self._forwarded_call_ids: set[str] = set()
+        # Monotonic counter minting unique ids for model-forged
+        # ``DetachedArrived`` calls (``_sanitize_forged_arrivals``). A forged
+        # call's model-chosen id can collide with a real arrival id; rewriting
+        # into the ``DETACHED_ARRIVED_MIMIC_PREFIX`` namespace keyed off this
+        # counter keeps every forgery's id globally unique.
+        self._mimic_counter: int = 0
         # ``AgentIdle`` is edge-triggered: published once when the
         # runtime is about to block on an empty inbox with no work
         # in flight, then suppressed until the next ``drain()`` returns
@@ -1249,13 +1297,14 @@ class AgentRuntime:
 
         """
         self._validate_no_alive_mask_overlap(mask)
-        if insert_after is not None:
-            for r_from, r_to in mask:
-                if r_from.ordinal <= insert_after.ordinal <= r_to.ordinal:
-                    raise InvalidSpliceError(
-                        f"insert_after {insert_after} falls inside this splice's"
-                        f" own mask range ({r_from}, {r_to})",
-                    )
+        # ``mask_contains_ref`` compares ``session_id`` before ordinal: a raw
+        # ordinal compare false-rejects an ``insert_after`` anchor from a
+        # different session whose ordinal happens to fall in this mask's range
+        # (multi-session resumed/legacy tapes).
+        if insert_after is not None and mask_contains_ref(mask, insert_after):
+            raise InvalidSpliceError(
+                f"insert_after {insert_after} falls inside this splice's own mask",
+            )
         ref = self.mint_ref()
         record = ContextSplice(
             ref=ref,
@@ -1468,8 +1517,85 @@ class AgentRuntime:
         real result is committed later as a synthetic ``DetachedArrived`` pair
         (``_flush_pending``), preserving full ``ToolResult`` structure. See
         ``docs/private/design_detached_tool_results.md``.
+
+        Idempotent per ``call_id``: a second delivery for an id already
+        forwarded (or already queued) is dropped, so no two
+        ``DetachedArrived`` pairs ever share an arrival id (the wedge in
+        ``Issue#294``).
+
+        A ``PENDING`` stub (``[detached]`` / ``[Running in background]``) is
+        never forwarded and never marks the id delivered: it is not the tool's
+        real output, and forwarding it would mark the id consumed and suppress
+        the genuine result that arrives later via the background task's own
+        ``DetachedResult`` (the regression in ``Issue#294``'s review). The real
+        result then forwards normally. Keyed on ``ToolResult.kind``, never on
+        ``content`` text, so a real output resembling a stub is never dropped.
+
+        A ``CANCELLED`` result whose call is ALREADY answered in-slot by a
+        terminal result (a cohort ``Kill``: ``_stop_tool`` wrote the
+        ``CANCELLED`` answer, then the cancelled task's unwind posts a second
+        ``CANCELLED``) is not forwarded -- the model already has the
+        cancellation, and a forward pair would tell it the same thing twice
+        (``f43f811c9`` review). A background job's cancellation, whose in-slot
+        answer is a ``PENDING`` running-stub, still forwards (it is the only
+        delivery of that outcome).
         """
+        if result.kind is ToolResultKind.PENDING:
+            logger.debug(
+                "runtime detached forward skipped (PENDING stub, not real result):"
+                " call_id=%s",
+                result.call_id,
+            )
+            return
+        if result.kind is ToolResultKind.CANCELLED and self._inslot_result_is_terminal(
+            result.call_id
+        ):
+            logger.debug(
+                "runtime detached forward skipped (cancellation already answered"
+                " in-slot): call_id=%s",
+                result.call_id,
+            )
+            return
+        if result.call_id in self._forwarded_call_ids:
+            logger.debug(
+                "runtime detached forward suppressed (already delivered): call_id=%s",
+                result.call_id,
+            )
+            return
+        self._forwarded_call_ids.add(result.call_id)
         self._pending_commits.append(_PendingCommit(kind="forward", result=result))
+
+    def _inslot_result_is_terminal(self, call_id: str) -> bool:
+        """True when ``call_id``'s in-slot ``ToolResult`` is a final answer.
+
+        Reads the call's existing placeholder/result record (O(1) via
+        ``_placeholder_refs``). ``CANCELLED`` / ``FINAL`` are terminal (the
+        model already has the answer); ``PENDING`` is not (a real result is
+        still pending forward delivery). ``_index_record`` registers
+        ``_placeholder_refs`` from both plain history records AND
+        ``ContextSplice`` payloads (a result preserved across compaction), so
+        both shapes are inspected -- otherwise a terminal result compacted into
+        a splice would read as non-terminal and a duplicate cancellation would
+        forward (``77bf1d67f`` review C3).
+        """
+        ref = self._placeholder_refs.get(call_id)
+        if ref is None:
+            return False
+        record = self._tape_by_ref.get(ref)
+        if isinstance(record, ReferrableTapeEvent):
+            event = record.event
+            return (
+                isinstance(event, ToolResult)
+                and event.kind is not ToolResultKind.PENDING
+            )
+        if isinstance(record, ContextSplice):
+            return any(
+                isinstance(entry, ToolResult)
+                and entry.call_id == call_id
+                and entry.kind is not ToolResultKind.PENDING
+                for entry in record.payload
+            )
+        return False
 
     def _defer_pairing(self, result: ToolResult) -> None:
         """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``.
@@ -1663,6 +1789,7 @@ class AgentRuntime:
                                 task.cancel()
                             self.detached.clear()
                             self._pending_commits.clear()
+                            self._forwarded_call_ids.clear()
                             queued.clear()
                             deferred.clear()
                             self._mid_stream_queue.clear()
@@ -1906,6 +2033,12 @@ class AgentRuntime:
                                 )
                                 continue
                             self.model_call = None
+                            # Neutralize any model-forged ``DetachedArrived``
+                            # call at the entry boundary, before the message
+                            # reaches history / cohort / pairing. Every
+                            # downstream consumer then sees an id that cannot
+                            # collide with a real arrival id (``Issue#297``).
+                            msg = self._sanitize_forged_arrivals(msg)
                             before_tool_spawn = None
                             if self.before_tool_spawn is not None:
                                 before_tool_spawn = self.before_tool_spawn(msg)
@@ -2140,16 +2273,56 @@ class AgentRuntime:
                     # ``UserMessage`` still at history.tail, treating the
                     # cancellation as a retry rather than waiting for the
                     # user's next input.
-                    self._assert_alternation_invariant()
-                    self._model_call_generation += 1
-                    model_call: asyncio.Task[None] = asyncio.create_task(
-                        self._stream_and_post(self._model_call_generation),
-                    )
-                    self.model_call = model_call
-                    model_call.add_done_callback(
-                        log_task_exception(logger, "model-call task crashed"),
-                    )
-                    self.publish(ModelCallStarted())
+                    try:
+                        self._assert_alternation_invariant()
+                    except (
+                        InvalidContextError,
+                        InvalidPayloadError,
+                        InvalidSpliceError,
+                    ) as exc:
+                        # The gate cannot fire against an invalid context that
+                        # even rescue could not repair (rescue's own
+                        # ``append_splice`` raises ``InvalidPayloadError`` /
+                        # ``InvalidSpliceError`` when its sanitized payload is
+                        # still malformed). Surfacing the failure
+                        # (rather than letting the master catch swallow it) is
+                        # mandatory: a silent re-raise every iteration wedges
+                        # the loop on the same broken tape with no UI feedback
+                        # -- the user sees a frozen prompt (``Issue#294``). Arm
+                        # ``AWAIT_USER`` so the loop stops re-validating the
+                        # same tape until the user acts, and skip the model
+                        # spawn below: firing the provider on the unrepaired
+                        # context is the very failure this guard prevents.
+                        log_exception_or_warning(
+                            logger, "model-call gate context unrepairable", exc
+                        )
+                        # Arm ``AWAIT_RECOVERY`` BEFORE publishing: an observer
+                        # that reacts to ``ModelResponseError`` by pushing a
+                        # recovery verb (``Clear`` / ``Compact``) must land a
+                        # genuinely-new post-arm item. Publishing first would let
+                        # that push count toward the gate baseline, so it would
+                        # satisfy the baseline without exceeding it and the gate
+                        # would never release -- stranding the recovery action
+                        # (same hazard the ``Clear`` arm documents). The batch is
+                        # fully processed here (this gate runs after the per-item
+                        # loop), so there are no items to requeue. ``AWAIT_RECOVERY``
+                        # admits the control verbs (``Clear`` / ``Compact`` /
+                        # ``Recompact``) that repair a broken tape -- which a bare
+                        # ``AWAIT_USER`` would strand -- plus ``Halt`` / ``Kill``
+                        # so no control input is buffered behind the gate.
+                        self.inbox.push_front(AWAIT_RECOVERY)
+                        self.publish(ModelResponseError(exc))
+                        awaiting_user = True
+                    else:
+                        self._model_call_generation += 1
+                        model_call: asyncio.Task[None] = asyncio.create_task(
+                            self._stream_and_post(self._model_call_generation),
+                        )
+                        self.model_call = model_call
+                        model_call.add_done_callback(
+                            log_task_exception(logger, "model-call task crashed"),
+                        )
+                        self.publish(ModelCallStarted())
 
                 self.publish(SaveSession())
             except asyncio.CancelledError:
@@ -2482,24 +2655,42 @@ class AgentRuntime:
         # under undelete semantics would resurrect the originally-
         # masked content (causing both the merged tail AND the
         # originals to render side-by-side).
-        prior_record = self._tape_by_ref.get(tail_origin)
-        if isinstance(prior_record, ContextSplice) and prior_record.mask:
-            prior_lo = min(r_from.ordinal for r_from, _ in prior_record.mask)
-            lo_ord = min(prior_lo, tail_origin.ordinal)
-        else:
-            lo_ord = tail_origin.ordinal
-        hi_ord = tail_origin.ordinal
         sid = tail_origin.session_id
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = (
-            (
-                TapeRef(session_id=sid, ordinal=lo_ord),
-                TapeRef(session_id=sid, ordinal=hi_ord),
-            ),
+        prior_record = self._tape_by_ref.get(tail_origin)
+        # Absorb the prior coalesce splice's OWN same-session mask ranges
+        # verbatim (preserving any gaps -- a sparse mask must stay sparse, or
+        # we delete records the prior splice intentionally left visible), then
+        # add a range for the prior splice's own ref so undelete of the new
+        # splice cannot resurrect the originally-masked content. Only
+        # fully-same-session ranges are absorbed: ``prior_record``'s mask can
+        # span multiple sessions (resumed/legacy tapes -- ``replay`` skips mask
+        # validation, so a malformed cross-session range can reach here) and the
+        # new ranges are built in ``sid``. BOTH endpoints must match ``sid`` (a
+        # range whose ``from`` is in ``sid`` but ``to`` is foreign is dropped,
+        # not absorbed -- otherwise it would feed a cross-session range into
+        # ``merge_mask_ranges``).
+        prior_ranges: tuple[tuple[TapeRef, TapeRef], ...] = ()
+        if isinstance(prior_record, ContextSplice):
+            prior_ranges = tuple(
+                (r_from, r_to)
+                for r_from, r_to in prior_record.mask
+                if r_from.session_id == sid and r_to.session_id == sid
+            )
+        own_range = (
+            TapeRef(session_id=sid, ordinal=tail_origin.ordinal),
+            TapeRef(session_id=sid, ordinal=tail_origin.ordinal),
         )
-        # Anchor: the tape ref immediately before the earliest masked
-        # position, or None for head insertion.
+        mask = merge_mask_ranges((*prior_ranges, own_range))
+        # Anchor: the same-session tape ref immediately before the earliest
+        # masked position, or None for head insertion. The scan is
+        # session-scoped because the mask is built in ``sid``: a foreign-session
+        # record whose ordinal happens to exceed the low must not terminate the
+        # scan early and mis-anchor the splice (multi-session tapes).
+        lo_ord = min(r_from.ordinal for r_from, _ in mask)
         anchor: TapeRef | None = None
         for record in self.tape:
+            if record.ref.session_id != sid:
+                continue
             if record.ref.ordinal >= lo_ord:
                 break
             anchor = record.ref
@@ -2532,10 +2723,10 @@ class AgentRuntime:
         deliberate: any soft path that wants tools to keep running
         without leaving the cohort (Halt) must NOT call this.
         """
-        placeholder, is_error = (
-            (CANCELLED_PLACEHOLDER, True)
+        placeholder, is_error, kind = (
+            (CANCELLED_PLACEHOLDER, True, ToolResultKind.CANCELLED)
             if mode == "kill"
-            else (DETACHED_PLACEHOLDER, False)
+            else (DETACHED_PLACEHOLDER, False, ToolResultKind.PENDING)
         )
         # Carry parent_id through; every other placeholder/result append site
         # (1666, 1698, _run_tool_and_post) does so. Without it, downstream
@@ -2547,6 +2738,7 @@ class AgentRuntime:
                 parent_id=self._parent_id_for_call(cid),
                 content=placeholder,
                 is_error=is_error,
+                kind=kind,
             ),
         )
         self.detached[cid] = task
@@ -2609,6 +2801,47 @@ class AgentRuntime:
                 )
             self.compact_task = None
 
+    def _sanitize_forged_arrivals(self, msg: AssistantMessage) -> AssistantMessage:
+        """Rewrite model-forged ``DetachedArrived`` call ids into a safe namespace.
+
+        The ``DetachedArrived`` name and the ``:detached`` arrival-id scheme
+        belong to the runtime's synthetic forward-delivery turns. A model can
+        emit its own ``DetachedArrived`` call carrying any id, including one
+        equal to a real arrival id -- two ``AssistantMessage``s would then share
+        a tool_call id, breaking wire validity and stranding one pairing
+        (``Issue#297``). Rewriting each forged call's id into the
+        ``DETACHED_ARRIVED_MIMIC_PREFIX`` namespace (keyed off a monotonic
+        counter) restores global id uniqueness at the single entry boundary, so
+        no downstream consumer -- history, cohort, ``_parent_assistant_refs``,
+        the mimic pairing -- can be confused. Returns ``msg`` unchanged when it
+        carries no forged ``DetachedArrived`` call (the common case).
+        """
+        if not any(tc.name == DETACHED_ARRIVED_TOOL for tc in msg.tool_calls):
+            return msg
+        # A model can also emit a non-forged tool call whose id already lies in
+        # the mimic namespace; advance the counter past any such collision so
+        # the rewrite never creates a duplicate id (which would fail
+        # ``AssistantMessage`` validation and lose the whole turn).
+        used_ids = {tc.id for tc in msg.tool_calls if tc.name != DETACHED_ARRIVED_TOOL}
+        rewritten: list[ToolCall] = []
+        for tc in msg.tool_calls:
+            if tc.name != DETACHED_ARRIVED_TOOL:
+                rewritten.append(tc)
+                continue
+            safe_id = f"{DETACHED_ARRIVED_MIMIC_PREFIX}{self._mimic_counter}"
+            self._mimic_counter += 1
+            while safe_id in used_ids:
+                safe_id = f"{DETACHED_ARRIVED_MIMIC_PREFIX}{self._mimic_counter}"
+                self._mimic_counter += 1
+            used_ids.add(safe_id)
+            logger.debug(
+                "runtime forged DetachedArrived rewritten: %s -> %s",
+                tc.id,
+                safe_id,
+            )
+            rewritten.append(dataclasses.replace(tc, id=safe_id))
+        return dataclasses.replace(msg, tool_calls=tuple(rewritten))
+
     def _relegate_tool_calls_to_background(self, msg: AssistantMessage) -> None:
         """Stub every tool call in ``msg`` and spawn it as a detached task.
 
@@ -2628,6 +2861,7 @@ class AgentRuntime:
                     call_id=tc.id,
                     parent_id=msg.id,
                     content=DETACHED_PLACEHOLDER,
+                    kind=ToolResultKind.PENDING,
                 ),
             )
             detached_task = asyncio.create_task(
@@ -2867,6 +3101,7 @@ class AgentRuntime:
                 parent_id=parent_id,
                 content=CANCELLED_PLACEHOLDER,
                 is_error=True,
+                kind=ToolResultKind.CANCELLED,
             )
         except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
             logger.debug(

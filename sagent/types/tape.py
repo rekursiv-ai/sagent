@@ -83,11 +83,24 @@ __all__ = [
 
 
 class InvalidPayloadError(ValueError):
-    """``ContextSplice.payload`` violates tool-call / tool-result pairing."""
+    """A ``ContextSplice`` fails construct-time validation.
+
+    Covers both payload tool-call / tool-result pairing violations and
+    malformed mask structure (inverted, cross-session, or self-overlapping
+    ranges) -- everything ``ContextSplice.__post_init__`` rejects. Distinct
+    from :class:`InvalidSpliceError`, which is the *append-time* check that a
+    new splice's mask does not overlap an already-alive splice's mask.
+    """
 
 
 class InvalidSpliceError(ValueError):
-    """A splice violates the append-time mask-overlap invariant."""
+    """A splice violates the append-time mask-overlap invariant.
+
+    Raised by ``AgentRuntime.append_splice`` when the new splice's mask
+    overlaps an existing alive splice, or its ``insert_after`` anchor falls
+    inside its own mask -- conflicts that only exist relative to the current
+    tape, not detectable at construct time (see :class:`InvalidPayloadError`).
+    """
 
 
 type TapeEvent = ModelContextEvent | CompactStarted | CompactComplete | CompactFailed
@@ -287,6 +300,51 @@ def full_tape_mask(
         )
         for refs in per_session.values()
     )
+
+
+def merge_mask_ranges(
+    ranges: tuple[tuple[TapeRef, TapeRef], ...],
+) -> tuple[tuple[TapeRef, TapeRef], ...]:
+    """Merge overlapping/touching ranges per session; preserve gaps.
+
+    Ranges that overlap or are adjacent (share or abut an ordinal) coalesce
+    into one; ranges separated by a genuine gap stay separate, so a sparse mask
+    stays sparse. Used when a coalesce splice absorbs a prior splice's mask plus
+    its own ref without filling gaps the prior splice intentionally left
+    visible. Output is sorted by ``(session_id, ordinal)`` and disjoint, so it
+    satisfies :func:`_validate_mask_disjoint`.
+
+    Args:
+      ranges: Mask ranges to merge; each ``(from, to)`` must be same-session.
+
+    Returns:
+      merged: Disjoint, gap-preserving ranges.
+
+    """
+    by_session: dict[str, list[tuple[TapeRef, TapeRef]]] = {}
+    for r_from, r_to in ranges:
+        # Same-session precondition (each range is partitioned by ``r_from``'s
+        # session): a cross-session range would silently produce a malformed
+        # ``(a:.., b:..)`` output the downstream validator can't reason about.
+        assert r_from.session_id == r_to.session_id, (
+            f"merge_mask_ranges: cross-session range {r_from} -> {r_to}"
+        )
+        by_session.setdefault(r_from.session_id, []).append((r_from, r_to))
+    merged: list[tuple[TapeRef, TapeRef]] = []
+    for _, session_ranges in sorted(by_session.items()):
+        session_ranges.sort(key=lambda pair: pair[0].ordinal)
+        cur_from, cur_to = session_ranges[0]
+        for r_from, r_to in session_ranges[1:]:
+            # Touching or overlapping (gap of 0 or less) -> extend; a real gap
+            # (next start > current end + 1) -> emit and start a new range.
+            if r_from.ordinal <= cur_to.ordinal + 1:
+                if r_to.ordinal > cur_to.ordinal:
+                    cur_to = r_to
+            else:
+                merged.append((cur_from, cur_to))
+                cur_from, cur_to = r_from, r_to
+        merged.append((cur_from, cur_to))
+    return tuple(merged)
 
 
 def mask_ranges_overlap(
