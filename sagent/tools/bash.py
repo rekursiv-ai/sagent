@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
@@ -65,8 +66,42 @@ _BACKGROUND_PROCESSES: list[subprocess.Popen[bytes]] = []
 
 
 def reap_background_processes() -> None:
-    """Reap completed detached Bash children retained for lifetime tracking."""
+    """Reap completed detached Bash children retained for lifetime tracking.
+
+    For each retained child, ``poll()`` collects its exit status if it has
+    finished. Finished children are then dropped from the retention list;
+    crucially the ``poll()`` itself reaps the OS child, so the ``Popen``
+    object is never garbage-collected with an unreaped process -- the
+    condition that makes ``Popen.__del__`` emit a ``ResourceWarning``.
+    Still-running children stay retained.
+    """
     _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
+
+
+def _reap_at_exit() -> None:
+    """Reap retained detached children at interpreter shutdown.
+
+    A child that finished after the last
+    :func:`reap_background_processes` call is otherwise garbage-collected
+    by ``Popen.__del__`` while still unwaited, emitting a spurious
+    ``ResourceWarning`` at exit -- seen under ``pytest -n`` worker
+    teardown. A final ``poll()`` of each handle reaps every finished
+    child (setting its ``returncode``), which is exactly the condition
+    ``Popen.__del__`` checks, so no finished child warns.
+
+    A child still genuinely running at exit is a different case: clearing
+    the list drops the last reference, so ``Popen.__del__`` runs and emits
+    ``ResourceWarning`` for it. That warning is accurate -- a
+    ``start_new_session`` child is being left running past this process --
+    and is not suppressed here.
+    """
+    for proc in _BACKGROUND_PROCESSES:
+        with contextlib.suppress(Exception):
+            proc.poll()
+    _BACKGROUND_PROCESSES.clear()
+
+
+atexit.register(_reap_at_exit)
 
 
 def _render_bash_description(text: str) -> str:

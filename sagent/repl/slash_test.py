@@ -8,6 +8,7 @@ from sagent.repl.slash import (
     Clear,
     Compact,
     Defer,
+    Effort,
     Halt,
     Help,
     Kill,
@@ -124,16 +125,30 @@ def test_parse_slash_thinking_commands(command: str) -> None:
     assert action.command == command
 
 
-def test_parse_slash_thinking_missing_mode_returns_unknown() -> None:
+def test_parse_slash_thinking_bare_returns_empty_command() -> None:
+    """Bare ``/thinking`` requests the status display (empty command)."""
     action = parse_slash("/thinking")
-    assert isinstance(action, Unknown)
-    assert "show" in action.text
+    assert isinstance(action, Thinking)
+    assert action.command == ""
 
 
 def test_parse_slash_thinking_unknown_mode_returns_unknown() -> None:
     action = parse_slash("/thinking nope")
     assert isinstance(action, Unknown)
     assert "redact-hide" in action.text
+
+
+def test_parse_slash_effort_bare_returns_empty_value() -> None:
+    """Bare ``/effort`` requests the status display (empty value)."""
+    action = parse_slash("/effort")
+    assert isinstance(action, Effort)
+    assert action.value == ""
+
+
+def test_parse_slash_effort_with_value() -> None:
+    action = parse_slash("/effort high")
+    assert isinstance(action, Effort)
+    assert action.value == "high"
 
 
 def test_parse_slash_halt_no_target() -> None:

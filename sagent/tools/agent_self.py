@@ -581,6 +581,17 @@ def _plan_model_options(
                 content="model_options.effort must be a string or null.",
                 is_error=True,
             )
+        valid = model.valid_efforts
+        if value is not None and value not in valid:
+            quoted = ", ".join(repr(e) for e in valid) or "(none)"
+            return types.runtime.ToolResult(
+                call_id="",
+                content=(
+                    f"model_options.effort for {model.model_id} must"
+                    f" be one of {quoted} or null, got {value!r}."
+                ),
+                is_error=True,
+            )
         planned["effort"] = value
     if "cache_ttl" in options:
         value = options["cache_ttl"]
@@ -627,7 +638,10 @@ def _supported_model_options(model: types.model.Model) -> dict[str, str]:
     supported: dict[str, str] = {}
     if model.supports_thinking:
         supported["thinking"] = "boolean"
-    if model.supports_effort:
+    efforts = model.valid_efforts
+    if efforts:
+        supported["effort"] = " | ".join(repr(e) for e in efforts)
+    elif model.supports_effort:
         supported["effort"] = "string"
     if model.supports_cache_control:
         supported["cache_ttl"] = "'5m' | '1h'"

@@ -42,6 +42,7 @@ from sagent.lib import token_count
 from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -504,9 +505,21 @@ class SelfHostedModel:
         return False
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Self-hosted generation surfaces no thinking; only ``off-hide``."""
+        return valid_thinking_states(
+            ThinkingCapability(supports_thinking=self.supports_thinking),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """Return whether effort control is supported."""
         return True
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """Self-hosted maps ``none`` -> thinking off, any other -> on."""
+        return ("none", "low", "medium", "high")
 
     @property
     def supports_cache_control(self) -> bool:

@@ -62,6 +62,7 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -271,9 +272,29 @@ class OpenAICompatModel:
         return self._reasoning_field is not None
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """OpenAI-compat vendors surface readable reasoning, no redaction.
+
+        Vendors exposing a ``reasoning_content`` field (Moonshot,
+        MiniMax, DashScope) return readable text; plain chat-completions
+        (no reasoning field) supports only ``off-hide``. None expose a
+        server-side redaction mode.
+        """
+        return valid_thinking_states(
+            ThinkingCapability(supports_thinking=self.supports_thinking),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """Whether the model accepts a ``reasoning_effort`` hint."""
         return self._is_effort_model(self._model_id)
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """Effort levels accepted by reasoning models; empty otherwise."""
+        if not self.supports_effort:
+            return ()
+        return ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
     @property
     def supports_cache_control(self) -> bool:

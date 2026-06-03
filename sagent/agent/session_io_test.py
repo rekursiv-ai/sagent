@@ -74,7 +74,9 @@ class _NoopModel:
     max_response_tokens: int = 1_024
     supports_streaming: bool = True
     supports_thinking: bool = False
+    valid_thinking_states: tuple[str, ...] = ("off-hide",)
     supports_effort: bool = False
+    valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()

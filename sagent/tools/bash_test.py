@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import asyncio
+import warnings
 
 import pytest
 
@@ -19,6 +20,7 @@ from sagent.tools.bash import (
     _ensure_valid_cwd,
     _kill_and_drain,
     _kill_process_group,
+    _reap_at_exit,
     _render_bash_description,
     _suppress_oserror,
     _trim_bash_output,
@@ -258,6 +260,29 @@ async def test_run_as_fully_detached_returns_pid(tmp_path: Path) -> None:
     reap_background_processes()
     assert "background" in result.content
     assert "pid=" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_detached_child_reaped_at_exit_without_resource_warning(
+    tmp_path: Path,
+) -> None:
+    """A finished detached child must not warn at exit when never reaped.
+
+    Reproduces the ``ResourceWarning: subprocess <pid> is still running``
+    seen under ``pytest -n`` teardown: spawn a fast detached child, do
+    NOT call ``reap_background_processes``, let it finish, then run the
+    atexit hook. With the hook's final ``poll()`` the ``Popen`` is reaped,
+    so promoting ``ResourceWarning`` to an error must not fire.
+    """
+    b = Bash()
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        _ = await b.run({"command": "sleep 0.01", "run_as_fully_detached": True})
+    await asyncio.sleep(0.05)  # child certainly finished, intentionally unreaped
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        _reap_at_exit()  # reaps finished children; no warning may escape
 
 
 def test_suppress_oserror_swallows_oserror() -> None:

@@ -47,6 +47,7 @@ from sagent.providers.lib.cost import (
     compute_cost,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -266,9 +267,23 @@ class _GeminiModel:
         return self._profile.supports_thinking
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Gemini surfaces readable thought parts; no server-side redaction."""
+        return valid_thinking_states(
+            ThinkingCapability(supports_thinking=self.supports_thinking),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
         return self._profile.supports_thinking
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """Gemini effort levels (mapped to ``thinkingBudget``)."""
+        if not self.supports_effort:
+            return ()
+        return ("min", "low", "medium", "high", "xhigh", "max")
 
     @property
     def supports_cache_control(self) -> bool:

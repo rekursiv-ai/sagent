@@ -71,6 +71,13 @@ class Thinking:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Effort:
+    """User typed ``/effort [value]``; bare shows status, value sets it."""
+
+    value: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Login:
     """User typed ``/login``; re-auth current provider."""
 
@@ -138,6 +145,7 @@ type SlashAction = (
     | Recompact
     | ModelSwitch
     | Thinking
+    | Effort
     | Login
     | Help
     | Tasks
@@ -152,8 +160,8 @@ QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
 # Public list of supported commands; drives the unknown-command help line.
 _SUPPORTED = (
-    "/help /clear /compact /recompact /model /provider /thinking /login /tasks"
-    " /halt /kill /defer /send /quit /exit"
+    "/help /clear /compact /recompact /model /provider /thinking /effort /login"
+    " /tasks /halt /kill /defer /send /quit /exit"
 )
 
 
@@ -200,11 +208,14 @@ def parse_slash(line: str) -> SlashAction | None:
         return ModelSwitch(args=f"--provider {arg}" if arg else "")
     arg = _arg_after("/thinking", stripped)
     if arg is not None:
-        if arg in THINKING_COMMANDS:
+        if not arg or arg in THINKING_COMMANDS:
             return Thinking(command=arg)
         return Unknown(
             text="/thinking requires one of: " + ", ".join(THINKING_COMMANDS)
         )
+    arg = _arg_after("/effort", stripped)
+    if arg is not None:
+        return Effort(value=arg)
     arg = _arg_after("/halt", stripped)
     if arg is not None:
         return Halt(target=arg)

@@ -60,6 +60,7 @@ from sagent.providers.lib.errors import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -293,84 +294,116 @@ class Anthropic:
     # these defaults err toward overcount for mixed agent traffic, which is
     # the safe direction for the compaction trigger.
     # opus-4-8 inherits 4-7's value (2.83) pending its own measurement.
+    # Thinking/effort capability per generation, all measured against the
+    # live API (Jun 2026):
+    #   - opus-4-8 / opus-4-7: ``adaptive`` only (``enabled`` 400s), and the
+    #     thinking block returns signed-but-empty -- no readable text.
+    #     Efforts low..xhigh,max.
+    #   - opus-4-6 / sonnet-4-6: both modes, readable thinking text.
+    #     Efforts low,medium,high,max (NO xhigh).
+    #   - opus-4-5 / sonnet-4-5 / haiku-4-5: ``enabled`` only (``adaptive``
+    #     400s 'not supported'), readable text. Efforts: opus-4-5
+    #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         "claude-opus-4-8": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
         ),
         "claude-opus-4-8+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
         ),
         "claude-opus-4-7": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS_FAST_4_6_7,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
         ),
         "claude-opus-4-7+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS_FAST_4_6_7,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
         ),
         "claude-opus-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS_FAST_4_6_7,
+            valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
         ),
         "claude-opus-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS_FAST_4_6_7,
+            valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
         ),
         "claude-opus-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            adaptive_thinking_mode=False,
+            valid_efforts=("low", "medium", "high"),
             chars_per_token=3.66,
         ),
         "claude-opus-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_OPUS,
+            adaptive_thinking_mode=False,
+            valid_efforts=("low", "medium", "high"),
             chars_per_token=3.66,
         ),
         "claude-sonnet-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
         ),
         "claude-sonnet-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
         ),
         "claude-sonnet-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            adaptive_thinking_mode=False,
             chars_per_token=4.83,
         ),
         "claude-sonnet-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_SONNET,
+            adaptive_thinking_mode=False,
             chars_per_token=4.83,
         ),
         "claude-haiku-4-5": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=64_000,
             pricing=_HAIKU,
-            supports_thinking=False,
+            adaptive_thinking_mode=False,
             chars_per_token=4.83,
         ),
     }
@@ -796,9 +829,40 @@ class _AnthropicModel:
         return self._profile.supports_thinking
 
     @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Anthropic API/subscription thinking states, per model capability.
+
+        Redaction rides ``adaptive`` and is a per-request toggle the
+        selected state controls (``-show`` states force ``redact_thinking``
+        off at model rebuild; ``redact-hide`` forces it on), so the
+        transport exposes the redacted mode wherever ``adaptive`` works.
+        The per-model profile decides the rest (all measured via API key):
+
+        - opus-4-8 / opus-4-7: ``adaptive`` only, no readable text -> only
+          ``adaptive-hide`` / ``off-hide`` / ``redact-hide``.
+        - opus-4-6 / sonnet-4-6: both modes, readable text -> all six.
+        - 4-5 generation: ``enabled`` only (``adaptive`` 400s) -> ``on-*``
+          and ``off-hide`` (no ``adaptive-*``, no ``redact-hide``).
+        """
+        return valid_thinking_states(
+            ThinkingCapability(
+                supports_thinking=self.supports_thinking,
+                readable_text=self._profile.readable_thinking,
+                supports_adaptive_mode=self._profile.adaptive_thinking_mode,
+                supports_enabled_mode=self._profile.enabled_thinking_mode,
+                supports_redaction=True,
+            ),
+        )
+
+    @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
-        return True
+        return bool(self._profile.valid_efforts)
+
+    @property
+    def valid_efforts(self) -> tuple[str, ...]:
+        """Per-model ``output_config.effort`` levels (measured)."""
+        return self._profile.valid_efforts
 
     @property
     def supports_cache_control(self) -> bool:

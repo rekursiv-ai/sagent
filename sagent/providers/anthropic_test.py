@@ -510,7 +510,9 @@ def test_anthropic_model_known_id_returns_backend() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
     assert m.model_id == "claude-haiku-4-5"
-    assert m.supports_thinking is False  # haiku profile.
+    # haiku supports thinking via ``enabled`` only (measured: 249 readable
+    # thinking chars; ``adaptive`` 400s 'not supported on this model').
+    assert m.supports_thinking is True
     assert m.max_request_tokens == 200_000
 
 
@@ -642,6 +644,55 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
     budget = cast(int, thinking["budget_tokens"])
     assert max_tokens <= m.max_response_tokens
     assert budget < max_tokens
+
+
+def test_anthropic_valid_thinking_states_opus_4_6_all_six() -> None:
+    """opus-4-6 streams readable thinking and accepts enabled: all six."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-6")
+    assert m.valid_thinking_states == (
+        "adaptive-show",
+        "adaptive-hide",
+        "on-show",
+        "on-hide",
+        "off-hide",
+        "redact-hide",
+    )
+
+
+def test_anthropic_valid_thinking_states_opus_4_8_adaptive_only_no_text() -> None:
+    """opus-4-8 returns empty thinking and rejects enabled: no -show, no on-*.
+
+    Measured via API key: opus-4-8 streams zero ``thinking_delta`` chars
+    (signed-but-empty block) and 400s on ``thinking.type=enabled``. So
+    every ``-show`` state and every ``on-*`` state is unsatisfiable.
+    """
+    p = Anthropic.from_key("k")
+    for model_id in ("claude-opus-4-8", "claude-opus-4-8+1m"):
+        m = p.model(model_id)
+        assert m.valid_thinking_states == (
+            "adaptive-hide",
+            "off-hide",
+            "redact-hide",
+        ), model_id
+
+
+def test_anthropic_valid_thinking_states_4_5_generation_enabled_only() -> None:
+    """4-5 generation rejects ``adaptive`` (400); only ``on-*`` / ``off``.
+
+    Measured via API key: opus-4-5, sonnet-4-5, haiku-4-5 all 400 on
+    ``thinking.type=adaptive`` ('not supported on this model') and stream
+    readable thinking under ``enabled``. So ``adaptive-*`` and
+    ``redact-hide`` (which rides ``adaptive``) are excluded.
+    """
+    p = Anthropic.from_key("k")
+    for model_id in ("claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"):
+        m = p.model(model_id)
+        assert m.valid_thinking_states == (
+            "on-show",
+            "on-hide",
+            "off-hide",
+        ), model_id
 
 
 def test_anthropic_valid_latency_modes_fast_on_opus() -> None:

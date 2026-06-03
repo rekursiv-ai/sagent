@@ -664,20 +664,19 @@ def _resolve_cli_thinking_state(args: argparse.Namespace) -> ThinkingState | Non
 
 
 def _validate_cli_thinking_state(
-    args: argparse.Namespace,
     model: types.model.Model,
-    resolved_auth: str,
     state: ThinkingState | None,
 ) -> None:
     """Validate a resolved CLI thinking state against model/provider support."""
     if state is None:
         return
-    if state != "off-hide" and not model.supports_thinking:
-        raise ValueError(f"model {model.model_id!r} does not support thinking")
-    if state == "redact-hide" and not _provider_accepts_arg(
-        str(args.provider), resolved_auth, "redact_thinking"
-    ):
-        raise ValueError("current provider does not support redacted thinking")
+    valid = model.valid_thinking_states
+    if state not in valid:
+        options = ", ".join(valid)
+        raise ValueError(
+            f"thinking state {state!r} not supported by {model.model_id!r};"
+            f" options: {options}"
+        )
 
 
 def _provider_accepts_arg(provider_name: str, auth: str, key: str) -> bool:
@@ -1183,7 +1182,7 @@ def main() -> None:
     try:
         thinking_state = _resolve_cli_thinking_state(args)
         provider, model, resolved_auth = _build_provider_model(args, thinking_state)
-        _validate_cli_thinking_state(args, model, resolved_auth, thinking_state)
+        _validate_cli_thinking_state(model, thinking_state)
     except (AttributeError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)

@@ -24,7 +24,41 @@ class ModelProfile:
     """Per-token price schedule."""
 
     supports_thinking: bool = True
-    """Whether the model supports thinking/reasoning mode."""
+    """Whether the model supports thinking/reasoning mode at all."""
+
+    readable_thinking: bool = True
+    """Whether the model returns readable thinking text to the client.
+
+    ``True`` for models that stream plaintext ``thinking_delta`` events
+    (measured: opus-4-6, sonnet-4-6, the 4-5 generation). ``False`` for
+    models that return a signed but empty thinking block -- the model
+    reasons, but the plaintext is never delivered (measured: opus-4-8,
+    opus-4-7). When ``False``, every ``-show`` thinking state is
+    unsatisfiable and excluded from validity."""
+
+    adaptive_thinking_mode: bool = True
+    """Whether the model accepts ``thinking.type=adaptive``.
+
+    ``False`` for the 4-5 generation (opus-4-5, sonnet-4-5, haiku-4-5),
+    which reject ``adaptive`` with HTTP 400 ('adaptive thinking is not
+    supported on this model') and require ``enabled``. When ``False``, the
+    ``adaptive-*`` and ``redact-hide`` states (which request ``adaptive``)
+    are excluded from validity."""
+
+    enabled_thinking_mode: bool = True
+    """Whether the model accepts ``thinking.type=enabled``.
+
+    ``False`` for opus-4-8 / opus-4-7, which reject ``enabled`` with HTTP
+    400 over the API transport (the API directs callers to ``adaptive`` +
+    ``output_config.effort``). When ``False``, the ``on-*`` states (which
+    request ``enabled``) are excluded from validity."""
+
+    valid_efforts: tuple[str, ...] = ()
+    """Accepted ``output_config.effort`` levels; empty when none.
+
+    Per-model (measured via API key): opus-4-8/4-7 accept
+    ``low..xhigh,max``; opus-4-6/sonnet-4-6 lack ``xhigh``; opus-4-5
+    accepts ``low,medium,high``; sonnet-4-5/haiku-4-5 accept none."""
 
     chars_per_token: float = 4.0
     """Estimator divisor for ``int(len(text) / chars_per_token)``. Default

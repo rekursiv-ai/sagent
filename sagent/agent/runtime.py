@@ -1004,6 +1004,40 @@ class AgentRuntime:
         self.service_suspended_until: float | None = None
 
     @property
+    def _engine_quiescent(self) -> bool:
+        """True when no streaming, compaction, or open tool batch is in flight.
+
+        The one place the "engine has nothing actively running that a gate
+        must wait behind" cluster is defined. Every per-iteration gate that
+        used to spell out ``not self.cohort and self.model_call is None and
+        self.compact_task is None`` reads this instead, so a future term can
+        never be added at one gate and forgotten at another -- the scattered
+        re-derivation that produced the deferral and wedge seam bugs.
+
+        Deliberately excludes ``inbox.gate_armed`` (a gate that must also
+        respect an armed ``AWAIT_USER`` composes via :attr:`_ready_to_advance`)
+        and ``detached`` / ``running_tools`` (backgrounded work does not block
+        the model-call gate -- it fires on ``not self.cohort``).
+
+        Snapshot at call time; read within one synchronous block.
+        """
+        return not self.cohort and self.model_call is None and self.compact_task is None
+
+    @property
+    def _ready_to_advance(self) -> bool:
+        """True when the engine is quiescent *and* no ``AWAIT_USER`` is armed.
+
+        :attr:`_engine_quiescent` plus ``not inbox.gate_armed``: the predicate
+        the gates that advance the conversation (the deferred-commit flush and
+        the model-call gate) require, since both must hold while a ``Halt`` /
+        ``Clear`` / ``ModelResponseError`` has parked the inbox on
+        ``AWAIT_USER`` waiting for the user to resume.
+
+        Snapshot at call time; read within one synchronous block.
+        """
+        return self._engine_quiescent and not self.inbox.gate_armed
+
+    @property
     def is_idle(self) -> bool:
         """True iff a freshly pushed user-side message would drain now.
 
@@ -1029,18 +1063,21 @@ class AgentRuntime:
         responsiveness: every time a tool ran in the background, Tab
         and Up-Enter would refuse to dispatch.
 
+        Built on :attr:`_ready_to_advance` (quiescent + no armed
+        ``AWAIT_USER``) plus the two extra "no half-consumed work" terms
+        the model-call gate does not need but a REPL push does:
+        ``running_tools`` (a serialized group still executing) and
+        ``_mid_stream_queue`` (buffered streaming input).
+
         Snapshot at call time. The caller must read this and act on it
         within the same synchronous block (no intervening ``await``);
         asyncio's cooperative scheduling guarantees no other coroutine
         runs during.
         """
         return (
-            self.model_call is None
-            and self.compact_task is None
-            and not self.cohort
+            self._ready_to_advance
             and not self.running_tools
             and not self._mid_stream_queue
-            and not self.inbox.gate_armed
         )
 
     def _fully_drained(self) -> bool:
@@ -1083,20 +1120,21 @@ class AgentRuntime:
         ``model_call`` being set (the only case a queued list can
         survive across iterations).
 
+        Built on :attr:`is_idle` (the REPL-push predicate, itself
+        :attr:`_ready_to_advance` + no half-consumed tool/stream work),
+        adding the three terms that distinguish "fully done" from "can
+        accept input": an empty inbox, no backgrounded ``detached`` work,
+        and a tail that does not itself want a model turn.
+
         Snapshot at call time. The caller must read this and act on it
         within the same synchronous block (no intervening ``await``),
         which asyncio's cooperative scheduling guarantees no other
         coroutine will run during.
         """
         return (
-            self.inbox.empty()
-            and self.model_call is None
-            and self.compact_task is None
-            and not self.cohort
-            and not self.running_tools
+            self.is_idle
+            and self.inbox.empty()
             and not self.detached
-            and not self._mid_stream_queue
-            and not self.inbox.gate_armed
             and not self._should_call_model()
         )
 
@@ -1584,22 +1622,7 @@ class AgentRuntime:
                                 len(self.detached),
                                 len(self._mid_stream_queue),
                             )
-                            if self.model_call:
-                                self.model_call.cancel()
-                                self.model_call = None
-                                self._model_call_generation += 1
-                            if self.compact_task is not None:
-                                compact_task = self.compact_task
-                                if not compact_task.done():
-                                    self._compact_generation += 1
-                                    compact_task.cancel()
-                                    self.publish(
-                                        CompactFailed(
-                                            exception=asyncio.CancelledError(),
-                                            tape_len=len(self.tape),
-                                        ),
-                                    )
-                                self.compact_task = None
+                            self._cancel_model_and_compaction()
                             # Halt intentionally leaves the cohort intact:
                             # running tools keep going and their results land
                             # via the normal cohort gate after the user resumes.
@@ -1623,22 +1646,7 @@ class AgentRuntime:
                                 break
 
                         case Clear():
-                            if self.model_call:
-                                self.model_call.cancel()
-                                self.model_call = None
-                                self._model_call_generation += 1
-                            if self.compact_task is not None:
-                                compact_task = self.compact_task
-                                if not compact_task.done():
-                                    self._compact_generation += 1
-                                    compact_task.cancel()
-                                    self.publish(
-                                        CompactFailed(
-                                            exception=asyncio.CancelledError(),
-                                            tape_len=len(self.tape),
-                                        ),
-                                    )
-                                self.compact_task = None
+                            self._cancel_model_and_compaction()
                             self._stop_all_tools(mode="detach")
                             # Cancel and forget every detached task. Clear
                             # is a hard reset; without this, surviving
@@ -1912,24 +1920,7 @@ class AgentRuntime:
                             self.append_history(msg)
                             self.publish(item)
                             if isinstance(before_tool_spawn, UserMessage):
-                                for tc in msg.tool_calls:
-                                    self.append_history(
-                                        ToolResult(
-                                            call_id=tc.id,
-                                            parent_id=msg.id,
-                                            content=DETACHED_PLACEHOLDER,
-                                        ),
-                                    )
-                                    detached_task = asyncio.create_task(
-                                        self._run_tool_and_post(tc, parent_id=msg.id),
-                                    )
-                                    detached_task.add_done_callback(
-                                        log_task_exception(
-                                            logger,
-                                            f"detached tool {tc.name!r} crashed",
-                                        ),
-                                    )
-                                    self.detached[tc.id] = detached_task
+                                self._relegate_tool_calls_to_background(msg)
                                 committed = self._append_or_coalesce_user(
                                     before_tool_spawn
                                 )
@@ -1944,24 +1935,7 @@ class AgentRuntime:
                                 # No ``CohortStarted`` / ``ModelIdle`` here:
                                 # this round did not idle (a follow-up is
                                 # about to fire) and no cohort gates the model.
-                                for tc in msg.tool_calls:
-                                    self.append_history(
-                                        ToolResult(
-                                            call_id=tc.id,
-                                            parent_id=msg.id,
-                                            content=DETACHED_PLACEHOLDER,
-                                        ),
-                                    )
-                                    detached_task = asyncio.create_task(
-                                        self._run_tool_and_post(tc, parent_id=msg.id),
-                                    )
-                                    detached_task.add_done_callback(
-                                        log_task_exception(
-                                            logger,
-                                            f"detached tool {tc.name!r} crashed",
-                                        ),
-                                    )
-                                    self.detached[tc.id] = detached_task
+                                self._relegate_tool_calls_to_background(msg)
                                 # Commit mid-stream input to history and
                                 # publish the coalesced bar -- the pending
                                 # preview drops as the buffer empties and
@@ -2123,9 +2097,7 @@ class AgentRuntime:
                 # we'd be cutting the queued content into a chain the user
                 # didn't intend to interrupt.
                 if (
-                    not self.cohort
-                    and self.model_call is None
-                    and self.compact_task is None
+                    self._engine_quiescent
                     and not self._should_call_model()
                     and (queued or deferred)
                 ):
@@ -2150,21 +2122,12 @@ class AgentRuntime:
                 # blocks both until the user resumes.
                 if (
                     self._pending_commits
-                    and not self.cohort
-                    and self.model_call is None
-                    and self.compact_task is None
-                    and not self.inbox.gate_armed
+                    and self._ready_to_advance
                     and (self._should_call_model() or self._has_waking_commit())
                 ):
                     self._flush_pending()
 
-                if (
-                    not self.cohort
-                    and self.model_call is None
-                    and self.compact_task is None
-                    and not self.inbox.gate_armed
-                    and self._should_call_model()
-                ):
+                if self._ready_to_advance and self._should_call_model():
                     logger.debug(
                         "runtime model call start: history=%d detached=%d queued=%d",
                         len(self.context().messages),
@@ -2616,6 +2579,67 @@ class AgentRuntime:
         self.running_tools.clear()
         self.cohort.clear()
         self._cohort_seen = False
+
+    def _cancel_model_and_compaction(self) -> None:
+        """Cancel any in-flight model call and compaction, bumping generations.
+
+        The shared preempt prologue of the hard-reset control events
+        (``Halt`` / ``Clear``): cancel the streaming ``model_call`` and bump
+        ``_model_call_generation`` so its late ``ModelResponseComplete`` is
+        ignored as stale; cancel an in-flight ``compact_task`` and bump
+        ``_compact_generation`` so ``_compact_and_post`` refuses to push a
+        terminal event, publishing ``CompactFailed`` in its place. Idempotent
+        when neither is live. Does NOT touch the cohort -- ``Halt`` preserves
+        running tools, and ``Clear`` calls ``_stop_all_tools`` separately.
+        """
+        if self.model_call:
+            self.model_call.cancel()
+            self.model_call = None
+            self._model_call_generation += 1
+        if self.compact_task is not None:
+            compact_task = self.compact_task
+            if not compact_task.done():
+                self._compact_generation += 1
+                compact_task.cancel()
+                self.publish(
+                    CompactFailed(
+                        exception=asyncio.CancelledError(),
+                        tape_len=len(self.tape),
+                    ),
+                )
+            self.compact_task = None
+
+    def _relegate_tool_calls_to_background(self, msg: AssistantMessage) -> None:
+        """Stub every tool call in ``msg`` and spawn it as a detached task.
+
+        The shared "the model produced tool calls but a user redirect cuts in
+        line" path: append a ``[detached]`` placeholder answering each
+        ``tool_use`` (so history stays wire-valid) and spawn the tool into
+        ``self.detached``. Its real result later arrives forward via
+        ``DetachedResult`` rather than gating the next model call. Used by
+        both ``ModelResponseComplete`` redirect branches -- an external
+        ``before_tool_spawn`` ``UserMessage`` and a buffered mid-stream user
+        turn -- which differ only in how they commit the user content, not in
+        how they background the tools.
+        """
+        for tc in msg.tool_calls:
+            self.append_history(
+                ToolResult(
+                    call_id=tc.id,
+                    parent_id=msg.id,
+                    content=DETACHED_PLACEHOLDER,
+                ),
+            )
+            detached_task = asyncio.create_task(
+                self._run_tool_and_post(tc, parent_id=msg.id),
+            )
+            detached_task.add_done_callback(
+                log_task_exception(
+                    logger,
+                    f"detached tool {tc.name!r} crashed",
+                ),
+            )
+            self.detached[tc.id] = detached_task
 
     def _drain_mid_stream_queue(self) -> UserMessage | AgentSendMessage | None:
         r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
