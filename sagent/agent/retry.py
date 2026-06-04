@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, cast
 import asyncio
 import logging
 import random
+import re
 import time
 
 
@@ -150,6 +151,8 @@ def extract_retry_after(error: Exception) -> float | None:
     1. ``retry-after`` (RFC 7231, either delta-seconds or HTTP-date).
     2. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
        limit fully clears) - converted to delta-from-now.
+    3. Google ``google.rpc.RetryInfo.retryDelay`` (e.g. ``"16s"``),
+       carried in the JSON error body rather than a header.
 
     All return paths are clamped to ``_MAX_SERVER_RETRY_AFTER_SEC`` (24h)
     to neutralize a misconfigured upstream advertising a far-future reset
@@ -179,6 +182,9 @@ def extract_retry_after(error: Exception) -> float | None:
             dt = None
         if dt is not None:
             return _clamp_retry_after(dt.timestamp() - time.time())
+    google_delay = _google_retry_delay(_response_body_text(response))
+    if google_delay is not None:
+        return _clamp_retry_after(google_delay)
     # ``anthropic-ratelimit-unified-reset`` is present on EVERY response --
     # it is the wall-clock when the current usage window rolls over (often
     # hours away, e.g. midnight), NOT a retry instruction. Honoring it
@@ -199,23 +205,29 @@ def extract_retry_after(error: Exception) -> float | None:
     return None
 
 
-# Anthropic's per-window status headers. A value other than ``allowed``
-# (``rejected`` / ``blocked``) on the representative window means the
-# request was actually throttled, so the ``-reset`` clock becomes a real
-# retry-after. ``-overage-status`` is excluded: it describes overage
-# billing eligibility, not whether THIS request was limited.
+# Anthropic's per-window status headers. A ``rejected`` / ``rate_limited``
+# value on any window means the request was actually throttled, so the
+# ``-reset`` clock becomes a real retry-after. ``allowed`` and
+# ``allowed_warning`` are both non-blocking: ``allowed_warning`` is a heads-up
+# that a window is filling (it rides the always-present ``-reset`` clock, often
+# the 7d rollover ~24h away), NOT an instruction to wait -- honoring it halts a
+# still-serviceable session for hours (Issue#316). ``-overage-status`` is
+# excluded: it describes overage billing eligibility, not whether THIS request
+# was limited.
 _UNIFIED_STATUS_HEADERS = (
     "anthropic-ratelimit-unified-status",
     "anthropic-ratelimit-unified-5h-status",
     "anthropic-ratelimit-unified-7d-status",
 )
 
+_UNIFIED_REJECTED_STATUSES = frozenset({"rejected", "rate_limited"})
+
 
 def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
-    """True when a unified-ratelimit status header reports a rejected request."""
+    """True when a unified-ratelimit status header reports a blocked request."""
     for name in _UNIFIED_STATUS_HEADERS:
         status = headers.get(name)
-        if status is not None and status.strip().lower() != "allowed":
+        if status is not None and status.strip().lower() in _UNIFIED_REJECTED_STATUSES:
             return True
     return False
 
@@ -249,6 +261,50 @@ def _retry_after_seconds(value: float) -> float:
 def _clamp_retry_after(delta_sec: float) -> float:
     """Clamp a server-advertised retry delay into ``[0, _MAX_SERVER_RETRY_AFTER_SEC]``."""
     return min(max(0.0, delta_sec), _MAX_SERVER_RETRY_AFTER_SEC)
+
+
+# Google's 429 backoff arrives in the JSON error body as a
+# ``google.rpc.RetryInfo`` detail rather than a header. The protobuf Duration
+# JSON encoding is a decimal-seconds string with a trailing ``s`` (e.g.
+# ``"16s"`` or ``"7.5s"``).
+_GOOGLE_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+
+
+def _google_retry_delay(body: str) -> float | None:
+    """Parse a Google ``RetryInfo.retryDelay`` (seconds) from an error body."""
+    if "retrydelay" not in body.lower():
+        return None
+    match = _GOOGLE_RETRY_DELAY_RE.search(body)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _response_body_text(response: object) -> str:
+    """Return the full response body text, never raising.
+
+    Unlike :func:`_response_body_excerpt` (capped for forensics), this returns
+    the untruncated body so a ``retryDelay`` detail far into a large error body
+    is not missed. Guards ``ResponseNotRead`` for unread streaming responses.
+    """
+    if response is None:
+        return ""
+    try:
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            return text
+        raw = getattr(response, "content", None)
+    except httpx.ResponseNotRead:
+        return ""
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return raw.decode("utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            return ""
+    return ""
 
 
 def _lower_headers(headers: object) -> dict[str, str]:
@@ -364,7 +420,12 @@ async def send_with_retry(
     """
     if resume_retry_at is not None:
         delay = max(0.0, resume_retry_at - time.time())
-        if delay > 0:
+        # A resume wait past the interactive ceiling is replayed (not advanced)
+        # on every send, so it never decays into range -- typing to resume just
+        # re-enters a multi-hour uninterruptible sleep (Issue#316 bug #5). The
+        # user typing IS an explicit "try now"; skip the stale wait and let the
+        # send proceed rather than wedge the REPL.
+        if 0 < delay <= INTERACTIVE_MAX_SLEEP_SEC:
             await asyncio.sleep(delay)
     last_error: Exception | None = None
     prior_emitted = ""

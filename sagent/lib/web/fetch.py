@@ -93,71 +93,6 @@ _NAV_ACCEPT = (
 )
 
 
-def _build_headers(
-    *,
-    method: str,
-    url: str,
-    content_type: str | None,
-    extra: dict[str, str] | None,
-    raw_headers: bool,
-) -> dict[str, str]:
-    """Build canonical-order Chrome request headers.
-
-    Header order, names, and the presence of ``sec-ch-ua`` /
-    ``Sec-Fetch-*`` are observable to servers; a minimal HTTP/1.1
-    request that omits modern browser headers is materially different
-    from typical user traffic, and many web gateways return 403 to
-    such requests. The layout below mirrors a real Chrome 125 wire
-    shape so that legitimate fetches are not mistaken for malformed
-    clients:
-      - GET/HEAD: top-level navigation (Sec-Fetch-Mode=navigate,
-        Upgrade-Insecure-Requests, Accept=text/html...).
-      - POST: fetch/XHR (Sec-Fetch-Mode=cors, Origin set, Accept=*/*,
-        Content-Type spliced between Accept and Sec-Fetch-*).
-
-    Host is omitted -- http.client.putrequest auto-adds it first on the
-    wire, and the connection path overrides explicitly when
-    validated_hosts forces an SNI/connect-IP split.
-
-    Content-Length is also omitted -- http.client._send_request adds it
-    automatically right after Host when body is present, which matches
-    Chrome's POST wire order.
-    """
-    if raw_headers:
-        return dict(extra or {})
-    h: dict[str, str] = {
-        "Connection": "keep-alive",
-        "sec-ch-ua": _CHROME_SEC_CH_UA,
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": _CHROME_PLATFORM,
-    }
-    if method in ("GET", "HEAD"):
-        h["Upgrade-Insecure-Requests"] = "1"
-        h["User-Agent"] = _CHROME_UA
-        h["Accept"] = _NAV_ACCEPT
-        h["Sec-Fetch-Site"] = "none"
-        h["Sec-Fetch-Mode"] = "navigate"
-        h["Sec-Fetch-User"] = "?1"
-        h["Sec-Fetch-Dest"] = "document"
-    else:
-        h["User-Agent"] = _CHROME_UA
-        h["Accept"] = "*/*"
-        if content_type:
-            h["Content-Type"] = content_type
-        parsed = urlparse(url)
-        h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
-        h["Sec-Fetch-Site"] = "cross-site"
-        h["Sec-Fetch-Mode"] = "cors"
-        h["Sec-Fetch-Dest"] = "empty"
-    h["Accept-Encoding"] = "gzip, deflate, br, zstd"
-    h["Accept-Language"] = "en-US,en;q=0.9"
-    if extra:
-        # Caller wins; dict.update preserves slot for existing keys and
-        # appends new ones at the end.
-        h.update(extra)
-    return h
-
-
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 _DEFAULT_MAX_REDIRECTS = 10
 
@@ -367,6 +302,71 @@ def fetch(
     # The loop returns on success and re-raises on the final attempt, so this
     # is unreachable; it exists only to satisfy the type checker.
     raise AssertionError("retry loop exited without returning or raising")
+
+
+def _build_headers(
+    *,
+    method: str,
+    url: str,
+    content_type: str | None,
+    extra: dict[str, str] | None,
+    raw_headers: bool,
+) -> dict[str, str]:
+    """Build canonical-order Chrome request headers.
+
+    Header order, names, and the presence of ``sec-ch-ua`` /
+    ``Sec-Fetch-*`` are observable to servers; a minimal HTTP/1.1
+    request that omits modern browser headers is materially different
+    from typical user traffic, and many web gateways return 403 to
+    such requests. The layout below mirrors a real Chrome 125 wire
+    shape so that legitimate fetches are not mistaken for malformed
+    clients:
+      - GET/HEAD: top-level navigation (Sec-Fetch-Mode=navigate,
+        Upgrade-Insecure-Requests, Accept=text/html...).
+      - POST: fetch/XHR (Sec-Fetch-Mode=cors, Origin set, Accept=*/*,
+        Content-Type spliced between Accept and Sec-Fetch-*).
+
+    Host is omitted -- http.client.putrequest auto-adds it first on the
+    wire, and the connection path overrides explicitly when
+    validated_hosts forces an SNI/connect-IP split.
+
+    Content-Length is also omitted -- http.client._send_request adds it
+    automatically right after Host when body is present, which matches
+    Chrome's POST wire order.
+    """
+    if raw_headers:
+        return dict(extra or {})
+    h: dict[str, str] = {
+        "Connection": "keep-alive",
+        "sec-ch-ua": _CHROME_SEC_CH_UA,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": _CHROME_PLATFORM,
+    }
+    if method in ("GET", "HEAD"):
+        h["Upgrade-Insecure-Requests"] = "1"
+        h["User-Agent"] = _CHROME_UA
+        h["Accept"] = _NAV_ACCEPT
+        h["Sec-Fetch-Site"] = "none"
+        h["Sec-Fetch-Mode"] = "navigate"
+        h["Sec-Fetch-User"] = "?1"
+        h["Sec-Fetch-Dest"] = "document"
+    else:
+        h["User-Agent"] = _CHROME_UA
+        h["Accept"] = "*/*"
+        if content_type:
+            h["Content-Type"] = content_type
+        parsed = urlparse(url)
+        h["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+        h["Sec-Fetch-Site"] = "cross-site"
+        h["Sec-Fetch-Mode"] = "cors"
+        h["Sec-Fetch-Dest"] = "empty"
+    h["Accept-Encoding"] = "gzip, deflate, br, zstd"
+    h["Accept-Language"] = "en-US,en;q=0.9"
+    if extra:
+        # Caller wins; dict.update preserves slot for existing keys and
+        # appends new ones at the end.
+        h.update(extra)
+    return h
 
 
 def _backoff_delay(attempt: int, headers: dict[str, str]) -> float:

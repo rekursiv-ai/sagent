@@ -62,6 +62,7 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.providers.lib.usage import openai_usage
 from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
@@ -69,6 +70,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -230,6 +232,7 @@ class OpenAICompatModel:
         self._max_request_tokens = max_request_tokens
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        self._last_usage: UsageSnapshot | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Return a reused ``AsyncClient`` (per-model). Lazy-created."""
@@ -582,6 +585,7 @@ class OpenAICompatModel:
                 if _is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
             r.raise_for_status()
+            self._last_usage = openai_usage(r.headers)
             return await consume_stream(
                 r,
                 on_text=on_text,
@@ -589,6 +593,10 @@ class OpenAICompatModel:
                 pricing=self._profile.pricing,
                 reasoning_field=self._reasoning_field,
             )
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Return normalized usage from the latest response's headers."""
+        return self._last_usage
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)

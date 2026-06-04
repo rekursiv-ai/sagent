@@ -54,6 +54,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -401,6 +402,10 @@ class _GeminiModel:
         """
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Gemini exposes no per-window rate-limit telemetry."""
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Send a request via the streaming path with no callbacks.

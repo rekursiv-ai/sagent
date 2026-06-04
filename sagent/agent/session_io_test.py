@@ -26,6 +26,8 @@ from sagent.agent.session_io import (
     _apply_update_in_place,
     _entry_from_json,
     _is_barrier_splice,
+    _mask_runs,
+    _persisted_refs,
     append_context_repair,
     append_session,
     load_persistent_agents,
@@ -37,7 +39,12 @@ from sagent.agent.session_io import (
     serialize_tool_state,
 )
 from sagent.tools.core import ReadCacheEntry, ToolState
-from sagent.types.model import ModelRequest, ModelResponse, Pricing
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    Pricing,
+    UsageSnapshot,
+)
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
@@ -46,6 +53,7 @@ from sagent.types.runtime import (
     BytesMessage,
     ModelContextEvent,
     ModelServiceSuspended,
+    NoticeMessage,
     SaveSession,
     ServiceErrorSnapshot,
     ToolCall,
@@ -122,6 +130,9 @@ class _NoopModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
@@ -1105,6 +1116,62 @@ def test_model_service_suspended_account_none_round_trips(tmp_path: Path) -> Non
     assert meta.runtime_events == (_service_suspended(None),)
 
 
+def _notice() -> NoticeMessage:
+    """Build a persisted notice fixture with an error snapshot."""
+    return NoticeMessage(
+        text="[rate-limited: allowed_warning at 89% weekly]",
+        tier="advisory",
+        error=ServiceErrorSnapshot(
+            type_name="RateLimitError",
+            message="Rate limited",
+            status=200,
+            headers={"anthropic-ratelimit-unified-status": "allowed_warning"},
+        ),
+    )
+
+
+def test_append_session_writes_notice_message_event(tmp_path: Path) -> None:
+    session_file = tmp_path / "session.jsonl"
+    append_session(session_file, runtime_events=[_notice()])
+
+    record = json.loads(session_file.read_text(encoding="utf-8"))
+    assert record == {
+        "kind": "runtime_event",
+        "type": "notice_message",
+        "timestamp": record["timestamp"],
+        "text": "[rate-limited: allowed_warning at 89% weekly]",
+        "tier": "advisory",
+        "error": {
+            "type_name": "RateLimitError",
+            "message": "Rate limited",
+            "status": 200,
+            "headers": {"anthropic-ratelimit-unified-status": "allowed_warning"},
+            "body": "",
+        },
+    }
+
+
+def test_load_session_decodes_notice_message_event(tmp_path: Path) -> None:
+    append_session(tmp_path / "session.jsonl", runtime_events=[_notice()])
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    meta, _, _ = loaded
+    assert meta.runtime_events == (_notice(),)
+
+
+def test_notice_message_without_error_round_trips(tmp_path: Path) -> None:
+    notice = NoticeMessage(text="[heads up]", tier="advisory")
+    append_session(tmp_path / "session.jsonl", runtime_events=[notice])
+
+    loaded = load_session(tmp_path, {})
+
+    assert loaded is not None
+    meta, _, _ = loaded
+    assert meta.runtime_events == (notice,)
+
+
 def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     append_session(
@@ -1692,6 +1759,40 @@ def test_rebuild_content_cache_from_read(tmp_path: Path) -> None:
     state = ToolState()
     rebuild_content_cache([asst, res], state)
     assert state.has_been_read(str(f))
+
+
+def test_mask_runs_empty_returns_empty() -> None:
+    # SESSION-6: an empty ref list must not IndexError on ``ordered[0]``.
+    assert _mask_runs([]) == ()
+
+
+def test_mask_runs_groups_contiguous() -> None:
+    refs = [
+        TapeRef(session_id="s", ordinal=0),
+        TapeRef(session_id="s", ordinal=1),
+        TapeRef(session_id="s", ordinal=3),
+    ]
+    runs = _mask_runs(refs)
+    assert runs == (
+        (TapeRef(session_id="s", ordinal=0), TapeRef(session_id="s", ordinal=1)),
+        (TapeRef(session_id="s", ordinal=3), TapeRef(session_id="s", ordinal=3)),
+    )
+
+
+def test_persisted_refs_warns_on_unreadable_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # SESSION-3: an existing-but-unreadable session file must warn, not
+    # silently return empty (which would re-append the whole tape next save).
+    session_file = tmp_path / "session.jsonl"
+    session_file.write_text("{}\n", encoding="utf-8")
+    with (
+        patch.object(Path, "open", side_effect=OSError("boom")),
+        caplog.at_level("WARNING"),
+    ):
+        refs = _persisted_refs(session_file)
+    assert refs == set()
+    assert any("persistence may duplicate" in r.message for r in caplog.records)
 
 
 if __name__ == "__main__":

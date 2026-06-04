@@ -34,7 +34,7 @@ from sagent.tools.core import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.types.model import ModelRequest, Pricing
+from sagent.types.model import ModelRequest, Pricing, UsageSnapshot
 from sagent.types.runtime import (
     AssistantMessage,
     Halt,
@@ -110,6 +110,9 @@ class MockModelCaps:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        return None
 
 
 class _NullModel:

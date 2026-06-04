@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import asyncio
+import time
 
 from sagent.repl.format import format_count, format_elapsed
 
@@ -100,10 +101,13 @@ def _has_live_activity(agent: Agent) -> bool:
 
 def _wait_reason(agent: Agent, elapsed: float) -> str:
     runtime = agent.runtime
-    now = asyncio.get_running_loop().time()
+    # ``service_suspended_until`` is a Unix wall-clock epoch
+    # (``ModelServiceSuspended.retry_at``), so the countdown compares against
+    # ``time.time()`` -- NOT the monotonic loop clock, which would render a
+    # multi-decade wait (Issue#316 RUNTIME-003).
     suspended_until = runtime.service_suspended_until
-    if suspended_until is not None and suspended_until > now:
-        return f"retrying in {format_elapsed(suspended_until - now)}."
+    if suspended_until is not None and suspended_until > time.time():
+        return f"retrying in {format_elapsed(suspended_until - time.time())}."
     # Compaction outranks the gate-armed check: during compaction the
     # gate can be armed (waiting for the compactor's own model response)
     # but the user-visible state is "compacting", not "waiting for

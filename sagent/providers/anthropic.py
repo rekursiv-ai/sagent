@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ from sagent.providers.lib.errors import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.providers.lib.usage import anthropic_usage
 from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
     ModelRequest,
@@ -67,6 +69,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    UsageSnapshot,
     base_model_id,
 )
 from sagent.types.runtime import (
@@ -80,6 +83,14 @@ from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)
+
+# Carries the latest streamed response's headers from ``_raw_message_stream``
+# (which holds the raw HTTP response) out to ``_AnthropicModel.stream`` (which
+# owns ``_last_usage``). A ContextVar keeps the module-level stream helpers
+# free of model state, mirroring ``runtime.cli_publish_var``.
+_response_headers_var: contextvars.ContextVar[Mapping[str, str] | None] = (
+    contextvars.ContextVar("anthropic_response_headers", default=None)
+)
 
 _STREAM_IDLE_TIMEOUT = 600.0
 
@@ -797,6 +808,7 @@ class _AnthropicModel:
         self._profile = profile
         self._max_request_tokens = max_request_tokens
         self._last_response_time = time.time()
+        self._last_usage: UsageSnapshot | None = None
 
     @property
     def _cache_cold(self) -> bool:
@@ -1221,8 +1233,16 @@ class _AnthropicModel:
             raise
         resp = _parse_response(raw, self._profile.pricing)
         self._last_response_time = time.time()
+        # Clear stale usage when a path yields no headers, so ``usage_snapshot``
+        # never reports a prior request's windows for the current one.
+        headers = _response_headers_var.get()
+        self._last_usage = anthropic_usage(headers) if headers is not None else None
         _guard_stream_interrupt(resp, kind="stream", model_id=self._model_id)
         return resp
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Return normalized usage from the latest response's unified headers."""
+        return self._last_usage
 
 
 async def _stream_impl(
@@ -1273,6 +1293,7 @@ async def _raw_message_stream(
     response = await _send_raw_anthropic_request(raw_sdk, request)
     if response.status_code >= 400:
         await _raise_anthropic_status_error(raw_sdk, response)
+    _response_headers_var.set(response.headers)
     return AsyncStream(
         cast_to=cast(
             "type[RawMessageStreamEvent]", anthropic.types.RawMessageStreamEvent

@@ -365,6 +365,14 @@ def widen_barrier_mask(
       ranges, per ``session_id``.
 
     """
+    # Each input range must be single-session: ``_widen_mask_ranges`` and
+    # ``_preserved_mask_gaps_by_session`` key gaps off ``r_from.session_id``, so
+    # a range whose endpoints straddle two sessions would compute a bogus gap
+    # and silently mis-widen. Producers only ever emit single-session ranges.
+    for r_from, r_to in override.mask:
+        assert r_from.session_id == r_to.session_id, (
+            f"widen_barrier_mask: cross-session mask range {r_from} -> {r_to}"
+        )
     mask = _widen_mask_ranges(override.mask, tape)
     if mask == override.mask:
         return override
@@ -1823,15 +1831,15 @@ class AgentRuntime:
                                 len(self.detached),
                             )
                             self.model_call = None
-                            self._append_or_coalesce_user(
-                                UserMessage(
-                                    text=f"[Error: {type(exc).__name__}: {exc}]",
-                                ),
-                            )
-                            # Preserve mid-stream content past the error;
-                            # commit + publish the coalesced bar so the
-                            # pending preview transitions to a permanent
-                            # entry.
+                            # The error is not conversation: the published
+                            # ``ModelResponseError`` already renders the banner
+                            # and halts. Synthesizing a ``[Error: ...]``
+                            # ``UserMessage`` here only polluted model context
+                            # (the model never needs to see its own transport
+                            # failures) and coalesced into the user's next bar
+                            # (Issue#316 #6). Drop it; the gate still parks on
+                            # ``AWAIT_USER`` below when no mid-stream content
+                            # remains.
                             coalesced = self._drain_mid_stream_queue()
                             if coalesced is not None:
                                 self.publish(coalesced)
@@ -1958,16 +1966,13 @@ class AgentRuntime:
                             self.append_history(item)
                             self.publish(item)
 
-                        case CompactFailed(exception=exc):
+                        case CompactFailed():
                             self.compact_task = None
-                            self._append_or_coalesce_user(
-                                UserMessage(
-                                    text=(
-                                        f"[Compaction error:"
-                                        f" {type(exc).__name__}: {exc}]"
-                                    ),
-                                ),
-                            )
+                            # The ``CompactFailed`` event (appended + published
+                            # below) is taped and rendered as a dim line. The
+                            # former ``[Compaction error: ...]`` ``UserMessage``
+                            # only polluted model context (Issue#316 #6); drop
+                            # it.
                             self.append_history(item)
                             self.publish(item)
 

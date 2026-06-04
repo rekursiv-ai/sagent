@@ -48,6 +48,7 @@ from sagent.types.model import (
     ModelResponse,
     Pricing,
     TokenCount,
+    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -617,6 +618,10 @@ class SelfHostedModel:
         """In-process generate calls have no transient retry surface."""
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """In-process generation has no rate-limit telemetry."""
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Render messages via chat template, generate, and parse tool calls.

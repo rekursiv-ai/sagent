@@ -37,6 +37,8 @@ __all__ = [
     "PromptTooLongError",
     "StreamInterruptedError",
     "TokenCount",
+    "UsageSnapshot",
+    "UsageWindow",
     "base_model_id",
     "default_buffer_tokens",
 ]
@@ -44,6 +46,43 @@ __all__ = [
 
 CONTEXT_TAGS = ("+1m", "+200k")
 """Window-size suffixes a sagent model id may carry (e.g. ``...+1m``)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UsageWindow:
+    """Utilization of one provider rate-limit window.
+
+    A normalized, provider-agnostic view of a single rolling limit window
+    (e.g. Anthropic's 5h / 7d, OpenAI's request / token windows).
+    """
+
+    label: str
+    """Human-facing window name (e.g. ``"5h"``, ``"7d"``, ``"requests"``)."""
+
+    utilization: float | None = None
+    """Fraction in ``[0, 1]`` consumed, or ``None`` when unknown."""
+
+    resets_at: float | None = None
+    """Unix wall-clock seconds when the window rolls over, or ``None``."""
+
+    blocked: bool = False
+    """True when this window currently rejects (vs. merely warns)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UsageSnapshot:
+    """Normalized rate-limit usage across a provider's windows.
+
+    The provider-agnostic superset surface: every provider maps its own
+    rate-limit telemetry (Anthropic ``unified-*`` headers, OpenAI
+    ``x-ratelimit-*`` headers) into this shape so the REPL can surface
+    usage uniformly. ``None`` from :meth:`Model.usage_snapshot` means "no
+    telemetry"; an empty ``windows`` tuple means "telemetry present, nothing
+    to report" -- producers here never emit the latter (they return ``None``).
+    """
+
+    windows: tuple[UsageWindow, ...] = ()
+    """Per-window utilization, in provider declaration order (not sorted)."""
 
 
 def base_model_id(model_id: str) -> str:
@@ -570,6 +609,21 @@ class Model(Protocol):
 
         Returns:
           retryable: True when the provider treats ``error`` as transient.
+
+        """
+        ...
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Return normalized rate-limit usage from the latest response.
+
+        The provider-agnostic superset surface: providers that receive
+        rate-limit telemetry (Anthropic ``unified-*`` headers, OpenAI
+        ``x-ratelimit-*`` headers) map it into a :class:`UsageSnapshot`.
+        Providers without telemetry return ``None``.
+
+        Returns:
+          snapshot: Latest usage across windows, or ``None`` when the
+              provider exposes no rate-limit telemetry.
 
         """
         ...

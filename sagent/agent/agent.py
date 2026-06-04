@@ -109,6 +109,13 @@ re-invoked per request so cwd-aware sections stay live after ``cd``."""
 ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
 MAX_OVERFLOW_RECOVERY = 3
 
+# Utilization fraction at which a rate-limit window earns a UI advisory.
+# Matches Anthropic's own ``surpassed-threshold`` warning point. A separate,
+# lower clear point gives hysteresis so a window oscillating around the warn
+# line does not re-fire the advisory every response.
+_USAGE_WARN_FRACTION = 0.75
+_USAGE_CLEAR_FRACTION = 0.60
+
 
 def _reject_bad_system_arg(system: object) -> None:
     """Reject non-system-prompt constructor values before runtime setup."""
@@ -269,6 +276,10 @@ class Agent:
         self._persistent: bool = False
         self._shutting_down: bool = False
         self._run_active: bool = False
+        # Rate-limit advisories already shown, keyed by ``(label, blocked)`` so
+        # a window escalating warn -> blocked still re-fires; cleared when the
+        # window drops below the hysteresis clear point.
+        self._usage_warned: set[tuple[str, bool]] = set()
 
         # Wrappers. ``_agent_compactor`` is None when no rich compactor
         # was supplied (the runtime is satisfied with a None compactor).
@@ -1528,6 +1539,43 @@ class Agent:
                 total_cost_usd=target.total_cost_usd,
                 max_budget_usd=self._max_budget_usd,
             )
+        self._surface_usage_warning()
+
+    def _surface_usage_warning(self) -> None:
+        """Publish an advisory ``NoticeMessage`` when a usage window is high.
+
+        Reads the provider's normalized :class:`UsageSnapshot` after a
+        response and warns once per window each time it crosses the warning
+        threshold, so a near-limit window is surfaced before it blocks.
+        Providers without telemetry return ``None`` and this is a no-op.
+        """
+        snapshot = self.model.usage_snapshot()
+        if snapshot is None:
+            return
+        for window in snapshot.windows:
+            util = window.utilization
+            over = window.blocked or (util is not None and util >= _USAGE_WARN_FRACTION)
+            below_clear = util is not None and util < _USAGE_CLEAR_FRACTION
+            if not over:
+                # Re-arm only once the window has clearly recovered (hysteresis),
+                # or when utilization is unknown and it is no longer blocked.
+                if below_clear or util is None:
+                    self._usage_warned.discard((window.label, True))
+                    self._usage_warned.discard((window.label, False))
+                continue
+            key = (window.label, window.blocked)
+            if key in self._usage_warned:
+                continue
+            # A fresh blocked advisory supersedes a prior warn for the window.
+            self._usage_warned.add(key)
+            pct = f"{util:.0%}" if util is not None else "limit"
+            state = "blocked" if window.blocked else f"{pct} used"
+            self.runtime.publish(
+                types.runtime.NoticeMessage(
+                    text=f"[usage: {window.label} window {state}]",
+                    tier="advisory",
+                )
+            )
 
     def _track_activity(self, event: types.runtime.RuntimeEvent) -> None:
         """Bracket round-chain elapsed time + count streamed chars.
@@ -1905,11 +1953,10 @@ class Agent:
                 exc,
             )
             self.compaction_state.compact_failures += 1
-            self.runtime.append_history(
-                types.runtime.UserMessage(
-                    text=f"[Compaction error: {type(exc).__name__}: {exc}]",
-                ),
-            )
+            # Issue#316 #6: the failure is not conversation. The published
+            # ``CompactFailed`` below is taped and rendered; a synthesized
+            # ``[Compaction error: ...]`` ``UserMessage`` only polluted model
+            # context.
             failed = types.runtime.CompactFailed(exception=exc, tape_len=tape_len)
             self.runtime.append_history(failed)
             self.publish(failed)

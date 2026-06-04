@@ -744,9 +744,12 @@ async def test_model_error_with_pending_midstream_input_does_not_wait_again() ->
     user_texts = [
         m.text for m in agent.context().messages if isinstance(m, UserMessage)
     ]
-    assert user_texts == [
-        "start\n\n[Error: RuntimeError: model exploded]\n\nwhat happened?",
-    ]
+    # Issue#316 #6: the error is NOT conversation -- it must not pollute model
+    # context. Mid-stream content coalesces onto the prior user turn; the
+    # error surfaces only via the published ``ModelResponseError`` (render +
+    # halt), never as ``[Error: ...]`` text in history.
+    assert user_texts == ["start\n\nwhat happened?"]
+    assert not any("[Error:" in t for t in user_texts)
     assert collector.has(ModelResponseError)
 
 
@@ -2031,13 +2034,14 @@ async def test_irrecoverable_error_gates_on_user() -> None:
     )
 
     assert collector.has(ModelResponseError)
-    # The error sentinel and the user's retry coalesce into one entry
-    # (alternation invariant: no back-to-back UserMessages in history).
+    # Issue#316 #6: the error is not context. History holds the original prompt
+    # and the user's retry (coalesced into one user turn); no ``[Error: ...]``
+    # sentinel pollutes the wire.
     user_texts = [
         t.text for t in agent.context().messages if isinstance(t, UserMessage)
     ]
-    assert any("[Error:" in t for t in user_texts), (
-        f"expected an error sentinel in user history; got {user_texts!r}"
+    assert not any("[Error:" in t for t in user_texts), (
+        f"error must not enter context; got {user_texts!r}"
     )
     assert any("retry" in t for t in user_texts), (
         f"expected 'retry' content to reach history; got {user_texts!r}"
@@ -2060,10 +2064,14 @@ async def test_run_model_error_returns_and_removes_observer() -> None:
 
     assert collector.has(ModelResponseError)
     assert tuple(agent.observers) == starting_observers
+    # Issue#316 #6: the error does not enter context. History holds only the
+    # user's prompt; the failure surfaces via the published
+    # ``ModelResponseError`` event, not as ``[Error: ...]`` text.
     assert len(history) == 1
     user = history[0]
     assert isinstance(user, UserMessage)
-    assert "[Error: RuntimeError: model exploded]" in user.text
+    assert user.text == "go"
+    assert "[Error:" not in user.text
 
 
 @pytest.mark.asyncio

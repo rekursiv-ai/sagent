@@ -31,8 +31,10 @@ from sagent.repl.tight_markdown import TightMarkdown
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponseError,
     ModelResponseThinking,
     ModelServiceSuspended,
+    NoticeMessage,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -313,6 +315,10 @@ def _render_child_item(printer: ConsolePrinter, item: ChildItem) -> None:
             printer.write_thinking(text)
         case ModelServiceSuspended():
             printer.write_dim_line(service_suspended_text(item))
+        case NoticeMessage(text=text):
+            printer.write_dim_line(text)
+        case ModelResponseError(exception=exc):
+            printer.write_tool_error(f"{type(exc).__name__}: {exc}")
         case ToolResult():
             render_tool_result(printer, item)
         case AgentSendMessage(source=source, text=text):
