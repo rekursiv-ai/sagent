@@ -932,17 +932,51 @@ def test_next_line_eof_returns_none() -> None:
     assert line is None
 
 
-def test_next_line_keyboard_interrupt_returns_none() -> None:
+def test_next_line_keyboard_interrupt_reprompts_never_quits() -> None:
+    """A stray Ctrl+C must re-arm the prompt, not terminate the loop.
+
+    Ctrl+C is owned by ``_kb_ctrl_c`` (halt/clear-line); it never exits
+    the REPL. When a ``KeyboardInterrupt`` escapes that binding,
+    ``next_line`` must swallow it and re-prompt -- returning ``None`` here
+    would make ``_input_pump`` call ``agent.shutdown`` and wedge the REPL.
+    """
     session = MagicMock()
+    calls: list[int] = []
 
     async def _prompt_async(**kwargs: object) -> str:
         del kwargs
-        raise KeyboardInterrupt
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return "after interrupt"
 
     session.prompt_async = _prompt_async
     src = PromptToolkitInputSource(session, queues=InputQueues())
     line = asyncio.run(src.next_line())
-    assert line is None
+    assert line == "after interrupt"
+    assert len(calls) == 2
+
+
+def test_next_line_keyboard_interrupt_preserves_queue() -> None:
+    """Stray Ctrl+C must not discard staged input (no quit-surface path)."""
+    session = MagicMock()
+    calls: list[int] = []
+
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
+        calls.append(1)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return "resumed"
+
+    session.prompt_async = _prompt_async
+    console = MagicMock()
+    queues = InputQueues(deferred=[QueuedInputBlock(text="staged line")])
+    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    line = asyncio.run(src.next_line())
+    assert line == "resumed"
+    assert queues.has_any()
+    console.print.assert_not_called()
 
 
 def test_quit_surfaces_queued_input_preview() -> None:

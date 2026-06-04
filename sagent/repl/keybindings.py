@@ -119,7 +119,14 @@ def build_key_bindings(
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
-    kb.add("c-c")(functools.partial(_kb_ctrl_c, agent, queues))
+    # ``eager=True`` is load-bearing: ``PromptSession`` merges this
+    # binding *before* its own default ``c-c`` -> ``_keyboard_interrupt``,
+    # but the key processor invokes ``matches[-1]`` (the last match),
+    # which would be prompt-toolkit's default -- raising ``KeyboardInterrupt``
+    # and shadowing this handler entirely. An eager binding filters out
+    # the non-eager default, so ``_kb_ctrl_c`` (halt when busy, clear the
+    # line when idle) actually runs and Ctrl+C never exits the REPL.
+    kb.add("c-c", eager=True)(functools.partial(_kb_ctrl_c, agent))
     kb.add("c-z")(_kb_suspend)
     kb.add("c-_")(_kb_undo)
     kb.add("escape", "z")(_kb_undo)
@@ -450,32 +457,35 @@ def _kb_open_editor(event: KeyPressEvent) -> None:
     event.current_buffer.open_in_editor()
 
 
-def _kb_ctrl_c(agent: Agent, queues: InputQueues, event: KeyPressEvent) -> None:
-    """Halt the active turn; never exit the REPL.
+def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
+    r"""Abandon the line being composed; never exit the REPL.
 
-    Busy path halts and stages any composed buffer text as one more
-    urgent block: typing during a halt is user intent we cannot drop.
-    Urgent blocks already in the queue stay in the queue verbatim so
-    their attachments survive (concatenating ``.text`` into the buffer
-    would lose them). Idle path clears the input buffer (standard
-    terminal convention -- abandon the line you were composing). To
-    exit the REPL use Ctrl+D or ``/quit``.
+    One rule, matching every Unix line editor (bash, readline, ipython):
+    Ctrl+C abandons the line you are composing and gives you a fresh
+    prompt. The abandoned text is recorded in history (Up-arrow recalls
+    it) but is never carried into the next turn -- typing a new line must
+    not re-inject the old one.
 
-    The "busy" predicate here is ``agent.work or agent.runtime.cohort``
-    -- ``agent.work`` covers ``model_call`` and ``compact_task``. Enter
-    (``_kb_submit``) uses the narrower ``agent.runtime.model_call``
-    instead because Enter's queue-staging rule fires only while the
-    model is streaming, not during compaction or tool fan-out.
+    Two facts stay orthogonal to that rule:
+
+    - When the agent is busy (``agent.work`` -- a model call or
+      compaction -- or a non-empty ``runtime.cohort``), Ctrl+C also halts
+      the running turn. That is the same "abandon the current activity"
+      intent applied to the agent rather than the line.
+    - Queued urgent/deferred blocks were *deliberately submitted* with
+      Enter/Tab; they are not the line being composed, so Ctrl+C leaves
+      them untouched -- this handler never reads or mutates the queues.
+
+    To exit the REPL use Ctrl+D or ``/quit``.
+
+    Args:
+      agent: Agent whose running turn is halted when busy.
+      event: Key event carrying the buffer to abandon.
+
     """
-    buf = event.current_buffer
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()
-        if buf.text:
-            queues.stage_urgent(buf.text)
-            buf.reset()
-        return
-    queues.clear()
-    buf.reset()
+    event.current_buffer.reset(append_to_history=True)
 
 
 def _kb_suspend(event: KeyPressEvent) -> None:

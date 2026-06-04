@@ -561,12 +561,25 @@ class PromptToolkitInputSource(InputSource):
 
     @override
     async def next_line(self) -> str | None:
-        """Return the next line, or ``None`` to terminate the input loop."""
-        try:
-            text = await self._session.prompt_async(set_exception_handler=False)
-        except (EOFError, KeyboardInterrupt):
-            self._surface_queued_input_on_quit()
-            return None
+        """Return the next line, or ``None`` to terminate the input loop.
+
+        Ctrl+C is owned by the ``_kb_ctrl_c`` keybinding (halt when busy,
+        clear the line when idle) and must never exit the REPL. A
+        ``KeyboardInterrupt`` that escapes that binding -- a prompt-toolkit
+        race where the keypress lands between binding-dispatch cycles --
+        is swallowed here and the prompt re-armed, so a stray Ctrl+C never
+        shuts the pump down or discards the queued input. Only Ctrl+D
+        (``EOFError``) and the quit words terminate the loop.
+        """
+        while True:
+            try:
+                text = await self._session.prompt_async(set_exception_handler=False)
+                break
+            except EOFError:
+                self._surface_queued_input_on_quit()
+                return None
+            except KeyboardInterrupt:
+                continue
         stripped = text.strip()
         if stripped.lower() in QUIT_WORDS:
             self._surface_queued_input_on_quit()

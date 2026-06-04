@@ -10,6 +10,12 @@ from unittest.mock import MagicMock
 import inspect
 
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.key_binding.key_bindings import (
+    KeyBindingsBase,
+    merge_key_bindings,
+)
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.shortcuts import PromptSession
 
 from sagent.agent.agent import Agent
 from sagent.repl import keybindings as keybindings_mod
@@ -736,81 +742,46 @@ def test_escape_z_undo() -> None:
     buf.undo.assert_called_once()
 
 
-def test_ctrl_c_halts_during_model_call() -> None:
-    """REPL-037: a composed buffer is staged as urgent then cleared."""
-    agent = _busy_agent()
+# Ctrl+C single rule: abandon the composed line (-> history, never
+# re-injected), halt the turn when busy, leave queues untouched.
+
+
+def test_ctrl_c_abandons_line_to_history_never_reinjects() -> None:
+    """The composed line is recorded in history and the buffer cleared.
+
+    ``reset(append_to_history=True)`` pushes the abandoned text to
+    history (Up-arrow recalls it) and clears the buffer, so a freshly
+    typed line never carries the old one forward.
+    """
+    agent = _idle_agent()
     queues = InputQueues()
     kb = _build(agent, queues)
     buf = _fake_buf("partial line")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert agent.halt_calls == 1
-    assert [b.text for b in queues.urgent] == ["partial line"]
-    buf.reset.assert_called_once()
+    buf.reset.assert_called_once_with(append_to_history=True)
+    assert not queues.has_any()
 
 
-def test_ctrl_c_busy_preserves_urgent_queue_with_attachments() -> None:
-    """REPL-037: Ctrl+C must not flatten urgent blocks to ``.text`` only.
-
-    Previously the busy path concatenated every urgent block's text into
-    the buffer and cleared the queue -- attachments were dropped on the
-    floor. Urgent blocks (which may carry attachments) now stay in the
-    queue verbatim across a halt; the user's composed buffer becomes
-    one additional urgent block.
-    """
+def test_ctrl_c_never_stages_composed_buffer() -> None:
+    """The composed buffer must never become a queued block."""
     agent = _busy_agent()
-    attachment = BytesMessage(data=b"png-bytes", descriptor="image/png")
-    queues = InputQueues(
-        urgent=[
-            QueuedInputBlock(text="what is happening?", attachments=(attachment,)),
-        ],
-    )
-    kb = _build(agent, queues)
-    buf = _fake_buf("")
-    _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert agent.halt_calls == 1
-    assert [b.text for b in queues.urgent] == ["what is happening?"]
-    assert queues.urgent[0].attachments == (attachment,), (
-        f"Ctrl+C must preserve urgent attachments; got {queues.urgent[0].attachments!r}"
-    )
-
-
-def test_ctrl_c_busy_with_typed_text_stages_buffer_as_urgent_block() -> None:
-    """REPL-037: composed buffer text becomes one more urgent block.
-
-    Halt-path must not silently overwrite text the user was composing.
-    Stage the buffer as its own urgent block so it survives the halt
-    and rides through with the existing queued blocks (whose
-    attachments are preserved by staying in the queue).
-    """
-    agent = _busy_agent()
-    queues = InputQueues(urgent=[QueuedInputBlock(text="urgent block")])
+    queues = InputQueues()
     kb = _build(agent, queues)
     buf = _fake_buf("typed-by-user")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert agent.halt_calls == 1
-    assert [b.text for b in queues.urgent] == ["urgent block", "typed-by-user"]
-    buf.reset.assert_called_once()
+    assert not queues.has_any(), (
+        f"Ctrl+C must not stage the buffer; got urgent={queues.urgent!r}"
+    )
+    buf.reset.assert_called_once_with(append_to_history=True)
 
 
-def test_ctrl_c_busy_preserves_deferred_queue() -> None:
-    """Ctrl+C during busy work must not silently discard Tab-staged deferred input.
-
-    The user staged the deferred message FOR LATER. Halting the active
-    turn doesn't invalidate "for later." Preserving deferred matches
-    urgent's preservation (lifted to buffer) -- the asymmetry would
-    confuse: Ctrl+C keeps urgent but drops deferred? Both are user
-    input; both deserve to survive a halt.
-    """
+def test_ctrl_c_halts_when_busy() -> None:
     agent = _busy_agent()
-    queues = InputQueues(deferred=[QueuedInputBlock(text="for the next round")])
-    kb = _build(agent, queues)
-    buf = _fake_buf("")
+    kb = _build(agent)
+    buf = _fake_buf("partial line")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
     assert agent.halt_calls == 1
-    assert [b.text for b in queues.deferred] == ["for the next round"], (
-        f"Ctrl+C must not discard deferred queue during busy halt;"
-        f" got deferred={queues.deferred!r}"
-    )
+    buf.reset.assert_called_once_with(append_to_history=True)
 
 
 def test_ctrl_c_halts_during_cohort() -> None:
@@ -821,24 +792,72 @@ def test_ctrl_c_halts_during_cohort() -> None:
     assert agent.halt_calls == 1
 
 
-def test_ctrl_c_idle_clears_buffer() -> None:
+def test_ctrl_c_idle_does_not_halt() -> None:
     agent = _idle_agent()
     kb = _build(agent)
     buf = _fake_buf("typing here")
     _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
     assert agent.halt_calls == 0
-    buf.reset.assert_called_once()
+    buf.reset.assert_called_once_with(append_to_history=True)
 
 
-def test_ctrl_c_idle_clears_visible_deferred_queue() -> None:
-    agent = _idle_agent()
-    queues = InputQueues(deferred=[QueuedInputBlock(text="stuck deferred")])
-    kb = _build(agent, queues)
-    buf = _fake_buf("")
-    _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
-    assert not queues.has_any()
-    assert agent.halt_calls == 0
-    buf.reset.assert_called_once()
+def test_ctrl_c_leaves_committed_queues_untouched() -> None:
+    """Deliberately-submitted urgent/deferred blocks survive Ctrl+C.
+
+    They are not the line being composed; clearing them would smuggle a
+    second, unrelated action into one keypress. Holds whether busy or
+    idle -- one rule, no asymmetry.
+    """
+    attachment = BytesMessage(data=b"png-bytes", descriptor="image/png")
+    for agent in (_busy_agent(), _idle_agent()):
+        queues = InputQueues(
+            urgent=[QueuedInputBlock(text="urgent", attachments=(attachment,))],
+            deferred=[QueuedInputBlock(text="for later")],
+        )
+        kb = _build(agent, queues)
+        buf = _fake_buf("composing")
+        _handler(kb, ("c-c",))(cast(KeyPressEvent, _fake_event(buf)))
+        assert [b.text for b in queues.urgent] == ["urgent"]
+        assert queues.urgent[0].attachments == (attachment,)
+        assert [b.text for b in queues.deferred] == ["for later"]
+
+
+def test_ctrl_c_wins_over_prompt_session_default_keyboard_interrupt() -> None:
+    """Root cause: our ``c-c`` must win the ``PromptSession`` merge.
+
+    ``PromptSession`` merges these bindings *before* its own default
+    ``c-c`` -> ``_keyboard_interrupt`` (which raises ``KeyboardInterrupt``
+    and would shut the REPL down). The key processor invokes the LAST
+    matching binding, so without ``eager=True`` the default wins and
+    ``_kb_ctrl_c`` never fires -- a stray Ctrl+C discards the queue and
+    exits. ``eager=True`` filters the non-eager default out, so the
+    resolved handler is ours. This reproduces the exact resolution the
+    processor performs (``eager_matches`` then ``matches[-1]``).
+    """
+    agent = _busy_agent()
+    queues = InputQueues()
+    session: PromptSession[str] = PromptSession(key_bindings=_build(agent, queues))
+    user_bindings = session.key_bindings
+    assert user_bindings is not None
+    # Mirror PromptSession._create_application's exact merge to test the
+    # real resolution the key processor performs.
+    # ``_create_prompt_bindings`` is prompt-toolkit's only entry point to
+    # the prompt-default bindings (including its ``c-c`` handler).
+    merged = merge_key_bindings(
+        [user_bindings, cast(KeyBindingsBase, session._create_prompt_bindings())]
+    )
+    matches = merged.get_bindings_for_keys((Keys.ControlC,))
+    eager = [m for m in matches if m.eager()]
+    resolved = (eager or matches)[-1]
+    handler = resolved.handler
+    inner = getattr(handler, "func", handler)
+    assert inner is keybindings_mod._kb_ctrl_c, (
+        f"c-c resolved to {getattr(inner, '__qualname__', inner)!r}, "
+        "not _kb_ctrl_c -- PromptSession default shadows our binding"
+    )
+    # Resolved handler halts (busy path), never raises KeyboardInterrupt.
+    handler(cast(KeyPressEvent, _fake_event(_fake_buf(""))))
+    assert agent.halt_calls == 1
 
 
 def test_up_arrow_on_tab_staging_lifts_back_truly_retracts() -> None:
