@@ -115,6 +115,7 @@ class StubModel:
     max_image_bytes: int = 5 * 1024 * 1024
     responses: list[types.runtime.AssistantMessage] = field(default_factory=list)
     received: list[types.model.ModelRequest] = field(default_factory=list)
+    usage: types.model.UsageSnapshot | None = None
 
     @property
     def valid_thinking_states(self) -> tuple[str, ...]:
@@ -154,6 +155,9 @@ class StubModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
+
+    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+        return self.usage
 
     async def buffer(
         self, request: types.model.ModelRequest
@@ -669,6 +673,89 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
         )
     assert exc_info.value.max_budget_usd == 1.0
     assert "Budget exhausted" in str(exc_info.value)
+
+
+def test_record_response_surfaces_usage_warning_once() -> None:
+    model = StubModel()
+    a = Agent(model=model, tools=[])
+    published: list[object] = []
+    a.runtime.observers.append(published.append)
+
+    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    # Below threshold: no advisory.
+    model.usage = types.model.UsageSnapshot(
+        windows=(types.model.UsageWindow(label="7d", utilization=0.5),)
+    )
+    a.record_response(resp)
+    # Crosses 0.75: one advisory.
+    model.usage = types.model.UsageSnapshot(
+        windows=(types.model.UsageWindow(label="7d", utilization=0.89),)
+    )
+    a.record_response(resp)
+    a.record_response(resp)  # still high -> not re-warned
+
+    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    assert len(notices) == 1
+    assert notices[0].tier == "advisory"
+    assert "7d" in notices[0].text
+    assert "89%" in notices[0].text
+
+
+def test_record_response_usage_warning_rearms_after_drop() -> None:
+    model = StubModel()
+    a = Agent(model=model, tools=[])
+    published: list[object] = []
+    a.runtime.observers.append(published.append)
+    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    for util in (0.9, 0.5, 0.9):
+        model.usage = types.model.UsageSnapshot(
+            windows=(types.model.UsageWindow(label="5h", utilization=util),)
+        )
+        a.record_response(resp)
+    # Warned at the first 0.9, cleared at 0.5 (< 0.60), re-warned at 0.9.
+    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    assert len(notices) == 2
+
+
+def test_record_response_usage_warning_escalates_to_blocked() -> None:
+    model = StubModel()
+    a = Agent(model=model, tools=[])
+    published: list[object] = []
+    a.runtime.observers.append(published.append)
+    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+
+    model.usage = types.model.UsageSnapshot(
+        windows=(types.model.UsageWindow(label="7d", utilization=0.89),)
+    )
+    a.record_response(resp)
+    # Same window now hard-blocked: the escalation must surface a new advisory.
+    model.usage = types.model.UsageSnapshot(
+        windows=(types.model.UsageWindow(label="7d", utilization=1.0, blocked=True),)
+    )
+    a.record_response(resp)
+
+    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    assert [n.text for n in notices] == [
+        "[usage: 7d window 89% used]",
+        "[usage: 7d window blocked]",
+    ]
+
+
+def test_record_response_usage_warning_no_chatter_above_clear() -> None:
+    model = StubModel()
+    a = Agent(model=model, tools=[])
+    published: list[object] = []
+    a.runtime.observers.append(published.append)
+    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    # Oscillating between 0.78 and 0.72 -- both above the 0.60 clear point --
+    # must warn once, not on every crossing of 0.75.
+    for util in (0.78, 0.72, 0.78, 0.72):
+        model.usage = types.model.UsageSnapshot(
+            windows=(types.model.UsageWindow(label="5h", utilization=util),)
+        )
+        a.record_response(resp)
+    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    assert len(notices) == 1
 
 
 def test_token_count_addable() -> None:
@@ -3495,7 +3582,7 @@ async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_now_failure_appends_error_user_message() -> None:
+async def test_compact_now_failure_publishes_event_not_context_pollution() -> None:
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
         def should_compact(
@@ -3530,14 +3617,20 @@ async def test_compact_now_failure_appends_error_user_message() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
+    published: list[object] = []
+    a.runtime.observers.append(published.append)
     a.runtime.append_history(types.runtime.UserMessage(text="x"))
     await a.compact_now()
-    err = [
+    # Issue#316 #6: the failure does not enter model context. It surfaces via a
+    # published ``CompactFailed`` event (taped + rendered dim), not as a
+    # ``[Compaction error: ...]`` ``UserMessage`` on the wire.
+    polluted = [
         e
         for e in a.runtime.context().messages
         if isinstance(e, types.runtime.UserMessage) and "[Compaction error:" in e.text
     ]
-    assert len(err) == 1
+    assert polluted == []
+    assert any(isinstance(e, types.runtime.CompactFailed) for e in published)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -3592,6 +3685,9 @@ class _OverflowModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
+
+    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+        return None
 
     async def buffer(
         self, request: types.model.ModelRequest
@@ -3672,6 +3768,9 @@ class _RawOverflowModel:
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
+
+    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+        return None
 
     async def buffer(
         self, request: types.model.ModelRequest
@@ -3856,6 +3955,9 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         def is_retryable_provider_error(self, error: Exception) -> bool:
             del error
             return False
+
+        def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+            return None
 
         async def buffer(
             self, request: types.model.ModelRequest

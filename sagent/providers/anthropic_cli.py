@@ -43,6 +43,7 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     TokenCount,
+    UsageSnapshot,
     base_model_id,
 )
 from sagent.types.runtime import (
@@ -404,6 +405,10 @@ class _AnthropicCLIModel:
         """``False`` -- subprocess errors are handled via respawn, not retry."""
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """No rate-limit telemetry over the CLI subprocess transport."""
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Run the request through the streaming path with no callbacks.

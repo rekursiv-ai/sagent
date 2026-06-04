@@ -53,7 +53,12 @@ from sagent.providers.lib.subproc import (
     SubprocessTransportError,
 )
 from sagent.thinking import ThinkingCapability, valid_thinking_states
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    TokenCount,
+    UsageSnapshot,
+)
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -401,6 +406,10 @@ class _GoogleCLIModel:
         """``False`` -- subprocess errors are handled via respawn, not retry."""
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """No rate-limit telemetry over the CLI subprocess transport."""
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Run the request through the streaming path with no callbacks.

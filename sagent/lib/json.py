@@ -368,6 +368,39 @@ _VALUE_TAG = "__value__"
 _SPECIAL_SCALARS: tuple[type, ...] = (bytes, Path, UUID, datetime, Enum)
 
 
+def dataclass_to_json(obj: object) -> JSON:
+    """Encode a dataclass instance to a tagged JSON object.
+
+    Recurses into nested dataclasses, tuples/lists, and dicts; encodes
+    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum`` to JSON-safe
+    forms. The result carries a ``"__type__"`` tag naming the class.
+    """
+    if not is_dataclass(obj) or isinstance(obj, type):
+        raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
+    hints = _hints(type(obj))
+    out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
+    for f in fields(obj):
+        out[f.name] = _encode(getattr(obj, f.name), hints.get(f.name))
+    return out
+
+
+def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
+    """Rebuild a dataclass of type ``cls`` from a JSON object.
+
+    Decoding is driven by ``cls``'s resolved type hints, so each field is
+    parsed against its real annotation (nested dataclass, union, tuple,
+    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum``, or scalar).
+    The ``"__type__"`` tag is ignored here (the caller already chose ``cls``).
+    """
+    hints = _hints(cls)
+    kwargs: dict[str, object] = {}
+    for name, raw in data.items():
+        if name == _TYPE_TAG or name not in hints:
+            continue
+        kwargs[name] = _decode(hints[name], raw)
+    return cls(**kwargs)
+
+
 @cache
 def _hints(cls: type) -> Mapping[str, object]:
     """Resolved type hints for ``cls`` (forward refs included), cached."""
@@ -414,39 +447,6 @@ def _scalar_member(members: tuple[object, ...], name: str) -> type | None:
         if isinstance(m, type) and m.__name__ == name:
             return m
     return None
-
-
-def dataclass_to_json(obj: object) -> JSON:
-    """Encode a dataclass instance to a tagged JSON object.
-
-    Recurses into nested dataclasses, tuples/lists, and dicts; encodes
-    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum`` to JSON-safe
-    forms. The result carries a ``"__type__"`` tag naming the class.
-    """
-    if not is_dataclass(obj) or isinstance(obj, type):
-        raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
-    hints = _hints(type(obj))
-    out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
-    for f in fields(obj):
-        out[f.name] = _encode(getattr(obj, f.name), hints.get(f.name))
-    return out
-
-
-def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
-    """Rebuild a dataclass of type ``cls`` from a JSON object.
-
-    Decoding is driven by ``cls``'s resolved type hints, so each field is
-    parsed against its real annotation (nested dataclass, union, tuple,
-    ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum``, or scalar).
-    The ``"__type__"`` tag is ignored here (the caller already chose ``cls``).
-    """
-    hints = _hints(cls)
-    kwargs: dict[str, object] = {}
-    for name, raw in data.items():
-        if name == _TYPE_TAG or name not in hints:
-            continue
-        kwargs[name] = _decode(hints[name], raw)
-    return cls(**kwargs)
 
 
 def _encode(value: object, annotation: object = None) -> JSONValue:

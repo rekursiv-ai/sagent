@@ -53,6 +53,8 @@ from sagent.types.runtime import (
     CompactStarted,
     ModelContextEvent,
     ModelServiceSuspended,
+    NoticeMessage,
+    NoticeTier,
     RuntimeEvent,
     SaveSession,
     ServiceErrorSnapshot,
@@ -465,6 +467,8 @@ def _legacy_override_to_splice(
 
 
 def _mask_runs(refs: Sequence[TapeRef]) -> tuple[tuple[TapeRef, TapeRef], ...]:
+    if not refs:
+        return ()
     ordered = sorted(refs, key=lambda item: (item.session_id, item.ordinal))
     runs: list[tuple[TapeRef, TapeRef]] = []
     start = ordered[0]
@@ -900,6 +904,17 @@ def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
             "server_supplied": event.server_supplied,
             "error": _service_error_snapshot_to_json(event.error),
         }
+    if isinstance(event, NoticeMessage):
+        return {
+            "kind": "runtime_event",
+            "type": "notice_message",
+            "timestamp": time.time(),
+            "text": event.text,
+            "tier": event.tier,
+            "error": _service_error_snapshot_to_json(event.error)
+            if event.error is not None
+            else None,
+        }
     raise TypeError(
         f"unsupported runtime event for persistence: {type(event).__name__}"
     )
@@ -923,7 +938,26 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             server_supplied=bool(record.get("server_supplied")),
             error=error,
         )
+    if record.get("type") == "notice_message":
+        raw_error = record.get("error")
+        return NoticeMessage(
+            text=str(record.get("text") or ""),
+            tier=_notice_tier(record.get("tier")),
+            error=_service_error_snapshot_from_json(raw_error)
+            if raw_error is not None
+            else None,
+        )
     return None
+
+
+def _notice_tier(raw: object) -> NoticeTier:
+    """Decode a persisted notice tier. Only ``advisory`` exists today.
+
+    Legacy ``recoverable`` / ``fatal`` values (never produced in practice)
+    decode to ``advisory`` -- a dim notice -- rather than failing a resume.
+    """
+    del raw
+    return "advisory"
 
 
 def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, object]:
@@ -1217,7 +1251,10 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
 
     def _on_event(event: RuntimeEvent) -> None:
         nonlocal meta_written, last_status, last_tool_state
-        if not isinstance(event, (SaveSession, StatusChanged, ModelServiceSuspended)):
+        if not isinstance(
+            event,
+            (SaveSession, StatusChanged, ModelServiceSuspended, NoticeMessage),
+        ):
             return
         tape_delta = [
             record for record in agent.runtime.tape if record.ref not in persisted_refs
@@ -1247,7 +1284,7 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
             meta=meta.serialize() if write_meta else None,
             tape_delta=tape_delta or None,
             runtime_events=(event,)
-            if isinstance(event, ModelServiceSuspended)
+            if isinstance(event, (ModelServiceSuspended, NoticeMessage))
             else None,
             tool_state_snapshot=tool_state if write_tool_state else None,
         )
@@ -1282,6 +1319,14 @@ def _persisted_refs(path: Path) -> set[TapeRef]:
                 if ref is not None:
                     refs.add(ref)
     except OSError:
+        # An existing-but-unreadable session file would otherwise return an
+        # empty set, making every tape record look new -- the next save then
+        # re-appends the whole tape, silently doubling the file. Warn loudly.
+        logger.warning(
+            "Could not read persisted refs from %s; persistence may duplicate"
+            " records on the next save.",
+            path,
+        )
         return set()
     return refs
 

@@ -49,6 +49,7 @@ from sagent.types.runtime import (
     ModelResponseThinking,
     ModelServiceSuspended,
     ModelSwitchRejected,
+    NoticeMessage,
     RuntimeEvent,
     SessionMessage,
     StatusChanged,
@@ -135,6 +136,8 @@ type ChildItem = (
     | ModelResponseThinking
     | ToolResult
     | ModelServiceSuspended
+    | NoticeMessage
+    | ModelResponseError
     | AgentSendMessage
     | UserMessage
     | AssistantMessage
@@ -419,6 +422,9 @@ class RenderObserver:
             case ModelServiceSuspended():
                 self._flush_stream()
                 self._printer.write_dim_line(service_suspended_text(event))
+            case NoticeMessage(text=text):
+                self._flush_stream()
+                self._printer.write_dim_line(text)
             case ModelResponseError(exception=exc):
                 self._flush_stream()
                 # ``UserFacingError`` carries a polished, user-actionable
@@ -596,18 +602,31 @@ class RenderObserver:
 
 
 def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
-    """Translate a non-streaming child event into a child-block item."""
-    if isinstance(inner, ToolLabel):
-        return inner
-    if isinstance(inner, ModelResponseThinking):
-        return inner
-    if isinstance(inner, ToolResult):
-        return inner
-    if isinstance(inner, ModelServiceSuspended):
-        return inner
-    if isinstance(inner, (AgentSendMessage, UserMessage)):
+    """Translate a non-streaming child event into a child-block item.
+
+    Any forwardable atomic child event renders in the child block; only
+    ``ModelResponsePartial`` needs separate streaming handling (done in
+    ``_consume_child`` before this is called). The accepted set must stay a
+    superset of what ``agent_spawn`` always-forwards -- see
+    ``test_every_always_forwarded_event_renders_a_child_block``.
+    """
+    if isinstance(inner, _CHILD_ITEM_TYPES):
         return inner
     return None
+
+
+# Atomic child events that render in a child block (everything the forwarder
+# may cross, minus the streamed ``ModelResponsePartial`` handled upstream).
+_CHILD_ITEM_TYPES = (
+    ToolLabel,
+    ModelResponseThinking,
+    ToolResult,
+    ModelServiceSuspended,
+    NoticeMessage,
+    ModelResponseError,
+    AgentSendMessage,
+    UserMessage,
+)
 
 
 HELP_TEXT = """\

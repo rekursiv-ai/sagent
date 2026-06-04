@@ -40,6 +40,7 @@ from sagent.types.runtime import (
     ModelResponseThinking,
     ModelServiceSuspended,
     ModelSwitchRejected,
+    NoticeMessage,
     RuntimeEvent,
     ServiceErrorSnapshot,
     ToolCall,
@@ -269,6 +270,61 @@ def test_model_service_suspended_flushes_stream_and_renders_dim_line() -> None:
     assert "model service suspended" in p.dim_lines[0]
     assert "rate-limited" in p.dim_lines[0]
     assert "resumes at" in p.dim_lines[0]
+
+
+def test_notice_message_advisory_renders_dim_line() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponsePartial(text="pending"))
+    obs(NoticeMessage(text="[rate-limit warning: 89% of weekly]", tier="advisory"))
+    assert p.markdowns == ["pending"]
+    assert p.dim_lines == ["[rate-limit warning: 89% of weekly]"]
+    assert p.halts == []
+
+
+def test_child_notice_message_renders_block() -> None:
+    # Issue#316 RUNTIME-001: a NoticeMessage forwarded from a child
+    # (agent_spawn always-forwards it) must render as a child block, not
+    # silently vanish in the child renderer.
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    notice = NoticeMessage(text="[usage: 7d window 89% used]", tier="advisory")
+    obs(ChildEvent(label="Agent_0", inner=notice))
+    obs(ChildDoneEvent(label="Agent_0", elapsed=0.0, tokens=0, cost=0.0))
+    assert p.child_blocks
+    label, items = p.child_blocks[0]
+    assert label == "Agent_0"
+    assert items == [notice]
+
+
+def test_child_model_response_error_renders_block() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    err = ModelResponseError(RuntimeError("boom"))
+    obs(ChildEvent(label="Agent_0", inner=err))
+    obs(ChildDoneEvent(label="Agent_0", elapsed=0.0, tokens=0, cost=0.0))
+    assert p.child_blocks
+    label, items = p.child_blocks[0]
+    assert label == "Agent_0"
+    assert items == [err]
+
+
+def test_every_always_forwarded_event_renders_a_child_block() -> None:
+    # Binding test: the set the forwarder always crosses to the parent must be
+    # a subset of what the child renderer materializes. Fails the instant a new
+    # always-forwarded event type is added without a child render path.
+    from sagent.tools.agent_spawn import (  # noqa: PLC0415 -- avoids heavy agent_spawn import at module load
+        always_forwarded_sample,
+    )
+
+    for event in always_forwarded_sample():
+        p = RecordingPrinter()
+        obs = make_render_observer(p)
+        obs(ChildEvent(label="L", inner=event))
+        obs(ChildDoneEvent(label="L", elapsed=0.0, tokens=0, cost=0.0))
+        assert p.child_blocks, (
+            f"{type(event).__name__} is always-forwarded but renders no child block"
+        )
 
 
 def test_service_suspended_text_short_wait_renders_relative_seconds() -> None:

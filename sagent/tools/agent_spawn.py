@@ -66,7 +66,9 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     ModelResponseThinking,
     ModelServiceSuspended,
+    NoticeMessage,
     RuntimeEvent,
+    ServiceErrorSnapshot,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -1030,9 +1032,42 @@ def _bundle_background_task(tools: list[Tool]) -> list[Tool]:
     return [*tools, BackgroundTask()]
 
 
+# Operational events forwarded to the parent regardless of verbosity. The
+# child renderer MUST be able to materialize each (see
+# ``render._child_atomic_item`` and the binding test
+# ``test_every_always_forwarded_event_renders_a_child_block``). Error
+# ``ToolResult``s also always forward, but only when ``is_error`` -- handled
+# separately at the call site.
+_ALWAYS_FORWARD_TYPES = (ModelResponseError, ModelServiceSuspended, NoticeMessage)
+
+
+def always_forwarded_sample() -> tuple[RuntimeEvent, ...]:
+    """Return one instance of each always-forwarded event type.
+
+    The single source of truth shared by the forwarder and the render binding
+    test, so a new always-forwarded type cannot be added without the test
+    exercising it.
+    """
+    return (
+        ModelResponseError(RuntimeError("sample")),
+        ModelServiceSuspended(
+            provider="",
+            auth="",
+            account=None,
+            model_id="",
+            retry_at=0.0,
+            delay_sec=0.0,
+            server_supplied=False,
+            error=ServiceErrorSnapshot(type_name="E", message="m"),
+        ),
+        NoticeMessage(text="[sample]", tier="advisory"),
+        ToolResult(call_id="c", content="boom", is_error=True),
+    )
+
+
 # Verbosity -> set of RuntimeEvent subclasses forwarded to the parent observer.
 # verbosity 0: nothing; 1: tool labels + tool results + assistant text;
-# 2: also thinking blocks. Errors are always forwarded.
+# 2: also thinking blocks. See ``_ALWAYS_FORWARD_TYPES`` for the always-on set.
 _VERBOSITY: dict[int, frozenset[type]] = {
     0: frozenset(),
     1: frozenset(
@@ -1167,9 +1202,9 @@ class _ChildForwarder:
         if isinstance(event, ModelResponsePartial):
             self._stats.model_response_chars += len(event.text)
             self._stats.model_response_tokens = self._stats.model_response_chars // 4
-        always_forward = isinstance(
-            event, (ModelResponseError, ModelServiceSuspended)
-        ) or (isinstance(event, ToolResult) and event.is_error)
+        always_forward = isinstance(event, _ALWAYS_FORWARD_TYPES) or (
+            isinstance(event, ToolResult) and event.is_error
+        )
         if not always_forward and type(event) not in self._forward_set:
             return
         self._parent_agent.publish(ChildEvent(label=self._label, inner=event))

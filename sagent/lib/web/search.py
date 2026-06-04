@@ -97,16 +97,6 @@ def _gsa_headers_for_query(query: str) -> dict[str, str]:
 _SEARXNG_URL_ENV = "SEARXNG_URL"
 
 
-def _searxng_url() -> str:
-    """Return the configured SearXNG base URL without a trailing slash."""
-    url = os.environ.get(_SEARXNG_URL_ENV, "").rstrip("/")
-    if not url:
-        raise RuntimeError(
-            f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
-        )
-    return url
-
-
 def searxng(
     query: str,
     num_results: int = 10,
@@ -136,6 +126,16 @@ def searxng(
         )
         for item in items[:num_results]
     ]
+
+
+def _searxng_url() -> str:
+    """Return the configured SearXNG base URL without a trailing slash."""
+    url = os.environ.get(_SEARXNG_URL_ENV, "").rstrip("/")
+    if not url:
+        raise RuntimeError(
+            f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
+        )
+    return url
 
 
 # ---------------------------------------------------------------------------

@@ -23,15 +23,6 @@ import sys
 import types
 
 
-class _DeferredModule(types.ModuleType):
-    @override
-    def __getattr__(self, name: str) -> object:
-        real = importlib.import_module(self.__name__)
-        object.__setattr__(self, "__class__", type(real))
-        self.__dict__.update(real.__dict__)
-        return getattr(self, name)
-
-
 def lazy_import(name: str) -> types.ModuleType:
     """Import a module lazily; loading deferred to first attribute access.
 
@@ -47,3 +38,12 @@ def lazy_import(name: str) -> types.ModuleType:
     if name in sys.modules:
         return sys.modules[name]
     return _DeferredModule(name)
+
+
+class _DeferredModule(types.ModuleType):
+    @override
+    def __getattr__(self, name: str) -> object:
+        real = importlib.import_module(self.__name__)
+        object.__setattr__(self, "__class__", type(real))
+        self.__dict__.update(real.__dict__)
+        return getattr(self, name)

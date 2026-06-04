@@ -15,6 +15,7 @@ import pytest
 from sagent.agent.retry import (
     _MAX_SERVER_RETRY_AFTER_SEC,
     DEFAULT_MAX_PERSISTENT_ATTEMPTS,
+    INTERACTIVE_MAX_SLEEP_SEC,
     MAX_RETRY_DELAY,
     PERSISTENT_MAX_BACKOFF_SEC,
     RETRY_BASE_SEC,
@@ -302,6 +303,92 @@ def test_extract_retry_after_unified_reset_honored_on_429_without_status() -> No
     assert 25.0 <= delay <= 30.5
 
 
+def test_extract_retry_after_unified_warning_status_not_a_limit() -> None:
+    # Captured incident (Issue#316, repl.log:3822): a 200 stream carrying an
+    # in-band rate_limit_error whose representative window is at
+    # ``allowed_warning`` (a heads-up, NOT a block). The always-present
+    # unified-reset is the 7d window rollover (~24h). Treating
+    # ``allowed_warning`` as a rejection promoted the warning into a 24h halt.
+    # Only ``rejected`` / ``rate_limited`` constitute a real throttle.
+    reset = time.time() + 86_000.0
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "allowed_warning",
+                "anthropic-ratelimit-unified-5h-status": "allowed",
+                "anthropic-ratelimit-unified-7d-status": "allowed_warning",
+                "anthropic-ratelimit-unified-7d-surpassed-threshold": "0.75",
+                "anthropic-ratelimit-unified-representative-claim": "seven_day",
+                "anthropic-ratelimit-unified-reset": str(reset),
+            },
+        )
+    )
+    assert extract_retry_after(err) is None
+
+
+def test_extract_retry_after_unified_rate_limited_status_honored() -> None:
+    # ``rate_limited`` is a genuine block (alongside ``rejected``); honor the
+    # reset clock as a real retry-after.
+    reset = time.time() + 30.0
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "rate_limited",
+                "anthropic-ratelimit-unified-reset": str(reset),
+            },
+        )
+    )
+    delay = extract_retry_after(err)
+    assert delay is not None
+    assert 25.0 <= delay <= 30.5
+
+
+def test_extract_retry_after_google_retry_info_body() -> None:
+    # Gemini advertises its 429 backoff in the JSON body via a
+    # ``google.rpc.RetryInfo`` detail (``retryDelay: "16s"``), NOT a header.
+    # Honor it so we wait the server-stated delay instead of guessing with
+    # local backoff (Issue#316; gemini-cli #5119 retries the same request
+    # uselessly when this is ignored).
+    body = (
+        '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":['
+        '{"@type":"type.googleapis.com/google.rpc.RetryInfo",'
+        '"retryDelay":"16s"}]}}'
+    )
+    err = _HTTPError(_FakeResponse(429, text=body))
+    assert extract_retry_after(err) == pytest.approx(16.0)
+
+
+def test_extract_retry_after_google_retry_info_fractional_seconds() -> None:
+    # ``retryDelay`` may carry fractional seconds (e.g. ``"7.5s"``).
+    body = (
+        '{"error":{"details":['
+        '{"@type":"type.googleapis.com/google.rpc.RetryInfo",'
+        '"retryDelay":"7.5s"}]}}'
+    )
+    err = _HTTPError(_FakeResponse(429, text=body))
+    assert extract_retry_after(err) == pytest.approx(7.5)
+
+
+def test_extract_retry_after_header_precedes_google_body() -> None:
+    # A ``retry-after`` header (if present) wins over the body delay; the
+    # body is only a fallback for providers that omit the header.
+    body = (
+        '{"error":{"details":['
+        '{"@type":"type.googleapis.com/google.rpc.RetryInfo",'
+        '"retryDelay":"16s"}]}}'
+    )
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "3"}, text=body))
+    assert extract_retry_after(err) == pytest.approx(3.0)
+
+
+def test_extract_retry_after_non_google_body_ignored() -> None:
+    # An arbitrary JSON body without a RetryInfo detail yields no delay.
+    err = _HTTPError(_FakeResponse(429, text='{"error":{"message":"nope"}}'))
+    assert extract_retry_after(err) is None
+
+
 def test_extract_retry_after_invalid_unified_reset_returns_none() -> None:
     err = _HTTPError(
         _FakeResponse(429, {"anthropic-ratelimit-unified-reset": "not-a-time"})
@@ -538,6 +625,37 @@ async def test_send_with_retry_interactive_halts_on_long_server_delay(
             publish_recoverable=_silent,
         )
     assert slept == [], "interactive mode must not sleep on a long server delay"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_in_band_warning_retries_to_success() -> None:
+    # Issue#316 bug #3: an in-band rate_limit_error on a 200 stream whose
+    # representative window is ``allowed_warning`` (a heads-up, not a block)
+    # must NOT halt -- it is a transient retryable, so the next attempt
+    # succeeds. Before the gate fix this raised RateLimitError (24h halt).
+    err = _HTTPError(
+        _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "allowed_warning",
+                "anthropic-ratelimit-unified-7d-status": "allowed_warning",
+                "anthropic-ratelimit-unified-reset": str(time.time() + 86_000.0),
+            },
+        )
+    )
+    model = _ScriptedModel(
+        stream_responses=[err, _resp("ok")], is_retryable_provider=True
+    )
+    response = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+    assert response.message.text == "ok"
+    assert model.stream_calls == 2
 
 
 @pytest.mark.asyncio
@@ -944,6 +1062,70 @@ async def test_send_with_retry_honors_resume_retry_at(
 
     assert response.message.text == "ok"
     assert sleeps == [12.5]
+    assert model.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_resume_retry_at_over_ceiling_does_not_wedge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#316 bug #5: a stale ``resume_retry_at`` carrying a bogus ~24h
+    # timestamp (itself produced by the allowed_warning->halt bug) was replayed
+    # as an uninterruptible sleep on the next user send. The delay is
+    # ``resume_retry_at - now`` -- wall-clock decay, so waiting minutes does not
+    # help (repro: +5s -> 86395s, +5m -> 86095s). A resume wait beyond the
+    # interactive ceiling must not block the REPL; the send proceeds instead.
+    model = _ScriptedModel(stream_responses=[_resp("ok")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    response = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+        resume_retry_at=100.0 + INTERACTIVE_MAX_SLEEP_SEC + 86_400.0,
+    )
+
+    assert response.message.text == "ok"
+    assert sleeps == [], "resume wait beyond ceiling must not sleep-wedge"
+    assert model.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_resume_retry_at_under_ceiling_still_sleeps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A short resume wait (within the interactive ceiling) is a legitimate
+    # backoff and is still honored.
+    model = _ScriptedModel(stream_responses=[_resp("ok")])
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+
+    async def fake_sleep(delay_sec: float) -> None:
+        sleeps.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    response = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+        resume_retry_at=100.0 + INTERACTIVE_MAX_SLEEP_SEC - 5.0,
+    )
+
+    assert response.message.text == "ok"
+    assert sleeps == [INTERACTIVE_MAX_SLEEP_SEC - 5.0]
     assert model.stream_calls == 1
 
 

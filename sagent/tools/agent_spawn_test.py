@@ -46,6 +46,7 @@ from sagent.types.runtime import (
     ChildEvent,
     ModelIdle,
     ModelServiceSuspended,
+    NoticeMessage,
     SaveSession,
     ServiceErrorSnapshot,
     ToolCall,
@@ -1048,6 +1049,24 @@ def test_forwarder_always_forwards_model_service_suspended() -> None:
     assert len(seen) == 1
     assert seen[0].label == "child"
     assert seen[0].inner is suspended
+
+
+def test_forwarder_always_forwards_usage_notice() -> None:
+    # A child burns the same provider quota as the root; its near-limit usage
+    # advisory must reach the parent even at verbosity 0 (empty forward_set).
+    parent = _make_parent()
+    seen: list[ChildEvent] = []
+    parent.runtime.observers.append(
+        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None
+    )
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
+    notice = NoticeMessage(text="[usage: 7d window 89% used]", tier="advisory")
+
+    fwd(notice)
+
+    assert len(seen) == 1
+    assert seen[0].label == "child"
+    assert seen[0].inner is notice
 
 
 @pytest.mark.asyncio

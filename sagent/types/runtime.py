@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import dataclasses
 import itertools
@@ -90,6 +90,8 @@ __all__ = [
     "ModelServiceSuspended",
     "ModelSwitch",
     "ModelSwitchRejected",
+    "NoticeMessage",
+    "NoticeTier",
     "Quit",
     "Recompact",
     "RuntimeEvent",
@@ -659,6 +661,39 @@ class ModelServiceSuspended:
     """Sanitized provider error snapshot."""
 
 
+type NoticeTier = Literal["advisory"]
+"""Severity of a :class:`NoticeMessage`.
+
+- ``advisory``: non-blocking heads-up (e.g. usage warning); rendered dim.
+
+Only ``advisory`` is produced today. Add tiers here (e.g. a halting ``fatal``)
+together with their producer and render branch -- never render-side capacity
+without a producer.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NoticeMessage:
+    """Operator-facing notice that is taped and rendered but never context.
+
+    Errors, warnings, and transport notices are not conversation: the model
+    needs the task, not the delivery mechanism of its own turns. A
+    ``NoticeMessage`` is persisted (for forensics) and shown to the human, but
+    is NOT a :data:`ModelContextEvent`, so the resolver never places it on the
+    wire and it can never coalesce into a ``UserMessage``. This is the
+    human-sees / model-never lane, mirroring :class:`ModelServiceSuspended`.
+    """
+
+    text: str
+    """Operator-facing notice text."""
+
+    tier: NoticeTier = "advisory"
+    """Severity selecting the render sink."""
+
+    error: ServiceErrorSnapshot | None = None
+    """Sanitized provider error snapshot for forensics, when applicable."""
+
+
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class ModelIdle:
     """Model finished with no tool calls."""
@@ -830,6 +865,7 @@ type RuntimeEvent = (
     | ModelResponseCancelled
     | ModelResponseError
     | ModelServiceSuspended
+    | NoticeMessage
     | ModelIdle
     | AgentIdle
     | CohortStarted

@@ -15,6 +15,7 @@ from sagent.types.model import (
     ModelResponse,
     Pricing,
     TokenCount,
+    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -109,6 +110,10 @@ class ScriptedModel:
         """
         del error
         return False
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Return ``None``; the offline scripted model has no rate limits."""
+        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Return one tool call, then a final answer after the tool result.

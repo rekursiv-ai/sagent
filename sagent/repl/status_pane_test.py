@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import patch
 
+import time
+
 import pytest
 
 from sagent.agent.agent import ActivityTracker, Agent
@@ -307,12 +309,39 @@ def test_auth_gate_reason_is_immediate() -> None:
 
 
 @pytest.mark.usefixtures("patched_loop_time")
-def test_service_suspension_countdown_reason() -> None:
-    a = _agent(active=True, current_call_start=0.0, service_suspended_until=75.0)
+def test_service_suspension_countdown_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``service_suspended_until`` is a wall-clock epoch; the countdown reads
+    # ``time.time()`` (patched here), not the monotonic loop clock.
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+    a = _agent(
+        active=True,
+        current_call_start=0.0,
+        service_suspended_until=1_800_000_065.0,
+    )
     assert (
         render_status_pane(_as_agent(a))[1:]
         == " [10s 0↑ 0↓ 0↟ 0↡ $0.00; retrying in 1m 5s.]"
     )
+
+
+@pytest.mark.usefixtures("patched_loop_time")
+def test_service_suspension_uses_wall_clock_not_loop_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#316 RUNTIME-003: ``service_suspended_until`` is a WALL-CLOCK epoch
+    # (``ModelServiceSuspended.retry_at`` == ``time.time() + delay``). The
+    # countdown must compare against ``time.time()``, not the monotonic loop
+    # clock (patched to 10.0 above), or a 2-minute suspension renders as a
+    # ~57-year wait.
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+    a = _agent(
+        active=True,
+        current_call_start=0.0,
+        service_suspended_until=1_800_000_120.0,
+    )
+    assert "retrying in 2m 0s." in render_status_pane(_as_agent(a))
 
 
 @pytest.mark.usefixtures("patched_loop_time")
