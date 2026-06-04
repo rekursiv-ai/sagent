@@ -165,7 +165,6 @@ show_missing = true
 skip_covered = true
 
 [tool.ruff]
-fix = true
 show-fixes = true
 line-length = 88
 output-format = "concise"
