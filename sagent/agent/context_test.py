@@ -31,6 +31,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
     TapeRecord,
@@ -49,7 +50,7 @@ def _hr(ordinal: int, entry: TapeEvent, session: str = "s") -> ReferrableTapeEve
 def _splice(
     ordinal: int,
     *,
-    mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
+    mask: tuple[MaskRange, ...] = (),
     insert_after: TapeRef | None = None,
     payload: tuple[ModelContextEvent, ...] = (),
     strategy: str = "test",
@@ -155,7 +156,7 @@ def test_splice_masks_earlier_history_record() -> None:
         _hr(1, _user("b")),
         _splice(
             2,
-            mask=((_ref(1), _ref(1)),),
+            mask=(MaskRange.between(_ref(1), _ref(1)),),
             insert_after=_ref(0),
             payload=(_user("B"),),
         ),
@@ -170,7 +171,7 @@ def test_splice_mask_respects_session_id() -> None:
         _hr(0, _user("b0"), session="b"),
         _splice(
             1,
-            mask=((_ref(0, "a"), _ref(0, "a")),),
+            mask=(MaskRange.between(_ref(0, "a"), _ref(0, "a")),),
             insert_after=None,
             payload=(_user("summary a"),),
             session="a",
@@ -208,7 +209,7 @@ def test_pure_deletion_with_empty_payload() -> None:
         _hr(0, _user("a")),
         _hr(1, _user("b")),
         _hr(2, _user("c")),
-        _splice(3, mask=((_ref(1), _ref(1)),), payload=()),
+        _splice(3, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
     ]
     msgs = _resolve_messages(tape)
     assert [getattr(m, "text", None) for m in msgs] == ["a", "c"]
@@ -234,7 +235,10 @@ def test_multi_range_mask_removes_non_contiguous_positions() -> None:
         _hr(4, _user("e")),
         _splice(
             5,
-            mask=((_ref(1), _ref(1)), (_ref(3), _ref(3))),
+            mask=(
+                MaskRange.between(_ref(1), _ref(1)),
+                MaskRange.between(_ref(3), _ref(3)),
+            ),
             insert_after=_ref(0),
             payload=(_user("SUMMARY"),),
         ),
@@ -252,7 +256,7 @@ def test_barrier_splice_masks_entire_prefix() -> None:
         _hr(2, _user("c")),
         _splice(
             3,
-            mask=((_ref(0), _ref(2)),),
+            mask=(MaskRange.between(_ref(0), _ref(2)),),
             insert_after=None,
             payload=(_user("SUMMARY"),),
         ),
@@ -268,7 +272,7 @@ def test_history_records_after_barrier_apply_normally() -> None:
         _hr(1, _user("b")),
         _splice(
             2,
-            mask=((_ref(0), _ref(1)),),
+            mask=(MaskRange.between(_ref(0), _ref(1)),),
             insert_after=None,
             payload=(_user("SUMMARY"),),
         ),
@@ -294,14 +298,14 @@ def test_cover_the_cover_resurrects_originally_masked_content() -> None:
         _hr(2, _user("c")),
         _splice(
             3,
-            mask=((_ref(1), _ref(1)),),
+            mask=(MaskRange.between(_ref(1), _ref(1)),),
             insert_after=_ref(0),
             payload=(_user("D"),),
         ),
         _hr(4, _user("e")),
         _splice(
             5,
-            mask=((_ref(3), _ref(3)),),
+            mask=(MaskRange.between(_ref(3), _ref(3)),),
             insert_after=_ref(0),
             payload=(_user("F"),),
         ),
@@ -324,7 +328,7 @@ def test_dead_splice_does_not_contribute_payload() -> None:
         ),
         _splice(
             2,
-            mask=((_ref(1), _ref(1)),),
+            mask=(MaskRange.between(_ref(1), _ref(1)),),
             insert_after=_ref(0),
             payload=(_user("Y"),),
         ),
@@ -349,13 +353,13 @@ def test_user_example_walkthrough() -> None:
         _hr(4, _user("e")),
         _splice(
             5,
-            mask=((_ref(3), _ref(3)),),
+            mask=(MaskRange.between(_ref(3), _ref(3)),),
             insert_after=_ref(2),
             payload=(_user("F"),),
         ),
         _splice(
             6,
-            mask=((_ref(1), _ref(1)),),
+            mask=(MaskRange.between(_ref(1), _ref(1)),),
             insert_after=_ref(0),
             payload=(_user("G"),),
         ),
@@ -372,7 +376,7 @@ def test_alive_splices_excludes_masked_splice_ref() -> None:
     tape = [
         _hr(0, _user("a")),
         _splice(1, mask=(), insert_after=_ref(0), payload=(_user("X"),)),
-        _splice(2, mask=((_ref(1), _ref(1)),), payload=()),
+        _splice(2, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
     ]
     alive = alive_splices(tape)
     assert _ref(2) in alive
@@ -384,8 +388,8 @@ def test_masked_refs_by_alive_excludes_dead_splice_masking() -> None:
     tape = [
         _hr(0, _user("a")),
         _hr(1, _user("b")),
-        _splice(2, mask=((_ref(1), _ref(1)),), payload=()),
-        _splice(3, mask=((_ref(2), _ref(2)),), payload=()),
+        _splice(2, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
+        _splice(3, mask=(MaskRange.between(_ref(2), _ref(2)),), payload=()),
     ]
     alive = alive_splices(tape)
     masked = masked_refs_by_alive(tape, alive)
@@ -402,7 +406,7 @@ def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
         tape.append(
             _splice(
                 idx * 2 + 1,
-                mask=((_ref(idx * 2), _ref(idx * 2)),),
+                mask=(MaskRange.between(_ref(idx * 2), _ref(idx * 2)),),
                 payload=(),
             )
         )
@@ -546,7 +550,7 @@ def test_resolved_context_after_compaction_validates_cleanly() -> None:
         _hr(2, _tool_result("t1")),
         _splice(
             3,
-            mask=((_ref(0), _ref(2)),),
+            mask=(MaskRange.between(_ref(0), _ref(2)),),
             insert_after=None,
             payload=(_user("[summary]"),),
         ),
@@ -564,7 +568,7 @@ def test_detached_splice_keeps_tool_pairing_valid() -> None:
         _hr(2, _tool_result("t1", content=DETACHED_PLACEHOLDER)),
         _splice(
             3,
-            mask=((_ref(2), _ref(2)),),
+            mask=(MaskRange.between(_ref(2), _ref(2)),),
             insert_after=_ref(1),
             payload=(_tool_result("t1", content="real"),),
             paired_externally=frozenset({"t1"}),

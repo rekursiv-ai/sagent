@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_SAFETY_FLOOR_TOKENS",
     "ScrunchPlan",
+    "ScrunchResult",
     "ScrunchTooLargeError",
     "entry_chars",
     "plan_scrunch",
@@ -94,6 +95,26 @@ class ScrunchPlan:
     """
 
     partitions: tuple[range, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScrunchResult:
+    """Outcome of a scrunch maneuver.
+
+    Attributes:
+      splices: Produced ``ContextSplice`` records, oldest-first, in the
+          order they were appended to the working tape.
+      view: Final resolved messages after every produced splice was
+          applied. This is the executor's own ground truth -- the same
+          list its size estimate and progress check operate on -- so
+          callers must consume it directly rather than re-deriving the
+          view from ``splices`` (the masks compose under cover-the-cover
+          undelete semantics the executor's flat replacement does not).
+
+    """
+
+    splices: tuple[ContextSplice, ...]
+    view: tuple[ModelContextEvent, ...]
 
 
 def _approx_tokens(context: Sequence[ModelContextEvent], chars_per_token: int) -> int:
@@ -292,12 +313,13 @@ async def scrunch_to_fit(
     chars_per_token: int = 4,
     summary_size_estimate_chars: int = 4_000,
     max_passes: int = 16,
-) -> list[ContextSplice]:
+) -> ScrunchResult:
     """Run partition-from-oldest scrunch passes until ``context`` fits.
 
-    Returns the produced :class:`ContextSplice` records in the order
-    they should be appended to the tape (oldest-first). Empty when
-    ``context`` already fits ``target_input_tokens``.
+    Returns the produced :class:`ContextSplice` records (oldest-first)
+    alongside the final resolved ``view`` the executor itself tracked.
+    When ``context`` already fits ``target_input_tokens`` the result has
+    empty ``splices`` and ``view`` set to ``context`` verbatim.
 
     Each pass:
       1. Plan partitions of the current uncompacted-or-summary tail.
@@ -310,6 +332,15 @@ async def scrunch_to_fit(
     When the tail empties without fitting, fold the produced summaries
     themselves (recompact-the-compacted) by re-planning over the new
     resolved view.
+
+    The executor replaces each partition's working entries with the
+    summary payload in place (a flat splice-by-replacement over the
+    evolving view). It returns that view directly rather than letting
+    callers re-derive it from ``splices``: a later pass's mask covers an
+    earlier pass's splice ref, and under the resolver's cover-the-cover
+    undelete semantics that resurrects the earlier-masked content -- not
+    what the fold intends. The flat ``view`` is the single ground truth
+    of what scrunch produced.
 
     Args:
       context: Resolved messages at scrunch entry.
@@ -325,7 +356,8 @@ async def scrunch_to_fit(
       max_passes: Safety bound on total producer calls.
 
     Returns:
-      splices: ``ContextSplice`` records to append, in order.
+      result: ``ScrunchResult`` carrying the produced splices (in append
+          order) and the final resolved view.
 
     Raises:
       ScrunchTooLargeError: A single message exceeds the per-partition
@@ -342,7 +374,7 @@ async def scrunch_to_fit(
         summary_size_estimate_chars=summary_size_estimate_chars,
     )
     if not plan.partitions:
-        return []
+        return ScrunchResult(splices=(), view=tuple(context))
 
     produced: list[ContextSplice] = []
     working_context: list[ModelContextEvent] = list(context)
@@ -424,4 +456,4 @@ async def scrunch_to_fit(
                 f" estimate {_approx_tokens(working_context, chars_per_token)}"
                 f" still exceeds target {target_input_tokens}",
             )
-    return produced
+    return ScrunchResult(splices=tuple(produced), view=tuple(working_context))

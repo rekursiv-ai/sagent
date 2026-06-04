@@ -13,7 +13,10 @@ import logging
 
 import pytest
 
-from sagent.agent import runtime as agent_runtime
+from sagent.agent import (
+    runtime as agent_runtime,
+    session_io,
+)
 from sagent.agent.context import (
     InvalidContextError,
     validate_context,
@@ -74,6 +77,7 @@ from sagent.types.runtime import (
 from sagent.types.tape import (
     ContextSplice,
     InvalidSpliceError,
+    MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
@@ -102,7 +106,7 @@ def _summary_override(
     care about the payload).
     """
     if tape:
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = ((tape[0].ref, tape[-1].ref),)
+        mask: tuple[MaskRange, ...] = (MaskRange.between(tape[0].ref, tape[-1].ref),)
     else:
         mask = ()
     return ContextSplice(
@@ -863,9 +867,11 @@ def test_rescue_context_partitions_mask_by_session_id() -> None:
     Bug repro: resuming an old session loads a tape whose records carry
     a mix of session_ids (legacy ``""`` and an earlier persisted id).
     The original rescue path masked ``tape[0].ref`` to ``tape[-1].ref``,
-    crossing session_ids; ``_validate_mask_disjoint`` rejected it, the
-    dispatch loop raised, and the REPL wedged so even ``/model`` could
-    not dispatch.
+    crossing session_ids. Post-Issue#313 a cross-session range is
+    unconstructable -- ``MaskRange.between`` rejects mismatched endpoints
+    at construction -- so the rescue path must partition per session up
+    front; before the fix the constructed cross-session range wedged the
+    dispatch loop and the REPL so even ``/model`` could not dispatch.
     """
     agent, _ = make_agent([AssistantMessage(text="x")])
     # Seed tape with refs from two different session namespaces, then
@@ -890,9 +896,9 @@ def test_rescue_context_partitions_mask_by_session_id() -> None:
     agent._rescue_context()
     splices = [r for r in agent.tape if isinstance(r, ContextSplice)]
     rescue = next(s for s in splices if s.strategy == "context_rescue")
-    sessions_in_mask = {r_from.session_id for r_from, _ in rescue.mask}
+    sessions_in_mask = {r.session_id for r in rescue.mask}
     assert sessions_in_mask == {"", "99edb2d0"}
-    assert all(r_from.session_id == r_to.session_id for r_from, r_to in rescue.mask)
+    # Same-session per range is now guaranteed by MaskRange's type (Issue#313).
 
 
 def test_append_splice_insert_after_check_is_session_scoped() -> None:
@@ -904,7 +910,7 @@ def test_append_splice_insert_after_check_is_session_scoped() -> None:
     ``session_id`` first (via ``mask_contains_ref``).
     """
     agent, _ = make_agent([AssistantMessage(text="x")])
-    mask = ((TapeRef(session_id="A", ordinal=0), TapeRef(session_id="A", ordinal=10)),)
+    mask = (MaskRange(session_id="A", lo=0, hi=10),)
 
     # Cross-session anchor whose ordinal (5) falls in the session-A range must
     # NOT be rejected -- different session.
@@ -919,9 +925,10 @@ def test_append_splice_insert_after_check_is_session_scoped() -> None:
     with pytest.raises(InvalidSpliceError):
         agent.append_splice(
             mask=(
-                (
-                    TapeRef(session_id="A", ordinal=20),
-                    TapeRef(session_id="A", ordinal=30),
+                MaskRange(
+                    session_id="A",
+                    lo=20,
+                    hi=30,
                 ),
             ),
             insert_after=TapeRef(session_id="A", ordinal=25),
@@ -951,11 +958,8 @@ def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
         agent.append_history(UserMessage(text=f"u{i}"))  # ordinals 0..5
     prior_ref = agent.append_splice(
         mask=(
-            (
-                TapeRef(session_id="legacy", ordinal=1),
-                TapeRef(session_id="legacy", ordinal=1),
-            ),
-            (TapeRef(session_id=sid, ordinal=5), TapeRef(session_id=sid, ordinal=5)),
+            MaskRange(session_id="legacy", lo=1, hi=1),
+            MaskRange(session_id=sid, lo=5, hi=5),
         ),
         insert_after=TapeRef(session_id=sid, ordinal=4),
         payload=(UserMessage(text="prior"),),
@@ -974,13 +978,13 @@ def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
     )
     # The new mask must live entirely in the tail session: a leaked ``legacy``
     # range is the bug.
-    assert all(r_from.session_id == sid for r_from, _ in new_splice.mask), (
+    assert all(r.session_id == sid for r in new_splice.mask), (
         "coalesce mask absorbed a cross-session range: "
-        f"{[(f.session_id, f.ordinal) for f, _ in new_splice.mask]}"
+        f"{[(r.session_id, r.lo) for r in new_splice.mask]}"
     )
     # The absorbed low must come from the same-session range (5) or the prior
     # splice's own ordinal -- never pulled down to the foreign low (1).
-    assert min(r_from.ordinal for r_from, _ in new_splice.mask) >= 5
+    assert min(r.lo for r in new_splice.mask) >= 5
     # The insertion anchor must be same-session too (F43-COALESCE-004): the
     # scan skips foreign-session records so a ``legacy`` ordinal cannot
     # mis-anchor the splice.
@@ -1004,8 +1008,8 @@ def test_user_coalesce_preserves_sparse_prior_mask_gaps() -> None:
         agent.append_history(UserMessage(text=f"u{i}"))
     prior_ref = agent.append_splice(
         mask=(
-            (TapeRef(session_id=sid, ordinal=1), TapeRef(session_id=sid, ordinal=1)),
-            (TapeRef(session_id=sid, ordinal=10), TapeRef(session_id=sid, ordinal=11)),
+            MaskRange(session_id=sid, lo=1, hi=1),
+            MaskRange(session_id=sid, lo=10, hi=11),
         ),
         insert_after=TapeRef(session_id=sid, ordinal=9),
         payload=(UserMessage(text="prior"),),
@@ -1025,7 +1029,7 @@ def test_user_coalesce_preserves_sparse_prior_mask_gaps() -> None:
     # The gap between the sparse ranges must be preserved: ordinal 5 must NOT
     # be covered by the new mask.
     assert not mask_contains_ref(new_splice.mask, TapeRef(session_id=sid, ordinal=5)), (
-        f"sparse gap filled; mask={[(f.ordinal, t.ordinal) for f, t in new_splice.mask]}"
+        f"sparse gap filled; mask={[(r.lo, r.hi) for r in new_splice.mask]}"
     )
     # The originally-masked ordinals (1, 10) are still absorbed.
     assert mask_contains_ref(new_splice.mask, TapeRef(session_id=sid, ordinal=1))
@@ -1705,7 +1709,10 @@ def test_widen_barrier_mask_preserves_mask_gaps() -> None:
     )
     override = ContextSplice(
         ref=TapeRef(session_id="s", ordinal=4),
-        mask=((refs[0], refs[0]), (refs[2], refs[2])),
+        mask=(
+            MaskRange.between(refs[0], refs[0]),
+            MaskRange.between(refs[2], refs[2]),
+        ),
         insert_after=None,
         payload=(UserMessage(text="summary"),),
         strategy="summary",
@@ -1713,7 +1720,10 @@ def test_widen_barrier_mask_preserves_mask_gaps() -> None:
 
     widened = agent_runtime.widen_barrier_mask(override, tape)
 
-    assert widened.mask == ((refs[0], refs[0]), (refs[2], refs[3]))
+    assert widened.mask == (
+        MaskRange.between(refs[0], refs[0]),
+        MaskRange.between(refs[2], refs[3]),
+    )
 
 
 def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
@@ -1721,11 +1731,11 @@ def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
 
     Legacy resumed tapes carry refs from both the empty ``""`` session id
     namespace and a later persisted id. Sorting all refs by ordinal and
-    treating them as one contiguous range produces a single
-    ``(from, to)`` whose endpoints straddle two session_ids --
-    ``_validate_mask_disjoint`` rejects with "mask range crosses session
-    ids" and ``dataclasses.replace`` inside ``widen_barrier_mask``
-    wedges the runtime at compact time.
+    treating them as one contiguous range would produce a single
+    ``(from, to)`` whose endpoints straddle two session_ids -- which
+    post-Issue#313 ``MaskRange`` makes unconstructable. The widening must
+    therefore partition refs per session; before that fix the
+    cross-session range wedged the runtime at compact time.
     """
     legacy = TapeRef(session_id="", ordinal=0)
     legacy_b = TapeRef(session_id="", ordinal=1)
@@ -1737,7 +1747,7 @@ def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
     )
     override = ContextSplice(
         ref=TapeRef(session_id="sess-2", ordinal=3),
-        mask=((legacy, legacy),),
+        mask=(MaskRange.between(legacy, legacy),),
         insert_after=None,
         payload=(UserMessage(text="summary"),),
         strategy="summary",
@@ -1745,11 +1755,13 @@ def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
 
     widened = agent_runtime.widen_barrier_mask(override, tape)
 
-    # Each session contributes one range; none crosses session_id.
-    for r_from, r_to in widened.mask:
-        assert r_from.session_id == r_to.session_id, (
-            f"mask range crosses session: ({r_from}, {r_to})"
-        )
+    # Each session contributes its own single-session range (cross-session is
+    # unconstructable; Issue#313). The legacy "" session widens 0..1; sess-2
+    # contributes ordinal 2.
+    assert set(widened.mask) == {
+        MaskRange(session_id="", lo=0, hi=1),
+        MaskRange(session_id="sess-2", lo=2, hi=2),
+    }
 
 
 @pytest.mark.asyncio
@@ -3443,7 +3455,7 @@ async def test_append_splice_indexes_preserved_payload_anchors() -> None:
     )
     # Compactor preserves the AM in its payload with paired_externally.
     splice_ref = agent.append_splice(
-        mask=((am_ref, placeholder_ref),),
+        mask=(MaskRange.between(am_ref, placeholder_ref),),
         insert_after=None,
         payload=(
             AssistantMessage(
@@ -6243,7 +6255,7 @@ async def test_detached_result_survives_compaction() -> None:
             del context, model, custom_instructions
             return ContextSplice(
                 ref=mint_ref(),
-                mask=((tape[0].ref, tape[-1].ref),),
+                mask=(MaskRange.between(tape[0].ref, tape[-1].ref),),
                 insert_after=None,
                 payload=(UserMessage(text="[summary]"),),
                 strategy="summary",
@@ -6813,50 +6825,34 @@ def test_inslot_terminal_through_splice_payload_skips_cancel_forward() -> None:
     assert not [c for c in agent._pending_commits if c.kind == "forward"]
 
 
-def test_user_coalesce_drops_legacy_cross_session_prior_range() -> None:
-    """A replayed legacy cross-session mask range must not crash coalesce.
+def test_legacy_cross_session_mask_range_dropped_at_deserialize() -> None:
+    """A legacy cross-session on-disk mask range is dropped on load (C6 / #313).
 
-    Regression for ``77bf1d67f`` review C6: ``ContextSplice.replay`` skips mask
-    validation, so a resumed legacy splice can carry a range whose endpoints
-    span sessions. ``_append_or_coalesce_user`` filtered prior ranges by the
-    ``from`` endpoint only, so such a range slipped through into
-    ``merge_mask_ranges`` (cross-session -> assertion / invalid splice). Both
-    endpoints must match the tail session; a malformed range is dropped.
+    Cross-session ranges are now unconstructable in memory (``MaskRange`` carries
+    one ``session_id``), so the only way one exists is a legacy wire record. The
+    drop happens once at the deserialize boundary (``_mask_from_json``) rather
+    than via scattered runtime guards; the resulting splice carries only the
+    same-session ranges, so downstream coalesce never sees a malformed range.
     """
-    agent, _ = make_agent([AssistantMessage(text="x")])
-    sid = agent.session_id
-    splice = ContextSplice.replay(
-        ref=TapeRef(session_id=sid, ordinal=2),
-        mask=(
-            (
-                TapeRef(session_id=sid, ordinal=0),
-                TapeRef(session_id="legacy", ordinal=1),
-            ),
-        ),
-        insert_after=None,
-        payload=(UserMessage(text="prior"),),
-        strategy="legacy",
-    )
-    agent.tape.append(splice)
-    agent._index_record(splice)
-    agent._cached_resolved = None
-    assert isinstance(agent.context().messages[-1], UserMessage)
-
-    # Must not raise: the cross-session range is dropped, not merged.
-    combined = agent._append_or_coalesce_user(UserMessage(text="more"))
-    assert isinstance(combined, UserMessage)
-    new_splice = next(
-        r
-        for r in reversed(agent.tape)
-        if isinstance(r, ContextSplice)
-        and r.strategy == "user_coalesce"
-        and r.ref != splice.ref
-    )
-    # Every range in the new mask is fully same-session.
-    assert all(
-        r_from.session_id == sid and r_to.session_id == sid
-        for r_from, r_to in new_splice.mask
-    )
+    sid = "s"
+    record = {
+        "kind": "context_splice",
+        "ref": {"session_id": sid, "ordinal": 2},
+        "mask": [
+            # Same-session range: kept.
+            [{"session_id": sid, "ordinal": 0}, {"session_id": sid, "ordinal": 0}],
+            # Cross-session legacy range: dropped at the boundary.
+            [{"session_id": sid, "ordinal": 1}, {"session_id": "legacy", "ordinal": 1}],
+        ],
+        "insert_after": None,
+        "payload": [],
+        "strategy": "legacy",
+    }
+    ref = TapeRef(session_id=sid, ordinal=2)
+    splice = session_io._splice_from_json(record, ref)
+    assert splice is not None
+    # Only the same-session range survives; the cross-session one was dropped.
+    assert splice.mask == (MaskRange(session_id=sid, lo=0, hi=0),)
 
 
 def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:

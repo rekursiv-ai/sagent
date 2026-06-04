@@ -52,6 +52,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
@@ -294,10 +295,10 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
 class _MaskIndex:
     intervals_by_session: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
 
-    def add_mask(self, mask: tuple[tuple[TapeRef, TapeRef], ...]) -> None:
-        for r_from, r_to in mask:
-            intervals = self.intervals_by_session.setdefault(r_from.session_id, [])
-            self._add_interval(intervals, r_from.ordinal, r_to.ordinal)
+    def add_mask(self, mask: tuple[MaskRange, ...]) -> None:
+        for r in mask:
+            intervals = self.intervals_by_session.setdefault(r.session_id, [])
+            self._add_interval(intervals, r.lo, r.hi)
 
     def contains(self, ref: TapeRef) -> bool:
         intervals = self.intervals_by_session.get(ref.session_id)

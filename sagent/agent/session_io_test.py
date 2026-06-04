@@ -26,6 +26,7 @@ from sagent.agent.session_io import (
     _apply_update_in_place,
     _entry_from_json,
     _is_barrier_splice,
+    _mask_from_json,
     _mask_runs,
     _persisted_refs,
     append_context_repair,
@@ -63,6 +64,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
@@ -274,7 +276,7 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
     parent_ref = placeholder_records[0].ref
     splice = ContextSplice(
         ref=TapeRef(session_id="abc", ordinal=2),
-        mask=((placeholder_ref, placeholder_ref),),
+        mask=(MaskRange.between(placeholder_ref, placeholder_ref),),
         insert_after=parent_ref,
         payload=(spliced,),
         strategy="detached_splice",
@@ -459,9 +461,7 @@ def test_is_barrier_splice_is_session_scoped() -> None:
     # A splice that masks only A:0 (not B:0), inserted at head.
     splice = ContextSplice.replay(
         ref=TapeRef(session_id="A", ordinal=1),
-        mask=(
-            (TapeRef(session_id="A", ordinal=0), TapeRef(session_id="A", ordinal=0)),
-        ),
+        mask=(MaskRange(session_id="A", lo=0, hi=0),),
         insert_after=None,
         payload=(),
         strategy="x",
@@ -538,7 +538,7 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
         tape_delta=[
             ContextSplice(
                 ref=splice_ref,
-                mask=((old_ref, old_ref),),
+                mask=(MaskRange.between(old_ref, old_ref),),
                 insert_after=None,
                 payload=(),
                 strategy="clear",
@@ -778,7 +778,10 @@ def test_legacy_override_with_gap_preserves_unmasked_ref(tmp_path: Path) -> None
     ]
     splice = tape[-1]
     assert isinstance(splice, ContextSplice)
-    assert splice.mask == ((refs[0], refs[0]), (refs[2], refs[2]))
+    assert splice.mask == (
+        MaskRange.between(refs[0], refs[0]),
+        MaskRange.between(refs[2], refs[2]),
+    )
 
 
 @pytest.mark.asyncio
@@ -995,14 +998,14 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
             ReferrableTapeEvent(ref=refs[2], event=result),
             ContextSplice(
                 ref=refs[3],
-                mask=((refs[0], refs[2]),),
+                mask=(MaskRange.between(refs[0], refs[2]),),
                 insert_after=None,
                 payload=(summary,),
                 strategy="summary",
             ),
             ContextSplice(
                 ref=refs[4],
-                mask=((refs[2], refs[2]),),
+                mask=(MaskRange.between(refs[2], refs[2]),),
                 insert_after=refs[1],
                 payload=(orphan,),
                 strategy="detached_splice",
@@ -1020,13 +1023,13 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
     assert any(
         isinstance(record, ContextSplice)
         and record.strategy == "orphan_tool_result_repair"
-        and record.mask == ((refs[0], refs[4]),)
+        and record.mask == (MaskRange.between(refs[0], refs[4]),)
         for record in tape
     )
     runtime = agent_runtime.AgentRuntime(model=_RuntimeModel())
     runtime.replay_tape(tape)
     runtime.append_splice(
-        mask=((runtime.tape[0].ref, runtime.tape[-1].ref),),
+        mask=(MaskRange.between(runtime.tape[0].ref, runtime.tape[-1].ref),),
         insert_after=None,
         payload=(UserMessage(text="[next summary]"),),
         strategy="summary",
@@ -1774,8 +1777,51 @@ def test_mask_runs_groups_contiguous() -> None:
     ]
     runs = _mask_runs(refs)
     assert runs == (
-        (TapeRef(session_id="s", ordinal=0), TapeRef(session_id="s", ordinal=1)),
-        (TapeRef(session_id="s", ordinal=3), TapeRef(session_id="s", ordinal=3)),
+        MaskRange(session_id="s", lo=0, hi=1),
+        MaskRange(session_id="s", lo=3, hi=3),
+    )
+
+
+def test_mask_from_json_drops_malformed_legacy_ranges(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cross-session and negative-ordinal legacy ranges drop; valid ones survive.
+
+    The old wire shape was two independent ``TapeRef`` endpoints, so a
+    cross-session ``(s:0, legacy:1)`` or a negative-ordinal range was
+    representable on disk. ``MaskRange`` makes both unconstructable, so
+    ``_mask_from_json`` is the single boundary that normalizes them: each
+    malformed range is dropped with a warning rather than crashing the load,
+    and well-formed siblings in the same mask are kept.
+    """
+    raw = [
+        # Cross-session: dropped.
+        [
+            {"session_id": "s", "ordinal": 0},
+            {"session_id": "legacy", "ordinal": 1},
+        ],
+        # Negative lower ordinal: dropped.
+        [
+            {"session_id": "s", "ordinal": -1},
+            {"session_id": "s", "ordinal": 3},
+        ],
+        # Inverted (also negative hi): dropped.
+        [
+            {"session_id": "s", "ordinal": 0},
+            {"session_id": "s", "ordinal": -1},
+        ],
+        # Well-formed: survives.
+        [
+            {"session_id": "s", "ordinal": 4},
+            {"session_id": "s", "ordinal": 6},
+        ],
+    ]
+    with caplog.at_level("WARNING"):
+        ranges = _mask_from_json(raw)
+    assert ranges == (MaskRange(session_id="s", lo=4, hi=6),)
+    # Each of the three malformed ranges logged a drop warning.
+    assert (
+        sum("dropping malformed legacy mask" in r.message for r in caplog.records) == 3
     )
 
 

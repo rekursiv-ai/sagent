@@ -43,6 +43,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     TapeRecord,
     TapeRef,
     full_tape_mask,
@@ -561,7 +562,7 @@ def _build_fallback_splice(
     direction: Literal["from", "up_to"],
     to_keep: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
-    mask: tuple[tuple[TapeRef, TapeRef], ...],
+    mask: tuple[MaskRange, ...],
     token_before: int,
     chars_per_token: int,
 ) -> ContextSplice:
