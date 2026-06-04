@@ -299,6 +299,7 @@ from sagent.types.tape import (
     ContextSplice,
     InvalidPayloadError,
     InvalidSpliceError,
+    MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
     TapeRecord,
@@ -365,14 +366,9 @@ def widen_barrier_mask(
       ranges, per ``session_id``.
 
     """
-    # Each input range must be single-session: ``_widen_mask_ranges`` and
-    # ``_preserved_mask_gaps_by_session`` key gaps off ``r_from.session_id``, so
-    # a range whose endpoints straddle two sessions would compute a bogus gap
-    # and silently mis-widen. Producers only ever emit single-session ranges.
-    for r_from, r_to in override.mask:
-        assert r_from.session_id == r_to.session_id, (
-            f"widen_barrier_mask: cross-session mask range {r_from} -> {r_to}"
-        )
+    # Mask ranges are single-session by construction (``MaskRange``), so the
+    # per-session widening below cannot mis-attribute a cross-session range --
+    # Issue#313 deleted the runtime guard that used to assert this here.
     mask = _widen_mask_ranges(override.mask, tape)
     if mask == override.mask:
         return override
@@ -380,57 +376,54 @@ def widen_barrier_mask(
 
 
 def _widen_mask_ranges(
-    mask: tuple[tuple[TapeRef, TapeRef], ...],
+    mask: tuple[MaskRange, ...],
     tape: Sequence[TapeRecord],
-) -> tuple[tuple[TapeRef, TapeRef], ...]:
+) -> tuple[MaskRange, ...]:
     """Return ``mask`` widened over ``tape`` without filling existing gaps.
 
-    Tape refs are partitioned by ``session_id`` before widening so the
-    returned ranges never span two session namespaces -- a single
-    range crossing sessions fails ``_validate_mask_disjoint`` and
-    wedges legacy resumed tapes (multiple session ids) at compact
-    time.
+    Tape refs are partitioned by ``session_id`` before widening; each emitted
+    :class:`MaskRange` is single-session by construction.
     """
     if not tape:
         return mask
-    refs_by_session: dict[str, list[TapeRef]] = {}
+    ordinals_by_session: dict[str, list[int]] = {}
     for record in tape:
-        refs_by_session.setdefault(record.ref.session_id, []).append(record.ref)
+        ordinals_by_session.setdefault(record.ref.session_id, []).append(
+            record.ref.ordinal
+        )
     preserved_gaps_by_session = _preserved_mask_gaps_by_session(mask)
-    widened: list[tuple[TapeRef, TapeRef]] = []
-    for sid, refs in refs_by_session.items():
-        refs.sort(key=lambda ref: ref.ordinal)
+    widened: list[MaskRange] = []
+    for sid, ordinals in ordinals_by_session.items():
+        ordinals.sort()
         preserved_gaps = preserved_gaps_by_session.get(sid, ())
-        start: TapeRef | None = None
-        previous: TapeRef | None = None
-        for ref in refs:
-            if any(lo < ref.ordinal < hi for lo, hi in preserved_gaps):
+        start: int | None = None
+        previous: int | None = None
+        for ordinal in ordinals:
+            if any(lo < ordinal < hi for lo, hi in preserved_gaps):
                 if start is not None and previous is not None:
-                    widened.append((start, previous))
+                    widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
                     start = None
                 continue
             if start is None:
-                start = ref
-            previous = ref
+                start = ordinal
+            previous = ordinal
         if start is not None and previous is not None:
-            widened.append((start, previous))
+            widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
     return tuple(widened)
 
 
 def _preserved_mask_gaps_by_session(
-    mask: tuple[tuple[TapeRef, TapeRef], ...],
+    mask: tuple[MaskRange, ...],
 ) -> dict[str, tuple[tuple[int, int], ...]]:
     """Return ordinal gaps between sorted mask ranges, per session_id."""
-    per_session: dict[str, list[tuple[TapeRef, TapeRef]]] = {}
-    for r_from, r_to in mask:
-        per_session.setdefault(r_from.session_id, []).append((r_from, r_to))
+    per_session: dict[str, list[MaskRange]] = {}
+    for r in mask:
+        per_session.setdefault(r.session_id, []).append(r)
     return {
         sid: tuple(
-            (left[1].ordinal, right[0].ordinal)
-            for left, right in pairwise(
-                sorted(ranges, key=lambda item: item[0].ordinal),
-            )
-            if left[1].ordinal + 1 < right[0].ordinal
+            (left.hi, right.lo)
+            for left, right in pairwise(sorted(ranges, key=lambda r: r.lo))
+            if left.hi + 1 < right.lo
         )
         for sid, ranges in per_session.items()
     }
@@ -1263,7 +1256,7 @@ class AgentRuntime:
     def append_splice(
         self,
         *,
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
+        mask: tuple[MaskRange, ...] = (),
         insert_after: TapeRef | None = None,
         payload: tuple[ModelContextEvent, ...] = (),
         strategy: str = "",
@@ -1332,9 +1325,7 @@ class AgentRuntime:
         self._invalidate_masked_anchors(record)
         return ref
 
-    def _validate_no_alive_mask_overlap(
-        self, new_mask: tuple[tuple[TapeRef, TapeRef], ...]
-    ) -> None:
+    def _validate_no_alive_mask_overlap(self, new_mask: tuple[MaskRange, ...]) -> None:
         """Reject ``new_mask`` if it shares any position with a currently
         alive splice's mask.
 
@@ -2560,7 +2551,13 @@ class AgentRuntime:
         for orphan in hr_orphan_refs:
             # Pure deletion: mask this single HR ref, empty payload.
             self.append_splice(
-                mask=((orphan, orphan),),
+                mask=(
+                    MaskRange(
+                        session_id=orphan.session_id,
+                        lo=orphan.ordinal,
+                        hi=orphan.ordinal,
+                    ),
+                ),
                 insert_after=None,
                 payload=(),
                 strategy="orphan_tool_result_repair",
@@ -2666,24 +2663,19 @@ class AgentRuntime:
         # verbatim (preserving any gaps -- a sparse mask must stay sparse, or
         # we delete records the prior splice intentionally left visible), then
         # add a range for the prior splice's own ref so undelete of the new
-        # splice cannot resurrect the originally-masked content. Only
-        # fully-same-session ranges are absorbed: ``prior_record``'s mask can
-        # span multiple sessions (resumed/legacy tapes -- ``replay`` skips mask
-        # validation, so a malformed cross-session range can reach here) and the
-        # new ranges are built in ``sid``. BOTH endpoints must match ``sid`` (a
-        # range whose ``from`` is in ``sid`` but ``to`` is foreign is dropped,
-        # not absorbed -- otherwise it would feed a cross-session range into
-        # ``merge_mask_ranges``).
-        prior_ranges: tuple[tuple[TapeRef, TapeRef], ...] = ()
+        # splice cannot resurrect the originally-masked content. Only ranges in
+        # ``sid`` are absorbed: ``prior_record``'s mask may carry ranges from
+        # other sessions (resumed/legacy tapes), and the new ranges are built in
+        # ``sid``. Each ``MaskRange`` is single-session by construction, so a
+        # plain ``session_id`` match selects the right ones.
+        prior_ranges: tuple[MaskRange, ...] = ()
         if isinstance(prior_record, ContextSplice):
-            prior_ranges = tuple(
-                (r_from, r_to)
-                for r_from, r_to in prior_record.mask
-                if r_from.session_id == sid and r_to.session_id == sid
-            )
-        own_range = (
-            TapeRef(session_id=sid, ordinal=tail_origin.ordinal),
-            TapeRef(session_id=sid, ordinal=tail_origin.ordinal),
+            # Each range is single-session by construction, so a simple
+            # session match suffices (Issue#313 deleted the former
+            # both-endpoint cross-session filter).
+            prior_ranges = tuple(r for r in prior_record.mask if r.session_id == sid)
+        own_range = MaskRange(
+            session_id=sid, lo=tail_origin.ordinal, hi=tail_origin.ordinal
         )
         mask = merge_mask_ranges((*prior_ranges, own_range))
         # Anchor: the same-session tape ref immediately before the earliest
@@ -2691,7 +2683,7 @@ class AgentRuntime:
         # session-scoped because the mask is built in ``sid``: a foreign-session
         # record whose ordinal happens to exceed the low must not terminate the
         # scan early and mis-anchor the splice (multi-session tapes).
-        lo_ord = min(r_from.ordinal for r_from, _ in mask)
+        lo_ord = min(r.lo for r in mask)
         anchor: TapeRef | None = None
         for record in self.tape:
             if record.ref.session_id != sid:

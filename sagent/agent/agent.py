@@ -2896,8 +2896,11 @@ class _AgentCompactor:
 
         """
         # Build a throwaway tape mirroring ``payload`` so scrunch can
-        # reference its entries by ordinal. The runtime never sees
-        # these refs.
+        # reference its entries by ordinal. The runtime never sees these
+        # refs: ``scratch_tape`` is local and never escapes, so the
+        # process-local ``scratch_session`` may collide with a prior
+        # scrunch's id (``id(payload)`` reuses a freed address) with no
+        # externally visible effect.
         scratch_session = f"scrunch-{id(self)}-{id(payload)}"
         scratch_tape: list[TapeRecord] = [
             ReferrableTapeEvent(
@@ -2908,7 +2911,7 @@ class _AgentCompactor:
         ]
         chars_per_token = self._agent.budget.chars_per_token or 4
         try:
-            splices = await scrunch_to_fit(
+            result = await scrunch_to_fit(
                 context=payload,
                 tape=scratch_tape,
                 model=self._agent.model,
@@ -2927,46 +2930,14 @@ class _AgentCompactor:
             # bridge returns a well-formed splice.
             logger.warning("scrunch could not make progress: %s", exc)
             return payload
-        if not splices:
-            return payload
-        # Build the post-scrunch resolved view by applying each splice
-        # in order: replace the masked range with the splice's payload.
-        working = list(payload)
-        scratch_refs = [r.ref for r in scratch_tape]
-        for splice in splices:
-            new_working: list[types.runtime.ModelContextEvent] = []
-            new_refs: list[TapeRef] = []
-            i = 0
-            while i < len(working):
-                ref = scratch_refs[i]
-                if any(
-                    mr_from.ordinal <= ref.ordinal <= mr_to.ordinal
-                    and mr_from.session_id == ref.session_id == scratch_session
-                    for mr_from, mr_to in splice.mask
-                ):
-                    # First masked position: inject the splice payload
-                    # in place and skip past the rest of this range.
-                    new_working.extend(splice.payload)
-                    new_refs.extend(
-                        TapeRef(session_id=scratch_session, ordinal=splice.ref.ordinal)
-                        for _ in splice.payload
-                    )
-                    # Skip the whole masked run.
-                    while i < len(working) and any(
-                        mr_from.ordinal <= scratch_refs[i].ordinal <= mr_to.ordinal
-                        and mr_from.session_id
-                        == scratch_refs[i].session_id
-                        == scratch_session
-                        for mr_from, mr_to in splice.mask
-                    ):
-                        i += 1
-                else:
-                    new_working.append(working[i])
-                    new_refs.append(scratch_refs[i])
-                    i += 1
-            working = new_working
-            scratch_refs = new_refs
-        return working
+        # ``scrunch_to_fit`` returns the final resolved view it tracked
+        # internally. Consume it directly: re-deriving the view from
+        # ``result.splices`` would compose the per-pass masks under the
+        # resolver's cover-the-cover undelete semantics and resurrect
+        # content an earlier pass folded away (a later pass masks an
+        # earlier pass's splice ref). The executor's flat replacement is
+        # the ground truth.
+        return list(result.view)
 
 
 def _repair_compact_payload(

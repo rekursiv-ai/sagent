@@ -21,6 +21,7 @@ from sagent.types.runtime import (
 from sagent.types.tape import (
     ContextSplice,
     InvalidPayloadError,
+    MaskRange,
     TapeRef,
     merge_mask_ranges,
 )
@@ -34,46 +35,48 @@ def _ref(ordinal: int) -> TapeRef:
     return TapeRef(session_id="s", ordinal=ordinal)
 
 
+def _mr(lo: int, hi: int, session_id: str = "s") -> MaskRange:
+    """Test helper: build a single-session MaskRange."""
+    return MaskRange(session_id=session_id, lo=lo, hi=hi)
+
+
 def test_merge_mask_ranges_preserves_gaps() -> None:
     """Sparse ranges stay sparse; a real gap is not filled."""
-    merged = merge_mask_ranges(((_ref(1), _ref(1)), (_ref(10), _ref(10))))
-    assert merged == ((_ref(1), _ref(1)), (_ref(10), _ref(10)))
+    merged = merge_mask_ranges((_mr(1, 1), _mr(10, 10)))
+    assert merged == (_mr(1, 1), _mr(10, 10))
 
 
 def test_merge_mask_ranges_coalesces_overlapping_and_touching() -> None:
     """Overlapping or adjacent (abutting) ranges merge into one."""
     # Touching: 1..3 and 4..5 abut (gap 0) -> one range.
-    assert merge_mask_ranges(((_ref(1), _ref(3)), (_ref(4), _ref(5)))) == (
-        (_ref(1), _ref(5)),
-    )
+    assert merge_mask_ranges((_mr(1, 3), _mr(4, 5))) == (_mr(1, 5),)
     # Overlapping: 1..5 and 3..8 -> one range.
-    assert merge_mask_ranges(((_ref(1), _ref(5)), (_ref(3), _ref(8)))) == (
-        (_ref(1), _ref(8)),
-    )
+    assert merge_mask_ranges((_mr(1, 5), _mr(3, 8))) == (_mr(1, 8),)
 
 
 def test_merge_mask_ranges_partitions_by_session() -> None:
     """Ranges in different sessions never merge across the boundary."""
-    a = TapeRef(session_id="a", ordinal=1)
-    b = TapeRef(session_id="b", ordinal=1)
-    merged = merge_mask_ranges(((a, a), (b, b)))
-    assert set(merged) == {(a, a), (b, b)}
+    a = _mr(1, 1, session_id="a")
+    b = _mr(1, 1, session_id="b")
+    merged = merge_mask_ranges((a, b))
+    assert set(merged) == {a, b}
 
 
-def test_merge_mask_ranges_rejects_cross_session_range() -> None:
-    """A range whose endpoints span sessions fails fast (review C5).
+def test_mask_range_cross_session_unconstructable() -> None:
+    """Issue#313 / review C5: a cross-session range cannot be built.
 
-    The helper's same-session precondition is unenforceable downstream silently:
-    a cross-session input would produce a malformed range. Fail at the source.
+    The former runtime guard inside ``merge_mask_ranges`` is deleted; the
+    illegal shape now fails at ``MaskRange.between`` construction instead.
     """
-    cross = (TapeRef(session_id="a", ordinal=0), TapeRef(session_id="b", ordinal=1))
-    with pytest.raises(AssertionError):
-        merge_mask_ranges((cross,))
+    a = TapeRef(session_id="a", ordinal=0)
+    b = TapeRef(session_id="b", ordinal=1)
+    with pytest.raises(InvalidPayloadError, match="crosses session"):
+        MaskRange.between(a, b)
 
 
 def _splice(
     *,
-    mask: tuple[tuple[TapeRef, TapeRef], ...] = (),
+    mask: tuple[MaskRange, ...] = (),
     payload: tuple[ModelContextEvent, ...] = (),
     paired_externally: frozenset[str] = frozenset(),
 ) -> ContextSplice:
@@ -212,26 +215,42 @@ def test_two_back_to_back_unpaired_ams_rejected() -> None:
 
 def test_mask_disjoint_within_splice_passes() -> None:
     """Two disjoint mask ranges in the same splice pass validation."""
-    splice = _splice(mask=((_ref(1), _ref(2)), (_ref(5), _ref(7))))
+    splice = _splice(mask=(_mr(1, 2), _mr(5, 7)))
     assert len(splice.mask) == 2
 
 
 def test_mask_adjacent_ranges_within_splice_pass() -> None:
     """Adjacent (touching) ranges do not share a position; allowed."""
-    splice = _splice(mask=((_ref(1), _ref(3)), (_ref(4), _ref(6))))
+    splice = _splice(mask=(_mr(1, 3), _mr(4, 6)))
     assert len(splice.mask) == 2
 
 
 def test_mask_overlap_within_splice_rejected() -> None:
     """Two mask ranges in the same splice that share a position fail."""
     with pytest.raises(InvalidPayloadError, match="mask ranges overlap"):
-        _splice(mask=((_ref(1), _ref(5)), (_ref(4), _ref(8))))
+        _splice(mask=(_mr(1, 5), _mr(4, 8)))
 
 
-def test_mask_inverted_range_rejected() -> None:
-    """A mask range whose end ordinal is below the start fails."""
+def test_mask_inverted_range_unconstructable() -> None:
+    """Issue#313: an inverted range cannot be built.
+
+    The former ``_validate_mask_disjoint`` inverted check is deleted; the
+    illegal shape now fails in ``MaskRange.__post_init__`` instead.
+    """
     with pytest.raises(InvalidPayloadError, match="inverted"):
-        _splice(mask=((_ref(5), _ref(3)),))
+        MaskRange(session_id="s", lo=5, hi=3)
+
+
+def test_mask_negative_ordinal_unconstructable() -> None:
+    """A negative lower ordinal is rejected at the MaskRange trust boundary.
+
+    Tape ordinals are minted monotonically from 0, so a negative endpoint is
+    malformed wire/legacy data. Rejecting it in ``__post_init__`` keeps
+    downstream ``contains`` / ``overlaps`` from silently honoring an
+    out-of-range mask.
+    """
+    with pytest.raises(InvalidPayloadError, match="negative"):
+        MaskRange(session_id="s", lo=-1, hi=3)
 
 
 def test_replay_bypasses_validation() -> None:
@@ -242,7 +261,7 @@ def test_replay_bypasses_validation() -> None:
     )
     splice = ContextSplice.replay(
         ref=_REF,
-        mask=((_ref(1), _ref(5)), (_ref(4), _ref(8))),
+        mask=(_mr(1, 5), _mr(4, 8)),
         insert_after=None,
         payload=(am,),
         strategy="legacy",
@@ -307,7 +326,7 @@ def test_replay_preserves_all_fields() -> None:
     """``replay()`` populates every dataclass field, including defaults."""
     splice = ContextSplice.replay(
         ref=_REF,
-        mask=((_ref(1), _ref(2)),),
+        mask=(_mr(1, 2),),
         insert_after=_ref(3),
         payload=(UserMessage(text="x"),),
         strategy="summary",

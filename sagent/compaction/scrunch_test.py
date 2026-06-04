@@ -254,7 +254,7 @@ async def test_scrunch_to_fit_already_fits_returns_no_splices() -> None:
     context: list[ModelContextEvent] = [_user("ok")]
     tape = _tape_from(context)
     compactor = _SizedCompactor()
-    splices = await scrunch_to_fit(
+    result = await scrunch_to_fit(
         context=context,
         tape=tape,
         model=_stub_model(),
@@ -264,7 +264,9 @@ async def test_scrunch_to_fit_already_fits_returns_no_splices() -> None:
         max_partition_tokens=500,
         chars_per_token=4,
     )
-    assert splices == []
+    assert result.splices == ()
+    # Already-fits: the view is the input verbatim.
+    assert result.view == tuple(context)
     assert compactor.calls == []
 
 
@@ -275,7 +277,7 @@ async def test_scrunch_to_fit_one_pass_when_one_partition_suffices() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(4)]
     tape = _tape_from(context)
     compactor = _SizedCompactor(summary_chars=20)
-    splices = await scrunch_to_fit(
+    result = await scrunch_to_fit(
         context=context,
         tape=tape,
         model=_stub_model(),
@@ -286,8 +288,8 @@ async def test_scrunch_to_fit_one_pass_when_one_partition_suffices() -> None:
         chars_per_token=4,
         summary_size_estimate_chars=20,
     )
-    assert len(splices) >= 1
-    assert len(compactor.calls) == len(splices)
+    assert len(result.splices) >= 1
+    assert len(compactor.calls) == len(result.splices)
     # First call's first entry must be the oldest message in context.
     first_call = compactor.calls[0]
     assert first_call[0] is context[0]
@@ -299,7 +301,7 @@ async def test_scrunch_to_fit_returns_splices_in_order() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(8)]
     tape = _tape_from(context)
     compactor = _SizedCompactor(summary_chars=20)
-    splices = await scrunch_to_fit(
+    result = await scrunch_to_fit(
         context=context,
         tape=tape,
         model=_stub_model(),
@@ -310,7 +312,7 @@ async def test_scrunch_to_fit_returns_splices_in_order() -> None:
         chars_per_token=4,
         summary_size_estimate_chars=20,
     )
-    refs = [s.ref.ordinal for s in splices]
+    refs = [s.ref.ordinal for s in result.splices]
     assert refs == sorted(refs)
 
 
@@ -321,7 +323,7 @@ async def test_scrunch_to_fit_stops_early_once_fits() -> None:
     context: list[ModelContextEvent] = [_user("x" * 1000) for _ in range(6)]
     tape = _tape_from(context)
     compactor = _SizedCompactor(summary_chars=10)
-    splices = await scrunch_to_fit(
+    result = await scrunch_to_fit(
         context=context,
         tape=tape,
         model=_stub_model(),
@@ -333,12 +335,62 @@ async def test_scrunch_to_fit_stops_early_once_fits() -> None:
         summary_size_estimate_chars=10,
     )
     # We don't pin an exact count; we pin "fewer than the worst case".
-    assert len(splices) < len(context)
+    assert len(result.splices) < len(context)
 
 
 # ---------------------------------------------------------------------------
 # Pathological: a producer compactor that overflows on every partition.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scrunch_to_fit_view_matches_flat_fold_across_passes() -> None:
+    """Multi-pass ``view`` folds away earlier summaries, never resurrects them.
+
+    Regression for the bridge's hand-rolled mask replay (REV-MR-001). A
+    second scrunch pass partitions over a region that includes the
+    first pass's summary splice; the producer's ``full_tape_mask`` then
+    covers that splice's ref. Re-deriving the resolved view from the
+    produced splices would trigger the resolver's cover-the-cover
+    undelete -- masking pass 1's splice resurrects the content pass 1
+    folded away -- yielding a view *larger* than the input. The
+    executor's flat splice-by-replacement is the ground truth, and
+    ``ScrunchResult.view`` must return exactly it.
+
+    The fold replaces each oldest partition with one ``"S"*chars``
+    summary, so the final view is a short prefix of summaries plus the
+    untouched recent tail. It must contain no original folded message
+    and must be strictly smaller than the input.
+    """
+    context: list[ModelContextEvent] = [_user("x" * 600) for _ in range(8)]
+    tape = _tape_from(context)
+    compactor = _SizedCompactor(summary_chars=20)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=compactor,
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=100,
+        max_partition_tokens=400,
+        chars_per_token=4,
+        summary_size_estimate_chars=20,
+    )
+    # Multiple passes ran (the fold needed more than one partition).
+    assert len(result.splices) >= 2, (
+        f"expected a multi-pass fold; got {len(result.splices)} splice(s)"
+    )
+    view_texts = [m.text for m in result.view if isinstance(m, UserMessage)]
+    summary_text = "S" * 20
+    # Every folded original ("x"*600) is gone; only summaries (+ any
+    # untouched recent tail, which here is also folded) remain. No
+    # resurrected original content.
+    assert all(t == summary_text for t in view_texts), (
+        f"resolved view leaked or resurrected non-summary content: {view_texts!r}"
+    )
+    # The view is strictly smaller than the input (the whole point of the
+    # fold); a resurrecting re-derivation would make it larger.
+    assert len(result.view) < len(context)
 
 
 @pytest.mark.asyncio

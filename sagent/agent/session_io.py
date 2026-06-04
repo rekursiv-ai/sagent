@@ -67,6 +67,8 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    InvalidPayloadError,
+    MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
     TapeRecord,
@@ -292,6 +294,36 @@ def _ref_from_json(raw: object) -> TapeRef | None:
     return TapeRef(session_id=session_id, ordinal=ordinal)
 
 
+def _mask_from_json(raw_mask: object) -> tuple[MaskRange, ...]:
+    """Decode a wire ``[[from_ref, to_ref], ...]`` mask into ``MaskRange``s.
+
+    This is the single boundary where legacy malformation is normalized
+    (Issue#313): a cross-session or inverted on-disk range -- representable in
+    the old two-independent-``TapeRef`` wire shape -- is dropped here rather
+    than guarded against at every downstream comparison.
+    """
+    if not isinstance(raw_mask, list):
+        return ()
+    ranges: list[MaskRange] = []
+    for item in cast(list[object], raw_mask):
+        if not isinstance(item, list) or len(cast(list[object], item)) != 2:
+            continue
+        pair = cast(list[object], item)
+        r_from = _ref_from_json(pair[0])
+        r_to = _ref_from_json(pair[1])
+        if r_from is None or r_to is None:
+            continue
+        try:
+            ranges.append(MaskRange.between(r_from, r_to))
+        except InvalidPayloadError:
+            # Cross-session or inverted legacy range: drop it (matches the
+            # historical C6 fix, now centralized at the deserialize boundary).
+            logger.warning(
+                "dropping malformed legacy mask range %s -> %s", r_from, r_to
+            )
+    return tuple(ranges)
+
+
 def _history_record_to_json(record: ReferrableTapeEvent) -> dict[str, object]:
     """Encode a ``ReferrableTapeEvent`` as a ``kind=history`` JSON record."""
     return {
@@ -306,8 +338,10 @@ def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
     return {
         "kind": "context_splice",
         "ref": _ref_to_json(splice.ref),
+        # Wire format unchanged: ``[[from_ref, to_ref], ...]`` byte-identical to
+        # the pre-MaskRange tuple form (Issue#313). Old code parses new files.
         "mask": [
-            [_ref_to_json(r_from), _ref_to_json(r_to)] for r_from, r_to in splice.mask
+            [_ref_to_json(r.from_ref), _ref_to_json(r.to_ref)] for r in splice.mask
         ],
         "insert_after": (
             _ref_to_json(splice.insert_after)
@@ -336,17 +370,7 @@ def _splice_from_json(
     ref: TapeRef,
 ) -> ContextSplice | None:
     """Decode a ``kind=context_splice`` record into a ``ContextSplice``."""
-    raw_mask = rec.get("mask")
-    mask_pairs: list[tuple[TapeRef, TapeRef]] = []
-    if isinstance(raw_mask, list):
-        for item in cast(list[object], raw_mask):
-            if not isinstance(item, list) or len(cast(list[object], item)) != 2:
-                continue
-            pair = cast(list[object], item)
-            r_from = _ref_from_json(pair[0])
-            r_to = _ref_from_json(pair[1])
-            if r_from is not None and r_to is not None:
-                mask_pairs.append((r_from, r_to))
+    mask = _mask_from_json(rec.get("mask"))
     raw_insert = rec.get("insert_after")
     insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
     raw_payload = rec.get("payload")
@@ -373,7 +397,7 @@ def _splice_from_json(
     # masks the validator would reject.
     return ContextSplice.replay(
         ref=ref,
-        mask=tuple(mask_pairs),
+        mask=mask,
         insert_after=insert_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
@@ -417,20 +441,17 @@ def _legacy_override_to_splice(
     raw_inject = rec.get("inject_after")
     inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
     barrier = bool(rec.get("barrier", False))
+    mask: tuple[MaskRange, ...]
     if suppresses:
         mask = _mask_runs(suppresses)
     elif barrier and inject_after is not None:
-        sid = inject_after.session_id
-        mask = ((TapeRef(session_id=sid, ordinal=0), inject_after),)
-    elif barrier:
-        sid = ref.session_id
-        prev_ord = max(0, ref.ordinal - 1)
         mask = (
-            (
-                TapeRef(session_id=sid, ordinal=0),
-                TapeRef(session_id=sid, ordinal=prev_ord),
+            MaskRange(
+                session_id=inject_after.session_id, lo=0, hi=inject_after.ordinal
             ),
         )
+    elif barrier:
+        mask = (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
     else:
         mask = ()
     raw_payload = rec.get("payload")
@@ -466,21 +487,25 @@ def _legacy_override_to_splice(
     )
 
 
-def _mask_runs(refs: Sequence[TapeRef]) -> tuple[tuple[TapeRef, TapeRef], ...]:
+def _mask_runs(refs: Sequence[TapeRef]) -> tuple[MaskRange, ...]:
     if not refs:
         return ()
     ordered = sorted(refs, key=lambda item: (item.session_id, item.ordinal))
-    runs: list[tuple[TapeRef, TapeRef]] = []
+    runs: list[MaskRange] = []
     start = ordered[0]
     prev = ordered[0]
     for ref in ordered[1:]:
         if ref.session_id == prev.session_id and ref.ordinal == prev.ordinal + 1:
             prev = ref
             continue
-        runs.append((start, prev))
+        runs.append(
+            MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal)
+        )
         start = ref
         prev = ref
-    runs.append((start, prev))
+    runs.append(
+        MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal)
+    )
     return tuple(runs)
 
 
@@ -499,16 +524,11 @@ def _legacy_clear_to_splice(ref: TapeRef, last_visible_ord: int) -> ContextSplic
       splice: Equivalent ``ContextSplice``.
 
     """
+    mask: tuple[MaskRange, ...]
     if last_visible_ord < 0:
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = ()
+        mask = ()
     else:
-        sid = ref.session_id
-        mask = (
-            (
-                TapeRef(session_id=sid, ordinal=0),
-                TapeRef(session_id=sid, ordinal=last_visible_ord),
-            ),
-        )
+        mask = (MaskRange(session_id=ref.session_id, lo=0, hi=last_visible_ord),)
     return ContextSplice.replay(
         ref=ref,
         mask=mask,

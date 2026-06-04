@@ -78,7 +78,9 @@ def _summary_override(
     care about the payload and don't need barrier semantics).
     """
     if tape:
-        mask: tuple[tuple[TapeRef, TapeRef], ...] = ((tape[0].ref, tape[-1].ref),)
+        mask: tuple[types.tape.MaskRange, ...] = (
+            types.tape.MaskRange.between(tape[0].ref, tape[-1].ref),
+        )
     else:
         mask = ()
     return ContextSplice(

@@ -19,6 +19,7 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
     TapeRef,
@@ -299,7 +300,7 @@ def test_replay_renders_resolved_view_after_compaction_splice() -> None:
     )
     splice = ContextSplice(
         ref=TapeRef(session_id="t", ordinal=3),
-        mask=((original_user.ref, original_assistant.ref),),
+        mask=(MaskRange.between(original_user.ref, original_assistant.ref),),
         insert_after=None,
         payload=(UserMessage(text="summary payload"),),
         strategy="summary",

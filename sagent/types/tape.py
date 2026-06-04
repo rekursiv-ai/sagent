@@ -70,6 +70,7 @@ __all__ = [
     "ContextSplice",
     "InvalidPayloadError",
     "InvalidSpliceError",
+    "MaskRange",
     "ModelContextEvent",
     "ReferrableTapeEvent",
     "TapeEvent",
@@ -78,6 +79,7 @@ __all__ = [
     "full_tape_mask",
     "mask_contains_ref",
     "mask_ranges_overlap",
+    "merge_mask_ranges",
     "unpaired_call_ids",
 ]
 
@@ -122,6 +124,79 @@ class TapeRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MaskRange:
+    """An inclusive ordinal range within ONE session that a splice masks.
+
+    A mask range is bounded to a single ``session_id`` by construction: a range
+    spanning two sessions is an illegal shape that produced a recurring bug
+    family (cross-session ranges slipping past ordinal-only comparisons). By
+    carrying one ``session_id`` and two ordinals -- rather than two independent
+    :class:`TapeRef` endpoints whose sessions could differ -- the illegal state
+    is unconstructable, so the downstream cross-session guards are deletable
+    (Issue#313). ``__post_init__`` enforces ``0 <= lo <= hi``.
+    """
+
+    session_id: str
+    """Session both endpoints belong to."""
+
+    lo: int
+    """Inclusive lower ordinal (``>= 0``)."""
+
+    hi: int
+    """Inclusive upper ordinal (``>= lo``)."""
+
+    def __post_init__(self) -> None:
+        # Tape ordinals are minted monotonically from 0; a negative endpoint is
+        # malformed wire/legacy data, not a valid range. Reject at the trust
+        # boundary so downstream ``contains`` / ``overlaps`` never silently
+        # honor an out-of-range mask.
+        if self.lo < 0:
+            raise InvalidPayloadError(
+                f"MaskRange lo={self.lo} is negative",
+            )
+        if self.hi < self.lo:
+            raise InvalidPayloadError(
+                f"MaskRange hi={self.hi} < lo={self.lo} is inverted",
+            )
+
+    def contains(self, ref: TapeRef) -> bool:
+        """True iff ``ref`` falls within this range's session and ordinals."""
+        return ref.session_id == self.session_id and self.lo <= ref.ordinal <= self.hi
+
+    def overlaps(self, other: MaskRange) -> bool:
+        """True iff two ranges in the same session share any ordinal."""
+        return (
+            self.session_id == other.session_id
+            and self.lo <= other.hi
+            and other.lo <= self.hi
+        )
+
+    @classmethod
+    def between(cls, r_from: TapeRef, r_to: TapeRef) -> MaskRange:
+        """Build from two same-session endpoint refs (wire/legacy boundary).
+
+        Raises:
+          InvalidPayloadError: The endpoints belong to different sessions.
+
+        """
+        if r_from.session_id != r_to.session_id:
+            raise InvalidPayloadError(
+                f"mask range crosses session ids: {r_from} -> {r_to}",
+            )
+        return cls(session_id=r_from.session_id, lo=r_from.ordinal, hi=r_to.ordinal)
+
+    @property
+    def from_ref(self) -> TapeRef:
+        """Lower endpoint as a :class:`TapeRef` (for the wire format)."""
+        return TapeRef(session_id=self.session_id, ordinal=self.lo)
+
+    @property
+    def to_ref(self) -> TapeRef:
+        """Upper endpoint as a :class:`TapeRef` (for the wire format)."""
+        return TapeRef(session_id=self.session_id, ordinal=self.hi)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReferrableTapeEvent:
     """A referrable event recorded on the tape."""
 
@@ -139,15 +214,15 @@ class ContextSplice:
     ref: TapeRef
     """Canonical identity."""
 
-    mask: tuple[tuple[TapeRef, TapeRef], ...]
-    """Inclusive ``(from, to)`` ranges of tape refs whose view
-    contribution this splice removes.
+    mask: tuple[MaskRange, ...]
+    """Inclusive single-session :class:`MaskRange`s whose view contribution
+    this splice removes.
 
     The runtime rejects appends whose mask overlaps any existing
     splice's mask: each tape ref has at most one editor for its
     lifetime. To re-edit, mask the editing splice's own ref. Within a
-    single splice, the ranges in ``mask`` must themselves be disjoint
-    (the validator rejects within-mask overlap)."""
+    single splice, the ranges must be disjoint (the validator rejects
+    within-mask overlap)."""
 
     insert_after: TapeRef | None
     """Tape ref after which ``payload`` renders in the resolved view.
@@ -204,7 +279,7 @@ class ContextSplice:
         cls,
         *,
         ref: TapeRef,
-        mask: tuple[tuple[TapeRef, TapeRef], ...],
+        mask: tuple[MaskRange, ...],
         insert_after: TapeRef | None,
         payload: tuple[ModelContextEvent, ...],
         strategy: str,
@@ -265,98 +340,78 @@ class ContextSplice:
         return instance
 
 
-def mask_contains_ref(mask: tuple[tuple[TapeRef, TapeRef], ...], ref: TapeRef) -> bool:
+def mask_contains_ref(mask: tuple[MaskRange, ...], ref: TapeRef) -> bool:
     """Return true iff ``mask`` covers ``ref``'s full tape identity."""
-    return any(_range_contains_ref(r_from, r_to, ref) for r_from, r_to in mask)
+    return any(r.contains(ref) for r in mask)
 
 
 def full_tape_mask(
     records: Sequence[ReferrableTapeEvent | ContextSplice],
-) -> tuple[tuple[TapeRef, TapeRef], ...]:
+) -> tuple[MaskRange, ...]:
     """Build a mask covering every record on ``records``, partitioned by session.
 
     A barrier splice that absorbs the entire current tape needs one
-    ``(from, to)`` range per ``session_id`` that appears. A single
-    range spanning two session namespaces fails
-    :func:`_validate_mask_disjoint`, which is what wedges resumed
-    sessions whose tape carries refs from a legacy ``""`` namespace
-    plus a later persisted id.
+    :class:`MaskRange` per ``session_id`` that appears -- single-session by
+    construction, so resumed tapes carrying refs from a legacy ``""`` namespace
+    plus a later persisted id stay well-formed.
 
     Args:
       records: Tape records to fully cover.
 
     Returns:
-      mask: One disjoint range per distinct ``session_id``; empty when
-          ``records`` is empty.
+      mask: One range per distinct ``session_id``, sorted by ``session_id``
+          to match :func:`merge_mask_ranges` (deterministic, byte-stable on
+          disk); empty when ``records`` is empty.
 
     """
-    per_session: dict[str, list[TapeRef]] = {}
+    per_session: dict[str, list[int]] = {}
     for record in records:
-        per_session.setdefault(record.ref.session_id, []).append(record.ref)
+        per_session.setdefault(record.ref.session_id, []).append(record.ref.ordinal)
     return tuple(
-        (
-            min(refs, key=lambda r: r.ordinal),
-            max(refs, key=lambda r: r.ordinal),
-        )
-        for refs in per_session.values()
+        MaskRange(session_id=sid, lo=min(ordinals), hi=max(ordinals))
+        for sid, ordinals in sorted(per_session.items())
     )
 
 
-def merge_mask_ranges(
-    ranges: tuple[tuple[TapeRef, TapeRef], ...],
-) -> tuple[tuple[TapeRef, TapeRef], ...]:
+def merge_mask_ranges(ranges: tuple[MaskRange, ...]) -> tuple[MaskRange, ...]:
     """Merge overlapping/touching ranges per session; preserve gaps.
 
     Ranges that overlap or are adjacent (share or abut an ordinal) coalesce
     into one; ranges separated by a genuine gap stay separate, so a sparse mask
-    stays sparse. Used when a coalesce splice absorbs a prior splice's mask plus
-    its own ref without filling gaps the prior splice intentionally left
-    visible. Output is sorted by ``(session_id, ordinal)`` and disjoint, so it
-    satisfies :func:`_validate_mask_disjoint`.
+    stays sparse. Output is sorted by ``(session_id, lo)`` and disjoint.
 
     Args:
-      ranges: Mask ranges to merge; each ``(from, to)`` must be same-session.
+      ranges: Mask ranges to merge.
 
     Returns:
       merged: Disjoint, gap-preserving ranges.
 
     """
-    by_session: dict[str, list[tuple[TapeRef, TapeRef]]] = {}
-    for r_from, r_to in ranges:
-        # Same-session precondition (each range is partitioned by ``r_from``'s
-        # session): a cross-session range would silently produce a malformed
-        # ``(a:.., b:..)`` output the downstream validator can't reason about.
-        assert r_from.session_id == r_to.session_id, (
-            f"merge_mask_ranges: cross-session range {r_from} -> {r_to}"
-        )
-        by_session.setdefault(r_from.session_id, []).append((r_from, r_to))
-    merged: list[tuple[TapeRef, TapeRef]] = []
-    for _, session_ranges in sorted(by_session.items()):
-        session_ranges.sort(key=lambda pair: pair[0].ordinal)
-        cur_from, cur_to = session_ranges[0]
-        for r_from, r_to in session_ranges[1:]:
+    by_session: dict[str, list[MaskRange]] = {}
+    for r in ranges:
+        by_session.setdefault(r.session_id, []).append(r)
+    merged: list[MaskRange] = []
+    for sid, session_ranges in sorted(by_session.items()):
+        session_ranges.sort(key=lambda r: r.lo)
+        cur_lo, cur_hi = session_ranges[0].lo, session_ranges[0].hi
+        for r in session_ranges[1:]:
             # Touching or overlapping (gap of 0 or less) -> extend; a real gap
-            # (next start > current end + 1) -> emit and start a new range.
-            if r_from.ordinal <= cur_to.ordinal + 1:
-                if r_to.ordinal > cur_to.ordinal:
-                    cur_to = r_to
+            # (next lo > current hi + 1) -> emit and start a new range.
+            if r.lo <= cur_hi + 1:
+                cur_hi = max(cur_hi, r.hi)
             else:
-                merged.append((cur_from, cur_to))
-                cur_from, cur_to = r_from, r_to
-        merged.append((cur_from, cur_to))
+                merged.append(MaskRange(session_id=sid, lo=cur_lo, hi=cur_hi))
+                cur_lo, cur_hi = r.lo, r.hi
+        merged.append(MaskRange(session_id=sid, lo=cur_lo, hi=cur_hi))
     return tuple(merged)
 
 
 def mask_ranges_overlap(
-    left: tuple[tuple[TapeRef, TapeRef], ...],
-    right: tuple[tuple[TapeRef, TapeRef], ...],
+    left: tuple[MaskRange, ...],
+    right: tuple[MaskRange, ...],
 ) -> bool:
     """Return true iff two masks claim the same tape identity."""
-    return any(
-        _ranges_overlap(left_from, left_to, right_from, right_to)
-        for left_from, left_to in left
-        for right_from, right_to in right
-    )
+    return any(lr.overlaps(rr) for lr in left for rr in right)
 
 
 def _field_default(f: Field[object]) -> object:
@@ -370,44 +425,19 @@ def _field_default(f: Field[object]) -> object:
     )
 
 
-def _range_contains_ref(r_from: TapeRef, r_to: TapeRef, ref: TapeRef) -> bool:
-    return (
-        ref.session_id == r_from.session_id
-        and ref.session_id == r_to.session_id
-        and r_from.ordinal <= ref.ordinal <= r_to.ordinal
-    )
+def _validate_mask_disjoint(mask: tuple[MaskRange, ...]) -> None:
+    """Reject overlapping mask ranges.
 
-
-def _ranges_overlap(
-    left_from: TapeRef,
-    left_to: TapeRef,
-    right_from: TapeRef,
-    right_to: TapeRef,
-) -> bool:
-    return (
-        left_from.session_id == left_to.session_id
-        and right_from.session_id == right_to.session_id
-        and left_from.session_id == right_from.session_id
-        and left_from.ordinal <= right_to.ordinal
-        and right_from.ordinal <= left_to.ordinal
-    )
-
-
-def _validate_mask_disjoint(
-    mask: tuple[tuple[TapeRef, TapeRef], ...],
-) -> None:
-    """Reject mask ranges that are inverted, cross-session, or overlapping."""
-    for i, (r_from, r_to) in enumerate(mask):
-        if r_from.session_id != r_to.session_id:
-            raise InvalidPayloadError("mask range crosses session ids")
-        if r_to.ordinal < r_from.ordinal:
-            raise InvalidPayloadError(
-                f"mask range from={r_from.ordinal} to={r_to.ordinal} is inverted",
-            )
-        for prior_from, prior_to in mask[:i]:
-            if _ranges_overlap(prior_from, prior_to, r_from, r_to):
+    Cross-session and inverted ranges are unconstructable (:class:`MaskRange`
+    carries one ``session_id`` and enforces ``hi >= lo``), so only overlap
+    remains to check here (Issue#313 -- the cross-session/inverted guards were
+    deleted because the type subsumes them).
+    """
+    for i, r in enumerate(mask):
+        for prior in mask[:i]:
+            if prior.overlaps(r):
                 raise InvalidPayloadError(
-                    f"mask ranges overlap in session {r_from.session_id!r}",
+                    f"mask ranges overlap in session {r.session_id!r}",
                 )
 
 

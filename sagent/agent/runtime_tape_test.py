@@ -29,6 +29,7 @@ from sagent.types.runtime import (
 from sagent.types.tape import (
     ContextSplice,
     InvalidSpliceError,
+    MaskRange,
     ReferrableTapeEvent,
     TapeRef,
 )
@@ -136,7 +137,7 @@ def test_append_splice_returns_taperef() -> None:
     runtime = _runtime()
     hist_ref = runtime.append_history(UserMessage(text="hi"))
     splice_ref = runtime.append_splice(
-        mask=((hist_ref, hist_ref),),
+        mask=(MaskRange.between(hist_ref, hist_ref),),
         insert_after=None,
         payload=(UserMessage(text="[summary]"),),
         strategy="summary",
@@ -151,7 +152,7 @@ def test_append_splice_records_context_splice() -> None:
     hist_ref = runtime.append_history(UserMessage(text="hi"))
     payload = (UserMessage(text="[summary]"),)
     splice_ref = runtime.append_splice(
-        mask=((hist_ref, hist_ref),),
+        mask=(MaskRange.between(hist_ref, hist_ref),),
         insert_after=None,
         payload=payload,
         strategy="summary",
@@ -161,7 +162,7 @@ def test_append_splice_records_context_splice() -> None:
     record = runtime.tape[1]
     assert isinstance(record, ContextSplice)
     assert record.ref == splice_ref
-    assert record.mask == ((hist_ref, hist_ref),)
+    assert record.mask == (MaskRange.between(hist_ref, hist_ref),)
     assert record.insert_after is None
     assert record.payload == payload
     assert record.strategy == "summary"
@@ -176,7 +177,7 @@ def test_append_splice_changes_resolved_context() -> None:
     r1 = runtime.append_history(AssistantMessage(text="hello"))
     summary = UserMessage(text="[summary]")
     runtime.append_splice(
-        mask=((r0, r1),),
+        mask=(MaskRange.between(r0, r1),),
         insert_after=None,
         payload=(summary,),
         strategy="summary",
@@ -191,7 +192,7 @@ def test_append_splice_user_coalesce_pattern() -> None:
     r1 = runtime.append_history(UserMessage(text="second"))
     combined = UserMessage(text="first\n\nsecond")
     runtime.append_splice(
-        mask=((r1, r1),),
+        mask=(MaskRange.between(r1, r1),),
         insert_after=r0,
         payload=(combined,),
         strategy="user_coalesce",
@@ -215,7 +216,7 @@ def test_append_splice_detached_splice_pattern() -> None:
     )
     real_result = ToolResult(call_id="c1", content="real")
     runtime.append_splice(
-        mask=((placeholder_ref, placeholder_ref),),
+        mask=(MaskRange.between(placeholder_ref, placeholder_ref),),
         insert_after=parent_ref,
         payload=(real_result,),
         strategy="detached_splice",
@@ -234,14 +235,14 @@ def test_append_splice_rejects_double_mask_of_same_position() -> None:
     runtime = _runtime()
     hr = runtime.append_history(UserMessage(text="x"))
     runtime.append_splice(
-        mask=((hr, hr),),
+        mask=(MaskRange.between(hr, hr),),
         insert_after=None,
         payload=(UserMessage(text="first"),),
         strategy="test",
     )
     with pytest.raises(InvalidSpliceError, match="overlaps alive splice"):
         runtime.append_splice(
-            mask=((hr, hr),),
+            mask=(MaskRange.between(hr, hr),),
             insert_after=None,
             payload=(UserMessage(text="second"),),
             strategy="test",
@@ -253,7 +254,7 @@ def test_append_splice_allows_mask_after_absorbing_prior() -> None:
     runtime = _runtime()
     hr = runtime.append_history(UserMessage(text="x"))
     prior = runtime.append_splice(
-        mask=((hr, hr),),
+        mask=(MaskRange.between(hr, hr),),
         insert_after=None,
         payload=(UserMessage(text="first"),),
         strategy="test",
@@ -261,7 +262,7 @@ def test_append_splice_allows_mask_after_absorbing_prior() -> None:
     # Re-edit by absorbing the prior splice. Mask range covers both hr
     # and prior, so prior is absorbed and its masking lapses.
     runtime.append_splice(
-        mask=((hr, prior),),
+        mask=(MaskRange.between(hr, prior),),
         insert_after=None,
         payload=(UserMessage(text="second"),),
         strategy="test",
@@ -278,7 +279,7 @@ def test_append_splice_rejects_insert_after_inside_own_mask() -> None:
     r1 = runtime.append_history(UserMessage(text="b"))
     with pytest.raises(InvalidSpliceError, match="insert_after"):
         runtime.append_splice(
-            mask=((r0, r1),),
+            mask=(MaskRange.between(r0, r1),),
             insert_after=r0,
             payload=(),
             strategy="test",
@@ -290,12 +291,12 @@ def test_adopt_record_rejects_mask_overlap_like_append_splice() -> None:
     runtime = _runtime()
     hr = runtime.append_history(UserMessage(text="x"))
     prior = runtime.append_splice(
-        mask=((hr, hr),),
+        mask=(MaskRange.between(hr, hr),),
         insert_after=None,
         payload=(UserMessage(text="first"),),
         strategy="test",
     )
-    bad_mask = ((hr, hr),)
+    bad_mask = (MaskRange.between(hr, hr),)
     with pytest.raises(InvalidSpliceError):
         runtime.append_splice(
             mask=bad_mask,
@@ -315,7 +316,7 @@ def test_adopt_record_rejects_mask_overlap_like_append_splice() -> None:
 
     absorbing_override = ContextSplice(
         ref=runtime.mint_ref(),
-        mask=((hr, prior),),
+        mask=(MaskRange.between(hr, prior),),
         insert_after=None,
         payload=(UserMessage(text="summary"),),
         strategy="summary",
@@ -417,7 +418,7 @@ def test_replay_tape_accepts_mixed_record_types() -> None:
             ReferrableTapeEvent(ref=u_ref, event=UserMessage(text="hi")),
             ContextSplice(
                 ref=TapeRef(session_id="x", ordinal=1),
-                mask=((u_ref, u_ref),),
+                mask=(MaskRange.between(u_ref, u_ref),),
                 insert_after=None,
                 payload=(UserMessage(text="[summary]"),),
                 strategy="summary",
@@ -505,7 +506,7 @@ def test_compaction_splice_via_append_validates() -> None:
     refs.append(runtime.append_history(ToolResult(call_id="c1", content="ok")))
     refs.append(runtime.append_history(AssistantMessage(text="done")))
     runtime.append_splice(
-        mask=((refs[0], refs[-1]),),
+        mask=(MaskRange.between(refs[0], refs[-1]),),
         insert_after=None,
         payload=(UserMessage(text="[summary]"),),
         strategy="summary",
