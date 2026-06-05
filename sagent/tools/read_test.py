@@ -192,13 +192,14 @@ async def test_read_png_image(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_svg_mime(tmp_path: Path) -> None:
+async def test_read_svg_as_text(tmp_path: Path) -> None:
     f = tmp_path / "image.svg"
     f.write_text("<svg/>")
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await read.run({"file_path": str(f)})
-    assert result.attachments[0].descriptor == "image/svg+xml"
+    assert not result.attachments
+    assert "<svg/>" in result.content
 
 
 @pytest.mark.asyncio

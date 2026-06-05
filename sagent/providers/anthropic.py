@@ -1605,8 +1605,8 @@ def _attachment_block(
 
 
 def _is_image_mime(descriptor: str) -> bool:
-    """True for image content types (no descriptor registry needed)."""
-    return descriptor.startswith("image/")
+    """True for image MIME types accepted by Anthropic image blocks."""
+    return descriptor in {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
 def _flush_tool_results(

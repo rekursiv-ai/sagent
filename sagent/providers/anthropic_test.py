@@ -41,6 +41,7 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AssistantMessage,
+    BytesMessage,
     ModelContextEvent,
     ToolCall,
     ToolResult,
@@ -352,6 +353,21 @@ def test_tool_result_block_is_error_flag_propagates() -> None:
         max_image_bytes=5 * 1024 * 1024,
     )
     assert out["is_error"] is True
+
+
+def test_tool_result_block_skips_svg_attachment() -> None:
+    ids = IdRemapper("toolu_")
+    out = _tool_result_block(
+        ToolResult(
+            call_id="x",
+            content="[image: qr.svg]",
+            attachments=(BytesMessage(data=b"<svg/>", descriptor="image/svg+xml"),),
+        ),
+        ids,
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
+    )
+    assert out["content"] == "[image: qr.svg]"
 
 
 def _build_anthropic_message(
