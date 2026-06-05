@@ -47,7 +47,8 @@ _IMAGE_EXTS = {
     ".gif",
     ".bmp",
     ".webp",
-    ".svg",
+    # SVG is XML; send it as text so providers do not reject image/svg+xml.
+    # ".svg",
 }
 _PDF_EXT = ".pdf"
 _NOTEBOOK_EXT = ".ipynb"
@@ -60,7 +61,8 @@ _MIME_BY_EXT: dict[str, str] = {
     ".gif": "image/gif",
     ".bmp": "image/bmp",
     ".webp": "image/webp",
-    ".svg": "image/svg+xml",
+    # Keep inactive with _IMAGE_EXTS; SVG falls through to _read_text.
+    # ".svg": "image/svg+xml",
 }
 
 
