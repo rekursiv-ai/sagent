@@ -33,6 +33,7 @@ from sagent.tools.core import (
     load_tool_description,
     provider_not_allowed_result,
 )
+from sagent.types.model import CONTEXT_TAGS, base_model_id
 
 
 if TYPE_CHECKING:
@@ -677,6 +678,7 @@ def _plan_limits(
                     "Invalid AgentSelf limit override: "
                     f"max_request_tokens={max_request_tokens:,} exceeds model's"
                     f" {model.max_request_tokens:,}"
+                    + _window_variant_hint(agent, model, max_request_tokens)
                 ),
                 is_error=True,
             )
@@ -752,6 +754,46 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | 
             is_error=True,
         )
     return val
+
+
+def _window_variant_hint(agent: Agent, model: types.model.Model, requested: int) -> str:
+    """Suggest a larger-window model id when one would satisfy ``requested``.
+
+    Context-window size is encoded in the model id via a ``+1m`` / ``+200k``
+    suffix, not the ``max_request_tokens`` limit. When an agent over-raises
+    the limit to reach a bigger window, point it at the sibling variant
+    (same base id, a window tag, enough room) so the rejection self-corrects.
+
+    Args:
+      agent: The active agent (source of provider + current model id).
+      model: The target model whose window the request exceeded.
+      requested: The rejected ``max_request_tokens`` value.
+
+    Returns:
+      hint: ``". Did you mean model_id=<variant>?"`` when a fitting variant
+          exists, else the empty string.
+
+    """
+    spec = agent.model_spec
+    if spec is None:
+        return ""
+    provider_cls = getattr(providers_module, spec.provider, None)
+    known = getattr(provider_cls, "KNOWN_MODELS", None)
+    if not isinstance(known, Mapping):
+        return ""
+    catalog = cast(Mapping[str, object], known)
+    base = base_model_id(model.model_id)
+    for tag in CONTEXT_TAGS:
+        candidate = base + tag
+        profile = catalog.get(candidate)
+        window = getattr(profile, "max_request_tokens", 0)
+        if candidate != model.model_id and window >= requested:
+            return (
+                f". The window is part of the model id: switch to"
+                f" model_id={candidate} (a {window:,}-token window) rather"
+                f" than raising max_request_tokens"
+            )
+    return ""
 
 
 def _commit_context(agent: Agent, context: str, prompt: str) -> None:

@@ -251,10 +251,22 @@ def _kb_submit(
         agent.runtime.model_call is not None
         and not agent.runtime.cohort
         and not agent.runtime.inbox.gate_armed
+        and agent.runtime.inbox.empty()
     ):
         # prompt-toolkit does not surface pasted attachments today;
         # pass the empty tuple explicitly so a future input source that
         # threads them through cannot silently drop them here.
+        #
+        # ``inbox.empty()`` closes a halt race: between Ctrl+C
+        # (``agent.halt()`` queues ``Halt``) and the runtime draining
+        # that ``Halt`` to arm ``AWAIT_USER``, ``gate_armed`` is still
+        # False and ``model_call`` still set. Staging here would orphan
+        # the block -- the imminent gate-arm makes ``_fully_drained``
+        # False, so no ``AgentIdle`` ever fires to commit a staged
+        # urgent block, and the gate's ``drain`` blocks forever on an
+        # empty inbox. A pending inbox item (the queued ``Halt``) means
+        # the runtime is mid-transition: push directly so the message
+        # lands in the inbox and releases the gate.
         queues.stage_urgent(text, attachments=())
     else:
         agent.runtime.inbox.push_back(UserMessage(text=text))
