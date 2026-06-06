@@ -123,10 +123,11 @@ pythonpath = ["."]
 python_files = "*_test.py"
 markers = [
     "ci_smoke: slower package/CLI smoke tests run explicitly in CI",
+    "cuda: tests that require a real CUDA device (deselected by default)",
     "integration: tests that require networking or external CLIs (deselected by default)",
     "performance: timing-sensitive tests (deselected by default)",
 ]
-addopts = "-m 'not ci_smoke and not integration and not performance' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance' --durations=20 --dist=worksteal"
 timeout = 60
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
