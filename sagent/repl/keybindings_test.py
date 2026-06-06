@@ -36,6 +36,9 @@ class _FakeInbox:
     def push_back(self, item: object) -> None:
         self.items.append(item)
 
+    def empty(self) -> bool:
+        return not self.items
+
 
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
@@ -172,6 +175,29 @@ def test_enter_text_during_model_call_stages_urgent_input() -> None:
     assert [b.text for b in queues.urgent] == ["first msg"]
     assert [b.text for b in queues.deferred] == ["staged-by-tab"]
     assert agent.runtime.inbox.items == []
+
+
+def test_enter_during_pending_halt_pushes_instead_of_staging() -> None:
+    """Halt race: a queued ``Halt`` forces Enter to push, not stage.
+
+    Repro of the wedged-session bug: Ctrl+C queues ``Halt`` but the
+    runtime has not yet drained it, so ``gate_armed`` is still False and
+    ``model_call`` still set. Staging the message here would orphan it --
+    the imminent gate-arm suppresses ``AgentIdle``, the only edge that
+    commits a staged urgent block, and the gate's ``drain`` then blocks
+    forever on an empty inbox. The non-empty inbox must route Enter to a
+    direct push so the message releases the gate.
+    """
+    agent = _busy_agent()
+    agent.runtime.inbox.items.append(object())  # a queued Halt, not yet drained
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    buf = _fake_buf("please stop and do this instead")
+    _handler(kb, ("enter",))(cast(KeyPressEvent, _fake_event(buf)))
+    assert not queues.has_any(), "pending halt must push, not stage"
+    pushed = [i for i in agent.runtime.inbox.items if isinstance(i, UserMessage)]
+    assert len(pushed) == 1
+    assert pushed[0].text == "please stop and do this instead"
 
 
 def test_enter_text_during_compaction_dispatches_immediately() -> None:

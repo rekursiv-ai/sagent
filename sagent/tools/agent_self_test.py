@@ -10,7 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from sagent import providers as providers_module
 from sagent.agent.agent import Agent
+from sagent.providers.lib.cost import ModelProfile
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.core import current_agent_var, tool_state_var
@@ -61,6 +63,13 @@ class StubProviderModel(MockModelCaps):
             else AssistantMessage(text="ok")
         )
         return ModelResponse(message=msg)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _CatalogStub:
+    """Stand-in provider class exposing only a ``KNOWN_MODELS`` catalog."""
+
+    KNOWN_MODELS: dict[str, ModelProfile]
 
 
 def _make_agent(*, spec: ModelSpec | None = None) -> Agent:
@@ -260,6 +269,55 @@ async def test_max_request_tokens_exceeds_model_cap() -> None:
         result = await t.run({"max_request_tokens": 999_999_999})
     assert result.is_error
     assert "exceeds model" in result.content
+
+
+@pytest.mark.asyncio
+async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
+    """Over-raising the limit to reach a bigger window points at the +1m id.
+
+    Regression for the AgentSelf footgun: asked to switch to a 1M-context
+    model, agents kept the base 200k model id and forced
+    ``max_request_tokens`` up -- rejected at the cap. The rejection now
+    names the ``+1m`` sibling so the wrong path self-corrects.
+    """
+    catalog = _CatalogStub(
+        KNOWN_MODELS={
+            "big-base": ModelProfile(
+                max_request_tokens=200_000, max_response_tokens=8_000
+            ),
+            "big-base+1m": ModelProfile(
+                max_request_tokens=1_000_000, max_response_tokens=8_000
+            ),
+        }
+    )
+    agent = Agent(
+        model=StubProviderModel(model_id="big-base"),
+        tools=[],
+        model_spec=ModelSpec(
+            provider="StubCat", auth="env", model_id="big-base", account=""
+        ),
+    )
+    t = AgentSelf()
+    with (
+        _active(agent),
+        patch.object(providers_module, "StubCat", catalog, create=True),
+    ):
+        result = await t.run({"max_request_tokens": 1_000_000})
+    assert result.is_error
+    assert "exceeds model" in result.content
+    assert "model_id=big-base+1m" in result.content
+
+
+@pytest.mark.asyncio
+async def test_exceeds_cap_no_variant_hint_when_none_fits() -> None:
+    """No window-variant sibling -> plain rejection, no spurious suggestion."""
+    agent = _make_agent()  # StubProviderModel has no provider catalog.
+    t = AgentSelf()
+    with _active(agent):
+        result = await t.run({"max_request_tokens": 999_999_999})
+    assert result.is_error
+    assert "exceeds model" in result.content
+    assert "model_id=" not in result.content
 
 
 @pytest.mark.asyncio
