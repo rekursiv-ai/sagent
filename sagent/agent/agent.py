@@ -1343,7 +1343,7 @@ class Agent:
             events.put_nowait(event)
             if isinstance(
                 event,
-                (types.runtime.ModelIdle, types.runtime.ModelResponseError),
+                (types.runtime.AgentIdle, types.runtime.ModelResponseError),
             ):
                 terminal.set()
 
