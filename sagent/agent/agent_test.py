@@ -16,6 +16,7 @@ import re
 import threading
 import time
 
+import httpx
 import pytest
 
 from sagent import (
@@ -589,6 +590,146 @@ async def test_agent_run_yields_idle_at_end() -> None:
     assert "ModelIdle" in events
     assert len(a.history) >= 2
     assert isinstance(a.history[0], types.runtime.UserMessage)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> None:
+    """A transient error on a post-idle detached re-drive must not vanish.
+
+    Definitive root cause of the empty-spawn ("completed with no output")
+    bug, reproduced from the production tape. The chain:
+
+    1. A child detaches a tool (via ``delay``), writes its real final
+       answer, and the model idles. ``Agent.run`` (the ``AgentSpawn``
+       driver) latches ``terminal`` on this first ``ModelIdle`` -- an
+       ``asyncio.Event`` that never resets.
+    2. The detached result lands *after* idle and re-drives the model
+       (tail is the ``DetachedArrived`` ``ToolResult`` -> the model-call
+       gate fires).
+    3. That re-drive's model call fails transiently (``ReadError`` in
+       production). ``_stream_and_post`` is about to push
+       ``ModelResponseError``.
+    4. **Race:** before that push lands, ``Agent.run``'s loop hits an
+       iteration where ``terminal.is_set() and events.empty()`` (the
+       queue momentarily drained during the failing async call), so it
+       breaks and ``shutdown()`` pushes ``Quit``, cancelling the in-flight
+       re-drive.
+    5. ``_stream_and_post``'s ``except asyncio.CancelledError`` wins over
+       the ``ReadError`` -> it publishes ``ModelResponseCancelled``, never
+       ``ModelResponseError``.
+
+    Net: no error surfaces (``child_errors`` stays empty, so ``AgentSpawn``
+    reports ``is_error=False``), the empty ``DetachedArrived`` turn is the
+    history tail, and the child's real answer is silently lost.
+
+    Two contracts, either of which kills the bug:
+      * the failed re-drive must surface as a ``ModelResponseError`` (so
+        ``AgentSpawn`` reports failure rather than empty success), OR
+      * ``run`` must not terminate until the agent is genuinely drained
+        (``AgentIdle`` / ``_fully_drained``), so the re-drive completes.
+
+    This test asserts the weaker, sufficient invariant: the transient
+    error is not silently swallowed -- the run surfaces *some* failure
+    signal rather than returning with an empty answer and no error.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class FailOnRedriveModel(StubModel):
+        """Answers once, then raises a transient error on every re-drive."""
+
+        _calls: int = 0
+
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            on_text: object = None,
+            on_thinking: object = None,
+        ) -> types.model.ModelResponse:
+            del on_text, on_thinking
+            self.received.append(request)
+            self._calls += 1
+            if self._calls == 1:
+                return types.model.ModelResponse(
+                    message=types.runtime.AssistantMessage(text="the real answer")
+                )
+            # Yield once so a cancellation can preempt, mimicking a
+            # transient transport failure mid-stream on the re-drive.
+            await asyncio.sleep(0)
+            raise httpx.ReadError("transient transport failure")
+
+    model = FailOnRedriveModel()
+    a = _build_agent(model=model)
+    # Production used max_attempts=5; the bug reproduces regardless because
+    # the cancellation preempts the retry. Pin to 1 for a tight assertion.
+    a.max_attempts = 1
+
+    # Seed a settled detached cohort: an answered placeholder whose real
+    # result will arrive forward after the model idles.
+    call = types.runtime.ToolCall(id="t1", name="echo", args={})
+    a.runtime.append_history(types.runtime.UserMessage(text="go"))
+    a.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(
+        types.runtime.ToolResult(
+            call_id="t1", content=types.runtime.DETACHED_PLACEHOLDER
+        )
+    )
+
+    # Capture errors exactly as ``AgentSpawn._execute_child`` does: via an
+    # observer watching for ``ModelResponseError``, registered *first* (the
+    # same order ``_execute_child`` uses). This is the surface that decides
+    # ``is_error`` for the spawned child -- not the yielded stream.
+    captured_errors: list[BaseException] = []
+
+    def _capture_error(event: types.runtime.RuntimeEvent) -> None:
+        if isinstance(event, types.runtime.ModelResponseError):
+            captured_errors.append(event.exception)
+
+    a.runtime.observers.append(_capture_error)
+
+    # The detached result lands only AFTER the answer's first ModelIdle --
+    # the exact production ordering that re-drives into the failing call.
+    idle_count = 0
+
+    def _land_detached_after_idle(event: types.runtime.RuntimeEvent) -> None:
+        nonlocal idle_count
+        if isinstance(event, types.runtime.ModelIdle):
+            idle_count += 1
+            if idle_count == 1:
+                a.runtime.inbox.push_back(
+                    types.runtime.DetachedResult(
+                        result=types.runtime.ToolResult(
+                            call_id="t1", content="late evidence"
+                        )
+                    )
+                )
+
+    a.runtime.observers.append(_land_detached_after_idle)
+
+    async def _drive() -> None:
+        async for _ in a.run(types.runtime.UserMessage(text="kick")):
+            pass
+
+    await asyncio.wait_for(_drive(), timeout=3.0)
+
+    last_assistant = next(
+        m for m in reversed(a.history) if isinstance(m, types.runtime.AssistantMessage)
+    )
+    answer_lost = last_assistant.text == ""
+
+    # The failure must not vanish through the spawn-harvest surface: either
+    # the real answer survives as the final turn, or ``_capture_error`` sees
+    # a ``ModelResponseError`` (so ``AgentSpawn`` reports ``is_error=True``).
+    # The bug does neither -- the re-drive's ReadError is converted to a
+    # silent ``ModelResponseCancelled``, so the observer captures nothing and
+    # the empty ``DetachedArrived`` turn is harvested as "no output".
+    assert not answer_lost or captured_errors, (
+        "transient error on the detached re-drive was silently swallowed:"
+        f" final assistant turn is {last_assistant.text!r} and"
+        " _capture_error saw no ModelResponseError -- AgentSpawn would"
+        " report 'completed with no output', dropping the child's answer"
+    )
 
 
 @pytest.mark.asyncio
