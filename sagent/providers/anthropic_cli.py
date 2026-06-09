@@ -547,6 +547,22 @@ class _AnthropicCLIModel:
         # wire re-send stays signed.
         signature_parts: list[str] = []
         usage_event: MutableJSON | None = None
+        # Usage of the LAST internal round's request (raw Anthropic API
+        # shape, snake_case). One ``claude --print`` turn runs the whole
+        # tool loop inside the subprocess -- N internal API rounds -- and
+        # the terminal ``result`` event sums input + cache tokens across
+        # ALL of them, so the result usage over-counts the live context
+        # window by ~the round count (observed 2026-06-09: a 69-round
+        # turn reported 5.6M "input" tokens against a 200k window,
+        # spuriously tripping the Agent's proactive compaction gate).
+        # Each round's ``message_start`` carries that round's request
+        # usage; the last one IS the current context footprint -- the
+        # same thing the direct-API provider reports. Captured here and
+        # used to normalize ``ModelResponse.tokens``'s input side; the
+        # output side stays cumulative (output genuinely accumulates
+        # across rounds), and billing is unaffected either way
+        # (``total_cost`` comes from ``modelUsage.costUSD``, summed).
+        last_round_usage: MutableJSON | None = None
         message_id = ""
         stop_reason: str | None = None
         while True:
@@ -565,8 +581,14 @@ class _AnthropicCLIModel:
                     )
                 break
             if kind == "stream_event":
+                inner = cast(MutableJSON, event.get("event") or {})
+                if inner.get("type") == "message_start":
+                    msg = cast(MutableJSON, inner.get("message") or {})
+                    usage = msg.get("usage")
+                    if isinstance(usage, dict):
+                        last_round_usage = cast(MutableJSON, usage)
                 _dispatch_stream_event(
-                    cast(MutableJSON, event.get("event") or {}),
+                    inner,
                     text_parts,
                     thinking_parts,
                     signature_parts,
@@ -577,11 +599,12 @@ class _AnthropicCLIModel:
                 message_id = cast(str, event.get("session_id") or "")
         assert usage_event is not None
         if update_input_tokens:
-            self._last_input_tokens = int_val(
-                cast(MutableJSON, usage_event.get("usage") or {}).get("input_tokens"), 0
-            )
+            # Cache-inclusive context footprint of the last internal
+            # round; feeds the context-fraction respawn heuristic.
+            self._last_input_tokens = _round_context_tokens(last_round_usage)
         return _build_model_response(
             usage_event=usage_event,
+            last_round_usage=last_round_usage,
             text="".join(text_parts),
             thinking_parts=thinking_parts,
             signature_parts=signature_parts,
@@ -875,30 +898,69 @@ def _dispatch_stream_event(
             signature_parts.append(sig)
 
 
+def _round_context_tokens(round_usage: MutableJSON | None) -> int:
+    """Cache-inclusive input footprint of one internal round's request.
+
+    ``round_usage`` is the raw Anthropic API ``usage`` object off a
+    ``message_start`` stream event (snake_case keys — unlike the
+    camelCase rows in the CLI's terminal ``result.modelUsage``). The
+    sum of non-cached input plus both cache pools is the full prompt
+    size the server counted for that request — the same number the
+    direct-API provider's per-request usage reports. Returns 0 when no
+    round was observed (defensive; a successful drain always sees at
+    least one ``message_start``), which downstream consumers treat as
+    "unknown — estimate instead".
+    """
+    if round_usage is None:
+        return 0
+    return (
+        int_val(round_usage.get("input_tokens"), 0)
+        + int_val(round_usage.get("cache_creation_input_tokens"), 0)
+        + int_val(round_usage.get("cache_read_input_tokens"), 0)
+    )
+
+
 def _build_model_response(
     *,
     usage_event: MutableJSON,
+    last_round_usage: MutableJSON | None,
     text: str,
     thinking_parts: list[str],
     signature_parts: list[str],
     stop_reason: str | None,
     fallback_message_id: str,
 ) -> ModelResponse:
-    """Aggregate per-model usage rows and assemble a ``ModelResponse``."""
+    """Assemble a ``ModelResponse`` with normalized token semantics.
+
+    One ``claude --print`` turn is N internal API rounds, so the
+    terminal ``result`` event's usage is CUMULATIVE across rounds while
+    the ``Model`` contract (and every direct-API provider) reports
+    per-request numbers. Mixing the two poisons context-size consumers:
+    the Agent's proactive compaction gate anchors on
+    ``tokens.input_tokens + cache_*`` as "how full is the window" and a
+    69-round turn summing to 5.6M against a 200k window trips it
+    spuriously (live 2026-06-09). Normalization at this boundary:
+
+    - **input side** (``input_tokens``, ``cache_creation_tokens``,
+      ``cache_read_tokens``): the LAST round's request usage — the
+      true context footprint, matching direct-API semantics. Zeros
+      when no round was observed (consumers fall back to estimates).
+    - **output side** (``output_tokens``): cumulative across rounds —
+      output genuinely accumulates (every internal round's generation
+      was produced and billed).
+    - **billing**: unaffected — ``total_cost`` sums
+      ``modelUsage.costUSD``, which the CLI computes from the full
+      cumulative usage, so under-reporting cumulative input *tokens*
+      here loses no cost fidelity.
+    """
     model_usage = cast(MutableJSON, usage_event.get("modelUsage") or {})
-    input_tokens = 0
     output_tokens = 0
-    cache_creation = 0
-    cache_read = 0
     total_cost = 0.0
     for row in model_usage.values():
         if not isinstance(row, dict):
             continue
         row_map = cast(MutableJSON, row)
-        input_tokens += int_val(row_map.get("inputTokens"), 0)
         output_tokens += int_val(row_map.get("outputTokens"), 0)
-        cache_creation += int_val(row_map.get("cacheCreationInputTokens"), 0)
-        cache_read += int_val(row_map.get("cacheReadInputTokens"), 0)
         cost = row_map.get("costUSD")
         if isinstance(cost, (int, float)):
             total_cost += float(cost)
@@ -907,6 +969,15 @@ def _build_model_response(
         raw = usage_event.get("total_cost_usd")
         if isinstance(raw, (int, float)):
             total_cost = float(raw)
+    input_tokens = 0
+    cache_creation = 0
+    cache_read = 0
+    if last_round_usage is not None:
+        input_tokens = int_val(last_round_usage.get("input_tokens"), 0)
+        cache_creation = int_val(
+            last_round_usage.get("cache_creation_input_tokens"), 0
+        )
+        cache_read = int_val(last_round_usage.get("cache_read_input_tokens"), 0)
     # Build the single thinking block from the accumulated body + signature.
     # The signature MUST be present whenever the body is — otherwise a
     # subsequent wire send rejects with ``thinking.signature: Field required``.
