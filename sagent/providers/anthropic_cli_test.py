@@ -270,6 +270,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     """``content_block_delta`` events fan text/thinking into separate buckets."""
     text_parts: list[str] = []
     thinking_parts: list[str] = []
+    signature_parts: list[str] = []
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
     text_event = cast(MutableJSON, {"delta": {"type": "text_delta", "text": "hello"}})
@@ -281,6 +282,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         text_event,
         text_parts,
         thinking_parts,
+        signature_parts,
         on_text=text_chunks.append,
         on_thinking=thinking_chunks.append,
     )
@@ -288,6 +290,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         thinking_event,
         text_parts,
         thinking_parts,
+        signature_parts,
         on_text=text_chunks.append,
         on_thinking=thinking_chunks.append,
     )
@@ -297,19 +300,47 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     assert thinking_chunks == ["reflecting"]
 
 
-def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
-    """A non-text/thinking delta does not perturb the accumulators."""
+def test_dispatch_stream_event_captures_signature_delta() -> None:
+    """``signature_delta`` accumulates the thought signature.
+
+    This test's predecessor used ``signature_delta`` as its example of
+    an *ignorable* delta type — it is not ignorable: the signature must
+    be carried alongside the thinking body, or any later wire re-send
+    of the thinking block is rejected with HTTP 400
+    ``thinking.signature: Field required``.
+    """
     text_parts: list[str] = []
     thinking_parts: list[str] = []
+    signature_parts: list[str] = []
     _dispatch_stream_event(
         cast(MutableJSON, {"delta": {"type": "signature_delta", "signature": "x"}}),
         text_parts,
         thinking_parts,
+        signature_parts,
         on_text=None,
         on_thinking=None,
     )
     assert text_parts == []
     assert thinking_parts == []
+    assert signature_parts == ["x"]
+
+
+def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
+    """A genuinely unknown delta does not perturb the accumulators."""
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    signature_parts: list[str] = []
+    _dispatch_stream_event(
+        cast(MutableJSON, {"delta": {"type": "citation_delta", "citation": "x"}}),
+        text_parts,
+        thinking_parts,
+        signature_parts,
+        on_text=None,
+        on_thinking=None,
+    )
+    assert text_parts == []
+    assert thinking_parts == []
+    assert signature_parts == []
 
 
 def test_build_model_response_sums_model_usage_rows() -> None:
@@ -339,6 +370,7 @@ def test_build_model_response_sums_model_usage_rows() -> None:
         usage_event=usage_event,
         text="reply",
         thinking_parts=["thought"],
+        signature_parts=["sig-bytes"],
         stop_reason="end_turn",
         fallback_message_id="fallback",
     )
@@ -349,6 +381,13 @@ def test_build_model_response_sums_model_usage_rows() -> None:
     assert response.stop_reason == "model_finished"
     assert response.message_id == "sid-x"
     assert len(response.message.thinking_blocks) == 1
+    # Signature MUST be carried alongside the thinking body — otherwise
+    # a subsequent wire send fails with HTTP 400
+    # ``thinking.signature: Field required``.
+    block = response.message.thinking_blocks[0]
+    assert block.get("type") == "thinking"
+    assert block.get("thinking") == "thought"
+    assert block.get("signature") == "sig-bytes"
 
 
 def test_build_model_response_falls_back_to_total_cost_usd() -> None:
@@ -366,6 +405,7 @@ def test_build_model_response_falls_back_to_total_cost_usd() -> None:
         usage_event=usage_event,
         text="",
         thinking_parts=[],
+        signature_parts=[],
         stop_reason="end_turn",
         fallback_message_id="m",
     )
