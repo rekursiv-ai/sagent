@@ -743,9 +743,9 @@ function renderBody(text) {
         row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
       const headers = splitCells(headerRow);
       const rows = bodyRows.trim().split('\n').map(splitCells);
-      let html = '<table><thead><tr>';
+      let html = '<table><thead><!-- codespell:ignore thead --><tr>';
       headers.forEach(h => { html += `<th>${h}</th>`; });
-      html += '</tr></thead><tbody>';
+      html += '</tr></thead><!-- codespell:ignore thead --><tbody>';
       rows.forEach(r => {
         html += '<tr>';
         r.forEach(c => { html += `<td>${c}</td>`; });

@@ -22,15 +22,17 @@ the ``_SUPPRESS_FLAG`` sentinel is checked exactly once per call.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from pathlib import Path
+
 import fcntl
 import json
 import logging
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterable
+
 
 _LOG = logging.getLogger(__name__)
 
@@ -67,16 +69,17 @@ SESSIONS_DIR = DATA_DIR / "sessions"
 # MCP server subprocess inherits it. Defaults to ``127.0.0.1:8767`` for
 # probe / standalone use.
 _SERVE_URL = os.environ.get(
-    "SAGENT_HTTP_URL", "http://127.0.0.1:8767",
+    "SAGENT_HTTP_URL",
+    "http://127.0.0.1:8767",
 ).rstrip("/")
 
 
 def iso8601_z(dt: datetime | None = None) -> str:
     """UTC ISO-8601 with millisecond precision + ``Z`` suffix."""
     if dt is None:
-        dt = datetime.now(timezone.utc)
+        dt = datetime.now(UTC)
     else:
-        dt = dt.astimezone(timezone.utc)
+        dt = dt.astimezone(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -131,7 +134,8 @@ def _http_post(path: str, payload: dict) -> tuple[bool, str, int]:
     url = f"{_SERVE_URL}{path}"
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
-        url, data=data,
+        url,
+        data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -142,10 +146,10 @@ def _http_post(path: str, payload: dict) -> tuple[bool, str, int]:
     except urllib.error.HTTPError as exc:
         try:
             body = exc.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
+        except Exception:
             body = str(exc)
         return False, body, exc.code
-    except Exception as exc:  # noqa: BLE001 -- network/runtime errors are reported back
+    except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}", 0
 
 
@@ -155,7 +159,7 @@ def route_send(
     to: str,
     content: str,
     urgent: bool = False,
-    suppress_audit: bool = False,  # noqa: ARG001 -- honored server-side via sentinel
+    suppress_audit: bool = False,
 ) -> tuple[bool, str]:
     """Deliver a peer message via ``serve.py``'s ``/api/post``.
 
@@ -190,7 +194,7 @@ def schedule_defer(
     sender: str,
     delay_s: int,
     body: str,
-    suppress_audit: bool = False,  # noqa: ARG001 -- honored server-side via sentinel
+    suppress_audit: bool = False,
 ) -> tuple[bool, str]:
     """Schedule a self-wake-up via ``serve.py``'s ``/api/defer``.
 

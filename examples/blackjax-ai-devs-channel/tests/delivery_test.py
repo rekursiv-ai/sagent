@@ -10,11 +10,10 @@ below ARE process-local and DO have unit-test surface.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from mcp_sagent import delivery
+
+import pytest
 
 
 @pytest.fixture

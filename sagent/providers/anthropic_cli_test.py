@@ -72,6 +72,11 @@ def _write_creds(tmp_path: Path) -> Path:
     return path
 
 
+def _which_claude_stub(_name: str) -> str | None:
+    """Pretend ``claude`` is installed (monkeypatched ``shutil.which``)."""
+    return "/usr/bin/claude"
+
+
 def test_anthropic_cli_does_not_import_subscription_provider() -> None:
     source = inspect.getsource(anthropic_cli)
     assert "providers.anthropic_sub" not in source
@@ -753,7 +758,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     )
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli.shutil.which",
-        lambda _name: "/usr/bin/claude",
+        _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -794,7 +799,10 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     drain_calls = 0
 
     async def _drain(
-        proc: object, on_text=None, on_thinking=None, update_input_tokens: bool = True
+        proc: object,
+        on_text: object = None,
+        on_thinking: object = None,
+        update_input_tokens: bool = True,
     ):
         del proc, on_text, on_thinking, update_input_tokens
         nonlocal drain_calls
@@ -1928,6 +1936,7 @@ def test_cancel_in_flight_returns_false_when_no_active_subprocess(
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-opus-4-7")
     # Hot spare has not been acquired -> ``active`` is None.
+    assert model._hot_spare is not None
     assert model._hot_spare.active is None
     assert model.cancel_in_flight() is False
 

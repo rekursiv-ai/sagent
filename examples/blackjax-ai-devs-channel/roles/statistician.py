@@ -35,14 +35,14 @@ def build():
     Read-anywhere. Edit/Write restricted to ``tuningfork/experiments/``
     via sandboxed tool wrappers (see ``sandboxed_tools.py``).
     """
-    from sagent import tools
-
     import sys
+
+    from sagent import tools
 
     plugin_dir = str(Path(__file__).resolve().parent.parent)
     if plugin_dir not in sys.path:
         sys.path.insert(0, plugin_dir)
-    import sandboxed_tools  # noqa: E402
+    import sandboxed_tools
 
     sandbox = _sandbox_root()
     return build_agent(

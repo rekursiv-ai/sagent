@@ -14,7 +14,7 @@ reference, the spawn recipe, and the per-knob rationale.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
 
@@ -133,14 +133,14 @@ class AnthropicCLIRetryableError(SubprocessTransportError):
         message: str,
         *,
         retry_after_ms: float | None = None,
-        event: dict | None = None,
+        event: Mapping[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.retry_after_ms = retry_after_ms
         self.event = event
 
 
-def _is_event_retryable(event: dict) -> bool:
+def _is_event_retryable(event: Mapping[str, object]) -> bool:
     """Classify a CLI ``result`` event as transient.
 
     Validated against ~60 ``is_error`` events captured on 2026-06-03/04
@@ -189,7 +189,7 @@ def _is_event_retryable(event: dict) -> bool:
     return False
 
 
-def _extract_retry_after_ms(event: dict) -> float | None:
+def _extract_retry_after_ms(event: Mapping[str, object]) -> float | None:
     """Pull a millisecond retry hint out of the CLI ``result`` event.
 
     The CLI sometimes embeds ``retry_after_ms`` / ``retry_delay_ms``
@@ -302,7 +302,7 @@ class AnthropicCLI(Anthropic):
         model_id: str | None = None,
         max_request_tokens: int | None = None,
         *,
-        extra_mcp_servers: dict[str, dict] | None = None,
+        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         materialize_session: bool = False,
         subprocess_read_timeout_sec: float | None = None,
@@ -418,7 +418,7 @@ class _AnthropicCLIModel:
         model_id: str,
         profile: ModelProfile,
         max_request_tokens: int,
-        extra_mcp_servers: dict[str, dict] | None = None,
+        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         materialize_session: bool = False,
         subprocess_read_timeout_sec: float | None = None,
@@ -1140,13 +1140,13 @@ class _AnthropicCLIModel:
                     # message; the retry then re-delivers via
                     # ``--resume``. See :func:`_is_event_retryable`
                     # for the catalog.
-                    if _is_event_retryable(cast(dict, event)):
+                    if _is_event_retryable(cast(Mapping[str, object], event)):
                         raise AnthropicCLIRetryableError(
                             f"AnthropicCLI: retryable result is_error: {event}",
                             retry_after_ms=_extract_retry_after_ms(
-                                cast(dict, event),
+                                cast(Mapping[str, object], event),
                             ),
-                            event=cast(dict, event),
+                            event=cast(Mapping[str, object], event),
                         )
                     raise SubprocessTransportError(
                         f"AnthropicCLI: result is_error: {event}"
@@ -1569,7 +1569,7 @@ def _build_anthropic_argv(
     system_prompt: str,
     bridge_url: str,
     bridge_server_name: str,
-    extra_mcp_servers: dict[str, dict] | None = None,
+    extra_mcp_servers: dict[str, dict[str, object]] | None = None,
     session_id: str | None = None,
     resume_existing: bool = False,
 ) -> list[str]:
@@ -1590,7 +1590,7 @@ def _build_anthropic_argv(
     keys don't collide with ``bridge_server_name``; sagent's bridge
     wins on conflict.
     """
-    servers: dict[str, dict] = {
+    servers: dict[str, dict[str, object]] = {
         bridge_server_name: {"type": "http", "url": bridge_url},
     }
     if extra_mcp_servers:
@@ -1765,7 +1765,7 @@ def _dispatch_stream_event(
             state = tool_use_blocks.get(idx)
             if state is not None:
                 partial = cast(str, delta.get("partial_json") or "")
-                cast(list, state["json_parts"]).append(partial)
+                cast(list[str], state["json_parts"]).append(partial)
             return
         if delta_type == "text_delta":
             text = cast(str, delta.get("text") or "")
@@ -1803,7 +1803,7 @@ def _dispatch_stream_event(
             return
         tool_name = cast(str, state["name"])
         tool_id = cast(str, state["id"])
-        json_parts = cast(list, state["json_parts"])
+        json_parts = cast(list[str], state["json_parts"])
         args_summary = _render_tool_args(tool_name, "".join(json_parts))
         label_text = f"{tool_name} {args_summary}".rstrip()
         try:
@@ -1926,9 +1926,7 @@ def _build_model_response(
     cache_read = 0
     if last_round_usage is not None:
         input_tokens = int_val(last_round_usage.get("input_tokens"), 0)
-        cache_creation = int_val(
-            last_round_usage.get("cache_creation_input_tokens"), 0
-        )
+        cache_creation = int_val(last_round_usage.get("cache_creation_input_tokens"), 0)
         cache_read = int_val(last_round_usage.get("cache_read_input_tokens"), 0)
     # Build the single thinking block from the accumulated body + signature.
     # The signature MUST be present whenever the body is — otherwise a

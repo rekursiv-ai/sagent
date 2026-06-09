@@ -60,9 +60,9 @@ from datetime import UTC
 # When the parent ``sagent`` install is older than the materializer
 # module, the import silently no-ops and the tripwire treats it as
 # "v2 fallback". Operators on older sagent: upgrade to pick up v2.1.
-from typing import Any  # noqa: E402
+from typing import Any
 
-from mcp_sagent import delivery  # noqa: E402
+from mcp_sagent import delivery
 
 
 arun_canary_against_live_cli: Any
@@ -201,7 +201,7 @@ async def _run_materializer_tripwire() -> None:
     _LOG.info("materializer tripwire: spawning canary against claude --print…")
     try:
         result = await arun_canary_against_live_cli()
-    except Exception as exc:  # noqa: BLE001 -- canary must never crash boot
+    except Exception as exc:
         _LOG.warning(
             "materializer tripwire: canary raised %s: %s; falling back to v2 mode",
             type(exc).__name__,
@@ -312,7 +312,7 @@ def _rehydrate_agents_from_jsonl(agents) -> None:
                 len(messages),
                 path.name,
             )
-        except Exception as exc:  # noqa: BLE001 -- rehydration must never crash boot
+        except Exception as exc:
             _LOG.warning(
                 "rehydrate %s: failed (%s: %s); agent starts fresh",
                 label,
@@ -572,7 +572,7 @@ def _diagnose_agent(label: str, agent) -> dict:
     in_flight_call = agent.runtime.model_call is not None
     inbox_pending = 0
     try:
-        inbox_pending = agent.runtime.inbox._queue.qsize()  # noqa: SLF001
+        inbox_pending = agent.runtime.inbox._queue.qsize()
     except AttributeError:
         pass
 
@@ -597,7 +597,7 @@ def _diagnose_agent(label: str, agent) -> dict:
 
         tp = trace_writer.trace_path_for(label)
         events = _read_jsonl(tp)
-    except Exception:  # noqa: BLE001 -- best-effort
+    except Exception:
         events = []
     recent = []
     for ev in events[-6:]:
@@ -689,7 +689,7 @@ def _diagnose_agent(label: str, agent) -> dict:
     # Best-effort and read-only — never mutated.
     pending_preview: list[dict] = []
     try:
-        deque_items = list(agent.runtime.inbox._queue._queue)  # noqa: SLF001
+        deque_items = list(agent.runtime.inbox._queue._queue)
         for item in deque_items[:4]:
             text = (getattr(item, "text", "") or "").replace("\n", " ")[:140]
             src = getattr(item, "source", "") or type(item).__name__
@@ -820,7 +820,7 @@ def _build_http_app(agents):
             )
         try:
             payload = await request.json()
-        except Exception as exc:  # noqa: BLE001 -- malformed body
+        except Exception as exc:
             return JSONResponse({"error": f"bad json: {exc}"}, status_code=400)
         role = str(payload.get("role") or "").strip()
         skip = bool(payload.get("skip_backlog"))
@@ -839,13 +839,13 @@ def _build_http_app(agents):
             # cohort / detached state so the runtime returns to a clean
             # baseline.
             try:
-                q = agent.runtime.inbox._queue  # noqa: SLF001
+                q = agent.runtime.inbox._queue
                 drained = 0
                 while not q.empty():
                     try:
                         q.get_nowait()
                         drained += 1
-                    except Exception:  # noqa: BLE001 -- benign race
+                    except Exception:
                         break
                 notes.append(f"drained {drained} pending inbox item(s)")
             except AttributeError:
@@ -858,7 +858,7 @@ def _build_http_app(agents):
             await agent.clear()
             notes.append("history cleared; CLI subprocess will respawn on next turn")
             ok = True
-        except Exception as exc:  # noqa: BLE001 -- best-effort soft restart
+        except Exception as exc:
             notes.append(f"clear() failed: {type(exc).__name__}: {exc}")
             ok = False
         return JSONResponse(
@@ -1113,7 +1113,7 @@ def _build_http_app(agents):
             )
         try:
             payload = await request.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return JSONResponse({"error": f"bad json: {exc}"}, status_code=400)
         to = str(payload.get("to", "")).strip()
         body = str(payload.get("body", "")).strip()

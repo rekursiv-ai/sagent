@@ -9,15 +9,15 @@ escape, (d) symlinks pointing outside the sandbox cannot escape.
 
 from __future__ import annotations
 
-import asyncio
-import os
 from pathlib import Path
 
+import asyncio
+import os
+
 import pytest
+import sandboxed_tools
 
 from sagent.testing import with_fake_agent
-
-import sandboxed_tools
 
 
 def _run(coro):
@@ -43,9 +43,7 @@ def test_sandboxed_write_accepts_path_inside_sandbox(tmp_path: Path) -> None:
     target = sandbox / "experiment.py"
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
     with with_fake_agent():
-        result = _run(
-            tool.run({"file_path": str(target), "content": "print('ok')\n"})
-        )
+        result = _run(tool.run({"file_path": str(target), "content": "print('ok')\n"}))
     assert not result.is_error, f"unexpected error: {result.content}"
     assert target.read_text() == "print('ok')\n"
 
@@ -78,9 +76,7 @@ def test_sandboxed_write_blocks_symlink_escape(tmp_path: Path) -> None:
 
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
     with with_fake_agent():
-        result = _run(
-            tool.run({"file_path": str(link_inside), "content": "PWNED\n"})
-        )
+        result = _run(tool.run({"file_path": str(link_inside), "content": "PWNED\n"}))
     assert result.is_error
     # outside_target must be untouched:
     assert outside_target.read_text() == "original\n"

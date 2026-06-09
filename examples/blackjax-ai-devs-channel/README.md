@@ -696,7 +696,7 @@ v2 changes the structure:
   subprocess respawns. The next turn picks up via `--resume`.
 - If many errors stack (rare in v2 but still possible),
   `/api/restart` wipes sagent's in-memory state AND
-  ``agent.clear()`` re-uses the same session_id — so the
+  ``agent.clear()`` reuses the same session_id — so the
   agent's claude session JSONL is **NOT** deleted unless you
   manually `rm` it. Useful when you want to flush sagent's
   inbox without losing claude's conversation history; risky

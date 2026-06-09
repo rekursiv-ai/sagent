@@ -31,9 +31,9 @@ _SERVE_DIR = Path(__file__).resolve().parent.parent / "bin"
 if str(_SERVE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVE_DIR))
 
-import serve  # noqa: E402
+import serve
 
-from sagent.providers.anthropic_cli_session import (  # noqa: E402
+from sagent.providers.anthropic_cli_session import (
     CanaryResult,
     DiffFinding,
 )

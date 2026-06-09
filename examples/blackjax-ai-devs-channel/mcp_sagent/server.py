@@ -47,15 +47,17 @@ MCP bridge without re-running the probe.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import asyncio
 import logging
 import os
 import sys
-from pathlib import Path
 
 import mcp.server
 import mcp.server.stdio
 import mcp.types as mcp_types
+
 
 # Ensure the plugin's siblings are importable when this module is
 # launched as a subprocess via ``--mcp-config``. We need ``delivery``
@@ -65,7 +67,10 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from mcp_sagent import delivery  # noqa: E402
+from datetime import UTC
+
+from mcp_sagent import delivery
+
 
 _LOG = logging.getLogger("mcp_sagent.server")
 
@@ -82,9 +87,10 @@ def _debug(msg: str) -> None:
     try:
         _DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
-            from datetime import datetime, timezone
+            from datetime import datetime
+
             f.write(
-                f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')} "
+                f"{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%S.%fZ')} "
                 f"[role={_AGENT_ROLE}] {msg}\n"
             )
     except Exception:
@@ -285,6 +291,7 @@ async def call_tool(name: str, arguments: dict) -> list[mcp_types.ContentBlock]:
         # cross-process registry issue if we hit it.
         try:
             from sagent.tools.core import agent_registry
+
             _debug(f"  agent_registry keys: {sorted(agent_registry)}")
         except Exception as e:
             _debug(f"  agent_registry import failed: {e!r}")

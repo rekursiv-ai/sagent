@@ -56,9 +56,10 @@ from sagent.providers.anthropic_cli_session.parser import (
     iter_jsonl,
     parse_jsonl_to_messages,
 )
-from sagent.types.model import ModelContextEvent, ModelRequest
+from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
+    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,

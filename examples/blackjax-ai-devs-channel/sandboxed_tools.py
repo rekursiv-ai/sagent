@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import override
 
 from sagent.tools.core import resolve_tool_path
 from sagent.tools.edit import Edit
@@ -52,17 +53,17 @@ class SandboxedWrite(Write):
         sandbox_root: Directory tree the tool is allowed to write
             inside. Must be an absolute path. Resolved once at
             construction.
+
     """
 
     def __init__(self, *, sandbox_root: Path | str) -> None:
         super().__init__()
         root = Path(sandbox_root)
         if not root.is_absolute():
-            raise ValueError(
-                f"sandbox_root must be absolute, got {sandbox_root!r}"
-            )
+            raise ValueError(f"sandbox_root must be absolute, got {sandbox_root!r}")
         self._sandbox_root = root.resolve()
 
+    @override
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         raw_path = str(args.get("file_path", ""))
         if not raw_path:
@@ -86,11 +87,10 @@ class SandboxedEdit(Edit):
         super().__init__()
         root = Path(sandbox_root)
         if not root.is_absolute():
-            raise ValueError(
-                f"sandbox_root must be absolute, got {sandbox_root!r}"
-            )
+            raise ValueError(f"sandbox_root must be absolute, got {sandbox_root!r}")
         self._sandbox_root = root.resolve()
 
+    @override
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         raw_path = str(args.get("file_path", ""))
         if not raw_path:

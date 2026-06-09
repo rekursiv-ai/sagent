@@ -25,9 +25,10 @@ also updating the role onboarding text.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import sys
-from pathlib import Path
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -36,7 +37,9 @@ SERVER_SCRIPT = PLUGIN_ROOT / "mcp_sagent" / "server.py"
 # Per-role mcp.json files live in the data dir, NOT the plugin code
 # dir. Resolved via :mod:`mcp_sagent.delivery` so this module agrees
 # with where ``main.jsonl`` and the trace files land.
-from mcp_sagent import delivery  # noqa: E402
+from mcp_sagent import delivery
+
+
 SESSIONS_DIR = delivery.SESSIONS_DIR
 
 

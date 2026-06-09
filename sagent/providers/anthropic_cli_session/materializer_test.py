@@ -359,7 +359,9 @@ def test_multiple_compact_boundaries_only_last_one_matters(tmp_home: Path) -> No
         "timestamp": "2026-06-09T00:00:00.000Z",
     }
 
-    def mk(uid: str, parent: str | None, content: str, **extra) -> dict[str, object]:
+    def mk(
+        uid: str, parent: str | None, content: str, **extra: object
+    ) -> dict[str, object]:
         return {
             **base,
             "type": "user",

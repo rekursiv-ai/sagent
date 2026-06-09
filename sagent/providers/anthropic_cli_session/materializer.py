@@ -204,7 +204,7 @@ def _build_entries(
             blocks = _assistant_blocks(entry)
             if blocks:
                 entries.append(_make_assistant_entry(blocks, chain, base, entry))
-        elif isinstance(entry, ToolResult):
+        elif isinstance(entry, ToolResult):  # pyright: ignore[reportUnnecessaryIsInstance] -- runtime-defensive: tape may carry future event types
             pending_tool_results.append(_tool_result_block(entry))
         # Else: unknown event type — skip silently. The provider's
         # linearizer already drops events that aren't model-visible.

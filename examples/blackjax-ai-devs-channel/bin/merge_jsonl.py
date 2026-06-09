@@ -21,12 +21,13 @@ external deps, no in-memory cap other than the OS file open limit.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
+
 import argparse
 import heapq
 import json
 import sys
-from pathlib import Path
-from typing import Iterator
 
 
 _DEFAULT_CHANNEL = (
@@ -122,7 +123,9 @@ def main() -> int:
         ]
 
     stream = merge(sources, since=args.since, only_runtime=args.runtime)
-    out = sys.stdout if args.output is None else open(args.output, "w", encoding="utf-8")
+    out = (
+        sys.stdout if args.output is None else open(args.output, "w", encoding="utf-8")
+    )
     try:
         for rec in stream:
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")

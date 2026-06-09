@@ -190,7 +190,7 @@ def test_canary_returns_unsafe_when_cli_missing(
     # Force `shutil.which("claude")` to return None.
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli_session.tripwire.shutil.which",
-        lambda _: None,
+        _which_none,
     )
     result = run_canary_against_live_cli(
         session_id="11111111-2222-3333-4444-555555555555",
@@ -199,6 +199,11 @@ def test_canary_returns_unsafe_when_cli_missing(
     )
     assert result.is_safe is False
     assert any("not on PATH" in f.detail for f in result.findings)
+
+
+def _which_none(_name: str) -> str | None:
+    """Pretend no executable exists (monkeypatched ``shutil.which``)."""
+    return None
 
 
 def _write_canary_jsonl(

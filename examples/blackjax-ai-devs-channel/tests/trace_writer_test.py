@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
+import json
 
 from runtime import trace_writer
 
@@ -75,6 +74,7 @@ def test_non_serializable_field_falls_back_to_repr(tmp_path: Path) -> None:
 
     loop = asyncio.new_event_loop()
     try:
+
         async def _noop():
             pass
 
@@ -119,12 +119,12 @@ def test_concurrent_appends_atomic(tmp_path: Path) -> None:
     import sys
 
     target = tmp_path / "tl.trace.jsonl"
-    script = """
+    script = f"""
 import json, sys
-sys.path.insert(0, {repo!r})
+sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
 from runtime import trace_writer
 tag = sys.argv[1]
-w = trace_writer.TraceWriter('tl', sessions_dir={tmp!r})
+w = trace_writer.TraceWriter('tl', sessions_dir={str(tmp_path)!r})
 class E: pass
 for i in range(100):
     e = E()
@@ -136,11 +136,10 @@ for i in range(100):
     class M:
         tag: str
     w(M(tag=f'{{tag}}-{{i:03d}}'))
-""".format(repo=str(Path(__file__).resolve().parent.parent), tmp=str(tmp_path))
+"""
 
     procs = [
-        subprocess.Popen([sys.executable, "-c", script, tag])
-        for tag in ("A", "B")
+        subprocess.Popen([sys.executable, "-c", script, tag]) for tag in ("A", "B")
     ]
     for p in procs:
         assert p.wait() == 0

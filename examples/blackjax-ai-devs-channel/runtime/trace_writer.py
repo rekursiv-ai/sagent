@@ -26,13 +26,13 @@ per agent — but the locking is harmless and matches ``shim.append_record``).
 
 from __future__ import annotations
 
-import dataclasses
-import fcntl
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import dataclasses
+import fcntl
+import json
 
 # Trace files co-locate with ``main.jsonl`` and the per-role
 # ``*.mcp.json`` configs in the plugin's *data* dir (configurable
@@ -42,16 +42,18 @@ from typing import Any
 # environment.
 import sys
 
+
 _plugin_root = Path(__file__).resolve().parent.parent
 if str(_plugin_root) not in sys.path:
     sys.path.insert(0, str(_plugin_root))
-from mcp_sagent import delivery  # noqa: E402
+from mcp_sagent import delivery
+
 
 _SESSIONS_DIR = delivery.SESSIONS_DIR
 
 
 def _iso_now() -> str:
-    dt = datetime.now(timezone.utc)
+    dt = datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -82,7 +84,7 @@ def _to_jsonable(obj: Any) -> Any:
             for f in dataclasses.fields(obj):
                 try:
                     out[f.name] = _to_jsonable(getattr(obj, f.name))
-                except Exception:  # noqa: BLE001 -- best-effort serializer
+                except Exception:
                     out[f.name] = repr(getattr(obj, f.name, None))
             return out
     if isinstance(obj, dict):
@@ -139,7 +141,9 @@ class TraceWriter:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def install_on(agent, role_name: str, *, sessions_dir: Path | None = None) -> TraceWriter:
+def install_on(
+    agent, role_name: str, *, sessions_dir: Path | None = None
+) -> TraceWriter:
     """Attach a TraceWriter observer to an agent and return it."""
     writer = TraceWriter(role_name, sessions_dir=sessions_dir)
     agent.runtime.observers.append(writer)

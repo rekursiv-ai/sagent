@@ -10,13 +10,13 @@ from sagent.providers.anthropic_cli_session.parser import parse_jsonl_to_message
 from sagent.types.runtime import AssistantMessage, ToolResult, UserMessage
 
 
-def _write(path: Path, entries: list[dict]) -> None:
+def _write(path: Path, entries: list[dict[str, object]]) -> None:
     path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
 
 
 def _asst(
-    uuid: str, parent: str | None, blocks: list[dict], rid: str = "req_x"
-) -> dict:
+    uuid: str, parent: str | None, blocks: list[dict[str, object]], rid: str = "req_x"
+) -> dict[str, object]:
     return {
         "type": "assistant",
         "uuid": uuid,

@@ -30,6 +30,7 @@ from pathlib import Path
 import os
 
 from sagent.compaction.summary import SummaryCompactor
+from sagent.types.tools import Tool
 
 
 # Per-role model assignments mirror ``claude-config/project/.claude/agents/<role>.md``
@@ -197,7 +198,7 @@ def build_agent(
     *,
     role_name: str,
     role_md_path: Path,
-    tools: Sequence[object],
+    tools: Sequence[Tool],
     model_id: str,
     max_tool_call_rounds: int | None = None,
     max_budget_usd: float | None = None,

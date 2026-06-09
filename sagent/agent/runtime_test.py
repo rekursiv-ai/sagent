@@ -7324,7 +7324,9 @@ async def test_preempt_in_flight_calls_cancel_on_urgent_agent_send_mid_stream() 
         await model.started.wait()
         agent.inbox.push_back(
             AgentSendMessage(
-                source="tl", text="ABORT, switch direction", urgent=True,
+                source="tl",
+                text="ABORT, switch direction",
+                urgent=True,
             ),
         )
 
@@ -7345,7 +7347,9 @@ async def test_preempt_in_flight_calls_cancel_on_urgent_agent_send_mid_stream() 
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_stream() -> None:
+async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_stream() -> (
+    None
+):
     """``urgent=False`` (default) AgentSendMessage mid-stream does
     NOT trigger cancel even with ``preempt_in_flight=True``.
 
@@ -7398,7 +7402,8 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
         await started.wait()
         agent.inbox.push_back(
             AgentSendMessage(
-                source="swe", text="FYI: I committed the patch.",
+                source="swe",
+                text="FYI: I committed the patch.",
                 # urgent omitted -> defaults to False
             ),
         )
@@ -7448,7 +7453,9 @@ async def test_preempt_in_flight_calls_cancel_on_user_message_mid_stream() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_stream() -> None:
+async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_stream() -> (
+    None
+):
     """``UserMessage(urgent=False)`` mid-stream does NOT trigger cancel
     even with ``preempt_in_flight=True``.
 
