@@ -1473,6 +1473,21 @@ def _build_anthropic_argv(
             "bypassPermissions",
         ]
     )
+    # Deny the Claude-Teams / Agent-SDK ``SendMessage`` built-in. In
+    # session-persistence mode we omit ``--tools`` (above) so MCP tools
+    # survive, which means the CLI's DEFAULT allowlist applies -- and that
+    # set includes ``SendMessage``. Agents (SWE especially) intermittently
+    # reach for it to "message tl", but it routes to Claude Teams' private
+    # agent registry, which is EMPTY in the sagent context: the message is
+    # silently dropped (a "PR is open" notification was lost this way on
+    # 2026-06-09, and the model mis-read the empty registry as "tl isn't
+    # running"). The ONLY working peer channel is
+    # ``mcp__sagent_chat__sagent_send``; PEER_MESSAGING names the trap in
+    # prose as belt-and-suspenders. Other Teams orchestration built-ins
+    # (Agent / Task*) would also route to the void, but SendMessage is the
+    # only confirmed leak -- extend this list if more surface. See worklog
+    # thread v2.1-cli-session-materialize.
+    base.extend(["--disallowedTools", "SendMessage"])
     return base
 
 
