@@ -12,25 +12,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
-from urllib.parse import urlencode
 
 import asyncio
-import json
 import logging
-import os
 
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.json import JSON, MutableJSON, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
-    S2_BASE,
     IdType,
     id_slug,
     normalize_id,
     papers_cache_dir,
+    resolve_id_args,
+    s2_batch,
+    s2_get,
     s2_wire_id,
-    short_id,
+    summary_ids,
 )
 from sagent.types.runtime import ToolResult
 
@@ -72,40 +71,53 @@ async def _fetch_arxiv(canonical: str) -> bytes | None:
         return None
 
 
-def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
-    """Ask S2 for an ``openAccessPdf.url``. Returns URL or None."""
-    wire = s2_wire_id(kind, canonical)
-    headers: dict[str, str] = {"Accept": "application/json"}
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-    if key:
-        headers["x-api-key"] = key
-    params = urlencode({"fields": "openAccessPdf"})
-    url = f"{S2_BASE}/paper/{wire}?{params}"
-    try:
-        body = fetch(url, headers=headers, timeout_sec=_HTTP_TIMEOUT)
-        data = json.loads(body)
-        if not isinstance(data, Mapping):
-            return None
-        data_map = cast(Mapping[str, object], data)
-        oa_raw = data_map.get("openAccessPdf")
-        if oa_raw is None:
-            oa_map: Mapping[str, object] = {}
-        elif isinstance(oa_raw, Mapping):
-            oa_map = cast(Mapping[str, object], oa_raw)
-        else:
-            return None
-        oa_url = oa_map.get("url")
-    except (FetchError, OSError, json.JSONDecodeError) as e:
-        logger.debug("S2 OA lookup for %s failed: %s", wire, e)
+async def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
+    """Ask S2 for an ``openAccessPdf.url`` via the shared, rate-gated client.
+
+    Routes through :func:`s2_get` so the lookup honors the cross-process
+    1 req/sec gate and backoff -- never a raw ``fetch`` against ``S2_BASE``.
+
+    Args:
+      kind: Identifier kind.
+      canonical: Canonical identifier.
+
+    Returns:
+      url: Open-access PDF URL, or ``None`` when S2 has none / errored.
+
+    """
+    data = await s2_get(
+        f"/paper/{s2_wire_id(kind, canonical)}", {"fields": "openAccessPdf"}
+    )
+    if isinstance(data, ToolResult):
         return None
-    if not isinstance(oa_url, str) or not oa_url:
-        return None
-    return oa_url
+    oa = cast(MutableJSON, data.get("openAccessPdf") or {})
+    url = oa.get("url")
+    return url if isinstance(url, str) and url else None
 
 
-async def _fetch_open_access(kind: IdType, canonical: str) -> bytes | None:
-    """Ask S2 for an ``openAccessPdf.url`` and try it."""
-    oa_url = await asyncio.to_thread(_s2_oa_lookup, kind, canonical)
+async def _fetch_open_access(
+    kind: IdType,
+    canonical: str,
+    *,
+    oa_url: str | None = None,
+    looked_up: bool = False,
+) -> bytes | None:
+    """Try an open-access PDF URL, looking it up via S2 when not yet resolved.
+
+    Args:
+      kind: Identifier kind.
+      canonical: Canonical identifier.
+      oa_url: Pre-resolved open-access URL (e.g. from a batched lookup).
+      looked_up: True when ``oa_url`` already reflects a completed lookup
+        (so ``None`` means "S2 has no open-access copy" -- do not re-query).
+        False means ``oa_url`` is unknown and a per-id lookup is needed.
+
+    Returns:
+      pdf: PDF bytes, or ``None`` when no open-access copy is reachable.
+
+    """
+    if oa_url is None and not looked_up:
+        oa_url = await _s2_oa_lookup(kind, canonical)
     if oa_url is None:
         return None
     try:
@@ -118,13 +130,31 @@ async def _fetch_open_access(kind: IdType, canonical: str) -> bytes | None:
 async def _fetch_cascade(
     kind: IdType,
     canonical: str,
+    *,
+    oa_url: str | None = None,
+    oa_looked_up: bool = False,
 ) -> tuple[bytes, str] | ToolResult:
-    """Try each enabled source; return ``(bytes, source_label)`` or an error."""
+    """Try each enabled source; return ``(bytes, source_label)`` or an error.
+
+    Args:
+      kind: Identifier kind.
+      canonical: Canonical identifier.
+      oa_url: Pre-resolved open-access URL from a batched lookup, if any.
+      oa_looked_up: True when ``oa_url`` is the result of a completed
+        (batched) lookup, so a ``None`` means "no open-access copy" and
+        must not trigger a second per-id S2 query.
+
+    Returns:
+      result: ``(pdf_bytes, source_label)`` or a ``ToolResult`` error.
+
+    """
     if kind == "arxiv":
         body = await _fetch_arxiv(canonical)
         if body is not None:
             return body, "arxiv"
-    body = await _fetch_open_access(kind, canonical)
+    body = await _fetch_open_access(
+        kind, canonical, oa_url=oa_url, looked_up=oa_looked_up
+    )
     if body is not None:
         return body, "open_access"
 
@@ -146,16 +176,23 @@ class PaperFetch:
         {
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "string",
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "DOI (10.xxxx/yyy, optional doi:/https://doi.org/ "
-                        "prefix) or arXiv id (2106.15928, arXiv:2106.15928, "
-                        "or legacy hep-th/9901001)."
+                        "One or more paper identifiers: DOI (10.xxxx/yyy, "
+                        "optional doi:/https://doi.org/ prefix) or arXiv id "
+                        "(2106.15928, arXiv:2106.15928, or legacy "
+                        "hep-th/9901001). When several are given, the "
+                        "open-access URL lookups are resolved in ONE batched "
+                        "Semantic Scholar request (up to 500) instead of one "
+                        "per id -- markedly more efficient against the 1 "
+                        "request/second rate limit -- then the PDFs download "
+                        "concurrently. Always pass every id you need at once."
                     ),
                 },
             },
-            "required": ["id"],
+            "required": ["ids"],
         }
     )
 
@@ -172,9 +209,7 @@ class PaperFetch:
           label: Human-readable summary string.
 
         """
-        raw = str(args.get("id", "")).strip()
-        short = short_id(raw) if raw else "?"
-        return f"PaperFetch {short}"
+        return f"PaperFetch {summary_ids(args)}"
 
     def summary_result(self, result: ToolResult) -> str | None:
         """Suppress the per-call receipt for PaperFetch.
@@ -204,31 +239,113 @@ class PaperFetch:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Download a paper PDF by identifier, using a source cascade.
+        """Download one or many paper PDFs by identifier.
+
+        For a single id, fetches it directly. For several, the open-access
+        URL lookups are batched into one S2 request and the PDFs download
+        concurrently.
 
         Args:
-          args: Tool arguments containing the paper ``id``.
+          args: Tool arguments containing ``ids``.
 
         Returns:
-          result: Path to the cached PDF or an error message.
+          result: Cached/downloaded path(s) or an error message.
 
         """
-        raw = str(args.get("id", "")).strip()
-        if not raw:
-            return ToolResult(call_id="", content="'id' is required.", is_error=True)
-        parsed = normalize_id(raw)
-        if isinstance(parsed, ToolResult):
-            return parsed
-        kind, canonical = parsed
+        id_list = resolve_id_args(args)
+        if isinstance(id_list, ToolResult):
+            return id_list
+        parsed_ids: list[tuple[IdType, str]] = []
+        for raw in id_list:
+            parsed = normalize_id(raw)
+            if isinstance(parsed, ToolResult):
+                return parsed
+            parsed_ids.append(parsed)
 
+        if len(parsed_ids) == 1:
+            kind, canonical = parsed_ids[0]
+            return await self._fetch_one(
+                kind, canonical, oa_url=None, oa_looked_up=False
+            )
+
+        # Batch-resolve open-access URLs in one gated request. ``None`` for
+        # the whole list means the batch call failed -- fall back to per-id
+        # (gated) lookups; otherwise each entry is authoritative.
+        oa_urls = await self._batch_oa_urls(parsed_ids)
+        looked_up = oa_urls is not None
+        urls = oa_urls if oa_urls is not None else [None] * len(parsed_ids)
+        results = await asyncio.gather(
+            *(
+                self._fetch_one(kind, canonical, oa_url=oa, oa_looked_up=looked_up)
+                for (kind, canonical), oa in zip(parsed_ids, urls, strict=True)
+            )
+        )
+        any_error = any(r.is_error for r in results)
+        return ToolResult(
+            call_id="",
+            content="\n".join(r.content for r in results),
+            is_error=any_error,
+        )
+
+    async def _fetch_one(
+        self,
+        kind: IdType,
+        canonical: str,
+        *,
+        oa_url: str | None,
+        oa_looked_up: bool,
+    ) -> ToolResult:
+        """Fetch one paper's PDF via the source cascade, honoring the cache.
+
+        Args:
+          kind: Identifier kind.
+          canonical: Canonical identifier.
+          oa_url: Pre-resolved open-access URL from a batched lookup, if any.
+          oa_looked_up: True when ``oa_url`` reflects a completed lookup, so
+            ``None`` means "no open-access copy" -- skip the per-id query.
+
+        Returns:
+          result: One-line cached/downloaded/error message for this id.
+
+        """
         slug = id_slug(kind, canonical)
         cache_path = self._cache_dir / f"{slug}.pdf"
         if cache_path.exists() and cache_path.stat().st_size > _MIN_PDF_BYTES:
             return ToolResult(call_id="", content=f"Cached: {cache_path}")
-
-        result = await _fetch_cascade(kind, canonical)
+        result = await _fetch_cascade(
+            kind, canonical, oa_url=oa_url, oa_looked_up=oa_looked_up
+        )
         if isinstance(result, ToolResult):
             return result
         body, source = result
         atomic_write_bytes(cache_path, body)
         return ToolResult(call_id="", content=f"Downloaded via {source}: {cache_path}")
+
+    async def _batch_oa_urls(
+        self, parsed_ids: list[tuple[IdType, str]]
+    ) -> list[str | None] | None:
+        """Resolve open-access URLs for many ids in one batched S2 request.
+
+        Args:
+          parsed_ids: Normalized ``(kind, canonical)`` pairs.
+
+        Returns:
+          urls: Per-id open-access URL (input order), where ``None`` means
+            S2 has no open-access copy for that id. The whole result is
+            ``None`` when the batch call itself failed -- callers then fall
+            back to gated per-id lookups rather than trusting empty data.
+
+        """
+        wire_ids = [s2_wire_id(kind, canonical) for kind, canonical in parsed_ids]
+        papers = await s2_batch(wire_ids, "openAccessPdf")
+        if isinstance(papers, ToolResult):
+            return None
+        urls: list[str | None] = []
+        for data in papers:
+            if data is None:
+                urls.append(None)
+                continue
+            oa = cast(MutableJSON, data.get("openAccessPdf") or {})
+            url = oa.get("url")
+            urls.append(url if isinstance(url, str) and url else None)
+        return urls

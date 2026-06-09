@@ -1,14 +1,14 @@
 """PaperDetails tool - Semantic Scholar metadata + citation graph.
 
-Three operations dispatched by which params are set:
+Operations dispatched by which params are set:
 
-- ``id`` alone → plain metadata lookup for one paper.
-- ``id`` + ``operation="references"`` → what the paper cites (backward).
-- ``id`` + ``operation="citations"`` → what cites the paper (forward).
+- ``ids`` alone → metadata for one or more papers (batched in one request).
+- ``ids`` (exactly one) + ``operation="references"`` → what it cites.
+- ``ids`` (exactly one) + ``operation="citations"`` → what cites it.
 
-S2's refs/cites endpoints don't support year / influential filtering in
-the URL, so when those filters are active we fetch a larger batch and
-trim client-side. See :data:`_FILTER_FETCH_CAP`.
+S2's citations endpoint doesn't support year / influential filtering in
+the URL, so when those filters are active we paginate the cursor and trim
+client-side via :func:`s2_paginate`.
 """
 
 from __future__ import annotations
@@ -22,15 +22,17 @@ from sagent.lib.json import JSON, MutableJSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     IdType,
-    clamp_limit,
     format_block,
     format_record,
     normalize_id,
+    resolve_id_args,
+    s2_batch,
     s2_get,
+    s2_paginate,
     s2_paper_to_record,
     s2_wire_id,
-    short_id,
-    truncation_notice,
+    summary_ids,
+    validate_limit,
 )
 from sagent.types.runtime import ToolResult
 
@@ -60,12 +62,6 @@ _CIT_FIELDS_STR = ",".join(
     ("isInfluential", *(f"citingPaper.{f}" for f in _PAPER_FIELDS)),
 )
 
-# When a client-side filter is active (year_from, influential_only) we
-# fetch up to this many from S2 before filtering down to `limit`. S2
-# caps its own pagination at 1000 per request, so this is the ceiling.
-_FILTER_FETCH_CAP = 1000
-
-_LIMIT_DEFAULT = 100
 
 _cache = cachetools.TTLCache[tuple[object, ...], str](
     maxsize=256,
@@ -120,13 +116,21 @@ class PaperDetails:
         {
             "type": "object",
             "properties": {
-                "id": {
-                    "type": "string",
+                "ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
-                        "Paper identifier: a DOI (10.xxxx/yyy, optional "
-                        "doi:/https://doi.org/ prefix) or an arXiv id "
+                        "One or more paper identifiers: a DOI (10.xxxx/yyy, "
+                        "optional doi:/https://doi.org/ prefix) or an arXiv id "
                         "(2106.15928, arXiv:2106.15928, or legacy "
-                        "hep-th/9901001)."
+                        "hep-th/9901001). For metadata, pass every id you "
+                        "need at once: they are looked up in ONE batched "
+                        "Semantic Scholar request (up to 500), dramatically "
+                        "more efficient against the 1 request/second rate "
+                        "limit than one call per id. Results come back in "
+                        "input order. 'references'/'citations' operate on a "
+                        "single paper, so pass exactly one id with "
+                        "'operation'."
                     ),
                 },
                 "operation": {
@@ -135,7 +139,7 @@ class PaperDetails:
                     "description": (
                         "Omit for plain metadata lookup. 'references' lists "
                         "papers this one cites; 'citations' lists papers that "
-                        "cite this one."
+                        "cite this one. Requires exactly one id in 'ids'."
                     ),
                 },
                 "influential_only": {
@@ -157,11 +161,10 @@ class PaperDetails:
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 1000,
                     "description": (
-                        "Max references/citations to return (default 100, "
-                        "capped at 1000). Must be between 1 and 1000."
-                        " Ignored for plain metadata lookup."
+                        "Max references/citations to return. Omit to let "
+                        "Semantic Scholar decide (one default page). Ignored "
+                        "for metadata."
                     ),
                 },
                 "abstract_chars": {
@@ -173,7 +176,7 @@ class PaperDetails:
                     ),
                 },
             },
-            "required": ["id"],
+            "required": ["ids"],
         }
     )
 
@@ -187,8 +190,7 @@ class PaperDetails:
           label: Human-readable summary string.
 
         """
-        raw_id = str(args.get("id", "")).strip()
-        short = short_id(raw_id) if raw_id else "?"
+        short = summary_ids(args)
         op = str(args.get("operation", "")).strip()
         if op == "references":
             return f"PaperDetails references {short}"
@@ -227,19 +229,37 @@ class PaperDetails:
         """Look up paper metadata, references, or citations.
 
         Args:
-          args: Tool arguments containing ``id`` and optional filters.
+          args: Tool arguments containing ``ids`` and optional filters.
 
         Returns:
           result: Formatted metadata or citation list, or an error.
 
         """
-        id_raw = args.get("id", "")
         operation = str(args.get("operation", ""))
         influential_only = bool_val(args.get("influential_only"), False)
         year_from = opt_int(args, "year_from")
-        limit = opt_int(args, "limit")
+        limit = validate_limit(opt_int(args, "limit"))
+        if isinstance(limit, ToolResult):
+            return limit
         abstract_chars = opt_int(args, "abstract_chars")
-        raw = str(id_raw).strip()
+        cap = int(abstract_chars) if abstract_chars is not None else None
+
+        id_list = resolve_id_args(args)
+        if isinstance(id_list, ToolResult):
+            return id_list
+
+        # References / citations walk one paper's graph; metadata of many
+        # papers batches into a single request.
+        if not operation.strip() and len(id_list) > 1:
+            return await self._metadata_batch(id_list, cap)
+        if operation.strip() and len(id_list) != 1:
+            return ToolResult(
+                call_id="",
+                content="'operation' (references/citations) needs exactly one id.",
+                is_error=True,
+            )
+
+        raw = id_list[0]
         validated = _validate_details_args(
             raw,
             op=operation,
@@ -251,13 +271,12 @@ class PaperDetails:
         op, kind, canonical = validated
 
         wire_id = s2_wire_id(kind, canonical)
-        cap = int(abstract_chars) if abstract_chars is not None else None
         cache_key = (
             op or "get",
             wire_id,
             bool(influential_only),
             int(year_from) if year_from is not None else None,
-            clamp_limit(limit, default=_LIMIT_DEFAULT) if op else 0,
+            limit if op else 0,
             cap,
         )
         cached = _cache.get(cache_key)
@@ -267,15 +286,11 @@ class PaperDetails:
         if op == "":
             content = await self._metadata(wire_id, cap)
         elif op == "references":
-            content = await self._references(
-                wire_id,
-                clamp_limit(limit, default=_LIMIT_DEFAULT),
-                cap,
-            )
+            content = await self._references(wire_id, limit, cap)
         else:
             content = await self._citations(
                 wire_id,
-                clamp_limit(limit, default=_LIMIT_DEFAULT),
+                limit,
                 cap,
                 influential_only=influential_only,
                 year_from=year_from,
@@ -299,61 +314,104 @@ class PaperDetails:
         rec = s2_paper_to_record(data)
         return format_block(rec, abstract_chars=abstract_chars)
 
+    async def _metadata_batch(
+        self, raw_ids: list[str], abstract_chars: int | None
+    ) -> ToolResult:
+        """Fetch metadata for many ids in one batched S2 request.
+
+        Args:
+          raw_ids: Raw identifiers (DOI / arXiv forms) to resolve.
+          abstract_chars: Optional abstract truncation length.
+
+        Returns:
+          result: Formatted blocks (input order), or an error.
+
+        """
+        wire_ids: list[str] = []
+        for raw in raw_ids:
+            parsed = normalize_id(raw)
+            if isinstance(parsed, ToolResult):
+                return parsed
+            wire_ids.append(s2_wire_id(*parsed))
+        papers = await s2_batch(wire_ids, _PAPER_FIELDS_STR)
+        if isinstance(papers, ToolResult):
+            return papers
+        blocks: list[str] = []
+        for raw, data in zip(raw_ids, papers, strict=True):
+            if data is None:
+                blocks.append(f"{raw}: not found")
+                continue
+            rec = s2_paper_to_record(data)
+            blocks.append(format_block(rec, abstract_chars=abstract_chars))
+        return ToolResult(call_id="", content="\n\n".join(blocks))
+
     async def _references(
         self,
         wire_id: str,
-        limit: int,
+        limit: int | None,
         abstract_chars: int | None,
     ) -> str | ToolResult:
         """Fetch papers cited by the given paper."""
-        data = await s2_get(
+        page = await s2_paginate(
             f"/paper/{wire_id}/references",
-            {"fields": _REF_FIELDS_STR, "limit": limit},
+            {"fields": _REF_FIELDS_STR},
+            limit=limit,
         )
-        if isinstance(data, ToolResult):
-            return data
-        entries = cast(list[MutableJSON], data.get("data") or [])
+        if isinstance(page, ToolResult):
+            return page
         return _render_edge_list(
-            entries,
+            page.entries,
             inner_key="citedPaper",
             abstract_chars=abstract_chars,
-            limit=limit,
+            complete=page.complete,
         )
 
     async def _citations(
         self,
         wire_id: str,
-        limit: int,
+        limit: int | None,
         abstract_chars: int | None,
         *,
         influential_only: bool,
         year_from: int | None,
     ) -> str | ToolResult:
-        """Fetch papers that cite the given paper, with optional filters."""
+        """Fetch papers that cite the given paper, with optional filters.
+
+        Paginates the citation cursor so an ``influential_only`` / ``year_from``
+        filter gathers ``limit`` matches however deep they lie, rather than
+        filtering only the first page.
+        """
+
+        def keep(entry: MutableJSON) -> bool:
+            if influential_only and not entry.get("isInfluential"):
+                return False
+            if year_from is not None:
+                y = _entry_year(entry, "citingPaper")
+                if y is None or y < year_from:
+                    return False
+            return True
+
         filter_active = influential_only or (year_from is not None)
-        fetch = _FILTER_FETCH_CAP if filter_active else limit
-        data = await s2_get(
-            f"/paper/{wire_id}/citations",
-            {"fields": _CIT_FIELDS_STR, "limit": fetch},
-        )
-        if isinstance(data, ToolResult):
-            return data
-        entries = cast(list[MutableJSON], data.get("data") or [])
-
-        if influential_only:
-            entries = [e for e in entries if e.get("isInfluential")]
-        if year_from is not None:
-            entries = [
-                e
-                for e in entries
-                if (y := _entry_year(e, "citingPaper")) is not None and y >= year_from
-            ]
-
+        if filter_active:
+            page = await s2_paginate(
+                f"/paper/{wire_id}/citations",
+                {"fields": _CIT_FIELDS_STR},
+                limit=limit,
+                keep=keep,
+            )
+        else:
+            page = await s2_paginate(
+                f"/paper/{wire_id}/citations",
+                {"fields": _CIT_FIELDS_STR},
+                limit=limit,
+            )
+        if isinstance(page, ToolResult):
+            return page
         return _render_edge_list(
-            entries,
+            page.entries,
             inner_key="citingPaper",
             abstract_chars=abstract_chars,
-            limit=limit,
+            complete=page.complete,
         )
 
 
@@ -369,15 +427,24 @@ def _render_edge_list(
     *,
     inner_key: str,
     abstract_chars: int | None,
-    limit: int,
+    complete: bool,
 ) -> str:
-    """Format a list of citation-edge entries as text."""
-    total = len(entries)
-    shown = entries[:limit]
-    if not shown:
+    """Format citation-edge entries as text.
+
+    Args:
+      entries: Already-trimmed, already-filtered edge entries (<= limit).
+      inner_key: ``citedPaper`` or ``citingPaper``.
+      abstract_chars: Optional abstract truncation length.
+      complete: False when more matches exist beyond those returned.
+
+    Returns:
+      text: One paper per line, with a notice when more matches remain.
+
+    """
+    if not entries:
         return "(no results)"
     lines: list[str] = []
-    for e in shown:
+    for e in entries:
         inner = cast(MutableJSON, e.get(inner_key) or {})
         if not inner:
             continue
@@ -387,4 +454,6 @@ def _render_edge_list(
         )
         lines.append(format_record(rec, abstract_chars=abstract_chars))
     body = "\n".join(lines) if lines else "(no results)"
-    return body + truncation_notice(len(shown), total)
+    if not complete:
+        body += "\n... (more matches exist; raise 'limit' to see them)"
+    return body

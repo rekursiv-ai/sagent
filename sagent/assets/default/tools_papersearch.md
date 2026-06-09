@@ -14,7 +14,8 @@ Parameters:
     `"openalex"` to sanity-check S2 results or reach beyond S2's
     coverage; use `"fused"` to dedup-merge both indexes (S2 ordering
     preserved, OpenAlex-only hits appended at their OpenAlex rank).
-  - `limit` (default 20, max 1000) — cap on returned hits.
+  - `limit` — cap on returned hits. Omit to let the backend decide its
+    default page; no cap is imposed by the tool.
   - `year_from` / `year_to` — publication-year bounds, inclusive.
   - `open_access_only` (bool) — restrict to papers with a known OA PDF.
   - `abstract_chars` (int) — truncate abstracts. Omit for full text.
