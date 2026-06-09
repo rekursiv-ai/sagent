@@ -733,6 +733,461 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_waits_for_background_tool_result() -> None:
+    """A ``background:true`` / ``delay`` tool's result must not be reaped.
+
+    The production empty-spawn incident: a child emits a tool call with
+    ``background: true`` (or ``delay: N``) so the tool runs while the model
+    keeps going. ``_AgentTool.run`` spawns the task into ``Agent._bg`` and
+    returns a PENDING placeholder; the cohort settles and the model idles.
+
+    ``_fully_drained`` (runtime.py) checks ``runtime.detached`` but **not**
+    ``Agent._bg``, so it returns True while the background tool is still
+    running. ``AgentIdle`` fires, ``Agent.run`` terminates, and
+    ``shutdown()`` cancels the live ``_bg`` task -- its real result is
+    dropped. This is the exact scout pattern (``delay=15..120``) that the
+    ``AgentIdle`` fix did **not** cover: that fix closed the sibling
+    ``runtime.detached`` path only.
+
+    Contract: ``Agent.run`` must not return while a background tool is
+    still running. When it returns, the tool completed and its result
+    reached the runtime.
+    """
+    completed = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowEchoTool:
+        name: str = "slow_echo"
+        tool_id: str = "application/x-tool-slow-echo"
+        description: str = "echoes after a brief async pause"
+        directive_schema: JSON = _STUB_SCHEMA
+        clearable_results: bool = False
+
+        def summary(self, args: Mapping[str, object]) -> str:
+            del args
+            return "slow_echo"
+
+        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+            del result
+            return None
+
+        def prompt(self) -> str:
+            return ""
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            del args
+            await asyncio.sleep(0.05)
+            completed.set()
+            return types.runtime.ToolResult(call_id="", content="scout finding")
+
+    bg_call = types.runtime.ToolCall(
+        id="bg1", name="slow_echo", args={"background": True}
+    )
+    model = StubModel(
+        responses=[
+            types.runtime.AssistantMessage(tool_calls=(bg_call,)),
+            types.runtime.AssistantMessage(text="ack, working in background"),
+        ]
+    )
+    a = _build_agent(model=model, tools=[SlowEchoTool()])
+
+    async for _ in a.run(types.runtime.UserMessage(text="scout")):
+        pass
+
+    assert completed.is_set(), (
+        "background tool was cancelled before completing real work --"
+        " _fully_drained ignored Agent._bg, AgentIdle latched, and"
+        " Agent.run's shutdown() reaped the live job"
+    )
+    # The forward-delivered result must have landed in history before run
+    # returned -- not been dropped into a dead inbox after Quit.
+    assert any(
+        "scout finding" in (getattr(m, "content", "") or "") for m in a.history
+    ), (
+        "background tool's real result never reached history before"
+        " Agent.run returned -- it was silently dropped"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
+    """A live persistent subagent must not wedge a one-shot ``Agent.run``.
+
+    The background idle gate (``has_pending_background``) must report only
+    *finite, turn-scoped* work. Persistent subagents register in ``_bg``
+    with ``kind="persistent_subagent"`` and live indefinitely by design --
+    they own their own ``serve_forever`` and are explicitly spared by
+    ``shutdown`` (agent.py ``_should_cancel_background``). If the idle gate
+    counts them as pending, ``AgentIdle`` never fires and ``Agent.run``
+    hangs forever waiting on a daemon that never completes.
+    """
+    model = StubModel(responses=[types.runtime.AssistantMessage(text="done")])
+    a = _build_agent(model=model)
+
+    daemon = asyncio.create_task(asyncio.sleep(3600))
+    a.register_background(
+        "sub-1",
+        BackgroundTaskEntry(
+            task=daemon,
+            tool_name="reviewer",
+            queue_id="sub-1",
+            started=0.0,
+            kind="persistent_subagent",
+            persistent_run_id="r1",
+        ),
+    )
+
+    async def _drive() -> None:
+        async for _ in a.run(types.runtime.UserMessage(text="hi")):
+            pass
+
+    try:
+        await asyncio.wait_for(_drive(), timeout=2.0)
+    except TimeoutError:
+        pytest.fail(
+            "Agent.run hung on a persistent subagent: has_pending_background"
+            " counts kind='persistent_subagent' as turn-blocking work"
+        )
+    finally:
+        _ = daemon.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await daemon
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
+    """Hidden infra (REPL pump, watchdogs) must not wedge ``Agent.run``.
+
+    Hidden ``_bg`` entries (``hidden=True``) are long-lived infrastructure,
+    not turn work; ``_should_cancel_background`` skips them. The idle gate
+    must skip them too, or a one-shot ``Agent.run`` hangs forever.
+    """
+    model = StubModel(responses=[types.runtime.AssistantMessage(text="done")])
+    a = _build_agent(model=model)
+
+    pump = asyncio.create_task(asyncio.sleep(3600))
+    a.register_background(
+        "pump-1",
+        BackgroundTaskEntry(
+            task=pump,
+            tool_name="repl-pump",
+            queue_id="pump-1",
+            started=0.0,
+            kind="tool",
+            hidden=True,
+        ),
+    )
+
+    async def _drive() -> None:
+        async for _ in a.run(types.runtime.UserMessage(text="hi")):
+            pass
+
+    try:
+        await asyncio.wait_for(_drive(), timeout=2.0)
+    except TimeoutError:
+        pytest.fail(
+            "Agent.run hung on hidden infra: has_pending_background counts"
+            " hidden=True jobs as turn-blocking work"
+        )
+    finally:
+        _ = pump.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_has_pending_background_predicate_table() -> None:
+    """Exhaustively pin ``_has_pending_background`` over every ``_bg`` cell.
+
+    The predicate feeds the runtime idle gate, so its truth table is the
+    contract: only a live (``not done``), visible (``not hidden``),
+    turn-scoped (``kind="tool"``) job counts as pending. Every other
+    flavor -- persistent subagents, hidden infra, finished jobs -- must be
+    invisible to the gate, or a one-shot ``Agent.run`` wedges. This mirrors
+    ``_should_cancel_background``'s taxonomy; the two must never diverge.
+    """
+    a = _build_agent()
+
+    async def _running() -> asyncio.Task[None]:
+        t: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(3600))
+        return t
+
+    async def _done() -> asyncio.Task[None]:
+        t: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+        await t
+        return t
+
+    def _entry(
+        task: asyncio.Task[None],
+        *,
+        kind: str = "tool",
+        hidden: bool = False,
+    ) -> BackgroundTaskEntry:
+        return BackgroundTaskEntry(
+            task=task,
+            tool_name="x",
+            queue_id="q",
+            started=0.0,
+            kind=cast("Literal['tool', 'persistent_subagent', 'detached']", kind),
+            hidden=hidden,
+            persistent_run_id="r" if kind == "persistent_subagent" else "",
+        )
+
+    running, done = await _running(), await _done()
+    try:
+        # Empty registry -> not pending.
+        assert a._bg == {}
+        assert a._has_pending_background() is False
+
+        cases: list[tuple[str, BackgroundTaskEntry, bool]] = [
+            ("live tool", _entry(running), True),
+            ("done tool", _entry(done), False),
+            ("hidden tool", _entry(running, hidden=True), False),
+            ("persistent subagent", _entry(running, kind="persistent_subagent"), False),
+            ("detached", _entry(running, kind="detached"), False),
+        ]
+        for label, entry, expected in cases:
+            a._bg.clear()
+            a._bg["j"] = entry
+            assert a._has_pending_background() is expected, (
+                f"{label}: expected has_pending_background={expected}"
+            )
+
+        # Mixed: a live tool alongside a persistent subagent -> pending
+        # (the tool blocks); after the tool drains, the subagent alone does not.
+        a._bg.clear()
+        a._bg["tool"] = _entry(running)
+        a._bg["sub"] = _entry(running, kind="persistent_subagent")
+        assert a._has_pending_background() is True
+        a._bg["tool"] = _entry(done)
+        assert a._has_pending_background() is False, (
+            "a persistent subagent must not keep the gate pending once the"
+            " only live tool has finished"
+        )
+
+        # Two live tools: stays pending until BOTH drain.
+        a._bg.clear()
+        a._bg["t1"] = _entry(running)
+        a._bg["t2"] = _entry(running)
+        assert a._has_pending_background() is True
+        a._bg["t1"] = _entry(done)
+        assert a._has_pending_background() is True
+        a._bg["t2"] = _entry(done)
+        assert a._has_pending_background() is False
+    finally:
+        for t in (running, done):
+            _ = t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_does_not_hang_on_external_quit() -> None:
+    """An external ``Quit`` must not wedge ``Agent.run`` forever.
+
+    ``Agent.run`` waits on ``{events.get(), terminal.wait()}`` and breaks
+    only on ``terminal`` (``AgentIdle`` / ``ModelResponseError``). But
+    ``Quit`` makes ``run_forever`` *return* without publishing either --
+    e.g. a CLI signal handler pushing a raw ``Quit`` into the inbox. The
+    drive task is then done, yet ``run``'s wait set excludes it, so
+    ``events.get()`` blocks forever. ``run`` must observe the driver's
+    completion and exit.
+    """
+    blocked = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class BlockingModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            on_text: object = None,
+            on_thinking: object = None,
+        ) -> types.model.ModelResponse:
+            del request, on_text, on_thinking
+            blocked.set()
+            await asyncio.Event().wait()  # never returns
+            raise AssertionError("unreachable")
+
+    a = _build_agent(model=BlockingModel())
+
+    async def _drive() -> None:
+        async for _ in a.run(types.runtime.UserMessage(text="go")):
+            pass
+
+    driver = asyncio.create_task(_drive())
+    # Wait until the model call is in flight, then inject a raw Quit -- the
+    # runtime returns from run_forever with no terminal event published.
+    await asyncio.wait_for(blocked.wait(), timeout=2.0)
+    a.runtime.inbox.push_back(types.runtime.Quit())
+
+    try:
+        await asyncio.wait_for(driver, timeout=2.0)
+    except TimeoutError:
+        pytest.fail(
+            "Agent.run hung after an external Quit: run_forever returned"
+            " without AgentIdle/ModelResponseError and run never observed"
+            " the driver's completion"
+        )
+    finally:
+        if not driver.done():
+            driver.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await driver
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_background_result_lands_before_single_agent_idle() -> None:
+    """No spurious ``AgentIdle`` during the bg result handoff; result lands first.
+
+    Covers two adjacent concerns:
+
+    * Forward-delivery timing (#4): the bg tool's real result must reach
+      history before ``Agent.run`` reports the agent idle. A REPL observer
+      flushing deferred input on ``AgentIdle`` must see a settled history.
+    * The forget-race (#5): ``_run_bg`` pushes ``DetachedResult`` then
+      ``forget_background`` with no ``await`` between, so ``_fully_drained``
+      never observes empty-inbox + empty-``_bg`` mid-handoff. Assert
+      exactly one ``AgentIdle`` -- a spurious mid-handoff idle would yield
+      two (one premature, one real).
+    """
+    completed = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class SlowEchoTool:
+        name: str = "slow_echo"
+        tool_id: str = "application/x-tool-slow-echo"
+        description: str = "echoes after a brief async pause"
+        directive_schema: JSON = _STUB_SCHEMA
+        clearable_results: bool = False
+
+        def summary(self, args: Mapping[str, object]) -> str:
+            del args
+            return "slow_echo"
+
+        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+            del result
+            return None
+
+        def prompt(self) -> str:
+            return ""
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+            del args
+            await asyncio.sleep(0.05)
+            completed.set()
+            return types.runtime.ToolResult(call_id="", content="bg payload")
+
+    bg_call = types.runtime.ToolCall(
+        id="bg1", name="slow_echo", args={"background": True}
+    )
+    model = StubModel(
+        responses=[
+            types.runtime.AssistantMessage(tool_calls=(bg_call,)),
+            types.runtime.AssistantMessage(text="ack"),
+        ]
+    )
+    a = _build_agent(model=model, tools=[SlowEchoTool()])
+
+    # Snapshot history at the first AgentIdle: the bg payload must already
+    # be present (forward-delivery landed before idle was reported).
+    history_at_idle: list[str] = []
+    idle_count = 0
+
+    def _on_idle(event: types.runtime.RuntimeEvent) -> None:
+        nonlocal idle_count
+        if isinstance(event, types.runtime.AgentIdle):
+            idle_count += 1
+            history_at_idle.extend(getattr(m, "content", "") or "" for m in a.history)
+
+    a.runtime.observers.append(_on_idle)
+
+    async for _ in a.run(types.runtime.UserMessage(text="go")):
+        pass
+
+    assert completed.is_set()
+    assert idle_count == 1, (
+        f"expected exactly one AgentIdle, got {idle_count} -- a spurious"
+        " mid-handoff idle indicates the forget-race window opened"
+    )
+    assert any("bg payload" in c for c in history_at_idle), (
+        "bg result was not in history at AgentIdle -- forward delivery"
+        " landed after the agent reported idle"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_agent_run_drains_queued_events_when_driver_exits_externally() -> None:
+    """An external ``Quit`` must not drop events already queued for the caller.
+
+    The ``drive in done`` break (the external-Quit-hang fix) must fire only
+    after the event queue is drained: both break conditions guard on
+    ``events.empty()``. So a queued event observed in the same scheduling
+    window as the driver's exit is still yielded before ``run`` returns --
+    the break never races ahead of a pending event.
+    """
+    model = StubModel(
+        responses=[types.runtime.AssistantMessage(text="hello")],
+    )
+    a = _build_agent(model=model)
+
+    yielded: list[types.runtime.RuntimeEvent] = []
+
+    async def _drive() -> None:
+        async for ev in a.run(types.runtime.UserMessage(text="go")):
+            yielded.append(ev)
+            # On the first event, inject a raw external Quit so the driver
+            # exits without a terminal event while more events may be queued.
+            if len(yielded) == 1:
+                a.runtime.inbox.push_back(types.runtime.Quit())
+
+    await asyncio.wait_for(_drive(), timeout=2.0)
+
+    # The driver exited via Quit, but the queued events were drained first --
+    # the model's response publish (carried by ModelResponseComplete) and the
+    # terminal AgentIdle are not lost to a premature break.
+    assert any(isinstance(e, types.runtime.ModelResponseComplete) for e in yielded), (
+        f"queued response event dropped when driver exited externally: {yielded}"
+    )
+    assert any(isinstance(e, types.runtime.AgentIdle) for e in yielded), (
+        f"terminal AgentIdle dropped when driver exited externally: {yielded}"
+    )
+
+
+def test_fully_drained_ignores_background_when_callback_unset() -> None:
+    """A bare ``AgentRuntime`` (no Agent) must behave exactly as pre-change.
+
+    ``has_pending_background`` defaults to ``None``; the ``_fully_drained``
+    term must then drop out entirely, leaving the predicate byte-identical
+    to its pre-callback form. Pins the standalone-runtime safety property.
+    """
+    runtime = agent_runtime.AgentRuntime(model=cast("agent_runtime.Model", StubModel()))
+    assert runtime.has_pending_background is None
+    # Fresh runtime, empty inbox, no work -> fully drained, as before.
+    assert runtime._fully_drained() is True
+    # Setting a callback that reports pending flips it; clearing restores.
+    runtime.has_pending_background = lambda: True
+    assert runtime._fully_drained() is False
+    runtime.has_pending_background = None
+    assert runtime._fully_drained() is True
+
+
+@pytest.mark.asyncio
 async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
     call = types.runtime.ToolCall(id="tool_call_1", name="Echo", args={})
     model = StubModel(

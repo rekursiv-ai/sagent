@@ -979,6 +979,19 @@ class AgentRuntime:
         self.before_tool_spawn: (
             Callable[[AssistantMessage], RuntimeEvent | None] | None
         ) = None
+        # Reports whether the Agent layer has live ``background: true`` /
+        # ``delay`` tool jobs (its ``_bg`` registry, invisible to the
+        # runtime). Consulted by ``_fully_drained`` so ``AgentIdle`` does not
+        # fire -- and a one-shot ``Agent.run`` does not reap -- while a
+        # backgrounded tool is still producing a result to deliver forward.
+        #
+        # This is a synchronous *query* into the Agent layer, not an event.
+        # The "publish an event instead" rule (module header) governs
+        # extension/notification -- things that happened, fanned out to
+        # observers. ``_fully_drained`` needs a boolean answer inline at
+        # predicate-evaluation time; an async one-directional event cannot
+        # supply that. Same shape and rationale as ``before_tool_spawn``.
+        self.has_pending_background: Callable[[], bool] | None = None
         # Lifted from run_forever locals for observer/REPL visibility.
         # Task[None]: tools/model post results to inbox, not via return.
         self.running_tools: dict[str, asyncio.Task[None]] = {}
@@ -1147,6 +1160,12 @@ class AgentRuntime:
         * ``detached`` non-empty -- backgrounded tools whose results
           will land later. Treated as work-in-progress: the agent has
           unfinished business even if it can accept new input.
+        * ``has_pending_background()`` true -- the Agent layer has live
+          ``background: true`` / ``delay`` tool jobs in its ``_bg``
+          registry. The runtime cannot see ``_bg`` directly, so the Agent
+          supplies this callback. Without it, ``AgentIdle`` fires while a
+          backgrounded tool is still running and a one-shot ``Agent.run``
+          reaps the live job before its forward result lands.
         * ``_mid_stream_queue`` non-empty -- buffered ``UserMessage``
           received while the model was streaming.
         * ``inbox.gate_armed`` -- the inbox is waiting for a specific
@@ -1171,9 +1190,10 @@ class AgentRuntime:
 
         Built on :attr:`is_idle` (the REPL-push predicate, itself
         :attr:`_ready_to_advance` + no half-consumed tool/stream work),
-        adding the three terms that distinguish "fully done" from "can
-        accept input": an empty inbox, no backgrounded ``detached`` work,
-        and a tail that does not itself want a model turn.
+        adding the terms that distinguish "fully done" from "can accept
+        input": an empty inbox, no backgrounded ``detached`` work, no live
+        Agent-layer background tool (``has_pending_background``), and a tail
+        that does not itself want a model turn.
 
         Snapshot at call time. The caller must read this and act on it
         within the same synchronous block (no intervening ``await``),
@@ -1184,6 +1204,10 @@ class AgentRuntime:
             self.is_idle
             and self.inbox.empty()
             and not self.detached
+            and not (
+                self.has_pending_background is not None
+                and self.has_pending_background()
+            )
             and not self._should_call_model()
         )
 

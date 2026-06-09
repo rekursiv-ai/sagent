@@ -308,6 +308,14 @@ class Agent:
         )
 
         self.runtime.before_tool_spawn = self._before_tool_spawn
+        # Let the runtime's idle gate see Agent-layer background jobs: a live
+        # turn-scoped ``_bg`` tool is unfinished work, so ``AgentIdle`` must
+        # not fire (and ``Agent.run`` must not reap) until it drains. Only
+        # ``kind="tool"`` non-hidden, still-running jobs count -- mirroring
+        # ``_should_cancel_background``'s taxonomy. Persistent subagents and
+        # hidden infra (REPL pump, watchdogs) live indefinitely by design;
+        # counting them would wedge a one-shot ``Agent.run`` forever.
+        self.runtime.has_pending_background = self._has_pending_background
         for fn in (
             self._track_activity,
             self._track_tool_registry,
@@ -1315,7 +1323,9 @@ class Agent:
 
         Yields:
           event: Each ``types.runtime.RuntimeEvent`` published until
-              ``types.runtime.ModelIdle`` or ``types.runtime.ModelResponseError``.
+              ``types.runtime.AgentIdle`` (the strict fully-drained edge,
+              which also waits for detached / background tool work) or
+              ``types.runtime.ModelResponseError``.
 
         Raises:
           RuntimeError: When another ``Agent.run`` is already in flight
@@ -1360,12 +1370,17 @@ class Agent:
                 while True:
                     get_task = asyncio.create_task(events.get())
                     terminal_task = asyncio.create_task(terminal.wait())
+                    # Wait on the drive task too: a ``Quit`` makes
+                    # ``run_forever`` return without publishing a terminal
+                    # event, so ``terminal`` never sets. Without ``drive`` in
+                    # the wait set, ``events.get()`` would block forever on an
+                    # already-dead driver (external-Quit hang).
                     done, _pending = await asyncio.wait(
-                        {get_task, terminal_task},
+                        {get_task, terminal_task, drive},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     # Drain pending events before checking terminal state so
-                    # consumers see the ModelIdle or ModelResponseError event.
+                    # consumers see the AgentIdle or ModelResponseError event.
                     if get_task in done:
                         yield get_task.result()
                     else:
@@ -1373,6 +1388,11 @@ class Agent:
                     if terminal_task not in done:
                         _ = terminal_task.cancel()
                     if terminal.is_set() and events.empty():
+                        break
+                    # Driver exited without a terminal event (``Quit`` /
+                    # crash): drain any already-queued events, then stop --
+                    # no further event will ever arrive.
+                    if drive in done and events.empty():
                         break
             finally:
                 self.shutdown(force=False)
@@ -1774,6 +1794,30 @@ class Agent:
 
         """
         self._bg[job_id] = entry
+
+    def _has_pending_background(self) -> bool:
+        """True iff a turn-scoped background tool is still running.
+
+        Feeds the runtime's ``_fully_drained`` gate (and thus ``AgentIdle``
+        / one-shot ``Agent.run`` termination). Only ``kind="tool"``,
+        non-hidden, not-yet-done jobs count -- the same taxonomy
+        ``_should_cancel_background`` uses to decide what a turn owns.
+        Persistent subagents (``kind="persistent_subagent"``) and hidden
+        infra (REPL pump, watchdogs) live past the turn by design, so
+        counting them would wedge ``Agent.run`` on work that never ends.
+
+        Do NOT bound a tool's duration here. Boundedness is the tool's
+        responsibility, not the agent's: ``Bash`` self-caps its timeout,
+        and truly unbounded work uses the tool's own fire-and-forget path.
+        Adding a grace-timeout at this gate would reap slow-but-finite
+        tools mid-flight and silently drop their results -- the exact bug
+        this background tracking was added to fix. A tool that never
+        returns is a tool defect; fix it at the tool.
+        """
+        return any(
+            job.kind == "tool" and not job.hidden and not job.task.done()
+            for job in self._bg.values()
+        )
 
     async def compact_if_needed(
         self,
@@ -2575,21 +2619,23 @@ class _AgentTool:
                 used_message_chars=self._agent.persist_budget_used_chars(),
             )
         except asyncio.CancelledError:
-            # User-initiated ``/kill`` and parent-driven shutdown both
-            # remove the job from the registry before cancelling -- the
-            # absence is the cleanup signal; log + consume the
-            # cancellation and let the task exit normally so the kill
-            # verb's cleanup path stays synchronous.
+            # Two cancellation paths, distinguished by registry membership
+            # at cancel time (checked below):
             #
-            # External cancellation cascade (asyncio.shield bypass, raw
-            # ``task.cancel`` from outside the agent) leaves the job in
-            # the registry. Post a ``[cancelled]`` ``DetachedResult`` so
-            # the splice site sees a paired result for the assistant's
-            # tool_use, then re-raise so the cancel chain reaches the
-            # scheduler -- asyncio's contract requires every
-            # ``CancelledError`` catch to either re-raise or be the
-            # explicit endpoint of the cancel chain (only the
-            # registry-popped path is that endpoint).
+            # 1. Registry-popped first (``cancel_background`` / ``/kill``,
+            #    and ``clear`` via ``_cancel_all_background``): the job is
+            #    already gone from ``background``. The absence is the cleanup
+            #    signal -- consume the cancellation and exit normally so the
+            #    kill verb's cleanup path stays synchronous.
+            #
+            # 2. Registry still populated (``Agent.shutdown``, which cancels
+            #    ``job.task`` WITHOUT popping first; or a raw external
+            #    ``task.cancel``): post a ``[cancelled]`` ``DetachedResult``
+            #    so the splice site sees a paired result for the assistant's
+            #    tool_use, then re-raise so the cancel chain reaches the
+            #    scheduler -- asyncio requires every ``CancelledError`` catch
+            #    to re-raise or be the explicit endpoint of the cancel chain
+            #    (only the registry-popped path is that endpoint).
             if job_id not in self._agent.background:
                 logger.debug(
                     "background tool %r cancelled via registry pop (job_id=%s)",
@@ -2622,6 +2668,15 @@ class _AgentTool:
                 content=f"{type(exc).__name__}: {exc}",
                 is_error=True,
             )
+        # Order matters and must stay await-free: push the result, THEN
+        # drop the registry entry. The two statements run atomically under
+        # cooperative scheduling (no ``await`` between), so ``_fully_drained``
+        # can never observe an empty inbox AND an empty ``_bg`` mid-handoff.
+        # Even were they to interleave, the ordering is belt-and-suspenders:
+        # after ``push_back`` the inbox is non-empty (gate stays False); the
+        # registry only clears once the result is already queued. Inserting an
+        # ``await`` between these lines would open a spurious-``AgentIdle``
+        # window -- do not.
         self._agent.runtime.inbox.push_back(
             types.runtime.DetachedResult(result=processed),
         )
