@@ -276,6 +276,18 @@ def test_run_openalex_other_http_error() -> None:
     assert "500" in result.content
 
 
+def test_run_openalex_invalid_json_returns_error() -> None:
+    # A non-JSON 200 body must surface a ToolResult error, not crash the tool.
+    with patch("sagent.tools.paper_search.fetch", return_value=b"<html>"):
+        result = asyncio.run(
+            PaperSearch().run(
+                {"query": "openalex_bad_json_query", "source": "openalex"}
+            ),
+        )
+    assert result.is_error
+    assert "invalid JSON" in result.content
+
+
 def test_run_fused_combines_backends() -> None:
     s2_payload = _s2_search_payload()
     openalex_payload = json.dumps(

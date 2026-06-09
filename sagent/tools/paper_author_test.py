@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import patch
 
 import asyncio
@@ -34,12 +35,12 @@ def test_summary_search_truncates() -> None:
 
 
 def test_summary_id_no_op() -> None:
-    out = PaperAuthor().summary({"id": "12345"})
+    out = PaperAuthor().summary({"ids": ["12345"]})
     assert out == "PaperAuthor 12345"
 
 
 def test_summary_id_papers() -> None:
-    out = PaperAuthor().summary({"id": "12345", "operation": "papers"})
+    out = PaperAuthor().summary({"ids": ["12345"], "operation": "papers"})
     assert out == "PaperAuthor papers 12345"
 
 
@@ -52,40 +53,40 @@ def test_prompt_empty() -> None:
 
 
 def test_validate_both_query_and_id() -> None:
-    err = _validate_author_args("q", "1", "", year_from=None, year_to=None)
+    err = _validate_author_args("q", ["1"], "", year_from=None, year_to=None)
     assert err is not None
     assert err.is_error
 
 
 def test_validate_neither_query_nor_id() -> None:
-    err = _validate_author_args("", "", "", year_from=None, year_to=None)
+    err = _validate_author_args("", [], "", year_from=None, year_to=None)
     assert err is not None
 
 
 def test_validate_unknown_op() -> None:
-    err = _validate_author_args("", "1", "frob", year_from=None, year_to=None)
+    err = _validate_author_args("", ["1"], "frob", year_from=None, year_to=None)
     assert err is not None
     assert "Unknown operation" in err.content
 
 
 def test_validate_op_requires_id() -> None:
-    err = _validate_author_args("", "", "papers", year_from=None, year_to=None)
+    err = _validate_author_args("", [], "papers", year_from=None, year_to=None)
     assert err is not None
 
 
 def test_validate_year_only_for_papers() -> None:
-    err = _validate_author_args("alice", "", "", year_from=2020, year_to=None)
+    err = _validate_author_args("alice", [], "", year_from=2020, year_to=None)
     assert err is not None
     assert "year" in err.content.lower()
 
 
 def test_validate_ok_for_search() -> None:
-    err = _validate_author_args("q", "", "", year_from=None, year_to=None)
+    err = _validate_author_args("q", [], "", year_from=None, year_to=None)
     assert err is None
 
 
 def test_validate_ok_for_papers() -> None:
-    err = _validate_author_args("", "1", "papers", year_from=2020, year_to=None)
+    err = _validate_author_args("", ["1"], "papers", year_from=2020, year_to=None)
     assert err is None
 
 
@@ -192,7 +193,7 @@ def test_run_author_metadata() -> None:
         }
     ).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
-        result = asyncio.run(PaperAuthor().run({"id": "unique_author_12345"}))
+        result = asyncio.run(PaperAuthor().run({"ids": ["unique_author_12345"]}))
     assert "Yoshua" in result.content
     assert "h_index: 200" in result.content
 
@@ -212,7 +213,7 @@ def test_run_papers() -> None:
     ).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
         result = asyncio.run(
-            PaperAuthor().run({"id": "unique_papers_author", "operation": "papers"}),
+            PaperAuthor().run({"ids": ["unique_papers_author"], "operation": "papers"}),
         )
     assert "Paper" in result.content
 
@@ -238,7 +239,7 @@ def test_run_papers_year_filter() -> None:
         result = asyncio.run(
             PaperAuthor().run(
                 {
-                    "id": "unique_year_filt_author",
+                    "ids": ["unique_year_filt_author"],
                     "operation": "papers",
                     "year_from": 2020,
                 }
@@ -246,6 +247,25 @@ def test_run_papers_year_filter() -> None:
         )
     assert "New" in result.content
     assert "Old" not in result.content
+
+
+def test_run_papers_year_filter_overfetches() -> None:
+    # With a year filter active, fetch a wide page so matches past `limit`
+    # aren't dropped before filtering.
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return json.dumps({"data": []}).encode()
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperAuthor().run(
+                {"ids": ["a"], "operation": "papers", "year_from": 2020, "limit": 5}
+            ),
+        )
+    params = cast(dict[str, object], captured["params"])
+    assert params["limit"] == 1000  # wide fetch, not the requested 5
 
 
 def test_run_papers_no_results_after_filter() -> None:
@@ -264,7 +284,7 @@ def test_run_papers_no_results_after_filter() -> None:
         result = asyncio.run(
             PaperAuthor().run(
                 {
-                    "id": "unique_empty_after_filt_author",
+                    "ids": ["unique_empty_after_filt_author"],
                     "operation": "papers",
                     "year_from": 2030,
                 }
@@ -281,6 +301,51 @@ def test_run_caches_search() -> None:
         _ = asyncio.run(PaperAuthor().run({"query": "cache_search_unique_query_abc"}))
         _ = asyncio.run(PaperAuthor().run({"query": "cache_search_unique_query_abc"}))
     assert mock_fetch.call_count == 1
+
+
+def test_run_ids_batches_author_metadata() -> None:
+    # Many author ids resolve in ONE /author/batch call, aligned by input.
+    batch_array = json.dumps(
+        [
+            {"authorId": "1", "name": "First", "hIndex": 10},
+            None,
+            {"authorId": "3", "name": "Third", "hIndex": 30},
+        ]
+    ).encode()
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return batch_array
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        result = asyncio.run(PaperAuthor().run({"ids": ["1", "2", "3"]}))
+    assert captured["method"] == "POST"
+    assert str(captured["url"]).endswith("/author/batch")
+    assert "First" in result.content
+    assert "2: not found" in result.content
+    assert "Third" in result.content
+
+
+def test_run_ids_must_be_list() -> None:
+    # Non-list ids must error consistently with PaperDetails / PaperFetch,
+    # not be silently coerced to "no ids".
+    result = asyncio.run(PaperAuthor().run({"ids": "123"}))
+    assert result.is_error
+    assert "'ids' must be a list" in result.content
+
+
+def test_run_ids_with_query_rejected() -> None:
+    result = asyncio.run(PaperAuthor().run({"ids": ["1"], "query": "x"}))
+    assert result.is_error
+
+
+def test_run_ids_multi_with_papers_rejected() -> None:
+    result = asyncio.run(
+        PaperAuthor().run({"ids": ["1", "2"], "operation": "papers"}),
+    )
+    assert result.is_error
+    assert "exactly one id" in result.content
 
 
 if __name__ == "__main__":

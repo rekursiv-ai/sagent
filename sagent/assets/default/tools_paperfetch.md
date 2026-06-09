@@ -1,15 +1,20 @@
-Download a scholarly paper PDF to disk by identifier.
+Download scholarly paper PDFs to disk by identifier.
 
 Input:
-  - `id` — a DOI (`10.xxxx/yyy`, optional `doi:` / `https://doi.org/`
-    prefix) or arXiv id (`2106.15928`, `arXiv:2106.15928`, or legacy
-    `hep-th/9901001`).
+  - `ids` — a list of one or more identifiers. Each is a DOI
+    (`10.xxxx/yyy`, optional `doi:` / `https://doi.org/` prefix) or an
+    arXiv id (`2106.15928`, `arXiv:2106.15928`, or legacy
+    `hep-th/9901001`). Pass every paper you need at once: the
+    open-access URL lookups are resolved in ONE batched Semantic Scholar
+    request (up to 500) rather than one per id — far more efficient
+    against the 1 request/second rate limit — then the PDFs download
+    concurrently.
 
-Output: the local filesystem path of the downloaded PDF. The agent
-should then call `Read` on that path; `Read` rasterizes `.pdf` pages
-to JPEG attachments for the vision pathway.
+Output: the local filesystem path of each downloaded PDF, one line per
+id. The agent should then `Read` each path; `Read` rasterizes `.pdf`
+pages to JPEG attachments for the vision pathway.
 
-Source cascade (first success wins):
+Source cascade (first success wins), per id:
   1. arXiv — if the id is an arXiv id, fetch the PDF directly from
      `https://arxiv.org/pdf/<id>`. Always legal, no intermediary.
   2. Open-access URL — consult Semantic Scholar metadata for an
@@ -27,5 +32,5 @@ Caching:
 
 Workflow guidance:
   - If you only have a title or topic, call `PaperSearch` first to
-    resolve to an id, then call `PaperFetch`.
+    resolve to identifiers, then call `PaperFetch`.
   - After fetch, always `Read(file_path=<returned path>)` to get text.

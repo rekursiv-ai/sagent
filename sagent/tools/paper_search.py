@@ -24,12 +24,12 @@ from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     PaperRecord,
-    clamp_limit,
     format_record,
     openalex_reconstruct_abstract,
     s2_get,
     s2_paper_to_record,
     truncation_notice,
+    validate_limit,
 )
 from sagent.types.runtime import ToolResult
 
@@ -40,7 +40,6 @@ _OPENALEX_BASE = "https://api.openalex.org"
 _HTTP_TIMEOUT = 60.0
 _CACHE_TTL_SEC = 15 * 60
 
-_LIMIT_DEFAULT = 20
 _OPENALEX_PER_PAGE_MAX = 200
 
 # S2 field list (shared with paperdetails - kept in-sync manually; duplicating
@@ -98,7 +97,7 @@ def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
 async def _search_s2(
     query: str,
     *,
-    limit: int,
+    limit: int | None,
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
@@ -106,9 +105,10 @@ async def _search_s2(
     """Query Semantic Scholar and return (records, total) or an error."""
     params: dict[str, str | int] = {
         "query": query,
-        "limit": min(limit, 100),
         "fields": _S2_SEARCH_FIELDS,
     }
+    if limit is not None:
+        params["limit"] = limit
     year_spec = _s2_year_param(year_from, year_to)
     if year_spec is not None:
         params["year"] = year_spec
@@ -153,7 +153,7 @@ def _openalex_filter(
 async def _search_openalex(
     query: str,
     *,
-    limit: int,
+    limit: int | None,
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
@@ -161,9 +161,11 @@ async def _search_openalex(
     """Query OpenAlex and return (records, total) or an error."""
     params: dict[str, str | int] = {
         "search": query,
-        "per-page": min(limit, _OPENALEX_PER_PAGE_MAX),
         "select": _OPENALEX_SELECT,
     }
+    if limit is not None:
+        # OpenAlex rejects per-page above its own documented max.
+        params["per-page"] = min(limit, _OPENALEX_PER_PAGE_MAX)
     flt = _openalex_filter(
         year_from=year_from,
         year_to=year_to,
@@ -199,7 +201,12 @@ async def _search_openalex(
             ),
             is_error=True,
         )
-    data = cast(MutableJSON, json.loads(raw))
+    try:
+        data = cast(MutableJSON, json.loads(raw))
+    except json.JSONDecodeError as e:
+        return ToolResult(
+            call_id="", content=f"OpenAlex returned invalid JSON: {e}", is_error=True
+        )
     meta = cast(MutableJSON, data.get("meta") or {})
     total = int_val(meta.get("count"), 0)
     records = [
@@ -373,11 +380,9 @@ class PaperSearch:
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 1000,
                     "description": (
-                        "Max hits (default 20, capped at 1000). In fused "
-                        "mode, the cap applies to the merged set. Must be"
-                        " between 1 and 1000."
+                        "Max hits. Omit to let the backend decide its default "
+                        "page. In fused mode, applies to the merged set."
                     ),
                 },
                 "year_from": {
@@ -465,7 +470,9 @@ class PaperSearch:
         """
         query = str(args.get("query", ""))
         source = str(args.get("source", "s2") or "s2")
-        limit = opt_int(args, "limit")
+        limit = validate_limit(opt_int(args, "limit"))
+        if isinstance(limit, ToolResult):
+            return limit
         year_from = opt_int(args, "year_from")
         year_to = opt_int(args, "year_to")
         open_access_only = bool_val(args.get("open_access_only"), False)
@@ -482,14 +489,13 @@ class PaperSearch:
                 ),
                 is_error=True,
             )
-        n = clamp_limit(limit, default=_LIMIT_DEFAULT)
         cap = int(abstract_chars) if abstract_chars is not None else None
 
         cache_key = (
             "search",
             src,
             q,
-            n,
+            limit,
             year_from,
             year_to,
             bool(open_access_only),
@@ -502,7 +508,7 @@ class PaperSearch:
         result = await self._dispatch_search(
             src,
             q,
-            limit=n,
+            limit=limit,
             year_from=year_from,
             year_to=year_to,
             open_access_only=open_access_only,
@@ -511,7 +517,7 @@ class PaperSearch:
             return result
         hits, total = result
 
-        text = _render_search_results(hits, total, n, cap)
+        text = _render_search_results(hits, total, limit, cap)
         _cache[cache_key] = text
         return ToolResult(call_id="", content=text)
 
@@ -520,7 +526,7 @@ class PaperSearch:
         src: str,
         q: str,
         *,
-        limit: int,
+        limit: int | None,
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
@@ -554,7 +560,7 @@ class PaperSearch:
         self,
         q: str,
         *,
-        limit: int,
+        limit: int | None,
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
@@ -609,11 +615,11 @@ class PaperSearch:
 def _render_search_results(
     hits: list[PaperRecord],
     total: int,
-    limit: int,
+    limit: int | None,
     abstract_chars: int | None,
 ) -> str:
     """Format search hits as newline-joined text with truncation notice."""
-    shown = hits[:limit]
+    shown = hits if limit is None else hits[:limit]
     if not shown:
         return "(no results)"
     lines = [format_record(r, abstract_chars=abstract_chars) for r in shown]

@@ -17,21 +17,22 @@ and :mod:`.paper_fetch`:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
 import asyncio
+import functools
 import json
 import os
 import re
+import time
 
 from sagent.lib.json import MutableJSON
+from sagent.lib.ratelimit import FileStore, SystemClock, TokenBucketRateLimiter
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.types.runtime import ToolResult
-
-
-_LIMIT_MAX = 1000
 
 
 def short_id(raw: str) -> str:
@@ -45,22 +46,6 @@ def short_id(raw: str) -> str:
 
     """
     return raw if len(raw) <= 40 else "…" + raw[-38:]
-
-
-def clamp_limit(limit: int | None, default: int) -> int:
-    """Clamp a caller-supplied limit to [1, 1000], falling back to default.
-
-    Args:
-      limit: Caller-supplied limit, or ``None`` to use the default.
-      default: Value returned when ``limit`` is ``None``.
-
-    Returns:
-      clamped: The effective limit.
-
-    """
-    if limit is None:
-        return default
-    return max(1, min(int(limit), _LIMIT_MAX))
 
 
 # DOI shape: 10.<registrant>/<suffix>. Registrant is 4+ digits (ISO 26324).
@@ -99,8 +84,10 @@ def normalize_id(raw: str) -> tuple[IdType, str] | ToolResult:
     if not s:
         return ToolResult(call_id="", content="Empty identifier.", is_error=True)
 
-    # Strip common URL / scheme wrappers.
+    # Strip common URL / scheme wrappers. A matched prefix pins the family,
+    # so a ``doi:`` value is never re-interpreted as arXiv (or vice versa).
     lower = s.lower()
+    forced: IdType | None = None
     for prefix in (
         "https://doi.org/",
         "http://doi.org/",
@@ -111,27 +98,28 @@ def normalize_id(raw: str) -> tuple[IdType, str] | ToolResult:
         if lower.startswith(prefix):
             s = s[len(prefix) :]
             lower = s.lower()
+            forced = "doi"
             break
-    for prefix in (
-        "https://arxiv.org/abs/",
-        "http://arxiv.org/abs/",
-        "https://arxiv.org/pdf/",
-        "http://arxiv.org/pdf/",
-        "arxiv:",
-        "arxiv.org/abs/",
-    ):
-        if lower.startswith(prefix):
-            s = s[len(prefix) :]
-            # arXiv PDF urls often end in ``.pdf`` - strip.
-            if s.lower().endswith(".pdf"):
-                s = s[:-4]
-            return "arxiv", s
+    if forced is None:
+        for prefix in (
+            "https://arxiv.org/abs/",
+            "http://arxiv.org/abs/",
+            "https://arxiv.org/pdf/",
+            "http://arxiv.org/pdf/",
+            "arxiv:",
+            "arxiv.org/abs/",
+        ):
+            if lower.startswith(prefix):
+                s = s[len(prefix) :]
+                # arXiv PDF urls often end in ``.pdf`` - strip.
+                if s.lower().endswith(".pdf"):
+                    s = s[:-4]
+                forced = "arxiv"
+                break
 
-    if _DOI_RE.match(s):
+    if forced != "arxiv" and _DOI_RE.match(s):
         return "doi", s
-    if _ARXIV_NEW_RE.match(s):
-        return "arxiv", s
-    if _ARXIV_OLD_RE.match(s):
+    if forced != "doi" and (_ARXIV_NEW_RE.match(s) or _ARXIV_OLD_RE.match(s)):
         return "arxiv", s
     return ToolResult(
         call_id="",
@@ -496,6 +484,11 @@ def truncation_notice(shown: int, total: int) -> str:
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_TIMEOUT = 60.0
 
+# S2 now *requires* exponential backoff on 429 (API release notes); retry
+# a throttled request a few times before surfacing the error to the agent.
+_S2_MAX_RETRIES = 4
+_S2_BACKOFF_BASE = 1.0
+
 
 def _s2_headers() -> dict[str, str]:
     """Build S2 request headers, injecting ``x-api-key`` when present in env."""
@@ -506,47 +499,419 @@ def _s2_headers() -> dict[str, str]:
     return headers
 
 
+def summary_ids(args: Mapping[str, object]) -> str:
+    """Render a short display label for an ``ids`` argument.
+
+    Args:
+      args: Tool arguments; reads the ``ids`` list.
+
+    Returns:
+      label: The first id (truncated), plus ``(+N more)`` when several,
+        or ``"?"`` when none are present.
+
+    """
+    raw = args.get("ids")
+    ids = (
+        [str(x).strip() for x in cast(list[object], raw) if str(x).strip()]
+        if isinstance(raw, list)
+        else []
+    )
+    if not ids:
+        return "?"
+    head = short_id(ids[0])
+    return head if len(ids) == 1 else f"{head} (+{len(ids) - 1} more)"
+
+
+def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
+    """Parse and validate the ``ids`` argument, allowing its absence.
+
+    Shared shape-checker so every id-taking Paper* tool rejects a malformed
+    ``ids`` identically. Absence yields ``[]`` (the caller decides whether
+    that is allowed). Size is not pre-checked -- S2 rejects an oversized
+    batch with its own error, which the request path surfaces.
+
+    Args:
+      args: Tool arguments.
+
+    Returns:
+      ids: Stripped, non-empty identifier strings (possibly ``[]`` when
+        ``ids`` is absent), or a ``ToolResult`` error on non-list input.
+
+    """
+    raw_ids = args.get("ids")
+    if raw_ids is None:
+        return []
+    if not isinstance(raw_ids, list):
+        return ToolResult(
+            call_id="", content="'ids' must be a list of strings.", is_error=True
+        )
+    return [str(x).strip() for x in cast(list[object], raw_ids) if str(x).strip()]
+
+
+def validate_limit(limit: int | None) -> int | None | ToolResult:
+    """Reject a non-positive ``limit``; pass ``None`` and positives through.
+
+    A ``limit`` below 1 is meaningless and, untrimmed, silently yields no
+    results (the pagination loop never runs). This is input validation, not
+    a provider-policy cap: no upper bound is imposed -- pagination satisfies
+    any positive ``limit`` the backend can serve.
+
+    Args:
+      limit: Caller-supplied limit (``None`` when omitted).
+
+    Returns:
+      limit: The value unchanged, or a ``ToolResult`` error when ``< 1``.
+
+    """
+    if limit is not None and limit < 1:
+        return ToolResult(
+            call_id="", content="'limit' must be a positive integer.", is_error=True
+        )
+    return limit
+
+
+def resolve_id_args(args: Mapping[str, object]) -> list[str] | ToolResult:
+    """Resolve a required, non-empty ``ids`` list.
+
+    Wraps :func:`parse_optional_ids` for tools where ``ids`` is mandatory.
+
+    Args:
+      args: Tool arguments. ``ids`` is a list of one or more identifiers.
+
+    Returns:
+      ids: Stripped, non-empty identifier strings, or a ``ToolResult``
+        error on missing, malformed, empty, or over-length input.
+
+    """
+    if "ids" not in args:
+        return ToolResult(call_id="", content="'ids' is required.", is_error=True)
+    ids = parse_optional_ids(args)
+    if isinstance(ids, ToolResult):
+        return ids
+    if not ids:
+        return ToolResult(call_id="", content="'ids' is empty.", is_error=True)
+    return ids
+
+
 async def s2_get(path: str, params: dict[str, str | int]) -> MutableJSON | ToolResult:
-    """GET an S2 Graph API path, injecting API key and normalizing errors.
+    """GET an S2 Graph API path, rate-gated, with key injection and backoff.
 
     Args:
       path: API path relative to ``S2_BASE`` (e.g. ``/paper/search``).
       params: Query parameters.
 
     Returns:
-      data: Parsed JSON response, or a ``Message`` with ``text/x-error``
-        on 404 / 429 / other HTTP failures.
+      data: Parsed JSON response, or a ``ToolResult`` error on
+        404 / exhausted-429 / other HTTP failures.
 
     """
-    try:
-        raw = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty can't narrow to_thread through overloads
-            bytes,
-            await asyncio.to_thread(
-                fetch,
-                url=f"{S2_BASE}{path}",
-                params=params,
-                headers=_s2_headers(),
-                timeout_sec=S2_TIMEOUT,
-            ),
-        )
-    except FetchError as e:
-        if e.status == 404:
-            return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)
-        if e.status == 429:
-            return ToolResult(
-                call_id="",
-                content="Semantic Scholar rate limit hit. Retry shortly.",
-                is_error=True,
-            )
+    result = await _s2_request(
+        lambda: fetch(
+            url=f"{S2_BASE}{path}",
+            params=params,
+            headers=_s2_headers(),
+            timeout_sec=S2_TIMEOUT,
+        ),
+        what=path,
+    )
+    # GET metadata/search endpoints never return a top-level array.
+    assert not isinstance(result, list), f"unexpected array from GET {path}"
+    return result
+
+
+async def s2_batch(
+    ids: list[str],
+    fields: str,
+    *,
+    endpoint: Literal["paper", "author"] = "paper",
+) -> list[MutableJSON | None] | ToolResult:
+    """Fetch metadata for many ids in one batched request.
+
+    Uses S2's ``POST /{endpoint}/batch`` -- a single rate-gated call returns
+    all requested records, far cheaper than one :func:`s2_get` per id against
+    the 1 req/sec budget. The result list is positionally aligned with
+    ``ids``; an entry is ``None`` when S2 could not resolve that id. The batch
+    size is not pre-checked: S2 rejects an oversized batch with its own error.
+
+    Args:
+      ids: S2 wire ids. For ``endpoint="paper"`` these are paper ids
+        (e.g. ``DOI:10.x/y``, ``ARXIV:1706.03762``); for
+        ``endpoint="author"`` they are opaque author ids.
+      fields: Comma-separated S2 field selector (e.g. ``"title,authors"``).
+      endpoint: Which batch endpoint to hit -- ``"paper"`` or ``"author"``.
+
+    Returns:
+      records: One entry per input id, in order; ``None`` for unresolved
+        ids. A ``ToolResult`` on an HTTP failure (incl. S2's size rejection).
+
+    """
+    if not ids:
+        return []
+    result = await _s2_request(
+        lambda: fetch(
+            url=f"{S2_BASE}/{endpoint}/batch",
+            method="POST",
+            params={"fields": fields},
+            json={"ids": ids},
+            headers=_s2_headers(),
+            timeout_sec=S2_TIMEOUT,
+        ),
+        what=f"/{endpoint}/batch",
+    )
+    if isinstance(result, ToolResult):
+        return result
+    # S2 returns a JSON array aligned with the request, ``null`` per miss.
+    return [cast(MutableJSON, p) if isinstance(p, dict) else None for p in result]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Page:
+    """A paginated, filtered slice of an S2 list endpoint.
+
+    Attributes:
+      entries: Entries passing the filter, trimmed to the caller's ``limit``
+        when one was given.
+      complete: True when no matches remain unseen -- S2's cursor was walked
+        to exhaustion. False when the caller's ``limit`` cut the walk short,
+        or S2's hard offset ceiling did. So ``not complete`` means "more
+        matches may exist; raise ``limit`` (up to the ceiling) to get them".
+
+    """
+
+    entries: list[MutableJSON]
+    complete: bool
+
+
+# Rows requested per page: large to gather a given number of matches in the
+# fewest rate-gated calls (a latency choice). S2 caps an over-large request
+# and signals its own depth ceiling with an HTTP error, which the walk below
+# treats as "no more to serve" -- so we don't mirror S2's exact limits here.
+_S2_PAGE_ROWS = 1000
+
+
+async def _s2_attempt(do_fetch: Callable[[], bytes]) -> bytes | FetchError:
+    """Run one gated S2 request with 429 backoff; return bytes or the error.
+
+    The single source of truth for the rate gate + exponential-backoff retry
+    that S2 requires. Callers decide how to render the outcome (``s2_get`` ->
+    ``ToolResult``; ``_s2_get_page`` -> HTTP status), so the policy lives in
+    exactly one place.
+
+    Args:
+      do_fetch: Thunk performing the blocking HTTP call, returning bytes.
+
+    Returns:
+      result: Response bytes, or the terminal :class:`FetchError` (its
+        ``status`` and ``body`` intact for the caller to render).
+
+    """
+    for attempt in range(_S2_MAX_RETRIES + 1):
+        await _s2_gate().acquire_async()
+        try:
+            return await asyncio.to_thread(do_fetch)
+        except FetchError as e:
+            if e.status == 429 and attempt < _S2_MAX_RETRIES:
+                await asyncio.sleep(_S2_BACKOFF_BASE * 2**attempt)
+                continue
+            return e
+    raise AssertionError("_s2_attempt retry loop exited without returning")
+
+
+def _s2_error_result(e: FetchError, what: str) -> ToolResult:
+    """Render an S2 ``FetchError`` as a consistent ``ToolResult`` message.
+
+    Shared so every S2 surface (``s2_get``, ``s2_batch``, ``s2_paginate``)
+    reports the same wording for the same status.
+
+    Args:
+      e: The terminal fetch error.
+      what: Short request label for the message.
+
+    Returns:
+      result: An error ``ToolResult``.
+
+    """
+    if e.status == 404:
+        return ToolResult(call_id="", content=f"Not found: {what}", is_error=True)
+    if e.status == 429:
         return ToolResult(
             call_id="",
-            content=(
-                f"Semantic Scholar HTTP {e.status}: "
-                f"{e.body[:200].decode(errors='replace')}"
-            ),
+            content="Semantic Scholar rate limit hit. Retry shortly.",
             is_error=True,
         )
-    return cast(MutableJSON, json.loads(raw))
+    body = e.body[:200].decode(errors="replace")
+    return ToolResult(
+        call_id="",
+        content=f"Semantic Scholar HTTP {e.status} for {what}: {body}",
+        is_error=True,
+    )
+
+
+async def _s2_get_page(
+    path: str, params: dict[str, str | int]
+) -> MutableJSON | FetchError:
+    """Fetch one paginated S2 page; return its JSON or the error.
+
+    Unlike :func:`s2_get`, which flattens every failure into an opaque
+    ``ToolResult``, this returns the :class:`FetchError` so the caller can
+    tell S2's depth-ceiling 400 apart from a transient 429/5xx and keep the
+    response body. Malformed JSON surfaces as a synthetic ``FetchError`` with
+    ``status=0``.
+
+    Args:
+      path: List endpoint path.
+      params: Query params including ``offset``/``limit``.
+
+    Returns:
+      result: Parsed page object, or the :class:`FetchError`.
+
+    """
+    raw = await _s2_attempt(
+        lambda: fetch(
+            url=f"{S2_BASE}{path}",
+            params=params,
+            headers=_s2_headers(),
+            timeout_sec=S2_TIMEOUT,
+        )
+    )
+    if isinstance(raw, FetchError):
+        return raw
+    try:
+        return cast(MutableJSON, json.loads(raw))
+    except json.JSONDecodeError as e:
+        return FetchError(url=path, status=0, headers={}, body=str(e).encode())
+
+
+async def s2_paginate(
+    path: str,
+    params: dict[str, str | int],
+    *,
+    limit: int | None,
+    keep: Callable[[MutableJSON], bool] = lambda _e: True,
+) -> Page | ToolResult:
+    """Walk an S2 ``offset``/``next`` cursor, collecting filtered entries.
+
+    Requests a large page each iteration to minimize the number of rate-gated
+    calls, and follows the cursor until one of:
+      - ``limit`` post-filter matches are gathered (``complete=False``);
+      - S2 exhausts the cursor (``complete=True``);
+      - S2 refuses a deeper page (its depth ceiling) after we already have
+        matches (``complete=False`` -- more may exist but S2 will not serve
+        it). We rely on S2 to signal this rather than mirroring its limits.
+
+    A client-side ``keep`` filter therefore never silently drops matches that
+    lie beyond the first page; ``complete`` truthfully reports exhaustion.
+    With ``limit=None`` a single page is fetched and ``complete`` reflects
+    whether S2's cursor was already exhausted.
+
+    Args:
+      path: List endpoint path (e.g. ``/author/{id}/papers``).
+      params: Query params (``fields`` etc.); ``offset``/``limit`` here are
+        managed internally and overwrite any in ``params``.
+      limit: Post-filter entries the caller wants, or ``None`` for one page.
+      keep: Predicate selecting entries to retain. Defaults to keep-all.
+
+    Returns:
+      page: A :class:`Page` (entries + completeness), or a ``ToolResult``
+        error from any underlying request.
+
+    """
+    kept: list[MutableJSON] = []
+    offset = 0
+    while True:
+        page_params: dict[str, str | int] = {
+            **params,
+            "offset": offset,
+            "limit": _S2_PAGE_ROWS,
+        }
+        data = await _s2_get_page(path, page_params)
+        if isinstance(data, FetchError):
+            # S2 answers a too-deep page with 400 ``offset + limit < 10000``
+            # -- the only 400 a cursor walk can provoke, since it controls
+            # only offset/limit -- so treat 400 (with results in hand) as the
+            # depth ceiling (stop, more may exist). Any other error surfaces
+            # with the shared, consistent message.
+            if data.status == 400 and kept:
+                return Page(entries=_cap(kept, limit), complete=False)
+            return _s2_error_result(data, f"paginating {path}")
+        rows = cast(list[MutableJSON], data.get("data") or [])
+        kept.extend(e for e in rows if keep(e))
+        nxt = data.get("next")
+        enough = limit is not None and len(kept) >= limit
+        exhausted = not isinstance(nxt, int) or not rows
+        if limit is None or enough or exhausted:
+            return Page(entries=_cap(kept, limit), complete=exhausted)
+        # Not exhausted => ``nxt`` is an int offset. Guard against a cursor
+        # that fails to advance (a server regression) looping forever.
+        assert isinstance(nxt, int)
+        if nxt <= offset:
+            return Page(entries=_cap(kept, limit), complete=False)
+        offset = nxt
+
+
+def _cap(entries: list[MutableJSON], limit: int | None) -> list[MutableJSON]:
+    """Trim ``entries`` to ``limit`` (no-op when ``limit`` is ``None``)."""
+    return entries if limit is None else entries[:limit]
+
+
+async def _s2_request(
+    do_fetch: Callable[[], bytes],
+    *,
+    what: str,
+) -> MutableJSON | list[object] | ToolResult:
+    """Run one gated, backed-off S2 request; parse JSON or return an error.
+
+    Shared core of :func:`s2_get` and :func:`s2_batch`: acquires the
+    cross-process rate gate so the 1 req/sec key is honored fleet-wide, and
+    retries 429s with exponential backoff (which S2 requires).
+
+    Args:
+      do_fetch: Thunk performing the blocking HTTP call, returning bytes.
+      what: Short request label used in error messages.
+
+    Returns:
+      data: Parsed JSON (object or array), or a ``ToolResult`` error on
+        404 / exhausted-429 / other HTTP failures.
+
+    """
+    raw = await _s2_attempt(do_fetch)
+    if isinstance(raw, FetchError):
+        return _s2_error_result(raw, what)
+    try:
+        return cast("MutableJSON | list[object]", json.loads(raw))
+    except json.JSONDecodeError as e:
+        return ToolResult(
+            call_id="",
+            content=f"Semantic Scholar returned invalid JSON for {what}: {e}",
+            is_error=True,
+        )
+
+
+@functools.cache
+def _s2_gate() -> TokenBucketRateLimiter:
+    """Return the process-wide S2 rate gate, constructed on first use.
+
+    S2's authenticated tier is one request/second, cumulative across every
+    endpoint and every holder of the key. Multiple sagent processes share one
+    key, so the gate serializes across processes (not just coroutines) via a
+    lockfile. ``S2_MIN_INTERVAL`` (env, default 1.0s) sets the spacing.
+
+    Built lazily (not at import) so importing this module has no filesystem
+    side effect -- tests stay hermetic -- and so an env override set before
+    first use takes effect. The wall-clock source is mandatory with
+    ``FileStore``: the persisted timestamp is compared across processes,
+    which share no monotonic epoch.
+
+    Returns:
+      gate: The shared cross-process token-bucket limiter.
+
+    """
+    return TokenBucketRateLimiter(
+        max_calls=1,
+        per_seconds=float(os.environ.get("S2_MIN_INTERVAL", "1.0")),
+        clock=SystemClock(source=time.time),
+        store=FileStore(Path.home() / ".sagent" / "s2_ratelimit.lock"),
+    )
 
 
 def s2_paper_to_record(

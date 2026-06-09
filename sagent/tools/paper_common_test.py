@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import patch
 
 import asyncio
+import json
+
+import pytest
 
 from sagent.lib.json import MutableJSON
+from sagent.lib.ratelimit import FileStore, TokenBucketRateLimiter
 from sagent.lib.web.fetch import FetchError
+from sagent.tools import paper_common
 from sagent.tools.paper_common import (
     S2_BASE,
     AuthorRecord,
     PaperRecord,
-    clamp_limit,
     format_author_block,
     format_author_line,
     format_block,
@@ -23,17 +27,39 @@ from sagent.tools.paper_common import (
     normalize_id,
     openalex_reconstruct_abstract,
     papers_cache_dir,
+    s2_batch,
     s2_get,
+    s2_paginate,
     s2_paper_to_record,
     s2_wire_id,
     short_id,
     truncation_notice,
+    validate_limit,
 )
 from sagent.types.runtime import ToolResult
 
 
-if TYPE_CHECKING:
-    import pytest
+@pytest.fixture(autouse=True)
+def _neutralize_rate_gate(  # pyright: ignore[reportUnusedFunction] -- autouse fixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point the module S2 gate at a fresh tmp-backed limiter, no waiting.
+
+    Keeps ``s2_get`` tests hermetic and instant: a per-test lockfile (no
+    cross-test coupling) and a stubbed sleep so a drained bucket never
+    blocks the suite.
+    """
+    gate = TokenBucketRateLimiter(
+        max_calls=1,
+        per_seconds=1.0,
+        store=FileStore(tmp_path / "s2.lock"),
+    )
+
+    async def _no_wait() -> None:
+        return None
+
+    monkeypatch.setattr(gate, "acquire_async", _no_wait)
+    monkeypatch.setattr(paper_common, "_s2_gate", lambda: gate)
 
 
 def test_short_id_short_unchanged() -> None:
@@ -45,22 +71,6 @@ def test_short_id_truncates_long() -> None:
     result = short_id(s)
     assert result.startswith("…")
     assert len(result) == 39
-
-
-def test_clamp_limit_none_uses_default() -> None:
-    assert clamp_limit(None, default=42) == 42
-
-
-def test_clamp_limit_under_min_clamps_to_1() -> None:
-    assert clamp_limit(0, default=10) == 1
-
-
-def test_clamp_limit_over_max_clamps_to_1000() -> None:
-    assert clamp_limit(99_999, default=10) == 1000
-
-
-def test_clamp_limit_passes_through() -> None:
-    assert clamp_limit(50, default=100) == 50
 
 
 def test_normalize_id_doi_bare() -> None:
@@ -109,6 +119,21 @@ def test_normalize_id_arxiv_pdf_url_strips_pdf() -> None:
         "arxiv",
         "2106.15928",
     )
+
+
+def test_normalize_id_arxiv_prefix_garbage_rejected() -> None:
+    # A prefix-stripped value must still match the arXiv shape, not pass
+    # through unvalidated.
+    result = normalize_id("arxiv:not-an-id")
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
+def test_normalize_id_prefix_pins_family() -> None:
+    # A ``doi:``-prefixed arXiv-shaped value must not be re-read as arXiv,
+    # and vice versa -- the prefix pins the family.
+    assert isinstance(normalize_id("doi:2106.15928"), ToolResult)
+    assert isinstance(normalize_id("arxiv:10.1145/foo"), ToolResult)
 
 
 def test_normalize_id_empty_returns_error() -> None:
@@ -400,6 +425,208 @@ def test_s2_get_other_http_error() -> None:
         result = asyncio.run(s2_get("/p", {}))
     assert isinstance(result, ToolResult)
     assert "500" in result.content
+
+
+def test_s2_batch_aligns_results_with_input_ids() -> None:
+    # S2 returns an array positionally aligned with the request, null per miss.
+    payload = b'[{"title": "A"}, null, {"title": "C"}]'
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        out = asyncio.run(s2_batch(["DOI:a", "DOI:b", "DOI:c"], "title"))
+    assert not isinstance(out, ToolResult)
+    assert len(out) == 3
+    first = out[0]
+    assert first is not None
+    assert first["title"] == "A"
+    assert out[1] is None
+    third = out[2]
+    assert third is not None
+    assert third["title"] == "C"
+
+
+def test_s2_batch_empty_returns_empty_list() -> None:
+    out = asyncio.run(s2_batch([], "title"))
+    assert out == []
+
+
+def test_s2_batch_posts_json_body() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b"[{}]"
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(s2_batch(["DOI:a"], "title"))
+    assert captured["method"] == "POST"
+    assert captured["json"] == {"ids": ["DOI:a"]}
+
+
+def test_s2_paginate_walks_cursor_until_limit_matches() -> None:
+    # Two pages; the filter keeps only even ids. Paginate must follow `next`
+    # and gather `limit` matches that span both pages, not stop at page 1.
+    pages = [
+        json.dumps(
+            {"offset": 0, "next": 3, "data": [{"n": 1}, {"n": 2}, {"n": 3}]}
+        ).encode(),
+        json.dumps({"offset": 3, "data": [{"n": 4}, {"n": 6}]}).encode(),
+    ]
+    calls = {"i": 0}
+
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        body = pages[calls["i"]]
+        calls["i"] += 1
+        return body
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        page = asyncio.run(
+            s2_paginate("/x", {}, limit=3, keep=lambda e: cast(int, e["n"]) % 2 == 0)
+        )
+    assert not isinstance(page, ToolResult)
+    assert calls["i"] == 2  # walked both pages
+    assert [cast(int, e["n"]) for e in page.entries] == [2, 4, 6]
+    assert page.complete  # cursor exhausted (page 2 had no `next`)
+
+
+def test_s2_paginate_stops_at_limit_marks_incomplete() -> None:
+    # First page already yields more than `limit` matches; must stop and
+    # report incomplete (more may exist) without fetching further.
+    page1 = json.dumps(
+        {"offset": 0, "next": 3, "data": [{"n": 1}, {"n": 2}, {"n": 3}]}
+    ).encode()
+    calls = {"i": 0}
+
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        calls["i"] += 1
+        return page1
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        page = asyncio.run(s2_paginate("/x", {}, limit=2))
+    assert not isinstance(page, ToolResult)
+    assert calls["i"] == 1
+    assert len(page.entries) == 2
+    assert not page.complete
+
+
+def test_s2_paginate_trims_exhausted_final_page_to_limit() -> None:
+    # PAG-002: an exhausted page (no `next`) with MORE rows than `limit`
+    # must still trim to `limit` -- the over-delivery bug.
+    payload = b'{"data": [{"n": 1}, {"n": 2}, {"n": 3}]}'
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        page = asyncio.run(s2_paginate("/x", {}, limit=2))
+    assert not isinstance(page, ToolResult)
+    assert [cast(int, e["n"]) for e in page.entries] == [1, 2]
+    assert page.complete  # cursor exhausted
+
+
+def test_s2_paginate_limit_none_incomplete_when_next_exists() -> None:
+    # PAG-001: limit=None fetches one page; if S2 sent a `next` cursor there
+    # is more, so `complete` must be False (no silent truncation).
+    payload = b'{"next": 1000, "data": [{"n": 1}]}'
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        page = asyncio.run(s2_paginate("/x", {}, limit=None))
+    assert not isinstance(page, ToolResult)
+    assert not page.complete
+
+
+def test_s2_paginate_limit_none_complete_when_exhausted() -> None:
+    payload = b'{"data": [{"n": 1}]}'  # no `next` -> exhausted
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        page = asyncio.run(s2_paginate("/x", {}, limit=None))
+    assert not isinstance(page, ToolResult)
+    assert page.complete
+
+
+def test_s2_paginate_deep_page_error_stops_gracefully() -> None:
+    # When S2 refuses a deeper page (its own depth ceiling) AFTER we have
+    # matches, stop with complete=False -- rely on S2's error, not a mirrored
+    # offset constant.
+    calls = {"i": 0}
+
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        calls["i"] += 1
+        if calls["i"] == 1:
+            return b'{"offset": 0, "next": 9000, "data": [{"n": 1}, {"n": 2}]}'
+        raise FetchError(
+            url="u", status=400, headers={}, body=b"offset + limit must be < 10000"
+        )
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        page = asyncio.run(s2_paginate("/x", {}, limit=1_000_000))
+    assert not isinstance(page, ToolResult)
+    assert len(page.entries) == 2
+    assert not page.complete  # S2 said no more; honest partial
+
+
+def test_s2_paginate_404_message_matches_s2_get() -> None:
+    # D1: one shared error renderer -> s2_get and s2_paginate report a 404
+    # with the same "Not found" wording, not divergent messages.
+    err = FetchError(url="u", status=404, headers={}, body=b"")
+    with patch("sagent.tools.paper_common.fetch", side_effect=err):
+        via_get = asyncio.run(s2_get("/p", {}))
+        via_page = asyncio.run(s2_paginate("/p", {}, limit=10))
+    assert isinstance(via_get, ToolResult)
+    assert isinstance(via_page, ToolResult)
+    assert "Not found" in via_get.content
+    assert "Not found" in via_page.content
+
+
+def test_s2_paginate_transient_error_mid_walk_surfaces() -> None:
+    # A non-400 error on a later page (e.g. 500) is a real failure, NOT the
+    # depth ceiling -- it must surface, not masquerade as a graceful partial.
+    calls = {"i": 0}
+
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        calls["i"] += 1
+        if calls["i"] == 1:
+            return b'{"offset": 0, "next": 1000, "data": [{"n": 1}]}'
+        raise FetchError(url="u", status=500, headers={}, body=b"server boom")
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        result = asyncio.run(s2_paginate("/x", {}, limit=1_000_000))
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "500" in result.content
+
+
+def test_s2_paginate_first_page_error_surfaces() -> None:
+    # An error on the FIRST page (no matches yet) is a real failure, surfaced.
+    err = FetchError(url="u", status=400, headers={}, body=b"bad request")
+    with patch("sagent.tools.paper_common.fetch", side_effect=err):
+        result = asyncio.run(s2_paginate("/x", {}, limit=10))
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
+def test_s2_paginate_non_advancing_cursor_terminates() -> None:
+    # A server regression where `next` does not advance must not loop forever.
+    calls = {"i": 0}
+
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        calls["i"] += 1
+        return b'{"offset": 5, "next": 5, "data": [{"n": 1}]}'  # next == offset
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        page = asyncio.run(
+            s2_paginate("/x", {}, limit=1_000_000, keep=lambda _e: False)
+        )
+    assert not isinstance(page, ToolResult)
+    assert not page.complete
+    assert calls["i"] <= 3  # bailed on non-advancing cursor, did not spin
+
+
+def test_validate_limit_rejects_non_positive() -> None:
+    assert isinstance(validate_limit(0), ToolResult)
+    assert isinstance(validate_limit(-3), ToolResult)
+
+
+def test_validate_limit_passes_none_and_positive() -> None:
+    assert validate_limit(None) is None
+    assert validate_limit(5) == 5
 
 
 def test_s2_get_uses_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
