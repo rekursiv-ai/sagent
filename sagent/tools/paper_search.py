@@ -23,6 +23,7 @@ from sagent.lib.json import JSON, MutableJSON, bool_val, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
+    S2_PAPER_FIELDS_STR,
     PaperRecord,
     format_record,
     openalex_reconstruct_abstract,
@@ -42,22 +43,6 @@ _CACHE_TTL_SEC = 15 * 60
 
 _OPENALEX_PER_PAGE_MAX = 200
 
-# S2 field list (shared with paperdetails - kept in-sync manually; duplicating
-# avoids a cross-module import cycle if paperdetails imports us later).
-_S2_SEARCH_FIELDS = ",".join(
-    (
-        "paperId",
-        "externalIds",
-        "title",
-        "abstract",
-        "authors",
-        "year",
-        "venue",
-        "citationCount",
-        "referenceCount",
-        "openAccessPdf",
-    ),
-)
 
 # OpenAlex select - request only fields we use to keep responses small.
 _OPENALEX_SELECT = ",".join(
@@ -105,7 +90,7 @@ async def _search_s2(
     """Query Semantic Scholar and return (records, total) or an error."""
     params: dict[str, str | int] = {
         "query": query,
-        "fields": _S2_SEARCH_FIELDS,
+        "fields": S2_PAPER_FIELDS_STR,
     }
     if limit is not None:
         params["limit"] = limit

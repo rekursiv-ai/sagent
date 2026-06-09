@@ -1,18 +1,26 @@
 """Shared helpers for the Paper* tool family.
 
 Used by :mod:`.paper_details`, :mod:`.paper_search`, :mod:`.paper_author`,
-and :mod:`.paper_fetch`:
+and :mod:`.paper_fetch`, grouped by concern:
 
-- :func:`normalize_id` - detect DOI vs arXiv shape, return canonical form.
-- :class:`PaperRecord` / :class:`AuthorRecord` - common record shapes
-  across backends (S2, OpenAlex).
-- :func:`format_record` / :func:`format_block` / :func:`format_author_line`
-  / :func:`format_author_block` - list-line and metadata block renderings;
-  agent consumes text, not JSON.
-- :func:`openalex_reconstruct_abstract` - OpenAlex ships abstracts as
-  an inverted index (word → token positions); fold back to plain text.
-- :data:`S2_BASE`, :func:`s2_get`, :func:`s2_paper_to_record`
-  - shared Semantic Scholar Graph API client + record conversion.
+- **Identifiers** -- :func:`normalize_id` (detect DOI vs arXiv shape, return
+  canonical form), :func:`s2_wire_id`, :func:`id_slug`, :func:`short_id`.
+- **Tool arguments** -- :func:`resolve_id_args` / :func:`parse_optional_ids`
+  (validate the ``ids`` list), :func:`validate_limit`,
+  :func:`year_in_range` (shared client-side year filter),
+  :func:`summary_ids`.
+- **Records** -- :class:`PaperRecord` / :class:`AuthorRecord` (common shapes
+  across S2 and OpenAlex), :func:`s2_paper_to_record`,
+  :func:`openalex_reconstruct_abstract` (fold OpenAlex's inverted-index
+  abstract back to text).
+- **Rendering** -- :func:`format_record` / :func:`format_block` /
+  :func:`format_author_line` / :func:`format_author_block` /
+  :func:`truncation_notice`; the agent consumes text, not JSON.
+- **S2 client** -- :data:`S2_BASE`, :data:`S2_PAPER_FIELDS` /
+  :data:`S2_PAPER_FIELDS_STR`, :func:`s2_get`, :func:`s2_batch`,
+  :func:`s2_paginate` (cursor walk, returning a :class:`Page`). The
+  cross-process rate gate and 429 backoff live here too, behind these
+  calls.
 """
 
 from __future__ import annotations
@@ -33,6 +41,29 @@ from sagent.lib.json import MutableJSON
 from sagent.lib.ratelimit import FileStore, SystemClock, TokenBucketRateLimiter
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.types.runtime import ToolResult
+
+
+def year_in_range(year: object, *, year_from: int | None, year_to: int | None) -> bool:
+    """Whether ``year`` is a known int within the inclusive bounds.
+
+    Shared by the client-side year filters in PaperDetails and PaperAuthor.
+    A missing or non-int year is treated as out of range -- S2 omits the
+    field on undated works, which a year filter should exclude.
+
+    Args:
+      year: Raw ``year`` value from an S2 record (may be any JSON type).
+      year_from: Inclusive lower bound, or ``None`` for no lower bound.
+      year_to: Inclusive upper bound, or ``None`` for no upper bound.
+
+    Returns:
+      in_range: True when ``year`` is an int satisfying both bounds.
+
+    """
+    if not isinstance(year, int):
+        return False
+    if year_from is not None and year < year_from:
+        return False
+    return not (year_to is not None and year > year_to)
 
 
 def short_id(raw: str) -> str:
@@ -483,6 +514,23 @@ def truncation_notice(shown: int, total: int) -> str:
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_TIMEOUT = 60.0
+
+# The S2 paper fields every Paper* tool requests. Shared so the set stays in
+# sync across tools; ``s2_paper_to_record`` consumes exactly these. Nested
+# refs/cites endpoints prefix each with ``citedPaper.`` / ``citingPaper.``.
+S2_PAPER_FIELDS: tuple[str, ...] = (
+    "paperId",
+    "externalIds",
+    "title",
+    "abstract",
+    "authors",
+    "year",
+    "venue",
+    "citationCount",
+    "referenceCount",
+    "openAccessPdf",
+)
+S2_PAPER_FIELDS_STR = ",".join(S2_PAPER_FIELDS)
 
 # S2 now *requires* exponential backoff on 429 (API release notes); retry
 # a throttled request a few times before surfacing the error to the agent.

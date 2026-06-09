@@ -51,6 +51,22 @@ def _looks_like_pdf(content: bytes) -> bool:
     return len(content) >= _MIN_PDF_BYTES and content[:5] == _PDF_MAGIC
 
 
+def _is_cached_pdf(path: Path) -> bool:
+    """True if ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
+    try:
+        with path.open("rb") as f:
+            return _looks_like_pdf(f.read(_MIN_PDF_BYTES))
+    except OSError:
+        return False
+
+
+def _oa_url(paper: MutableJSON) -> str | None:
+    """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record."""
+    oa = cast(MutableJSON, paper.get("openAccessPdf") or {})
+    url = oa.get("url")
+    return url if isinstance(url, str) and url else None
+
+
 def _download_pdf(url: str, *, retries: int = _DOWNLOAD_RETRIES) -> bytes:
     """Download a URL, validate it looks like a PDF, return bytes."""
     body = fetch(url, retries=retries, timeout_sec=_DOWNLOAD_TIMEOUT)
@@ -90,9 +106,7 @@ async def _s2_oa_lookup(kind: IdType, canonical: str) -> str | None:
     )
     if isinstance(data, ToolResult):
         return None
-    oa = cast(MutableJSON, data.get("openAccessPdf") or {})
-    url = oa.get("url")
-    return url if isinstance(url, str) and url else None
+    return _oa_url(data)
 
 
 async def _fetch_open_access(
@@ -310,7 +324,7 @@ class PaperFetch:
         """
         slug = id_slug(kind, canonical)
         cache_path = self._cache_dir / f"{slug}.pdf"
-        if cache_path.exists() and cache_path.stat().st_size > _MIN_PDF_BYTES:
+        if _is_cached_pdf(cache_path):
             return ToolResult(call_id="", content=f"Cached: {cache_path}")
         result = await _fetch_cascade(
             kind, canonical, oa_url=oa_url, oa_looked_up=oa_looked_up
@@ -340,12 +354,4 @@ class PaperFetch:
         papers = await s2_batch(wire_ids, "openAccessPdf")
         if isinstance(papers, ToolResult):
             return None
-        urls: list[str | None] = []
-        for data in papers:
-            if data is None:
-                urls.append(None)
-                continue
-            oa = cast(MutableJSON, data.get("openAccessPdf") or {})
-            url = oa.get("url")
-            urls.append(url if isinstance(url, str) and url else None)
-        return urls
+        return [_oa_url(p) if p is not None else None for p in papers]

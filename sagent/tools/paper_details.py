@@ -21,6 +21,8 @@ import cachetools
 from sagent.lib.json import JSON, MutableJSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
+    S2_PAPER_FIELDS,
+    S2_PAPER_FIELDS_STR,
     IdType,
     format_block,
     format_record,
@@ -33,33 +35,18 @@ from sagent.tools.paper_common import (
     s2_wire_id,
     summary_ids,
     validate_limit,
+    year_in_range,
 )
 from sagent.types.runtime import ToolResult
 
 
 _CACHE_TTL_SEC = 15 * 60
 
-# Field set requested from S2 per paper. Nested refs/cites endpoints
-# prepend this with ``citedPaper.`` / ``citingPaper.`` dots.
-_PAPER_FIELDS: tuple[str, ...] = (
-    "paperId",
-    "externalIds",
-    "title",
-    "abstract",
-    "authors",
-    "year",
-    "venue",
-    "citationCount",
-    "referenceCount",
-    "openAccessPdf",
-)
-_PAPER_FIELDS_STR = ",".join(_PAPER_FIELDS)
-
 _REF_FIELDS_STR = ",".join(
-    ("isInfluential", *(f"citedPaper.{f}" for f in _PAPER_FIELDS)),
+    ("isInfluential", *(f"citedPaper.{f}" for f in S2_PAPER_FIELDS)),
 )
 _CIT_FIELDS_STR = ",".join(
-    ("isInfluential", *(f"citingPaper.{f}" for f in _PAPER_FIELDS)),
+    ("isInfluential", *(f"citingPaper.{f}" for f in S2_PAPER_FIELDS)),
 )
 
 
@@ -307,7 +294,7 @@ class PaperDetails:
         """Fetch and format single-paper metadata."""
         data = await s2_get(
             f"/paper/{wire_id}",
-            {"fields": _PAPER_FIELDS_STR},
+            {"fields": S2_PAPER_FIELDS_STR},
         )
         if isinstance(data, ToolResult):
             return data
@@ -333,7 +320,7 @@ class PaperDetails:
             if isinstance(parsed, ToolResult):
                 return parsed
             wire_ids.append(s2_wire_id(*parsed))
-        papers = await s2_batch(wire_ids, _PAPER_FIELDS_STR)
+        papers = await s2_batch(wire_ids, S2_PAPER_FIELDS_STR)
         if isinstance(papers, ToolResult):
             return papers
         blocks: list[str] = []
@@ -385,11 +372,10 @@ class PaperDetails:
         def keep(entry: MutableJSON) -> bool:
             if influential_only and not entry.get("isInfluential"):
                 return False
-            if year_from is not None:
-                y = _entry_year(entry, "citingPaper")
-                if y is None or y < year_from:
-                    return False
-            return True
+            if year_from is None:
+                return True
+            inner = cast(MutableJSON, entry.get("citingPaper") or {})
+            return year_in_range(inner.get("year"), year_from=year_from, year_to=None)
 
         filter_active = influential_only or (year_from is not None)
         if filter_active:
@@ -413,13 +399,6 @@ class PaperDetails:
             abstract_chars=abstract_chars,
             complete=page.complete,
         )
-
-
-def _entry_year(entry: MutableJSON, inner_key: str) -> int | None:
-    """Extract ``inner_key.year`` as an int (or ``None`` when missing)."""
-    inner = cast(MutableJSON, entry.get(inner_key) or {})
-    y = inner.get("year")
-    return int(y) if isinstance(y, int) else None
 
 
 def _render_edge_list(

@@ -334,6 +334,25 @@ class TokenBucketRateLimiter:
         Returns:
           wait: Seconds the caller must sleep before its token is earned.
 
+        Note on reading ``now`` before the lock (a recurring review question):
+        capturing ``now`` outside ``transact`` looks racy -- two callers can
+        read near-identical ``now`` values, then commit in lock-serialized
+        order. It is nonetheless correct, because ``updated`` is set to
+        ``now + wait`` and ``wait`` absorbs any staleness:
+
+        - If caller A's ``now`` is *earlier* than the ``updated`` already on
+          disk (because B committed a future reservation first), then
+          ``now - updated`` is negative, so A's ``tokens`` only shrink, A's
+          ``wait`` only grows, and A commits ``updated = now + wait`` which is
+          >= the value it read. ``updated`` never moves backward; the bucket
+          is never over-credited.
+        - Reading ``now`` *inside* the lock would tighten spacing by at most
+          the lock-hold time (microseconds here), not fix a correctness bug.
+
+        So the only way to over-grant is a wall clock that steps backward
+        (e.g. NTP), which is out of scope -- ``FileStore`` already requires a
+        well-behaved wall clock to compare timestamps across processes.
+
         """
         now = self._clock.time()
         wait = 0.0
@@ -345,6 +364,9 @@ class TokenBucketRateLimiter:
                 self._capacity, tokens + (now - updated) * self._refill_per_sec
             )
             wait = max(0.0, (1.0 - tokens) / self._refill_per_sec)
+            # ``now + wait`` is monotonic non-decreasing even when ``now`` is a
+            # stale early read (see the method docstring), so ``updated`` never
+            # regresses and the budget cannot be exceeded.
             tokens += wait * self._refill_per_sec - 1.0
             return tokens, now + wait
 

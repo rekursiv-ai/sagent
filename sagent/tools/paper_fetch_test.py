@@ -161,6 +161,22 @@ def test_min_pdf_bytes_threshold_check(tmp_path: Path) -> None:
     assert result.is_error
 
 
+def test_cache_rejects_non_pdf_file(tmp_path: Path) -> None:
+    """A cached file large enough but lacking the %PDF- magic is not served.
+
+    The cache check must use the same magic-byte bar as fresh downloads, so a
+    corrupted/truncated cache entry re-triggers the fetch cascade.
+    """
+    cache_file = tmp_path / "arxiv_1234.56789.pdf"
+    _ = cache_file.write_bytes(b"<html>" + b"x" * 300)  # big but not a PDF
+    err = FetchError(url="u", status=500, headers={}, body=b"")
+    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+        result = asyncio.run(
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
+        )
+    assert result.is_error  # not served as "Cached:"
+
+
 def test_run_ids_batches_oa_lookup(tmp_path: Path) -> None:
     """'ids' resolves OA URLs in ONE batched S2 call, then downloads each."""
     batch_array = json.dumps(

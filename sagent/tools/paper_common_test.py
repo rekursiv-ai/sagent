@@ -35,6 +35,7 @@ from sagent.tools.paper_common import (
     short_id,
     truncation_notice,
     validate_limit,
+    year_in_range,
 )
 from sagent.types.runtime import ToolResult
 
@@ -627,6 +628,16 @@ def test_validate_limit_rejects_non_positive() -> None:
 def test_validate_limit_passes_none_and_positive() -> None:
     assert validate_limit(None) is None
     assert validate_limit(5) == 5
+
+
+def test_year_in_range() -> None:
+    assert year_in_range(2021, year_from=2020, year_to=2022)
+    assert not year_in_range(2019, year_from=2020, year_to=None)
+    assert not year_in_range(2023, year_from=None, year_to=2022)
+    assert year_in_range(2021, year_from=None, year_to=None)
+    # Non-int / missing year is out of range (undated works excluded).
+    assert not year_in_range(None, year_from=2020, year_to=None)
+    assert not year_in_range("2021", year_from=None, year_to=None)
 
 
 def test_s2_get_uses_api_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
