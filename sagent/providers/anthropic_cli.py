@@ -604,6 +604,16 @@ class _AnthropicCLIModel:
             argv,
             env=_anthropic_subprocess_env(tmpdir),
             tmpdir=tmpdir,
+            # ``claude --print --output-format stream-json`` emits ONE
+            # NDJSON record per content block; a single Read of a large
+            # file echoes the file's content verbatim into one line
+            # (40+ KiB tool results are routine). Subproc's stock 64 KiB
+            # per-line cap strands ``readline()`` with "ValueError:
+            # Separator is found, but chunk is longer than limit" --
+            # diagnosed live 2026-06-03 after back-to-back ~41 KiB +
+            # ~22 KiB file reads tripped it. 16 MiB is comfortably above
+            # any single stream-json record while keeping memory bounded.
+            stream_limit=16 * 1024 * 1024,
         )
         self._warming_proc = proc
         try:

@@ -39,6 +39,45 @@ async def test_write_and_read_json_round_trip(tmp_path: Path) -> None:
     del tmp_path
 
 
+@pytest.mark.asyncio
+async def test_stream_limit_kwarg_handles_record_larger_than_default_buffer(
+    tmp_path: Path,
+) -> None:
+    """``stream_limit=`` raises the per-line cap above asyncio's 64 KiB.
+
+    ``Subproc.read_line()`` uses ``StreamReader.readline()``, which
+    defaults to a 64 KiB per-line buffer and raises ``ValueError:
+    Separator is found, but chunk is longer than limit`` for larger
+    lines. The ``claude --print --output-format stream-json``
+    subprocess emits one NDJSON record per content block; reading a
+    large file (the failure mode TL diagnosed live 2026-06-03 with
+    back-to-back 41 KiB + 22 KiB worklog threads) easily exceeds
+    64 KiB on a single line — so the AnthropicCLI provider passes a
+    16 MiB ``stream_limit``. The default stays at asyncio's 64 KiB:
+    existing callers see no behaviour change.
+    """
+    payload = {"big": "x" * (250_000)}  # one record ~250 KiB
+    proc = Subproc(
+        ["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        stream_limit=16 * 1024 * 1024,
+    )
+    await proc.start()
+    await proc.write_line(json.dumps(payload))
+    assert proc._proc is not None
+    assert proc._proc.stdin is not None
+    proc._proc.stdin.close()
+    msg = await proc.read_json_line()
+    assert msg == payload
+    await proc.close()
+    del tmp_path
+
+
+def test_stream_limit_defaults_to_asyncio_64k() -> None:
+    """No ``stream_limit`` → the stock 64 KiB cap (no behaviour change)."""
+    proc = Subproc(["true"])
+    assert proc._stream_limit == 64 * 1024
+
+
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_read_json_line_skips_non_json_when_requested() -> None:

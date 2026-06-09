@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 _STDERR_TAIL_LINES = 100
 _TERMINATE_GRACE_SEC = 2.0
 _READ_IDLE_TIMEOUT_SEC = 60.0
+# asyncio.StreamReader's stock per-line buffer (64 KiB). Kept as the
+# default so existing callers see no behaviour change; providers whose
+# wire protocol carries large single-line payloads pass a higher cap.
+_DEFAULT_STREAM_LIMIT = 64 * 1024
 
 
 class SubprocessTransportError(RuntimeError):
@@ -51,6 +55,11 @@ class Subproc:
           for the wrapper to clean.
       cwd: Working directory for the child. ``None`` inherits.
       read_timeout_sec: Maximum idle seconds while waiting for one stdout line.
+      stream_limit: Per-line buffer cap (bytes) for the child's stdout
+          ``asyncio.StreamReader``. Defaults to asyncio's 64 KiB. A line
+          longer than the cap strands ``readline()`` with ``ValueError:
+          Separator is found, but chunk is longer than limit`` — raise it
+          for protocols that put large payloads on a single NDJSON line.
 
     """
 
@@ -62,12 +71,14 @@ class Subproc:
         tmpdir: Path | None = None,
         cwd: Path | None = None,
         read_timeout_sec: float = _READ_IDLE_TIMEOUT_SEC,
+        stream_limit: int = _DEFAULT_STREAM_LIMIT,
     ) -> None:
         self._argv = argv
         self._env = env
         self._tmpdir = tmpdir
         self._cwd = cwd
         self._read_timeout_sec = read_timeout_sec
+        self._stream_limit = stream_limit
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._stderr_task: asyncio.Task[None] | None = None
@@ -88,6 +99,7 @@ class Subproc:
             stderr=asyncio.subprocess.PIPE,
             env=self._env,
             cwd=str(self._cwd) if self._cwd is not None else None,
+            limit=self._stream_limit,
         )
         self._stderr_task = asyncio.create_task(self._drain_stderr())
         self._stderr_task.add_done_callback(
