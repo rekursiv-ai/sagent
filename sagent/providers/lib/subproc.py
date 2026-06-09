@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import shutil
+import signal
 
 from sagent.lib.json import MutableJSON
 from sagent.types.exceptions import log_task_exception
@@ -218,6 +219,34 @@ class Subproc:
                 logger.debug("subprocess close: stderr drain raised: %s", exc)
         if self._tmpdir is not None and self._tmpdir.exists():
             shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def interrupt(self) -> bool:
+        """Send SIGINT to the subprocess; Ctrl-C semantic for the wrapped CLI.
+
+        Returns True if a live subprocess was signalled, False otherwise
+        (already exited, never started, or already closed). Non-blocking:
+        the signal is delivered, and the subprocess is expected to exit
+        on its own; callers needing to wait should consume the next
+        ``read_json_line`` (which will raise ``SubprocessTransportError``
+        once the subprocess closes its stdout).
+
+        Empirical: ``claude --print`` aborts its current generation on
+        SIGINT and exits without flushing a terminal ``result`` event,
+        so the provider's ``stream()`` resolves as ``ModelResponseError``
+        on the runtime side and the hot-spare layer respawns the next
+        time a turn is requested. Partial assistant text from the
+        cancelled turn is lost -- intentional, since the caller is
+        preempting precisely because that work is no longer wanted.
+        """
+        if self._closed:
+            return False
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return False
+        with contextlib.suppress(ProcessLookupError):
+            proc.send_signal(signal.SIGINT)
+            return True
+        return False
 
     @property
     def pid(self) -> int | None:

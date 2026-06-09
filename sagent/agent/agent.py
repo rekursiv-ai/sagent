@@ -173,6 +173,17 @@ class Agent:
       effort: Effort hint; passed through when supported.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
       persistent_retry: Enable persistent-mode backoff for 429/529.
+      preempt_in_flight: When True, a ``UserMessage`` or
+          ``AgentSendMessage`` arriving while ``model_call`` is in flight
+          additionally calls ``model.cancel_in_flight()`` (provider-side
+          SIGINT for CLI-driven providers) before buffering. Use with
+          CLI-driven providers like ``AnthropicCLI`` whose tool loops
+          run opaquely inside a subprocess and are otherwise
+          uninterruptible from sagent's runtime. The cancelled turn
+          resolves as ``ModelResponseError``; partial assistant text is
+          lost (intentional — caller is preempting precisely because
+          that work is no longer wanted). Defaults False so existing
+          callers see no behaviour change.
 
     Side effects:
       Constructing with a non-``None`` ``model_spec`` (and
@@ -206,6 +217,8 @@ class Agent:
         persistent_retry: bool = False,
         provider_args: Mapping[str, object] | None = None,
         show_thinking: bool = True,
+        preempt_in_flight: bool = False,
+        coalesce_inbox: bool = True,
     ) -> None:
         if max_attempts < 1:
             # ``send_with_retry``'s loop ``break``s on ``attempt >=
@@ -306,6 +319,8 @@ class Agent:
             tools=agent_tools,
             compactor=self._agent_compactor,
             session_id=self._session_id,
+            preempt_in_flight=preempt_in_flight,
+            coalesce_inbox=coalesce_inbox,
         )
 
         self.runtime.before_tool_spawn = self._before_tool_spawn
@@ -2244,6 +2259,17 @@ class _AgentModel:
 
         """
         self._inner = inner
+
+    def cancel_in_flight(self) -> bool:
+        """Forward to the wrapped provider model if it supports cancel.
+
+        Returns False (silent no-op) for providers that don't expose the
+        method; runtime callers check ``callable(...)`` before invoking.
+        """
+        cancel = getattr(self._inner, "cancel_in_flight", None)
+        if not callable(cancel):
+            return False
+        return bool(cancel())
 
     async def stream(
         self,

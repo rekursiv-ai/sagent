@@ -78,6 +78,42 @@ def test_stream_limit_defaults_to_asyncio_64k() -> None:
     assert proc._stream_limit == 64 * 1024
 
 
+def test_interrupt_returns_false_before_start() -> None:
+    """``interrupt`` on a never-started Subproc is a safe no-op."""
+    proc = Subproc(["python3", "-c", "pass"])
+    assert proc.interrupt() is False
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_interrupt_signals_running_subprocess(tmp_path: Path) -> None:
+    """SIGINT to a python child running ``signal.pause()`` makes it exit on KeyboardInterrupt."""
+    proc = Subproc(["python3", "-c", "import signal, sys; signal.pause(); sys.exit(0)"])
+    await proc.start()
+    # Tiny grace so the child reaches signal.pause() before we interrupt.
+    await asyncio.sleep(0.1)
+    assert proc.is_alive
+    assert proc.interrupt() is True
+    # signal.pause() returns on SIGINT and Python translates the signal to
+    # KeyboardInterrupt, exit code 1 in default handlers.
+    assert proc._proc is not None
+    rc = await asyncio.wait_for(proc._proc.wait(), 5.0)
+    assert rc != 0
+    assert proc.interrupt() is False  # Already exited.
+    await proc.close()
+    del tmp_path
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_interrupt_returns_false_after_close() -> None:
+    """``interrupt`` after ``close`` is a no-op (idempotent guard)."""
+    proc = Subproc(["python3", "-c", "import time; time.sleep(60)"])
+    await proc.start()
+    await proc.close()
+    assert proc.interrupt() is False
+
+
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_read_json_line_skips_non_json_when_requested() -> None:

@@ -551,6 +551,41 @@ class _AnthropicCLIModel:
         """Model identifier passed to ``claude --model``."""
         return self._model_id
 
+    def cancel_in_flight(self) -> bool:
+        """SIGINT the active CLI subprocess to abort the current turn.
+
+        Returns True if a live subprocess was signalled, False otherwise
+        (idle, never started, or already closed). Non-blocking: callers
+        do not await termination here. The currently-awaiting ``stream``
+        call observes the subprocess closing its stdout and resolves as
+        a :class:`SubprocessTransportError`, which the runtime surfaces
+        as ``ModelResponseError``; the next ``stream`` call triggers
+        ``_hot_spare.respawn_after_transport_failure`` transparently.
+
+        The CLI subprocess does *not* emit a terminal ``result`` event
+        on SIGINT -- partial assistant text and token-usage telemetry
+        for the cancelled turn are lost. This is the intended behaviour
+        when the caller is preempting because the in-flight work is no
+        longer wanted; do not call this method to soft-pause a turn
+        that should resume.
+
+        Use case: peer-message preempt for CLI-driven providers. The
+        full CLI tool loop runs in-process inside the subprocess (see
+        ``providers/lib/mcp_bridge.py`` lines 16-20), so the runtime
+        cannot ``Detach``/``Kill`` individual tool calls; SIGINT to
+        the subprocess is the only mid-turn cancellation surface.
+        """
+        if self._hot_spare is not None:
+            active = self._hot_spare.active
+            if active is None:
+                return False
+            return active.interrupt()
+        # Session-persistence mode: HotSpare is bypassed; the active
+        # subprocess (if any) is on ``_active_proc``.
+        if self._active_proc is None:
+            return False
+        return self._active_proc.interrupt()
+
     @property
     def max_response_tokens(self) -> int:
         """Per-request output token cap from the profile."""

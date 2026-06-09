@@ -1919,6 +1919,42 @@ def test_serialize_for_stdin_user_passthrough() -> None:
     assert line["type"] == "user"
 
 
+def test_cancel_in_flight_returns_false_when_no_active_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No active hot-spare ⇒ ``cancel_in_flight`` returns False without raising."""
+    creds = _write_creds(tmp_path)
+    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    provider = AnthropicCLI.from_credentials()
+    model = provider.model("claude-opus-4-7")
+    # Hot spare has not been acquired -> ``active`` is None.
+    assert model._hot_spare.active is None
+    assert model.cancel_in_flight() is False
+
+
+def test_cancel_in_flight_signals_active_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Active hot-spare ⇒ ``cancel_in_flight`` forwards to ``Subproc.interrupt``."""
+    creds = _write_creds(tmp_path)
+    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    provider = AnthropicCLI.from_credentials()
+    model = provider.model("claude-opus-4-7")
+
+    class _FakeActiveSubproc:
+        def __init__(self) -> None:
+            self.interrupt_calls = 0
+
+        def interrupt(self) -> bool:
+            self.interrupt_calls += 1
+            return True
+
+    fake = _FakeActiveSubproc()
+    monkeypatch.setattr(model._hot_spare, "_active", fake)
+    assert model.cancel_in_flight() is True
+    assert fake.interrupt_calls == 1
+
+
 _ = ToolCall
 
 
