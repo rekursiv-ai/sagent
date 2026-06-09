@@ -607,6 +607,32 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     assert model._last_input_tokens == 96_003
 
 
+def test_seed_session_marks_prefix_synced() -> None:
+    """``seed_session``: the rehydration handshake after ``replay_tape``.
+
+    Declares the on-disk session JSONL already holds the first N tape
+    entries, so the next spawn resumes with ``--resume`` instead of
+    minting a new session, and the prefix is not re-fed via stdin.
+    Public API so host applications (e.g. the blackjax-ai-devs-channel
+    example) never touch provider-private attributes. No-op in
+    stateless mode.
+    """
+    provider = AnthropicCLI()
+    seeded = provider.model(
+        "claude-haiku-4-5",
+        session_id="deadbeef-1234-5678-9abc-deadbeef1234",
+    )
+    assert seeded.session_id == "deadbeef-1234-5678-9abc-deadbeef1234"
+    seeded.seed_session(42)
+    assert seeded._last_sent_index == 42
+    assert seeded._session_initialized is True
+
+    stateless = provider.model("claude-haiku-4-5")
+    assert stateless.session_id is None
+    stateless.seed_session(42)  # no session to seed → no-op
+    assert stateless._last_sent_index == 0
+
+
 def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
     """``AnthropicCLI.model(subprocess_read_timeout_sec=…)`` plumbs to the model.
 

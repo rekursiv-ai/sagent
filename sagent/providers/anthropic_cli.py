@@ -619,6 +619,40 @@ class _AnthropicCLIModel:
         return True
 
     @property
+    def session_id(self) -> str | None:
+        """Session UUID in session-persistence mode, ``None`` in stateless."""
+        return self._session_id
+
+    def seed_session(self, synced_entries: int) -> None:
+        """Declare the on-disk session JSONL already holds the tape prefix.
+
+        Host applications that rehydrate an agent's tape from the
+        session JSONL on restart (``parse_jsonl_to_messages`` →
+        ``repair_dangling_tool_calls`` → ``runtime.replay_tape``) must
+        tell the provider the disk and the tape now agree on a common
+        prefix of ``synced_entries`` tape entries, so that:
+
+        - the next spawn resumes the existing session with ``--resume``
+          instead of minting a new one with ``--session-id`` (which
+          would error: the UUID is already in use), and
+        - only entries appended AFTER the prefix are fed via stdin —
+          re-feeding the prefix would duplicate the conversation claude
+          already has on disk.
+
+        No-op in stateless mode (no session to seed).
+
+        Args:
+          synced_entries: Number of leading tape entries already
+              present in the on-disk JSONL (typically ``len(messages)``
+              right after ``replay_tape``).
+
+        """
+        if self._session_id is None:
+            return
+        self._last_sent_index = max(0, int(synced_entries))
+        self._session_initialized = True
+
+    @property
     def pricing(self) -> Pricing:
         """Per-million-token pricing for the active profile."""
         return self._profile.pricing
