@@ -34,6 +34,7 @@ from sagent.providers.anthropic_cli import (
     _session_jsonl_exists,
     _user_line,
 )
+from sagent.providers.anthropic_cli_session import session_jsonl_path
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.subproc import (
     Subproc,
@@ -350,14 +351,6 @@ def test_argv_denies_sendmessage_builtin() -> None:
     assert _denied(persistent)
 
 
-def _session_jsonl_path_for(home: Path, cwd: Path, session_id: str) -> Path:
-    """Mirror the CLI's encoded-cwd convention (test-local helper)."""
-    encoded = "".join(
-        ch if (ch.isalnum() or ch == "-") else "-" for ch in str(cwd)
-    )
-    return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
-
-
 def test_model_session_id_initialises_session_persistent_mode() -> None:
     """``AnthropicCLI.model(session_id=...)`` flips the mode flag,
     bypasses HotSpare, and starts uninitialised.
@@ -399,7 +392,7 @@ def test_session_jsonl_exists_is_cwd_aware(
     cwd_b.mkdir()
 
     # Record a session under deploy-a's encoded dir only.
-    jsonl_a = _session_jsonl_path_for(tmp_path / "home", cwd_a, sid)
+    jsonl_a = session_jsonl_path(sid, cwd=cwd_a)
     jsonl_a.parent.mkdir(parents=True, exist_ok=True)
     jsonl_a.write_text("{}\n")
 
@@ -444,6 +437,38 @@ def test_anthropic_subprocess_env_skip_history_off_when_persistent(
     """
     env = _anthropic_subprocess_env(tmp_path, persist_session=True)
     assert "CLAUDE_CODE_SKIP_PROMPT_HISTORY" not in env
+
+
+def test_anthropic_subprocess_env_disables_autocompact_in_materialize_mode(
+    tmp_path: Path,
+) -> None:
+    """v2.1-α: ``materialize_session=True`` must disable claude's auto-compact.
+
+    Rationale: in materialize mode sagent's tape is the source of truth
+    and overwrites the on-disk JSONL each turn. If claude auto-compacts
+    mid-session, it writes a ``system/compact_boundary`` to the file
+    that sagent's tape doesn't carry. The next materialize-overwrite
+    cycle would clobber claude's compaction, restoring the full
+    pre-compaction history and re-triggering the blocking_limit. So we
+    suppress claude's compactor and rely on sagent's own (which
+    records compactions as ``ContextSplice`` on the tape, which the
+    materializer renders as the resolved view).
+    """
+    # v2 baseline: session-persistent + NOT materialize → auto-compact ENABLED
+    env_v2 = _anthropic_subprocess_env(
+        tmp_path, persist_session=True, materialize_session=False
+    )
+    assert "DISABLE_AUTO_COMPACT" not in env_v2
+
+    # v2.1-α: session-persistent + materialize → auto-compact DISABLED
+    env_v21 = _anthropic_subprocess_env(
+        tmp_path, persist_session=True, materialize_session=True
+    )
+    assert env_v21.get("DISABLE_AUTO_COMPACT") == "1"
+
+    # Stateless mode (regardless of materialize flag) always disables
+    env_stateless = _anthropic_subprocess_env(tmp_path, persist_session=False)
+    assert env_stateless.get("DISABLE_AUTO_COMPACT") == "1"
 
 
 def test_build_model_response_normalizes_input_to_last_round() -> None:
@@ -653,8 +678,8 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # but the provider's counters still think 2 messages were sent.
     request = ModelRequest(
         system="terse",
-        messages=(),
-        tools=(),
+        messages=[],
+        tools=[],
     )
     response = await model.stream(
         request,
@@ -771,7 +796,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     )
     request = ModelRequest(
         system="x",
-        messages=(
+        messages=[
             UserMessage(text="old turn 1"),
             UserMessage(text="old turn 2"),
             UserMessage(text="old turn 3"),
@@ -780,8 +805,8 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
             msg_E1,
             msg_E2,
             msg_E3,
-        ),
-        tools=(),
+        ],
+        tools=[],
     )
 
     with pytest.raises(SubprocessTransportError):
@@ -928,14 +953,14 @@ def test_model_session_initialized_probes_disk_at_construction(
 
     # Stage 2: drop a session JSONL for OUR sid under THIS cwd's
     # encoded project dir -> session_initialized flips to True.
-    ours = _session_jsonl_path_for(tmp_path, workdir, sid)
+    ours = session_jsonl_path(sid, cwd=workdir)
     ours.parent.mkdir(parents=True, exist_ok=True)
     ours.write_text("{}\n", encoding="utf-8")
     model = provider.model("claude-haiku-4-5", session_id=sid)
     assert model._session_initialized is True
 
     # Stage 3: jsonl exists for a DIFFERENT uuid but not ours -> still False.
-    other_jsonl = _session_jsonl_path_for(tmp_path, workdir, other)
+    other_jsonl = session_jsonl_path(other, cwd=workdir)
     other_jsonl.write_text("{}\n", encoding="utf-8")
     ours.unlink()
     model = provider.model("claude-haiku-4-5", session_id=sid)
@@ -1289,6 +1314,7 @@ def test_should_respawn_triggers() -> None:
 
     # Pretend the hot spare has a live active subprocess; the test only
     # needs ``_active`` to be non-None to exercise the respawn branch.
+    assert model._hot_spare is not None
     model._hot_spare._active = cast(Subproc, _DummyActive())
     user = UserMessage(text="hi")
     request = ModelRequest(messages=[user])
