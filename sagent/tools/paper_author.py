@@ -32,6 +32,7 @@ from sagent.lib.json import (
 )
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
+    S2_PAPER_FIELDS_STR,
     AuthorRecord,
     format_author_block,
     format_author_line,
@@ -44,6 +45,7 @@ from sagent.tools.paper_common import (
     summary_ids,
     truncation_notice,
     validate_limit,
+    year_in_range,
 )
 from sagent.types.runtime import ToolResult
 
@@ -60,24 +62,6 @@ _AUTHOR_FIELDS_STR = ",".join(
         "hIndex",
         "citationCount",
         "paperCount",
-    ),
-)
-
-# Fields for papers returned from /author/{id}/papers. Papers come back
-# directly (not nested under citedPaper/citingPaper), so field names are
-# plain - no dot prefix.
-_PAPER_FIELDS_STR = ",".join(
-    (
-        "paperId",
-        "externalIds",
-        "title",
-        "abstract",
-        "authors",
-        "year",
-        "venue",
-        "citationCount",
-        "referenceCount",
-        "openAccessPdf",
     ),
 )
 
@@ -326,7 +310,7 @@ class PaperAuthor:
 
         cap = int(abstract_chars) if abstract_chars is not None else None
         if not q and not op and len(ids) > 1:
-            return await self._author_batch(ids, cap)
+            return await self._author_batch(ids)
         return await self._dispatch_author(
             q,
             ids[0] if ids else "",
@@ -337,21 +321,16 @@ class PaperAuthor:
             abstract_chars=cap,
         )
 
-    async def _author_batch(
-        self, author_ids: list[str], abstract_chars: int | None
-    ) -> ToolResult:
+    async def _author_batch(self, author_ids: list[str]) -> ToolResult:
         """Fetch metadata for many authors in one batched S2 request.
 
         Args:
           author_ids: Opaque S2 author ids.
-          abstract_chars: Unused (author metadata has no abstract); accepted
-            for signature symmetry with the paper tools.
 
         Returns:
           result: Author blocks in input order, or an error.
 
         """
-        del abstract_chars
         authors = await s2_batch(author_ids, _AUTHOR_FIELDS_STR, endpoint="author")
         if isinstance(authors, ToolResult):
             return authors
@@ -461,25 +440,22 @@ class PaperAuthor:
         """
 
         def keep(entry: MutableJSON) -> bool:
-            y = entry.get("year")
-            if not isinstance(y, int):
-                return False
-            if year_from is not None and y < year_from:
-                return False
-            return not (year_to is not None and y > year_to)
+            return year_in_range(
+                entry.get("year"), year_from=year_from, year_to=year_to
+            )
 
         filter_active = year_from is not None or year_to is not None
         if filter_active:
             page = await s2_paginate(
                 f"/author/{author_id}/papers",
-                {"fields": _PAPER_FIELDS_STR},
+                {"fields": S2_PAPER_FIELDS_STR},
                 limit=limit,
                 keep=keep,
             )
         else:
             page = await s2_paginate(
                 f"/author/{author_id}/papers",
-                {"fields": _PAPER_FIELDS_STR},
+                {"fields": S2_PAPER_FIELDS_STR},
                 limit=limit,
             )
         if isinstance(page, ToolResult):
