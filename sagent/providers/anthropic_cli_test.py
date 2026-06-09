@@ -5,25 +5,33 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import asyncio
 import inspect
 import json
+import os
 
 import pytest
 
+from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import MutableJSON
 from sagent.providers import anthropic_cli
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.anthropic_cli import (
     AnthropicCLI,
+    AnthropicCLIRetryableError,
+    _anthropic_subprocess_env,
     _AnthropicCLIModel,
     _build_anthropic_argv,
     _build_model_response,
     _dispatch_stream_event,
+    _extract_retry_after_ms,
     _hash_system,
+    _is_event_retryable,
     _round_context_tokens,
     _serialize_for_stdin,
+    _session_jsonl_exists,
     _user_line,
 )
 from sagent.providers.lib.hotspare import HotSpare
@@ -33,8 +41,10 @@ from sagent.providers.lib.subproc import (
 )
 from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     ToolCall,
+    ToolLabel,
     ToolResult,
     UserMessage,
 )
@@ -253,6 +263,116 @@ def test_argv_contains_required_flags() -> None:
     assert cfg["mcpServers"]["sagent"]["url"].endswith("/mcp")
 
 
+def test_argv_session_id_swaps_no_persistence_for_session_id_flag() -> None:
+    """First-turn argv carries ``--session-id <uuid>`` instead of
+    ``--no-session-persistence``.
+    """
+    argv = _build_anthropic_argv(
+        model_id="claude-sonnet-4-5",
+        system_prompt="be brief",
+        bridge_url="http://127.0.0.1:1234/mcp",
+        bridge_server_name="sagent",
+        session_id="deadbeef-1234-5678-9abc-deadbeef1234",
+        resume_existing=False,
+    )
+    assert "--no-session-persistence" not in argv
+    assert "--session-id" in argv
+    assert "--resume" not in argv
+    sid_idx = argv.index("--session-id")
+    assert argv[sid_idx + 1] == "deadbeef-1234-5678-9abc-deadbeef1234"
+
+
+def test_argv_session_id_resume_existing_uses_resume_flag() -> None:
+    """``resume_existing=True`` → ``--resume <uuid>``, no
+    ``--session-id``.
+    """
+    argv = _build_anthropic_argv(
+        model_id="claude-sonnet-4-5",
+        system_prompt="be brief",
+        bridge_url="http://127.0.0.1:1234/mcp",
+        bridge_server_name="sagent",
+        session_id="deadbeef-1234-5678-9abc-deadbeef1234",
+        resume_existing=True,
+    )
+    assert "--no-session-persistence" not in argv
+    assert "--session-id" not in argv
+    assert "--resume" in argv
+    r_idx = argv.index("--resume")
+    assert argv[r_idx + 1] == "deadbeef-1234-5678-9abc-deadbeef1234"
+
+
+def test_argv_default_session_id_none_preserves_stateless_flag() -> None:
+    """No session_id → existing ``--no-session-persistence`` behaviour."""
+    argv = _build_anthropic_argv(
+        model_id="claude-sonnet-4-5",
+        system_prompt="x",
+        bridge_url="http://x",
+        bridge_server_name="sagent",
+    )
+    assert "--no-session-persistence" in argv
+    assert "--session-id" not in argv
+    assert "--resume" not in argv
+
+
+def _session_jsonl_path_for(home: Path, cwd: Path, session_id: str) -> Path:
+    """Mirror the CLI's encoded-cwd convention (test-local helper)."""
+    encoded = "".join(
+        ch if (ch.isalnum() or ch == "-") else "-" for ch in str(cwd)
+    )
+    return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+
+
+def test_model_session_id_initialises_session_persistent_mode() -> None:
+    """``AnthropicCLI.model(session_id=...)`` flips the mode flag,
+    bypasses HotSpare, and starts uninitialised.
+    """
+    provider = AnthropicCLI()
+    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
+    m = provider.model("claude-haiku-4-5", session_id=sid)
+    assert m._session_id == sid
+    assert m._session_initialized is False
+    assert m._hot_spare is None
+    assert m._active_proc is None
+    # Stateless companion still works.
+    m_stateless = provider.model("claude-haiku-4-5")
+    assert m_stateless._session_id is None
+    assert m_stateless._hot_spare is not None
+
+
+def test_session_jsonl_exists_is_cwd_aware(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The resume-vs-mint probe only sees sessions under THIS cwd's
+    encoded project dir.
+
+    Claude indexes sessions per encoded-cwd project dir and ``--resume``
+    cannot reach across. The probe used to glob across ALL project dirs,
+    which broke the moment two deployments derived the same
+    deterministic per-role uuid: live repro 2026-06-09 — a second
+    server instance launched from a scratch cwd found the primary
+    deployment's JSONL via the glob, chose ``--resume``, and claude
+    exited ``No conversation found``, wedging warmup for all five
+    agents.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
+
+    cwd_a = tmp_path / "deploy-a"
+    cwd_b = tmp_path / "deploy-b"
+    cwd_a.mkdir()
+    cwd_b.mkdir()
+
+    # Record a session under deploy-a's encoded dir only.
+    jsonl_a = _session_jsonl_path_for(tmp_path / "home", cwd_a, sid)
+    jsonl_a.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_a.write_text("{}\n")
+
+    monkeypatch.chdir(cwd_a)
+    assert _session_jsonl_exists(sid) is True  # same cwd → resume
+    monkeypatch.chdir(cwd_b)
+    assert _session_jsonl_exists(sid) is False  # other cwd → fresh session
+
+
 def test_user_line_text_only() -> None:
     """A plain ``UserMessage`` becomes a single ``content: str`` line."""
     line = _user_line(UserMessage(text="hello"), max_image_dim=8000)
@@ -265,6 +385,29 @@ def test_serialize_for_stdin_rejects_tool_result() -> None:
         _ = _serialize_for_stdin(
             ToolResult(call_id="x", content="done"), max_image_dim=8000
         )
+
+
+def test_anthropic_subprocess_env_overrides_home_when_tmpdir_set(
+    tmp_path: Path,
+) -> None:
+    """Stateless mode (or session-persistent + per-account): tmpdir
+    becomes HOME so the renamed credentials file is found.
+    """
+    env = _anthropic_subprocess_env(tmp_path)
+    assert env["HOME"] == str(tmp_path)
+    assert env["USERPROFILE"] == str(tmp_path)
+    # Stateless default has CLAUDE_CODE_SKIP_PROMPT_HISTORY set.
+    assert env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] == "1"
+
+
+def test_anthropic_subprocess_env_skip_history_off_when_persistent(
+    tmp_path: Path,
+) -> None:
+    """Session-persistent mode keeps the SKIP_PROMPT_HISTORY var unset
+    so claude actually writes its session JSONL.
+    """
+    env = _anthropic_subprocess_env(tmp_path, persist_session=True)
+    assert "CLAUDE_CODE_SKIP_PROMPT_HISTORY" not in env
 
 
 def test_build_model_response_normalizes_input_to_last_round() -> None:
@@ -403,6 +546,384 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     assert model._last_input_tokens == 96_003
 
 
+def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
+    """``AnthropicCLI.model(subprocess_read_timeout_sec=…)`` plumbs to the model.
+
+    The v2.1-β.2 lever: bump beyond the 60s Subproc default so
+    long-running synchronous Bash tools (``pre-commit run``, ``ty
+    check``, JAX warmup compiles) don't trip the divergence cascade.
+    Verified live 2026-06-09 on SWE's PR3 ``pre-commit + git commit``
+    chain that was 7-times-eaten by ``send_with_retry`` divergence.
+    """
+    provider = AnthropicCLI()
+    model = provider.model(
+        "claude-haiku-4-5",
+        subprocess_read_timeout_sec=300.0,
+    )
+    assert model._subprocess_read_timeout_sec == 300.0  # type: ignore[attr-defined]
+
+    # Default path: ``None`` defers to ``Subproc``'s own default.
+    default_model = provider.model("claude-haiku-4-5")
+    assert default_model._subprocess_read_timeout_sec is None  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_session_persistent_stream_returns_empty_when_history_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After ``agent.clear()``, sagent's runtime calls ``stream()`` with
+    an empty ``request.messages`` until new input arrives. The
+    session-persistent path detects this (``_last_sent_index > len``),
+    resets its counters, deletes the stale on-disk session JSONL so
+    the next ``--session-id`` call works, and returns a no-op
+    ``ModelResponse`` rather than crashing the runtime turn.
+
+    Regression for 2026-06-03 07:20 ``RuntimeError: stream() called
+    with no new user-like entries to send`` triggered by /api/restart
+    on TL.
+    """
+    _write_creds(tmp_path)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+
+    def _which_claude(name: str) -> str | None:
+        del name
+        return "/usr/bin/claude"
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude,
+    )
+    # Point HOME at tmp_path so the JSONL-cleanup glob is sandboxed.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    provider = AnthropicCLI.from_credentials()
+    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+
+    # Stage 1: pretend two turns of conversation already happened
+    # (``_last_sent_index == 2``, on-disk session JSONL present).
+    model._last_sent_index = 2
+    model._session_initialized = True
+    proj_dir = tmp_path / ".claude" / "projects" / "-some-cwd"
+    proj_dir.mkdir(parents=True)
+    jsonl = proj_dir / f"{sid}.jsonl"
+    jsonl.write_text("{}\n", encoding="utf-8")
+    assert jsonl.exists()
+
+    # Stage 2: simulate post-``agent.clear()`` call: history is empty
+    # but the provider's counters still think 2 messages were sent.
+    request = ModelRequest(
+        system="terse",
+        messages=(),
+        tools=(),
+    )
+    response = await model.stream(
+        request,
+        on_text=None,
+        on_thinking=None,
+    )
+
+    # The response is a no-op (empty assistant text, no tools, zero
+    # cost) so the runtime gets a clean "model said nothing" turn.
+    assert response.message.text == ""
+    assert response.message.tool_calls == ()
+    assert response.tokens.input_tokens == 0
+    assert response.tokens.output_tokens == 0
+
+    # Provider state was reset: next real call will use ``--session-id``
+    # (not ``--resume``).
+    assert model._last_sent_index == 0
+    assert model._session_initialized is False
+
+    # The stale on-disk JSONL was removed so the next ``--session-id``
+    # spawn doesn't error with "Session ID is already in use".
+    assert not jsonl.exists()
+
+
+@pytest.mark.asyncio
+async def test_session_persistent_advances_sent_index_per_entry_on_partial_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for 2026-06-03 ~14:30 SWE bug: when multiple new
+    user-like entries are queued and the drain aborts partway through,
+    ``_last_sent_index`` must reflect every entry already WRITTEN to
+    stdin -- not just the entries whose drain completed.
+
+    Otherwise the next ``--resume`` re-writes the entries that already
+    landed in claude's session JSONL (producing duplicates) AND fails
+    to reach the entries that came after the abort point (silently
+    dropping them). The SWE symptom was an early "Great smoke" inbound
+    appearing 3× in the session JSONL while five subsequent TL STOP
+    directives never appeared at all.
+    """
+    _write_creds(tmp_path)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        lambda _name: "/usr/bin/claude",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
+    provider = AnthropicCLI.from_credentials()
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    # Pretend a turn already landed so we're past the first-spawn case.
+    model._session_initialized = True
+    model._last_sent_index = 5
+
+    # Replace the heavy I/O with mocks:
+    #   * _ensure_tools_bridge / _sync_tools_bridge: no-op
+    #   * _spawn_initialized: returns a fake proc
+    #   * _send_entry: records the entry written
+    #   * _drain_until_result: returns OK on the first call (entry index
+    #     5 succeeds end-to-end), raises SubprocessTransportError on the
+    #     second (simulating aborted_streaming on the second entry's
+    #     model_call)
+    bridge_calls: list[object] = []
+    sent_entries: list[TapeEvent] = []
+
+    async def _ensure() -> None:
+        bridge_calls.append("ensure")
+
+    model._ensure_tools_bridge = _ensure  # ty: ignore[invalid-assignment]
+    model._sync_tools_bridge = lambda r: bridge_calls.append(("sync", r))  # ty: ignore[invalid-assignment]
+
+    fake_proc = MagicMock()
+    fake_proc.close = AsyncMock()
+    model._spawn_initialized = AsyncMock(return_value=fake_proc)  # ty: ignore[invalid-assignment]
+
+    async def _send_entry(proc: object, entry: TapeEvent) -> None:
+        del proc
+        sent_entries.append(entry)
+
+    model._send_entry = _send_entry  # ty: ignore[invalid-assignment]
+
+    drain_calls = 0
+
+    async def _drain(
+        proc: object, on_text=None, on_thinking=None, update_input_tokens: bool = True
+    ):
+        del proc, on_text, on_thinking, update_input_tokens
+        nonlocal drain_calls
+        drain_calls += 1
+        if drain_calls == 1:
+            # First drain (for the FIRST entry) succeeds: this would be
+            # the equivalent of "Great smoke" being acknowledged.
+            return ModelResponse(
+                message=AssistantMessage(text="ack 1", tool_calls=()),
+                stop_reason="model_finished",
+            )
+        # Second drain (for the SECOND entry) aborts mid-stream: this
+        # is the equivalent of the aborted_streaming on the abort cycle
+        # that prevented TL's STOP from being processed in production.
+        raise SubprocessTransportError("simulated abort on entry 2")
+
+    model._drain_until_result = _drain  # ty: ignore[invalid-assignment]
+
+    # Three entries queued. _last_sent_index = 5 means request.messages
+    # has 8 entries; entries 5, 6, 7 are the new user-like ones.
+    msg_E1 = AgentSendMessage(source="tl", text="entry 1 — should land cleanly")
+    msg_E2 = AgentSendMessage(source="tl", text="entry 2 — drain aborts on this one")
+    msg_E3 = AgentSendMessage(
+        source="tl", text="entry 3 — STOP directive that must NOT be lost"
+    )
+    request = ModelRequest(
+        system="x",
+        messages=(
+            UserMessage(text="old turn 1"),
+            UserMessage(text="old turn 2"),
+            UserMessage(text="old turn 3"),
+            UserMessage(text="old turn 4"),
+            UserMessage(text="old turn 5"),
+            msg_E1,
+            msg_E2,
+            msg_E3,
+        ),
+        tools=(),
+    )
+
+    with pytest.raises(SubprocessTransportError):
+        await model.stream(request, on_text=None, on_thinking=None)
+
+    # Both E1 and E2 were written to stdin before the drain raised on
+    # E2's model_call. E3 was NOT written -- the loop short-circuited.
+    assert sent_entries == [msg_E1, msg_E2]
+
+    # The CRITICAL regression assertion: _last_sent_index now reflects
+    # both writes (5 + 2 entries = position 7, pointing at E3 which is
+    # the FIRST entry the next --resume must deliver).
+    # Pre-fix behaviour would have left _last_sent_index at 5, causing
+    # the next retry to re-write E1 (duplicate in claude's session) and
+    # re-attempt the same drain abort sequence, leaving E3 perpetually
+    # stranded.
+    assert model._last_sent_index == 7
+
+
+def test_is_event_retryable_classifies_organic_shapes() -> None:
+    """Direct unit test of the catalog. Examples are taken from
+    actual ``is_error: True`` events captured 2026-06-03/04 from the
+    multi-agent server.
+    """
+    # 1. The dominant aborted_streaming + ede_diagnostic shape (TL,
+    #    2026-06-03 10:17:53 — 418k cache reads attempt that died on
+    #    a tool_use boundary). Retryable.
+    aborted_streaming = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "stop_reason": "tool_use",
+        "terminal_reason": "aborted_streaming",
+        "errors": [
+            "[ede_diagnostic] result_type=user last_content_type=n/a "
+            "stop_reason=tool_use",
+        ],
+    }
+    assert _is_event_retryable(aborted_streaming) is True
+
+    # 2. ede_diagnostic without aborted_streaming terminal_reason --
+    #    still retryable (same root cause, different surface).
+    ede_only = {
+        "is_error": True,
+        "terminal_reason": "completed",
+        "errors": ["[ede_diagnostic] mid-stream cut"],
+    }
+    assert _is_event_retryable(ede_only) is True
+
+    # 3. Context overflow -- NOT retryable. The next attempt would hit
+    #    the same wall; operator must clear the session.
+    blocking_limit = {
+        "is_error": True,
+        "terminal_reason": "blocking_limit",
+        "result": "Prompt is too long",
+        "stop_reason": "stop_sequence",
+    }
+    assert _is_event_retryable(blocking_limit) is False
+
+    # 4. Empty errors list, no special terminal_reason -- not retryable
+    #    by default.
+    unknown_error = {"is_error": True, "errors": [], "stop_reason": "end_turn"}
+    assert _is_event_retryable(unknown_error) is False
+
+
+def test_extract_retry_after_ms_handles_both_key_names() -> None:
+    """``send_with_retry`` falls back to exponential backoff when no
+    hint is present, so ``None`` is a valid return; but when the CLI
+    emits a hint (either ``retry_after_ms`` or ``retry_delay_ms``) we
+    forward it.
+    """
+    assert _extract_retry_after_ms({"retry_after_ms": 506}) == 506.0
+    assert _extract_retry_after_ms({"retry_delay_ms": 1247.5}) == 1247.5
+    assert _extract_retry_after_ms({}) is None
+    # Negative or non-numeric values are ignored (defensive).
+    assert _extract_retry_after_ms({"retry_after_ms": -1}) is None
+    assert _extract_retry_after_ms({"retry_after_ms": "soon"}) is None
+
+
+def test_is_retryable_provider_error_session_persistent_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``send_with_retry`` consults this method to decide whether to
+    sleep + retry vs let the runtime see the error. Session-persistent
+    mode answers True for :class:`AnthropicCLIRetryableError`;
+    stateless mode keeps the historical False (its HotSpare
+    subprocess has already consumed the stdin lines we wrote, so a
+    same-call retry would duplicate or stall).
+    """
+    _write_creds(tmp_path)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    provider = AnthropicCLI.from_credentials()
+
+    # Stateless mode (no session_id) -- never retry at this layer.
+    stateless = provider.model("claude-haiku-4-5")
+    retryable_exc = AnthropicCLIRetryableError("aborted_streaming")
+    assert stateless.is_retryable_provider_error(retryable_exc) is False
+
+    # Session-persistent mode (session_id set) -- retry the retryable type.
+    persistent = provider.model(
+        "claude-haiku-4-5",
+        session_id="deadbeef-1234-5678-9abc-deadbeef1234",
+    )
+    assert persistent.is_retryable_provider_error(retryable_exc) is True
+
+    # Both modes still propagate non-retryable subprocess errors:
+    plain_exc = SubprocessTransportError("subprocess stdout closed before result")
+    assert stateless.is_retryable_provider_error(plain_exc) is False
+    assert persistent.is_retryable_provider_error(plain_exc) is False
+
+    # Random Exception that isn't a subprocess error: never retried.
+    assert persistent.is_retryable_provider_error(RuntimeError("oops")) is False
+
+
+def test_model_session_initialized_probes_disk_at_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host-application restart should pick up prior conversations
+    transparently: at construction time the provider probes for the
+    session JSONL under THIS cwd's encoded project dir and sets
+    ``_session_initialized = True`` on a hit -- so the first spawn
+    uses ``--resume`` (not ``--session-id``, which would error with
+    "Session ID is already in use"). The probe is cwd-aware: a JSONL
+    for the same uuid under a DIFFERENT cwd's project dir must not
+    count (claude's ``--resume`` can't see it; see
+    ``test_session_jsonl_exists_is_cwd_aware``).
+    """
+    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
+    other = "1c0705bd-ecf6-55a2-91cc-9d519e9ca6f6"
+
+    # Stage 1: empty $HOME -> session_initialized is False.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    assert model._session_initialized is False
+
+    # Stage 2: drop a session JSONL for OUR sid under THIS cwd's
+    # encoded project dir -> session_initialized flips to True.
+    ours = _session_jsonl_path_for(tmp_path, workdir, sid)
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("{}\n", encoding="utf-8")
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    assert model._session_initialized is True
+
+    # Stage 3: jsonl exists for a DIFFERENT uuid but not ours -> still False.
+    other_jsonl = _session_jsonl_path_for(tmp_path, workdir, other)
+    other_jsonl.write_text("{}\n", encoding="utf-8")
+    ours.unlink()
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    assert model._session_initialized is False
+
+    # Stage 4: stateless mode (session_id=None) is always False.
+    model = provider.model("claude-haiku-4-5")
+    assert model._session_initialized is False
+
+
+def test_anthropic_subprocess_env_inherits_real_home_when_tmpdir_none() -> None:
+    """Session-persistent + single-account: ``tmpdir=None`` means the
+    subprocess inherits the operator's real HOME so native tools (Bash,
+    gh, git) find ``~/.config/`` and ``~/.gitconfig``.
+    """
+    operator_home = os.environ.get("HOME", "")
+    env = _anthropic_subprocess_env(None, persist_session=True)
+    # HOME comes through unchanged (inherited from os.environ).
+    assert env.get("HOME") == operator_home
+    # No USERPROFILE override either.
+    if "USERPROFILE" not in os.environ:
+        assert "USERPROFILE" not in env
+
+
 def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     """``content_block_delta`` events fan text/thinking into separate buckets."""
     text_parts: list[str] = []
@@ -410,16 +931,27 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     signature_parts: list[str] = []
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
-    text_event = cast(MutableJSON, {"delta": {"type": "text_delta", "text": "hello"}})
+    tool_use_blocks: dict[int, dict[str, object]] = {}
+    text_event = cast(
+        MutableJSON,
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": "hello"},
+        },
+    )
     thinking_event = cast(
         MutableJSON,
-        {"delta": {"type": "thinking_delta", "thinking": "reflecting"}},
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "thinking_delta", "thinking": "reflecting"},
+        },
     )
     _dispatch_stream_event(
         text_event,
         text_parts,
         thinking_parts,
         signature_parts,
+        tool_use_blocks,
         on_text=text_chunks.append,
         on_thinking=thinking_chunks.append,
     )
@@ -428,50 +960,195 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         text_parts,
         thinking_parts,
         signature_parts,
+        tool_use_blocks,
         on_text=text_chunks.append,
         on_thinking=thinking_chunks.append,
     )
     assert text_parts == ["hello"]
     assert thinking_parts == ["reflecting"]
+    assert signature_parts == []  # no signature_delta yet
     assert text_chunks == ["hello"]
     assert thinking_chunks == ["reflecting"]
 
 
 def test_dispatch_stream_event_captures_signature_delta() -> None:
-    """``signature_delta`` accumulates the thought signature.
+    """``signature_delta`` events feed the signature accumulator.
 
-    This test's predecessor used ``signature_delta`` as its example of
-    an *ignorable* delta type — it is not ignorable: the signature must
-    be carried alongside the thinking body, or any later wire re-send
-    of the thinking block is rejected with HTTP 400
-    ``thinking.signature: Field required``.
+    Required for v2.1-α materializer mode: claude's stream emits a
+    ``signature_delta`` event after the thinking body, carrying the
+    opaque thought signature. The stream parser MUST capture it —
+    without it, ``AssistantMessage.thinking_blocks`` carry blocks
+    with no signature, the materializer writes them unsigned to
+    JSONL, and Anthropic's API rejects on the next ``--resume`` wire
+    send with ``HTTP 400 thinking.signature: Field required``.
+    Verified live 2026-06-09 in statistician session
+    ``b4fe5972-...`` after TL sent a thank-you AgentSendMessage.
     """
     text_parts: list[str] = []
     thinking_parts: list[str] = []
     signature_parts: list[str] = []
+    tool_use_blocks: dict[int, dict[str, object]] = {}
+    sig_event = cast(
+        MutableJSON,
+        {
+            "type": "content_block_delta",
+            "delta": {"type": "signature_delta", "signature": "abc123"},
+        },
+    )
     _dispatch_stream_event(
-        cast(MutableJSON, {"delta": {"type": "signature_delta", "signature": "x"}}),
+        sig_event,
         text_parts,
         thinking_parts,
         signature_parts,
+        tool_use_blocks,
         on_text=None,
         on_thinking=None,
     )
+    assert signature_parts == ["abc123"]
     assert text_parts == []
     assert thinking_parts == []
-    assert signature_parts == ["x"]
+
+
+def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
+    """tool_use is published at content_block_stop with name + arg
+    summary, after the streamed input_json_delta has been accumulated.
+    """
+    published: list[object] = []
+    token = cli_publish_var.set(published.append)
+    try:
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        signature_parts: list[str] = []
+        tool_use_blocks: dict[int, dict[str, object]] = {}
+        # 1) start: registers tool_use at index 0 -- NO label published yet
+        _dispatch_stream_event(
+            cast(
+                MutableJSON,
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_abc123",
+                        "name": "Bash",
+                        "input": {},
+                    },
+                },
+            ),
+            text_parts,
+            thinking_parts,
+            signature_parts,
+            tool_use_blocks,
+            on_text=None,
+            on_thinking=None,
+        )
+        assert published == []  # nothing yet -- we wait for args
+        # 2) deltas: stream the JSON in two chunks
+        for partial in ('{"command":"ls', ' -la"}'):
+            _dispatch_stream_event(
+                cast(
+                    MutableJSON,
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "input_json_delta", "partial_json": partial},
+                    },
+                ),
+                text_parts,
+                thinking_parts,
+                signature_parts,
+                tool_use_blocks,
+                on_text=None,
+                on_thinking=None,
+            )
+        assert published == []  # still nothing
+        # 3) stop: now we publish the rich label
+        _dispatch_stream_event(
+            cast(
+                MutableJSON,
+                {"type": "content_block_stop", "index": 0},
+            ),
+            text_parts,
+            thinking_parts,
+            signature_parts,
+            tool_use_blocks,
+            on_text=None,
+            on_thinking=None,
+        )
+    finally:
+        cli_publish_var.reset(token)
+    assert len(published) == 1
+    label = published[0]
+    assert isinstance(label, ToolLabel)
+    # Includes both the tool name and the command arg
+    assert label.text == "Bash ls -la"
+    assert label.call_id == "toolu_abc123"
+
+
+def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
+    """``content_block_start`` for ``text`` does NOT publish a ToolLabel."""
+    published: list[object] = []
+    token = cli_publish_var.set(published.append)
+    try:
+        tool_use_blocks: dict[int, dict[str, object]] = {}
+        _dispatch_stream_event(
+            cast(
+                MutableJSON,
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            [],
+            [],
+            [],
+            tool_use_blocks,
+            on_text=None,
+            on_thinking=None,
+        )
+        # And a content_block_stop on the text block: no label.
+        _dispatch_stream_event(
+            cast(MutableJSON, {"type": "content_block_stop", "index": 1}),
+            [],
+            [],
+            [],
+            tool_use_blocks,
+            on_text=None,
+            on_thinking=None,
+        )
+    finally:
+        cli_publish_var.reset(token)
+    assert published == []
 
 
 def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
-    """A genuinely unknown delta does not perturb the accumulators."""
+    """A delta type we don't recognize does not perturb any accumulator.
+
+    Historical note: this test previously used ``signature_delta`` as
+    the exemplar "unknown" type because the parser intentionally
+    dropped it. Capturing the signature became load-bearing once
+    v2.1-α materialize mode started re-sending history via wire, so
+    ``signature_delta`` moved into the known set. We use a genuinely
+    unknown type (``fake_future_delta``) to keep the contract
+    semantics — the parser stays inert on shapes it doesn't know.
+    """
     text_parts: list[str] = []
     thinking_parts: list[str] = []
     signature_parts: list[str] = []
+    tool_use_blocks: dict[int, dict[str, object]] = {}
     _dispatch_stream_event(
-        cast(MutableJSON, {"delta": {"type": "citation_delta", "citation": "x"}}),
+        cast(
+            MutableJSON,
+            {
+                "type": "content_block_delta",
+                "delta": {"type": "fake_future_delta", "payload": "x"},
+            },
+        ),
         text_parts,
         thinking_parts,
         signature_parts,
+        tool_use_blocks,
         on_text=None,
         on_thinking=None,
     )

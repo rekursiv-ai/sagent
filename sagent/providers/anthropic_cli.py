@@ -35,6 +35,7 @@ from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.subproc import (
+    _READ_IDLE_TIMEOUT_SEC,
     Subproc,
     SubprocessTransportError,
 )
@@ -84,6 +85,120 @@ _CREDENTIALS_SCHEMA: JSON = {
         },
     },
 }
+
+
+class AnthropicCLIRetryableError(SubprocessTransportError):
+    """The CLI returned a transient ``is_error`` ``result`` event.
+
+    Distinguished from :class:`SubprocessTransportError` so the model's
+    :meth:`is_retryable_provider_error` can flag the call for in-place
+    retry by ``send_with_retry`` instead of propagating to the runtime
+    as a fatal ``ModelResponseError`` (which would burn a turn boundary
+    + pollute history with a synthetic ``[Error: ...]`` UserMessage).
+
+    **Naming heritage and corrected understanding (2026-06-04 evening).**
+    The ``aborted_streaming`` / ``ede_diagnostic`` shape was originally
+    framed as "Anthropic-side stream instability under load." Live
+    cross-correlation with peer-message timestamps that evening showed
+    the dominant cause is actually our own SIGINT preempt
+    (``runtime.preempt_in_flight=True``, override #2): when a peer or
+    operator message arrives while a ``claude --print`` subprocess is
+    mid-turn, we ``model.cancel_in_flight()`` to make room for the new
+    inbound. The CLI subprocess dies and emits a final ``result`` event
+    with ``terminal_reason="aborted_streaming"`` + an ede_diagnostic
+    line -- exactly the shape we'd been attributing to upstream
+    instability. The smoking gun was the 0-input-token events: an API
+    can't abort a request that never reached it; only a local SIGINT
+    can.
+
+    So the dominant retry path here is: "operator typed a correction
+    mid-turn, our preempt killed the in-flight subprocess, retry the
+    delivery via ``--resume`` so the correction lands cleanly without
+    burning a runtime turn boundary." Genuine upstream stream cuts
+    exist but are a minority. The retry behaviour is correct either
+    way; only the framing matters for future debugging.
+
+    See :func:`_is_event_retryable` for the catalog of shapes that are
+    treated as transient. Carries an optional ``retry_after_ms`` hint
+    extracted from the CLI event when present; ``send_with_retry`` will
+    fall back to standard exponential backoff if ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_ms: float | None = None,
+        event: dict | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_ms = retry_after_ms
+        self.event = event
+
+
+def _is_event_retryable(event: dict) -> bool:
+    """Classify a CLI ``result`` event as transient.
+
+    Validated against ~60 ``is_error`` events captured on 2026-06-03/04
+    from the live multi-agent server. The retryable shapes share two
+    attributes: (a) claude's session JSONL on disk remains consistent
+    (the next ``--resume`` will pick up cleanly), and (b) re-running
+    the same request usually succeeds without operator intervention.
+
+    Retryable shapes:
+
+    * ``terminal_reason == "aborted_streaming"``: dominant pattern,
+      often paired with ``stop_reason == "tool_use"`` and an
+      ``[ede_diagnostic]`` entry in ``errors``. **Historically read as
+      "Anthropic-side mid-stream cut"; the dominant cause is actually
+      our own preempt SIGINT** (see :class:`AnthropicCLIRetryableError`
+      for the diagnosis). 0-input-token instances are unambiguous
+      preempt kills (the API never saw the request).
+    * ``errors`` contains an ``[ede_diagnostic]`` line: same surface
+      shape, occasionally reported with ``terminal_reason ==
+      "completed"`` when the SIGINT raced the natural stop.
+
+    NOT retryable:
+
+    * ``terminal_reason == "blocking_limit"``: context overflow. The
+      next attempt would hit the same wall; operator must clear the
+      session. Surfacing as a hard error gets the runtime to publish
+      ``ModelResponseError`` so the operator sees ``status=hung``.
+    * ``api_error_status`` in non-429 4xx: client-side issue, retry
+      won't help.
+
+    The classification doesn't depend on root cause: retryable shapes
+    recover cleanly via ``--resume`` regardless of whether the abort
+    came from upstream or from our own SIGINT. Only the framing in
+    docs/logs matters for future debugging.
+    """
+    terminal_reason = event.get("terminal_reason")
+    if terminal_reason == "aborted_streaming":
+        return True
+    if terminal_reason == "blocking_limit":
+        return False
+    errors = event.get("errors", [])
+    if isinstance(errors, list):
+        for err in errors:
+            if "ede_diagnostic" in str(err):
+                return True
+    return False
+
+
+def _extract_retry_after_ms(event: dict) -> float | None:
+    """Pull a millisecond retry hint out of the CLI ``result`` event.
+
+    The CLI sometimes embeds ``retry_after_ms`` / ``retry_delay_ms``
+    keys in the result envelope (mirroring the underlying API
+    ``retry-after`` header). When present we forward it to the retry
+    layer so backoff respects the server's hint; when absent
+    ``send_with_retry`` falls back to its standard exponential schedule.
+    """
+    for key in ("retry_after_ms", "retry_delay_ms"):
+        val = event.get(key)
+        if isinstance(val, (int, float)) and val >= 0:
+            return float(val)
+    return None
 
 
 class AnthropicCLICredentials(TypedDict):
@@ -182,12 +297,47 @@ class AnthropicCLI(Anthropic):
         self,
         model_id: str | None = None,
         max_request_tokens: int | None = None,
+        *,
+        extra_mcp_servers: dict[str, dict] | None = None,
+        session_id: str | None = None,
+        subprocess_read_timeout_sec: float | None = None,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
 
         Args:
           model_id: Claude model id; ``None`` uses ``DEFAULT_MODEL``.
           max_request_tokens: Override the profile's input cap.
+          extra_mcp_servers: Additional MCP servers (stdio or HTTP)
+            merged into the CLI's ``--mcp-config`` at subprocess spawn
+            time. Each entry follows Claude Code's mcp.json shape:
+            ``{"command": "...", "args": [...], "env": {...}}`` for
+            stdio or ``{"type": "http", "url": "..."}`` for HTTP. Keys
+            colliding with sagent's own bridge server name are dropped.
+          session_id: When set, every ``claude`` subprocess is spawned
+            with ``--session-id <uuid>`` (first turn) or
+            ``--resume <uuid>`` (subsequent turns) instead of
+            ``--no-session-persistence``. Sagent stops re-feeding
+            history via stdin: only the latest user-like inbound is
+            sent each turn, and ``claude`` itself owns the
+            conversation transcript at
+            ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``. This
+            mode is intended for chat-channel use cases where
+            ``aborted_streaming`` recoveries must NOT lose
+            ``AssistantMessage`` content — see
+            ``plugin/blackjax-chat/README.md`` for context.
+          subprocess_read_timeout_sec: Stdout-idle timeout (seconds)
+            for the ``claude`` subprocess transport. ``None`` keeps
+            the ``Subproc`` default (60s). Set higher when the
+            agent's tools include long-running synchronous Bash
+            commands (e.g. ``pre-commit run --files ...``,
+            ``ty check``, big test suites) that legitimately go
+            silent for >60s while claude awaits the result —
+            without a bump, the transport reads silence as a hang,
+            raises ``SubprocessTransportError``, and
+            ``send_with_retry`` may emit a divergence marker that
+            eats the closing assistant message. Verified live
+            2026-06-09 on SWE's PR3 ``pre-commit + git commit``
+            chain.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -214,6 +364,9 @@ class AnthropicCLI(Anthropic):
                 if max_request_tokens is not None
                 else profile.max_request_tokens
             ),
+            extra_mcp_servers=extra_mcp_servers,
+            session_id=session_id,
+            subprocess_read_timeout_sec=subprocess_read_timeout_sec,
         )
 
     @override
@@ -250,6 +403,9 @@ class _AnthropicCLIModel:
         model_id: str,
         profile: ModelProfile,
         max_request_tokens: int,
+        extra_mcp_servers: dict[str, dict] | None = None,
+        session_id: str | None = None,
+        subprocess_read_timeout_sec: float | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
@@ -261,13 +417,101 @@ class _AnthropicCLIModel:
         self._last_input_tokens = 0
         self._tools_bridge: ToolsBridge | None = None
         self._warming_proc: Subproc | None = None
-        self._hot_spare = HotSpare(
-            self._spawn_spare_initialized,
-            close_partial=self._close_warming_proc,
+        # Stdout-idle timeout (seconds) for the ``claude`` subprocess
+        # transport. ``None`` defers to the ``Subproc`` default (60s).
+        # Bumped to ~3-5min for v2 plugin agents whose tools include
+        # long-running ``pre-commit run`` / ``ty check`` / heavy test
+        # invocations; without the bump, a >60s tool wait makes the
+        # transport read claude's silence as a hang and triggers
+        # ``send_with_retry``, whose retried response often diverges
+        # from the cached partial and eats the closing assistant
+        # message. See worklog ``v2.1-cli-session-materialize`` →
+        # 2026-06-09 SWE PR3 divergence diagnosis.
+        self._subprocess_read_timeout_sec: float | None = subprocess_read_timeout_sec
+        # Session-persistence mode (see ``AnthropicCLI.model``'s
+        # ``session_id`` arg). When set:
+        #   * ``--session-id <uuid>`` is passed on the first turn,
+        #     ``--resume <uuid>`` thereafter. ``claude`` owns history
+        #     at ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``.
+        #   * Sagent no longer re-feeds history via stdin: only the
+        #     latest user-like inbound is sent per turn.
+        #   * HotSpare is bypassed -- each ``stream`` call spawns a
+        #     fresh subprocess. Pre-warming a spare with
+        #     ``--resume <same-uuid>`` would race against in-flight
+        #     turns updating the session file (see the
+        #     ``/tmp/resume_probe/`` test A from 2026-06-02 evening:
+        #     concurrent ``--resume`` branches the conversation tree).
+        self._session_id: str | None = session_id
+        # ``_session_initialized = True`` means "claude already has a
+        # session JSONL for this uuid on disk, use ``--resume``"; False
+        # means "first time we've seen this uuid, use ``--session-id``".
+        # We probe the operator's real ``~/.claude/projects/`` at
+        # construction time so server restarts pick up prior
+        # conversations transparently.
+        self._session_initialized: bool = (
+            session_id is not None and _session_jsonl_exists(session_id)
         )
+        if session_id is None:
+            self._hot_spare: HotSpare | None = HotSpare(
+                self._spawn_spare_initialized,
+                close_partial=self._close_warming_proc,
+            )
+            # Stateless mode mints a fresh tmpdir per spawn for
+            # credential isolation; the per-spawn tmpdir is local to
+            # ``_spawn_initialized``.
+            self._persistent_tmpdir: Path | None = None
+        else:
+            self._hot_spare = None
+            # Session-persistence mode tradeoff on the ``HOME`` env var:
+            #
+            # If we override HOME to a hermetic tmpdir (as stateless
+            # mode does for credential isolation), then claude's
+            # NATIVE tools -- ``Bash``, ``Read``, ``Write``, etc. --
+            # run with that hermetic HOME inside the ``claude --print``
+            # subprocess. They lose visibility into the operator's
+            # ``~/.config/gh/hosts.yml``, ``~/.gitconfig``, ssh keys,
+            # etc. This shows up as ``gh auth status`` reporting "not
+            # authenticated" even though the operator IS authenticated
+            # on the host. (In stateless mode the same tools were
+            # mounted via sagent's HTTP bridge, so their handler ran
+            # IN THE SAGENT SERVER PROCESS with the operator's real
+            # HOME -- mooting the issue.)
+            #
+            # In session-persistence mode + single-account
+            # (``provider.account is None``), we drop the HOME
+            # override entirely. ``claude`` reads its credentials
+            # from the operator's real ``~/.claude/.credentials.json``,
+            # native tools find ``~/.config/gh/``, and session
+            # JSONLs land at the operator's real
+            # ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``,
+            # which survives ``serve.py`` restarts -- so re-running
+            # the server now ``--resume``s the prior conversation
+            # transcripts cleanly.
+            #
+            # For per-account use (``provider.account is not None``)
+            # we still mint a tmpdir + populate the renamed
+            # credentials file, because ``claude``'s creds path is
+            # hardcoded to ``$HOME/.claude/.credentials.json`` --
+            # there's no env var to redirect it. That case keeps the
+            # stateless-mode HOME-override behaviour.
+            if self._provider.account is None:
+                self._persistent_tmpdir = None
+            else:
+                self._persistent_tmpdir = Path(
+                    tempfile.mkdtemp(prefix="sagent-anthropic-cli-resume-"),
+                )
+                _populate_anthropic_tmpdir(
+                    self._persistent_tmpdir,
+                    self._provider.account,
+                )
+        self._active_proc: Subproc | None = None
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
         self._sent_history_head: TapeEvent | None = None
+        # External MCP servers (stdio or HTTP) merged into the CLI's
+        # ``--mcp-config`` at subprocess spawn time. See
+        # :func:`_build_anthropic_argv`.
+        self._extra_mcp_servers = extra_mcp_servers
 
     @property
     def max_request_tokens(self) -> int:
@@ -402,8 +646,30 @@ class _AnthropicCLIModel:
         )
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
-        """``False`` -- subprocess errors are handled via respawn, not retry."""
-        del error
+        """Session-persistent mode flags transient ``is_error`` results
+        as retryable so ``send_with_retry`` performs an in-place retry
+        (sleep → spawn fresh ``claude --print --resume`` → process only
+        the entries the per-entry-advance ``_last_sent_index`` hasn't
+        delivered yet) instead of letting the error propagate up to
+        the runtime as a ``ModelResponseError`` (which appends a
+        synthetic ``[Error: …]`` UserMessage to history and costs a
+        full turn boundary).
+
+        Stateless mode keeps the historical ``return False`` because
+        its warm ``HotSpare`` subprocess has already consumed the
+        stdin lines we wrote; same-subprocess retry would either
+        duplicate inbound messages or stall waiting on a CLI that no
+        longer expects more input. The runtime's respawn path handles
+        that case correctly by resetting ``_last_sent_index = 0`` and
+        re-feeding history from scratch.
+
+        Only :class:`AnthropicCLIRetryableError` qualifies; plain
+        :class:`SubprocessTransportError` (subprocess died, stdout
+        closed, blocking_limit context overflow) still propagates so
+        the operator sees the failure.
+        """
+        if isinstance(error, AnthropicCLIRetryableError):
+            return self._session_id is not None
         return False
 
     def usage_snapshot(self) -> UsageSnapshot | None:
@@ -448,6 +714,13 @@ class _AnthropicCLIModel:
 
         """
         self._pending_system = request.system or ""
+        if self._session_id is not None:
+            return await self._stream_session_persistent(
+                request,
+                on_text,
+                on_thinking,
+            )
+        assert self._hot_spare is not None  # stateless path
         if self._should_respawn(request):
             if _hash_system(request.system) != self._system_hash:
                 await self._hot_spare.discard_spare()
@@ -468,15 +741,159 @@ class _AnthropicCLIModel:
         self._turn_count += 1
         return response
 
+    async def _stream_session_persistent(
+        self,
+        request: ModelRequest,
+        on_text: Callable[[str], None] | None,
+        on_thinking: Callable[[str], None] | None,
+    ) -> ModelResponse:
+        """Drive one turn through a ``--session-id`` / ``--resume`` subprocess.
+
+        Spawn-on-demand (no HotSpare) because pre-warming a spare with
+        ``--resume <same-uuid>`` would race against the active
+        subprocess updating the session file (see
+        ``/tmp/resume_probe/`` test A from 2026-06-02: concurrent
+        ``--resume`` produces a branched conversation tree).
+
+        Only the newest user-like entries are written to stdin --
+        ``claude`` already has the rest in its session file.
+        ``_last_sent_index`` is the cumulative count of messages we've
+        delivered to ``claude`` across this session_id, NOT a per-
+        subprocess counter -- so it's preserved across transport-error
+        respawns. On the first turn we use ``--session-id``; on every
+        subsequent turn (including respawns) we use ``--resume``.
+        """
+        # ``agent.clear()`` (driven by ``/api/restart``, ``Clear`` event,
+        # or context-overflow recovery) wipes ``runtime.context().messages``
+        # but doesn't reach into the provider's ``_last_sent_index`` /
+        # ``_session_initialized``. After clear, the runtime keeps calling
+        # ``stream()`` -- with an empty ``request.messages`` until new
+        # input arrives. The stateless path handles this in
+        # ``_should_respawn`` (history shrunk → respawn → reset
+        # counters); we have to do the equivalent here. Otherwise:
+        #
+        # * The defensive "no new user-like entries" guard fires and
+        #   crashes the runtime turn.
+        # * Even if we let an empty turn through, the next real
+        #   ``--session-id <uuid>`` call would fail with "Session ID
+        #   is already in use" because claude's prior session JSONL
+        #   is still on disk.
+        #
+        # Detect via ``self._last_sent_index > len(request.messages)``
+        # (cumulative-count > current-history-length is only possible
+        # after a clear). Reset state, delete the stale on-disk JSONL,
+        # then continue as if this is a fresh session.
+        if self._last_sent_index > len(request.messages):
+            self._reset_for_clear()
+
+        new_entries = request.messages[self._last_sent_index :]
+        # user-like entries only: filter out AssistantMessage / ToolResult
+        # (sagent's own history bookkeeping, never written to stdin).
+        # We build the index map below at the same time we'd otherwise
+        # build the list.
+        if not any(
+            not isinstance(e, (AssistantMessage, ToolResult)) for e in new_entries
+        ):
+            # No new input to feed. Return a no-op response: empty
+            # assistant message + zero usage. The runtime treats this
+            # as a finished turn with no output; the next real inbound
+            # will spawn the next subprocess. Cheaper than spawning a
+            # claude --print just to wait for stdin EOF.
+            return ModelResponse(
+                message=AssistantMessage(text="", tool_calls=()),
+                stop_reason="model_finished",
+            )
+        # Bridge MUST be populated before the subprocess spawns: the
+        # CLI issues ``ListToolsRequest`` against the bridge soon
+        # after launch, and if our tool catalog isn't there at that
+        # moment, opus falls back to emitting tool calls as plain
+        # text inside the assistant message (Episode 2.7 pathology
+        # — observed 2026-06-02 23:16 when TL produced
+        # "Bash {command: ls -la …}" as text instead of a tool_use
+        # block on the first turn after refactor).
+        # Per-entry index map: each user-like entry's position in
+        # ``new_entries`` (which is ``request.messages[base:]``). We
+        # use this to advance ``_last_sent_index`` per-entry as the
+        # writes succeed, so a mid-loop ``SubprocessTransportError``
+        # doesn't lose the entries we already wrote and doesn't force
+        # the next retry to re-send them.
+        new_entries_idx: list[tuple[int, TapeEvent]] = []
+        for i, entry in enumerate(new_entries):
+            if not isinstance(entry, (AssistantMessage, ToolResult)):
+                new_entries_idx.append((i, entry))
+        base = self._last_sent_index
+
+        await self._ensure_tools_bridge()
+        self._sync_tools_bridge(request)
+        proc = await self._spawn_initialized()
+        self._active_proc = proc
+        try:
+            for rel_idx, entry in new_entries_idx[:-1]:
+                await self._send_entry(proc, entry)
+                # Advance per-entry BEFORE the drain: once a line is on
+                # claude's stdin, claude will consume it + persist it to
+                # the session JSONL even if the resulting model_call
+                # aborts. If the drain fails, the next ``--resume`` MUST
+                # NOT re-write this entry (that produced the "Great
+                # smoke 3×" duplication observed in SWE's session log
+                # on 2026-06-03 around 14:30, when each retry re-wrote
+                # the earliest pending entry AND failed to reach the
+                # later entries that contained TL's STOP directives).
+                self._last_sent_index = base + rel_idx + 1
+                _ = await self._drain_until_result(
+                    proc,
+                    on_text=None,
+                    on_thinking=None,
+                    update_input_tokens=False,
+                )
+            last_rel_idx, last_entry = new_entries_idx[-1]
+            await self._send_entry(proc, last_entry)
+            self._last_sent_index = base + last_rel_idx + 1
+            response = await self._drain_until_result(
+                proc,
+                on_text,
+                on_thinking,
+            )
+        except SubprocessTransportError:
+            # ``claude`` died mid-turn. ``_last_sent_index`` already
+            # reflects every entry we wrote to stdin; the next
+            # ``--resume`` will skip them and pick up from the first
+            # entry we hadn't reached yet. The session JSONL on disk
+            # was updated by claude as it processed each line, so the
+            # next turn's view is consistent.
+            await proc.close()
+            self._active_proc = None
+            raise
+        else:
+            # All entries delivered + final drain returned cleanly.
+            # Advance past any trailing AssistantMessage / ToolResult
+            # entries (sagent's own bookkeeping; we never write them).
+            self._last_sent_index = len(request.messages)
+            # First successful turn established the session on disk;
+            # all future spawns use ``--resume``.
+            self._session_initialized = True
+            await proc.close()
+            self._active_proc = None
+            self._turn_count += 1
+            return response
+
     async def close(self) -> None:
         """Tear down the subprocess pool and the MCP bridge."""
-        await self._hot_spare.close()
+        if self._hot_spare is not None:
+            await self._hot_spare.close()
+        if self._active_proc is not None:
+            await self._active_proc.close()
+            self._active_proc = None
         if self._tools_bridge is not None:
             await self._tools_bridge.stop()
             self._tools_bridge = None
+        if self._persistent_tmpdir is not None and self._persistent_tmpdir.exists():
+            shutil.rmtree(self._persistent_tmpdir, ignore_errors=True)
+            self._persistent_tmpdir = None
 
     def _should_respawn(self, request: ModelRequest) -> bool:
         """Inspect the trigger list (§1.4) for this request."""
+        assert self._hot_spare is not None  # caller is the stateless path
         if self._hot_spare.active is None:
             return False
         history = request.messages
@@ -501,6 +918,23 @@ class _AnthropicCLIModel:
         """Refresh the MCP bridge's tool registry to match the request."""
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
+
+    async def _ensure_tools_bridge(self) -> None:
+        """Lazily create the MCP bridge (without spawning the CLI).
+
+        The bridge MUST exist before the first ``claude --print``
+        subprocess starts -- the CLI does ``ListToolsRequest`` against
+        the bridge URL soon after launch, and an empty bridge produces
+        an empty tool catalog (which then makes opus emit tool calls
+        as plain text). In the stateless path this is implicit because
+        the HotSpare's first spawn calls ``_spawn_initialized`` which
+        creates the bridge; in session-persistent mode we must hoist
+        the bridge creation out so the spawn argv can use a real
+        ``--mcp-config`` URL.
+        """
+        if self._tools_bridge is None:
+            self._tools_bridge = ToolsBridge(tools=[])
+            await self._tools_bridge.start()
 
     async def _exchange_turn(
         self,
@@ -542,10 +976,25 @@ class _AnthropicCLIModel:
         """Read stream events until ``result``; assemble a ``ModelResponse``."""
         text_parts: list[str] = []
         thinking_parts: list[str] = []
-        # Thought-signature deltas accumulated alongside the thinking
-        # body; carried into the response's thinking block so a later
-        # wire re-send stays signed.
+        # Aggregated thinking-block signature. Anthropic's stream
+        # emits a ``signature_delta`` event alongside ``thinking_delta``;
+        # the final signature is the concatenation of those deltas
+        # (typically a single delta). Required because Anthropic's API
+        # rejects an assistant message with a signature-less thinking
+        # block (HTTP 400 ``thinking.signature: Field required``).
+        # Pre-2026-06-09 this parser ignored signature_delta and v2's
+        # session-persistent path didn't notice — claude owned the
+        # JSONL and never re-sent unsigned thinking blocks via wire.
+        # v2.1-α materialize mode IS the wire-resender, so the
+        # signature became load-bearing.
         signature_parts: list[str] = []
+        # Per-block-index state for tool_use accumulators. Each
+        # ``content_block_start`` for a ``tool_use`` registers
+        # ``{name, id, json_parts: list[str]}`` keyed by block index;
+        # streamed ``input_json_delta`` deltas append to ``json_parts``;
+        # ``content_block_stop`` finalises and emits a ToolLabel with
+        # the parsed args.
+        tool_use_blocks: dict[int, dict[str, object]] = {}
         usage_event: MutableJSON | None = None
         # Usage of the LAST internal round's request (raw Anthropic API
         # shape, snake_case). One ``claude --print`` turn runs the whole
@@ -576,6 +1025,23 @@ class _AnthropicCLIModel:
                 usage_event = event
                 stop_reason = cast(str | None, event.get("stop_reason"))
                 if event.get("is_error"):
+                    # Classify transient shapes for in-place retry vs
+                    # fatal shapes for runtime escalation. The
+                    # dominant transient shape in practice is the
+                    # ``aborted_streaming`` event the CLI emits when
+                    # we ``model.cancel_in_flight()`` to preempt a
+                    # mid-turn subprocess for an incoming peer/operator
+                    # message; the retry then re-delivers via
+                    # ``--resume``. See :func:`_is_event_retryable`
+                    # for the catalog.
+                    if _is_event_retryable(cast(dict, event)):
+                        raise AnthropicCLIRetryableError(
+                            f"AnthropicCLI: retryable result is_error: {event}",
+                            retry_after_ms=_extract_retry_after_ms(
+                                cast(dict, event),
+                            ),
+                            event=cast(dict, event),
+                        )
                     raise SubprocessTransportError(
                         f"AnthropicCLI: result is_error: {event}"
                     )
@@ -592,6 +1058,7 @@ class _AnthropicCLIModel:
                     text_parts,
                     thinking_parts,
                     signature_parts,
+                    tool_use_blocks,
                     on_text,
                     on_thinking,
                 )
@@ -621,18 +1088,62 @@ class _AnthropicCLIModel:
         if self._tools_bridge is None:
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
-        tmpdir = Path(tempfile.mkdtemp(prefix="sagent-anthropic-cli-"))
-        _populate_anthropic_tmpdir(tmpdir, self._provider.account)
+        spawn_owned_tmpdir: Path | None
+        tmpdir: Path | None
+        if self._persistent_tmpdir is not None:
+            # Session-persistence + per-account: reuse the
+            # construction-time tmpdir so the renamed credentials
+            # file is found by claude (its creds path is hardcoded
+            # to $HOME/.claude/.credentials.json).
+            tmpdir = self._persistent_tmpdir
+            spawn_owned_tmpdir = None
+        elif self._session_id is not None:
+            # Session-persistence + single account: NO HOME override.
+            # The subprocess inherits the operator's real HOME so
+            # native tools (``Bash``-from-shell, ``gh``, ``git``,
+            # ssh, ...) find ``~/.config/``, ``~/.gitconfig``, etc.,
+            # AND ``claude`` reads + writes session JSONLs at the
+            # operator's real ``~/.claude/projects/`` (which
+            # survives ``serve.py`` restarts -- a free upgrade).
+            tmpdir = None
+            spawn_owned_tmpdir = None
+        else:
+            # Stateless mode: hermetic per-spawn tmpdir for
+            # credential isolation. The Subproc wrapper deletes it
+            # on close.
+            tmpdir = Path(tempfile.mkdtemp(prefix="sagent-anthropic-cli-"))
+            _populate_anthropic_tmpdir(tmpdir, self._provider.account)
+            spawn_owned_tmpdir = tmpdir
         argv = _build_anthropic_argv(
             model_id=base_model_id(self._model_id),
             system_prompt=self._pending_system,
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,
+            extra_mcp_servers=self._extra_mcp_servers,
+            session_id=self._session_id,
+            # ``--resume`` once we've successfully spawned and ack'd
+            # at least one turn under this session_id; ``--session-id``
+            # otherwise. Updated in the session-persistence stream
+            # path on first successful drain.
+            resume_existing=self._session_initialized,
+        )
+        env = _anthropic_subprocess_env(
+            tmpdir,
+            persist_session=self._session_id is not None,
+        )
+        # ``None`` defers to ``Subproc``'s own default (60s); an explicit
+        # value (set by the plugin for long pre-commit/ty/JAX tool calls)
+        # overrides it. Pass the resolved value either way.
+        read_timeout = (
+            self._subprocess_read_timeout_sec
+            if self._subprocess_read_timeout_sec is not None
+            else _READ_IDLE_TIMEOUT_SEC
         )
         proc = Subproc(
             argv,
-            env=_anthropic_subprocess_env(tmpdir),
-            tmpdir=tmpdir,
+            env=env,
+            tmpdir=spawn_owned_tmpdir,
+            read_timeout_sec=read_timeout,
             # ``claude --print --output-format stream-json`` emits ONE
             # NDJSON record per content block; a single Read of a large
             # file echoes the file's content verbatim into one line
@@ -659,6 +1170,48 @@ class _AnthropicCLIModel:
         self._turn_count = 0
         self._last_input_tokens = 0
         self._reset_delta_state()
+
+    def _reset_for_clear(self) -> None:
+        """Reset session-persistent state after ``agent.clear()``.
+
+        Wipes the cumulative-sent counter, marks the session as
+        uninitialised (next spawn will use ``--session-id`` again),
+        and DELETES the on-disk session JSONL so the next
+        ``--session-id <same-uuid>`` call doesn't error with
+        "Session ID is already in use".
+
+        Called from :meth:`_stream_session_persistent` when it
+        detects ``_last_sent_index > len(request.messages)``, which
+        is the post-``Clear`` shape.
+        """
+        if self._session_id is None:
+            return
+        self._last_sent_index = 0
+        self._session_initialized = False
+        # Find + delete the session JSONL. Path:
+        #   <HOME>/.claude/projects/-<encoded-cwd>/<uuid>.jsonl
+        # where HOME is either the persistent tmpdir (per-account
+        # mode) or the operator's real $HOME (single-account mode).
+        home = self._persistent_tmpdir or Path(os.environ.get("HOME", "~")).expanduser()
+        projects = home / ".claude" / "projects"
+        if not projects.exists():
+            return
+        # The cwd-encoded subdir is opaque to us (claude picks the
+        # encoding); glob across all subdirs for safety.
+        for jsonl in projects.glob(f"*/{self._session_id}.jsonl"):
+            try:
+                jsonl.unlink()
+                logger.info(
+                    "AnthropicCLI(session_persistent): cleared session "
+                    "JSONL at %s after agent.clear()",
+                    jsonl,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "AnthropicCLI(session_persistent): failed to delete %s: %s",
+                    jsonl,
+                    exc,
+                )
 
     def _reset_delta_state(self) -> None:
         """Reset sent-history delta tracking."""
@@ -733,6 +1286,40 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     return _parse_cli_credentials(raw)
 
 
+def _session_jsonl_exists(session_id: str) -> bool:
+    """Check whether claude already has a session transcript for this
+    uuid on disk, under THIS cwd's encoded project dir.
+
+    Used at construction time so that on a host-application restart we
+    pick the right initial flag: ``--resume`` (the JSONL exists, we
+    continue the prior conversation) vs ``--session-id`` (no prior
+    session, we establish a fresh one). Picking the wrong one makes
+    ``claude --print`` exit non-zero before consuming stdin --
+    ``--session-id`` on an existing session errors with "Session ID
+    is already in use", ``--resume`` on a nonexistent one errors
+    with "No conversation found".
+
+    The check must be cwd-AWARE: claude indexes sessions per
+    encoded-cwd project dir (``~/.claude/projects/-<encoded-cwd>/``)
+    and ``--resume`` cannot see a session recorded under a different
+    cwd. The original implementation globbed ACROSS project dirs
+    ("the encoding is opaque to us") -- a latent bug once two
+    deployments derive the same deterministic session uuid: live repro
+    2026-06-09, where a second server instance launched from a scratch
+    cwd globbed the primary deployment's JSONL into ``True``, spawned
+    ``--resume``, and claude exited ``No conversation found``, wedging
+    warmup for all five agents. The encoding mirrors the CLI's:
+    every character of the absolute cwd outside ``[A-Za-z0-9-]``
+    becomes ``-``; ask the question claude will answer: does the
+    JSONL exist under THIS cwd's encoded project dir.
+    """
+    home = Path(os.environ.get("HOME", "~")).expanduser()
+    encoded = "".join(
+        ch if (ch.isalnum() or ch == "-") else "-" for ch in str(Path.cwd())
+    )
+    return (home / ".claude" / "projects" / encoded / f"{session_id}.jsonl").exists()
+
+
 def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
     """Copy the user's credentials into a hermetic ``HOME`` for the CLI."""
     dot_claude = tmpdir / ".claude"
@@ -745,14 +1332,32 @@ def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
     target.chmod(0o600)
 
 
-def _anthropic_subprocess_env(tmpdir: Path) -> dict[str, str]:
-    """Build the env for the ``claude`` subprocess (telemetry off, hermetic HOME)."""
+def _anthropic_subprocess_env(
+    tmpdir: Path | None,
+    *,
+    persist_session: bool = False,
+) -> dict[str, str]:
+    """Build the env for the ``claude`` subprocess (telemetry off, hermetic HOME).
+
+    When ``persist_session=True`` we keep ``CLAUDE_CODE_SKIP_PROMPT_HISTORY``
+    unset -- that env var (verified by bisect 2026-06-02) causes the CLI
+    to skip writing its session JSONL even when ``--session-id`` /
+    ``--resume`` are passed, which makes session-persistence mode silently
+    no-op and the next ``--resume`` fails with "No conversation found".
+
+    When ``tmpdir is None`` we don't override ``HOME`` -- the subprocess
+    inherits the operator's real HOME so claude finds its real
+    credentials + project session JSONLs AND its native tools (Bash,
+    gh, git, ...) find ``~/.config/`` and ``~/.gitconfig`` naturally.
+    Used by the session-persistent + single-account path.
+
+    """
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    if tmpdir is not None:
+        env["HOME"] = str(tmpdir)
+        env["USERPROFILE"] = str(tmpdir)
     env.update(
         {
-            "HOME": str(tmpdir),
-            "USERPROFILE": str(tmpdir),
-            "DISABLE_AUTO_COMPACT": "1",
             "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1",
             "DISABLE_AUTOUPDATER": "1",
@@ -761,11 +1366,18 @@ def _anthropic_subprocess_env(tmpdir: Path) -> dict[str, str]:
             "DISABLE_COST_WARNINGS": "1",
             "DISABLE_INSTALLATION_CHECKS": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
             "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP": "1",
             "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS": "1",
         }
     )
+    # Auto-compact: disable in stateless mode where sagent owns
+    # history; enable in session-persistent mode where claude is the
+    # sole writer.
+    sagent_owns_history = not persist_session
+    if sagent_owns_history:
+        env["DISABLE_AUTO_COMPACT"] = "1"
+    if not persist_session:
+        env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
     return env
 
 
@@ -775,16 +1387,39 @@ def _build_anthropic_argv(
     system_prompt: str,
     bridge_url: str,
     bridge_server_name: str,
+    extra_mcp_servers: dict[str, dict] | None = None,
+    session_id: str | None = None,
+    resume_existing: bool = False,
 ) -> list[str]:
-    """Assemble the ``claude --print --input-format stream-json ...`` argv."""
-    mcp_config = json.dumps(
-        {
-            "mcpServers": {
-                bridge_server_name: {"type": "http", "url": bridge_url},
-            }
-        }
-    )
-    return [
+    """Assemble the ``claude --print --input-format stream-json ...`` argv.
+
+    When ``session_id`` is ``None`` (default), passes
+    ``--no-session-persistence`` -- the historical behaviour. Otherwise
+    passes ``--session-id <uuid>`` (``resume_existing=False``) or
+    ``--resume <uuid>`` (``resume_existing=True``). Misusing this
+    (``--session-id`` on an existing session, ``--resume`` on a
+    nonexistent one) makes ``claude`` exit non-zero before consuming
+    stdin, which sagent surfaces as ``SubprocessTransportError``.
+
+    ``extra_mcp_servers``, when provided, is merged into the
+    ``mcpServers`` block of the JSON written to ``--mcp-config``. Use
+    this to register stdio/HTTP MCP servers alongside sagent's own
+    in-process tool bridge. Caller is responsible for ensuring the
+    keys don't collide with ``bridge_server_name``; sagent's bridge
+    wins on conflict.
+    """
+    servers: dict[str, dict] = {
+        bridge_server_name: {"type": "http", "url": bridge_url},
+    }
+    if extra_mcp_servers:
+        for name, entry in extra_mcp_servers.items():
+            if name == bridge_server_name:
+                # Don't let an external entry stomp on the bridge that
+                # exposes sagent-native tools (Read/Bash/etc.).
+                continue
+            servers[name] = entry
+    mcp_config = json.dumps({"mcpServers": servers})
+    base = [
         "claude",
         "--print",
         "--input-format",
@@ -797,18 +1432,48 @@ def _build_anthropic_argv(
         model_id,
         "--system-prompt",
         system_prompt,
-        "--no-session-persistence",
-        "--setting-sources",
-        "",
-        "--mcp-config",
-        mcp_config,
-        "--strict-mcp-config",
-        "--tools",
-        "",
-        "--disable-slash-commands",
-        "--permission-mode",
-        "bypassPermissions",
     ]
+    if session_id is None:
+        # Stateless: every spawn is a fresh session, history is fed
+        # via stdin by ``_exchange_turn``.
+        base.append("--no-session-persistence")
+    elif resume_existing:
+        # Session-persistence mode, claude has the session on disk.
+        base.extend(["--resume", session_id])
+    else:
+        # Session-persistence mode, first time we see this UUID.
+        base.extend(["--session-id", session_id])
+    base.extend(
+        [
+            "--setting-sources",
+            "",
+            "--mcp-config",
+            mcp_config,
+            "--strict-mcp-config",
+        ]
+    )
+    # ``--tools ""`` historically meant "use the default allowlist" in
+    # stateless mode. In session-persistence mode (``--session-id`` /
+    # ``--resume``) the CLI re-interprets empty-string as "ALLOW NO
+    # TOOLS, including MCP ones" -- bisect probe 2026-06-03 found:
+    #
+    #   --tools ""              → no tool_use; opus replies "I'll run
+    #                             `ls /tmp`" as plain text.
+    #   (omit --tools entirely) → tool_use(name=Bash) emitted cleanly.
+    #   --tools "Bash"          → tool_use(name=Bash) emitted cleanly.
+    #
+    # We omit ``--tools`` in session-persistence mode and keep the
+    # empty-string in stateless mode (no observed regressions there).
+    if session_id is None:
+        base.extend(["--tools", ""])
+    base.extend(
+        [
+            "--disable-slash-commands",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+    )
+    return base
 
 
 def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
@@ -866,36 +1531,126 @@ def _dispatch_stream_event(
     text_parts: list[str],
     thinking_parts: list[str],
     signature_parts: list[str],
+    tool_use_blocks: dict[int, dict[str, object]],
     on_text: Callable[[str], None] | None,
     on_thinking: Callable[[str], None] | None,
 ) -> None:
-    """Route one stream_event payload to ``on_text`` / ``on_thinking``."""
-    delta = cast(MutableJSON, event.get("delta") or {})
-    delta_type = delta.get("type")
-    if delta_type == "text_delta":
-        text = cast(str, delta.get("text") or "")
-        if text:
-            text_parts.append(text)
-            if on_text is not None:
-                on_text(text)
-    elif delta_type == "thinking_delta":
-        text = cast(str, delta.get("thinking") or "")
-        if text:
-            thinking_parts.append(text)
-            if on_thinking is not None:
-                on_thinking(text)
-    elif delta_type == "signature_delta":
-        # Per Anthropic's stream-json spec, ``signature_delta``
-        # carries the opaque thought-signature in the ``signature``
-        # field (mirrors ``thinking_delta`` for body text). The
-        # final signature is the concatenation across deltas
-        # (typically a single delta in practice). Required so any
-        # downstream wire re-send embeds the signature in the
-        # thinking block — Anthropic's API rejects unsigned thinking
-        # with HTTP 400 ``thinking.signature: Field required``.
-        sig = cast(str, delta.get("signature") or "")
-        if sig:
-            signature_parts.append(sig)
+    """Route one stream_event payload to ``on_text`` / ``on_thinking``.
+
+    Also accumulates ``tool_use`` content blocks across their start /
+    streamed ``input_json_delta`` chunks / stop events, and emits one
+    ``ToolLabel`` per tool call at block-stop with ``name`` plus a
+    short rendering of the JSON args (e.g. ``Bash ls -la`` or
+    ``Read foo.py``). Published via :data:`cli_publish_var` so the
+    trace panel surfaces what tools the model is invoking. Covers
+    both bridge-mounted tools (Bash, Read, ...) and external-MCP
+    tools (``mcp__sagent_chat__sagent_send``, ...) uniformly --
+    in stateless mode the bridge ALSO publishes labels for its own
+    tools, so bridge-mounted tools get logged twice; the trace
+    renderer treats each ToolLabel as a separate event.
+    """
+    event_type = event.get("type")
+    if event_type == "content_block_start":
+        idx = int(cast(int, event.get("index") or 0))
+        block = cast(MutableJSON, event.get("content_block") or {})
+        if block.get("type") == "tool_use":
+            tool_use_blocks[idx] = {
+                "name": cast(str, block.get("name") or "?"),
+                "id": cast(str, block.get("id") or ""),
+                "json_parts": [],
+            }
+        return
+    if event_type == "content_block_delta":
+        delta = cast(MutableJSON, event.get("delta") or {})
+        delta_type = delta.get("type")
+        if delta_type == "input_json_delta":
+            idx = int(cast(int, event.get("index") or 0))
+            state = tool_use_blocks.get(idx)
+            if state is not None:
+                partial = cast(str, delta.get("partial_json") or "")
+                cast(list, state["json_parts"]).append(partial)
+            return
+        if delta_type == "text_delta":
+            text = cast(str, delta.get("text") or "")
+            if text:
+                text_parts.append(text)
+                if on_text is not None:
+                    on_text(text)
+            return
+        if delta_type == "thinking_delta":
+            text = cast(str, delta.get("thinking") or "")
+            if text:
+                thinking_parts.append(text)
+                if on_thinking is not None:
+                    on_thinking(text)
+            return
+        if delta_type == "signature_delta":
+            # Per Anthropic's stream-json spec, ``signature_delta``
+            # carries the opaque thought-signature in the ``signature``
+            # field (mirrors ``thinking_delta`` for body text). The
+            # final signature is the concatenation across deltas
+            # (typically a single delta in practice). Required so
+            # downstream wire sends (v2.1-α materializer mode) embed
+            # the signature in the thinking block — Anthropic's API
+            # rejects unsigned thinking with HTTP 400
+            # ``thinking.signature: Field required``.
+            sig = cast(str, delta.get("signature") or "")
+            if sig:
+                signature_parts.append(sig)
+            return
+        return
+    if event_type == "content_block_stop":
+        idx = int(cast(int, event.get("index") or 0))
+        state = tool_use_blocks.pop(idx, None)
+        if state is None:
+            return
+        tool_name = cast(str, state["name"])
+        tool_id = cast(str, state["id"])
+        json_parts = cast(list, state["json_parts"])
+        args_summary = _render_tool_args(tool_name, "".join(json_parts))
+        label_text = f"{tool_name} {args_summary}".rstrip()
+        try:
+            # Lazy: a module-level import would cycle (agent.runtime
+            # transitively imports the providers package).
+            from sagent.agent.runtime import cli_publish_var  # noqa: PLC0415
+            from sagent.types.runtime import ToolLabel  # noqa: PLC0415
+
+            publish = cli_publish_var.get()
+            if publish is not None:
+                publish(ToolLabel(call_id=tool_id, text=label_text))
+        except Exception:  # noqa: BLE001 -- never let a label publish break the stream
+            logger.debug("failed to publish ToolLabel for %r", tool_name, exc_info=True)
+        return
+
+
+def _render_tool_args(name: str, raw_json: str) -> str:
+    """Render tool input JSON as a short label suffix.
+
+    Best-effort: if the JSON is incomplete (streaming aborted mid-flight)
+    or unparseable, falls back to a truncated raw form. Common args
+    (``command``, ``file_path``, ``pattern``, ``query``, ``to``,
+    ``content``) get a friendly rendering; unknown tools fall back to
+    the raw arg dict.
+    """
+    del name  # reserved for future per-tool renderings
+    if not raw_json:
+        return ""
+    try:
+        args = json.loads(raw_json)
+    except (json.JSONDecodeError, ValueError):
+        snippet = raw_json[:80].replace("\n", " ")
+        return f"({snippet}…)" if len(raw_json) > 80 else f"({snippet})"
+    if not isinstance(args, dict):
+        return str(args)[:80]
+    for key in ("command", "file_path", "path", "pattern", "query", "to"):
+        if key in args and isinstance(args[key], str):
+            val = args[key]
+            return val if len(val) <= 120 else val[:120] + "…"
+    if "content" in args and isinstance(args["content"], str):
+        val = args["content"]
+        return val if len(val) <= 120 else val[:120] + "…"
+    rendered = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(args.items())[:3])
+    return rendered[:120]
 
 
 def _round_context_tokens(round_usage: MutableJSON | None) -> int:
