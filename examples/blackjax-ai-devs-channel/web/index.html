@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>blackjax chat (power by Sagent)</title>
+<script>
+  (function () {
+    var t = null;
+    try { t = localStorage.getItem('channel-theme'); } catch (e) {}
+    if (!t) {
+      t = (window.matchMedia &&
+           window.matchMedia('(prefers-color-scheme: light)').matches)
+          ? 'light' : 'dark';
+    }
+    if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  })();
+</script>
+<style>
+  :root {
+    --bg: #1e1f22;
+    --bg-panel: #2b2d31;
+    --bg-input: #383a40;
+    --bg-hover: #3a3c43;
+    --text: #dbdee1;
+    --text-dim: #949ba4;
+    --text-mute: #6e7178;
+    --accent: #5865f2;
+    --divider: #3f4147;
+    --tint-strong: rgba(255,255,255,0.04);
+    --tint-soft:   rgba(255,255,255,0.02);
+    --tint-faint:  rgba(255,255,255,0.03);
+    --shadow:      rgba(0,0,0,0.4);
+    --avatar-text: #0a0a0a;
+
+    --role-user: #00ccff;
+    --role-system: #6e7178;
+    --role-tl: #ffc107;
+    --role-swe: #4ade80;
+    --role-junior-swe: #2e7d32;
+    --role-statistician: #e040fb;
+    --role-tech-writer: #60a5fa;
+    --role-default: #cccccc;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg-panel: #f5f6f8;
+    --bg-input: #eceef2;
+    --bg-hover: #e4e7ec;
+    --text: #1d1c1d;
+    --text-dim: #5e6470;
+    --text-mute: #8a8f99;
+    --accent: #5865f2;
+    --divider: #d6d9de;
+    --tint-strong: rgba(0,0,0,0.05);
+    --tint-soft:   rgba(0,0,0,0.025);
+    --tint-faint:  rgba(0,0,0,0.04);
+    --shadow:      rgba(0,0,0,0.12);
+    --avatar-text: #ffffff;
+
+    --role-user: #0284c7;
+    --role-system: #6e7178;
+    --role-tl: #b45309;
+    --role-swe: #15803d;
+    --role-junior-swe: #166534;
+    --role-statistician: #a21caf;
+    --role-tech-writer: #1d4ed8;
+    --role-default: #525252;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                 "Helvetica Neue", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  code, pre, .mono {
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 12.5px;
+  }
+  button, input, textarea, select {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+  }
+
+  /* --- layout ----------------------------------------------------- */
+  .app {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: 48px 1fr;
+    height: 100vh;
+  }
+  .app.trace-open {
+    grid-template-columns: 220px minmax(240px, 1fr) var(--trace-w, 840px);
+  }
+  .header {
+    grid-column: 1 / -1;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--divider);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    font-weight: 600;
+  }
+  .header .title {
+    margin-right: 14px;
+  }
+  .header .hdr-spacer {
+    flex: 1;
+  }
+  .header .conn {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .header .conn.ok    { color: var(--role-swe); }
+  .header .conn.dead  { color: #f87171; }
+  .header .theme-toggle {
+    background: var(--bg-input);
+    border: 1px solid var(--divider);
+    color: var(--text-dim);
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-right: 12px;
+  }
+  .header .theme-toggle:hover { color: var(--text); background: var(--bg-hover); }
+
+  /* --- sidebar (members) ------------------------------------------ */
+  .sidebar {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--divider);
+    overflow-y: auto;
+    padding: 12px 0;
+  }
+  .sidebar h3 {
+    margin: 0 12px 8px 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-mute);
+    letter-spacing: 0.05em;
+  }
+  .member {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 12px;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+  }
+  .member:hover { background: var(--bg-hover); }
+  .member.active {
+    background: var(--bg-hover);
+    border-left-color: var(--accent);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--role-default);
+    flex: 0 0 auto;
+  }
+  .member .label {
+    flex: 1;
+    color: var(--text);
+  }
+  .member .badge {
+    font-size: 10px;
+    color: var(--text-mute);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --- main pane: filter + messages + input ----------------------- */
+  .main {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    overflow: hidden;
+  }
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 20px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--divider);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .filter-bar label { display: flex; align-items: center; gap: 4px; }
+  .filter-bar select {
+    background: var(--bg-input);
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 3px 6px;
+    color: var(--text);
+    font-size: 12px;
+  }
+  .filter-bar button {
+    background: transparent;
+    border: 1px solid var(--divider);
+    color: var(--text-dim);
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .filter-bar button:hover { background: var(--bg-hover); color: var(--text); }
+  .filter-bar .stats {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+  .messages {
+    overflow-y: auto;
+    padding: 16px 20px;
+  }
+  .msg.filtered { display: none; }
+  .msg {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 12px;
+    padding: 8px 0;
+  }
+  .msg + .msg { border-top: 1px solid transparent; }
+  .msg.continued { padding-top: 1px; padding-bottom: 1px; }
+  .msg .avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--bg-panel);
+    color: var(--avatar-text);
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-transform: uppercase;
+    font-size: 16px;
+    flex: 0 0 auto;
+  }
+  .msg.continued .avatar { visibility: hidden; }
+  .msg .body { min-width: 0; }
+  .msg .meta {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+  .msg .from {
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .msg .from:hover { text-decoration: underline; }
+  .msg .to {
+    color: var(--text-mute);
+    font-size: 12px;
+  }
+  .msg .to-chip {
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: var(--tint-strong);
+    margin-left: 2px;
+  }
+  .msg .ts {
+    color: var(--text-mute);
+    font-size: 11px;
+  }
+  .msg .text {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg .text code {
+    background: var(--bg-input);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .msg .text pre {
+    background: var(--bg-input);
+    padding: 8px 12px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 4px 0;
+  }
+  .msg .text h1, .msg .text h2, .msg .text h3 {
+    margin: 12px 0 4px 0;
+    line-height: 1.25;
+  }
+  .msg .text h1 { font-size: 17px; }
+  .msg .text h2 { font-size: 15px; }
+  .msg .text h3 { font-size: 13.5px; color: var(--text-dim); }
+  .msg .text hr {
+    border: none;
+    border-top: 1px solid var(--divider);
+    margin: 8px 0;
+  }
+  .msg .text ul {
+    margin: 4px 0;
+    padding-left: 24px;
+  }
+  .msg .text li { padding: 1px 0; }
+  .msg .text table {
+    border-collapse: collapse;
+    margin: 6px 0;
+    font-size: 12.5px;
+    width: max-content;
+    max-width: 100%;
+  }
+  .msg .text th, .msg .text td {
+    border: 1px solid var(--divider);
+    padding: 4px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .msg .text th {
+    background: var(--bg-input);
+    font-weight: 600;
+  }
+  .msg .text tbody tr:nth-child(odd) td {
+    background: var(--tint-soft);
+  }
+  .msg .text strong { font-weight: 700; color: var(--text); }
+  .msg .text em { font-style: italic; }
+  .msg .text a {
+    color: var(--accent);
+    text-decoration: underline;
+    overflow-wrap: anywhere;
+  }
+  .msg .text .mention {
+    color: var(--accent);
+    background: rgba(88, 101, 242, 0.15);
+    border-radius: 3px;
+    padding: 0 2px;
+    cursor: pointer;
+  }
+  .msg.system .text {
+    color: var(--text-mute);
+    font-style: italic;
+    font-size: 12.5px;
+  }
+
+  .load-more-row {
+    display: flex;
+    justify-content: center;
+    padding: 4px 0 12px 0;
+  }
+  .load-more-row button {
+    background: var(--bg-input);
+    border: 1px solid var(--divider);
+    color: var(--text-dim);
+    padding: 4px 14px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .load-more-row button:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  /* --- input box -------------------------------------------------- */
+  .input-bar {
+    border-top: 1px solid var(--divider);
+    padding: 12px 20px;
+    background: var(--bg);
+  }
+  .input-bar .row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  .input-bar input, .input-bar textarea {
+    background: var(--bg-input);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text);
+    outline: none;
+    resize: none;
+  }
+  .input-bar input { flex: 1 1 auto; font-family: "SF Mono", monospace; font-size: 12.5px; }
+  .to-picker {
+    position: relative;
+    display: flex;
+    flex: 0 0 260px;
+    gap: 0;
+  }
+  .to-picker input {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .to-picker .toggle {
+    background: var(--bg-input);
+    border: none;
+    border-left: 1px solid var(--bg);
+    color: var(--text-dim);
+    padding: 0 10px;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .to-picker .toggle:hover { color: var(--text); }
+  .popover {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 6px;
+    background: var(--bg-panel);
+    border: 1px solid var(--divider);
+    border-radius: 6px;
+    padding: 6px 0;
+    min-width: 200px;
+    z-index: 20;
+    box-shadow: 0 6px 20px var(--shadow);
+  }
+  .popover label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .popover label:hover { background: var(--bg-hover); }
+  .popover input[type="checkbox"] {
+    margin: 0;
+    accent-color: var(--accent);
+  }
+  .popover .name { flex: 1; }
+  .popover .divider {
+    height: 1px;
+    background: var(--divider);
+    margin: 4px 0;
+  }
+  .input-bar textarea {
+    flex: 1;
+    min-height: 38px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .input-bar button {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .input-bar button:hover { filter: brightness(1.1); }
+  .input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .input-bar button#urgent-toggle {
+    background: transparent;
+    color: var(--text-mute);
+    border: 1px solid var(--border);
+    font-weight: 500;
+    font-size: 11.5px;
+    padding: 6px 10px;
+  }
+  .input-bar button#urgent-toggle.active {
+    background: #d04040;
+    color: #fff;
+    border-color: #d04040;
+  }
+  .input-bar .hint {
+    color: var(--text-mute);
+    font-size: 11px;
+    margin-top: 4px;
+  }
+  .input-bar .hint kbd {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+    font-size: 10.5px;
+    font-family: "SF Mono", monospace;
+  }
+
+  /* --- trace panel ------------------------------------------------ */
+  .trace {
+    position: relative;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--divider);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .trace[hidden] { display: none; }
+  .trace-resizer {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 5;
+  }
+  .trace-resizer:hover,
+  .trace-resizer.dragging {
+    background: var(--accent);
+    opacity: 0.35;
+  }
+
+  .trace-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--divider);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .trace-header .role {
+    font-weight: 700;
+    flex: 1;
+  }
+  .trace-header .pill {
+    background: var(--bg-input);
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .trace-header button {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 4px;
+  }
+  .trace-body {
+    overflow-y: auto;
+    padding: 8px 12px;
+    font-family: "SF Mono", "Menlo", "Consolas", monospace;
+    font-size: 12px;
+  }
+  .ev {
+    padding: 2px 0;
+    border-bottom: 1px solid var(--tint-faint);
+  }
+  .ev .ets {
+    color: var(--text-mute);
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .ev .marker { font-weight: 700; }
+  .ev .marker.begin { color: #4ade80; }
+  .ev .marker.end   { color: #facc15; }
+  .ev.tool .name { color: #60a5fa; }
+  .ev.text .snip { color: var(--text); }
+  .ev.thinking { color: #a78bfa; font-style: italic; }
+  .ev.result { color: var(--text-dim); }
+  .ev.tool-result { color: var(--text-dim); }
+  .ev.error { color: #f87171; }
+  .ev .more {
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 11px;
+    margin-left: 6px;
+  }
+  .ev pre.full {
+    margin: 4px 0 4px 16px;
+    padding: 6px 10px;
+    background: var(--bg);
+    border-left: 2px solid var(--divider);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    color: var(--text);
+    font-size: 11.5px;
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--bg-input);
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+
+<div id="app" class="app">
+
+  <header class="header">
+    <div class="title">💬 blackjax chat</div>
+    <a class="theme-toggle" href="/debug" style="text-decoration:none"
+       title="Open the debug console (full-history search + agent status)">🔧 debug ↗</a>
+    <div class="hdr-spacer"></div>
+    <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark"
+            type="button">dark</button>
+    <div id="conn" class="conn">connecting…</div>
+  </header>
+
+  <aside class="sidebar">
+    <h3>Members</h3>
+    <div id="members"></div>
+  </aside>
+
+  <section class="main">
+    <div class="filter-bar">
+      <label>From: <select id="filter-from"><option value="">any</option></select></label>
+      <label>To: <select id="filter-to"><option value="">any</option></select></label>
+      <button id="filter-clear">clear</button>
+      <button id="filter-inbox" title="show messages addressed to me (@user)">inbox</button>
+      <div class="stats"><span id="filter-stats"></span></div>
+    </div>
+    <div id="messages" class="messages"></div>
+    <div class="input-bar">
+      <div class="row">
+        <div class="to-picker">
+          <input id="to-input" type="text" value="tl" autocomplete="off"
+                 placeholder="@tl"
+                 title="comma-separated, e.g. statistician, tl  (use @ optionally)" />
+          <button id="to-toggle" type="button" class="toggle" title="Pick recipients">▾</button>
+          <div id="to-popover" class="popover" hidden></div>
+        </div>
+        <textarea id="input"
+          placeholder="Message #blackjax-chat  (Enter to queue, Shift+Enter for newline, Ctrl+Enter to interrupt)"
+          rows="1"></textarea>
+        <button id="urgent-toggle" type="button" class="toggle"
+                title="When ON, the next message INTERRUPTS the recipient's in-flight turn instead of queuing.">
+          interrupt: off
+        </button>
+        <button id="send-btn">Send</button>
+      </div>
+      <div class="hint">
+        Posts as <code>user</code>. To: comma-separated roles (e.g.
+        <code>statistician, tl</code> CCs both via fan-out POSTs).
+        <strong>Interrupt</strong> off (default) → message queues until
+        recipient's current turn finishes. <strong>Interrupt</strong> on
+        or <kbd>Ctrl</kbd>+<kbd>Enter</kbd> → recipient's in-flight
+        subprocess is SIGINTed to make room. Use sparingly: every
+        interrupt discards the recipient's in-flight work.
+      </div>
+    </div>
+  </section>
+
+  <aside id="trace" class="trace" hidden>
+    <div class="trace-resizer" id="trace-resizer" title="Drag to resize"></div>
+    <div class="trace-header">
+      <div class="role" id="trace-role">trace</div>
+      <div id="trace-count" class="pill">0 events</div>
+      <button id="trace-close" title="Close">✕</button>
+    </div>
+    <div id="trace-body" class="trace-body"></div>
+  </aside>
+
+</div>
+
+
+<script>
+const ROLE_COLOR = {
+  user:          'var(--role-user)',
+  system:        'var(--role-system)',
+  tl:            'var(--role-tl)',
+  swe:           'var(--role-swe)',
+  'junior-swe':  'var(--role-junior-swe)',
+  statistician:  'var(--role-statistician)',
+  'tech-writer': 'var(--role-tech-writer)',
+};
+
+const $ = (id) => document.getElementById(id);
+const messagesEl = $('messages');
+const inputEl = $('input');
+const sendBtn = $('send-btn');
+const toInput = $('to-input');
+const conn = $('conn');
+const traceEl = $('trace');
+const traceBody = $('trace-body');
+const traceRoleEl = $('trace-role');
+const traceCountEl = $('trace-count');
+const filterFromEl = $('filter-from');
+const filterToEl = $('filter-to');
+const filterClearBtn = $('filter-clear');
+const filterInboxBtn = $('filter-inbox');
+const filterStatsEl = $('filter-stats');
+
+let lastFromRole = null;
+let lastTo = null;
+let lastTs = '';
+let traceRole = null;
+let traceTimer = null;     // sagent has no SSE; we poll the trace tail
+let traceTotal = 0;        // last-seen trace total; used to fetch only new tail
+let allRoles = [];
+let filterFrom = '';
+let filterTo = '';
+
+const PAGE_SIZE = 20;
+let allMessages = [];
+let displayStart = 0;
+
+function setConn(state, label) {
+  conn.className = 'conn ' + state;
+  conn.textContent = label;
+}
+
+function roleColor(role) {
+  return ROLE_COLOR[role] || 'var(--role-default)';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso.slice(11, 19);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+// Minimal markdown → HTML with @mention chips. Same renderer as channel/.
+function renderBody(text) {
+  const stash = [];
+  const ph = (html) => `\x00${stash.push(html) - 1}\x00`;
+
+  let s = escapeHtml(text);
+
+  s = s.replace(/```([\s\S]*?)```/g, (_, code) =>
+    ph('<pre>' + code.trim() + '</pre>'));
+
+  s = s.replace(/`([^`\n]+)`/g, (_, code) =>
+    ph('<code>' + code + '</code>'));
+
+  s = s.replace(/\bhttps?:\/\/[^\s<]+/g, (url) => {
+    let trail = '';
+    const t = url.match(/[.,!?)\]]+$/);
+    if (t) { trail = t[0]; url = url.slice(0, -trail.length); }
+    return ph(`<a href="${url}" target="_blank" rel="noopener">${url}</a>`) + trail;
+  });
+
+  s = s.replace(
+    /^(\|[^\n]+\|)\n(\|[\s:|\-]+\|)\n((?:\|[^\n]+\|(?:\n|$))+)/gm,
+    (_, headerRow, _sep, bodyRows) => {
+      const splitCells = (row) =>
+        row.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+      const headers = splitCells(headerRow);
+      const rows = bodyRows.trim().split('\n').map(splitCells);
+      let html = '<table><thead><tr>';
+      headers.forEach(h => { html += `<th>${h}</th>`; });
+      html += '</tr></thead><tbody>';
+      rows.forEach(r => {
+        html += '<tr>';
+        r.forEach(c => { html += `<td>${c}</td>`; });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      return ph(html);
+    }
+  );
+
+  s = s.replace(/^---+\s*$/gm, ph('<hr>'));
+
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  s = s.replace(
+    /(?:^[ \t]*[-*][ \t]+.+(?:\n|$))+/gm,
+    (block) => {
+      const items = block.trim().split('\n').map(line =>
+        '<li>' + line.replace(/^[ \t]*[-*][ \t]+/, '') + '</li>'
+      );
+      return '<ul>' + items.join('') + '</ul>';
+    }
+  );
+
+  s = s.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(?<!\*)\*([^*\s][^*\n]*?[^*\s]|[^*\s])\*(?!\*)/g, '<em>$1</em>');
+
+  s = s.replace(/@([a-zA-Z][\w-]*)/g, (m, role) =>
+    `<span class="mention" data-role="${role}" style="color:${roleColor(role)}">@${role}</span>`);
+
+  s = s.replace(/\x00(\d+)\x00/g, (_, idx) => stash[parseInt(idx, 10)]);
+
+  return s;
+}
+
+function msgMatchesFilter(msg) {
+  if (filterFrom && msg.from !== filterFrom) return false;
+  if (filterTo) {
+    const matched = (msg.to || []).some(r => r === filterTo || r === 'all');
+    if (!matched) return false;
+  }
+  return true;
+}
+
+function applyFilterToRow(row, msg) {
+  if (msgMatchesFilter(msg)) row.classList.remove('filtered');
+  else row.classList.add('filtered');
+}
+
+function updateFilterStats() {
+  const rows = Array.from(messagesEl.children).filter(r => r._msg);
+  const total = allMessages.length;
+  const rendered = rows.length;
+  const visible = rows.filter(r => !r.classList.contains('filtered')).length;
+  const hidden = total - rendered;
+  let parts = [];
+  if (filterFrom || filterTo) parts.push(`${visible} of ${rendered} shown`);
+  else parts.push(`${rendered} of ${total} messages`);
+  if (hidden > 0) parts.push(`${hidden} older hidden`);
+  filterStatsEl.textContent = parts.join(' · ');
+}
+
+function sameRecipients(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every(r => b.includes(r));
+}
+
+function rebuildVisibility() {
+  lastFromRole = null;
+  lastTo = null;
+  const rows = Array.from(messagesEl.children);
+  let prevVisibleFrom = null;
+  let prevVisibleTo = null;
+  for (const row of rows) {
+    const msg = row._msg;
+    if (!msg) continue;
+    applyFilterToRow(row, msg);
+    const visible = !row.classList.contains('filtered');
+    if (visible) {
+      const continued =
+        msg.from === prevVisibleFrom && sameRecipients(msg.to, prevVisibleTo);
+      row.classList.toggle('continued', continued);
+      prevVisibleFrom = msg.from;
+      prevVisibleTo = msg.to;
+    }
+  }
+  updateFilterStats();
+}
+
+function renderMessage(msg) {
+  const continued =
+    msg.from === lastFromRole && sameRecipients(msg.to, lastTo);
+  const row = document.createElement('div');
+  row.className = 'msg' + (continued ? ' continued' : '') +
+                  (msg.from === 'system' ? ' system' : '');
+  row._msg = msg;
+
+  const color = roleColor(msg.from);
+  const avatar = msg.from.charAt(0);
+  const toList = msg.to || [];
+  const toHtml = toList.map(r =>
+    `<span class="to-chip" data-role="${r}" style="color:${roleColor(r)}">@${r}</span>`
+  ).join(' ');
+
+  row.innerHTML = `
+    <div class="avatar" style="background:${color}">${avatar}</div>
+    <div class="body">
+      ${continued ? '' : `
+        <div class="meta">
+          <span class="from" style="color:${color}" data-role="${msg.from}">@${msg.from}</span>
+          <span class="to">→ ${toHtml}</span>
+          <span class="ts">${fmtTime(msg.ts)}</span>
+        </div>`}
+      <div class="text">${renderBody(msg.body || '')}</div>
+    </div>`;
+
+  row.querySelectorAll('[data-role]').forEach(el => {
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', () => openTrace(el.dataset.role));
+  });
+
+  messagesEl.appendChild(row);
+  applyFilterToRow(row, msg);
+  if (!row.classList.contains('filtered')) {
+    lastFromRole = msg.from;
+    lastTo = msg.to;
+  }
+  lastTs = msg.ts;
+  updateFilterStats();
+
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop
+                    - messagesEl.clientHeight < 80;
+  if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function loadMembers() {
+  try {
+    const r = await fetch('/api/roles');
+    const data = await r.json();
+    allRoles = data.roles;
+    const el = $('members');
+    el.innerHTML = '';
+    data.roles.forEach(role => {
+      const m = document.createElement('div');
+      m.className = 'member';
+      m.dataset.role = role;
+      m.innerHTML = `
+        <span class="dot" style="background:${roleColor(role)}"></span>
+        <span class="label">${role}</span>
+        <span class="badge"></span>`;
+      m.addEventListener('click', () => openTrace(role));
+      el.appendChild(m);
+    });
+    for (const sel of [filterFromEl, filterToEl]) {
+      data.roles.forEach(role => {
+        const opt = document.createElement('option');
+        opt.value = role;
+        opt.textContent = '@' + role;
+        sel.appendChild(opt);
+      });
+    }
+    buildPopover();
+  } catch (e) {
+    console.error('members load failed', e);
+  }
+}
+
+function parseRecipients(s) {
+  return s.split(/[,\s]+/)
+    .map(x => x.trim().replace(/^@/, '').toLowerCase())
+    .filter(Boolean);
+}
+
+const toToggleBtn = $('to-toggle');
+const toPopover = $('to-popover');
+
+function buildPopover() {
+  toPopover.innerHTML = '';
+  // sagent's /api/post is single-target; 'all' is not a known target,
+  // so we don't offer broadcast here. To CC multiple roles, list them
+  // comma-separated and we fan out one POST per recipient.
+  const items = allRoles.filter(r => r !== 'user' && r !== 'system');
+  items.forEach(role => {
+    const lbl = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = role;
+    cb.addEventListener('change', () => onPopoverToggle(cb));
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = roleColor(role);
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = '@' + role;
+    lbl.appendChild(cb);
+    lbl.appendChild(dot);
+    lbl.appendChild(name);
+    toPopover.appendChild(lbl);
+  });
+}
+
+function syncPopoverFromInput() {
+  const current = new Set(parseRecipients(toInput.value));
+  toPopover.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.checked = current.has(cb.value);
+  });
+}
+
+function onPopoverToggle(cb) {
+  const current = parseRecipients(toInput.value);
+  const set = new Set(current);
+  if (cb.checked) set.add(cb.value);
+  else            set.delete(cb.value);
+  toInput.value = Array.from(set).join(', ');
+  syncPopoverFromInput();
+}
+
+toToggleBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (toPopover.hidden) {
+    syncPopoverFromInput();
+    toPopover.hidden = false;
+  } else {
+    toPopover.hidden = true;
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!toPopover.hidden &&
+      !toPopover.contains(e.target) &&
+      e.target !== toToggleBtn) {
+    toPopover.hidden = true;
+  }
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !toPopover.hidden) {
+    toPopover.hidden = true;
+  }
+});
+
+filterFromEl.addEventListener('change', () => {
+  filterFrom = filterFromEl.value;
+  rebuildVisibility();
+});
+filterToEl.addEventListener('change', () => {
+  filterTo = filterToEl.value;
+  rebuildVisibility();
+});
+filterClearBtn.addEventListener('click', () => {
+  filterFrom = filterTo = '';
+  filterFromEl.value = filterToEl.value = '';
+  rebuildVisibility();
+});
+filterInboxBtn.addEventListener('click', () => {
+  filterTo = 'user';
+  filterToEl.value = 'user';
+  rebuildVisibility();
+});
+
+function renderLoadMoreRow() {
+  let row = messagesEl.querySelector('.load-more-row');
+  if (displayStart <= 0) {
+    if (row) row.remove();
+    return;
+  }
+  const remaining = displayStart;
+  const chunk = Math.min(PAGE_SIZE, remaining);
+  const label = `Load ${chunk} older message${chunk === 1 ? '' : 's'} (${remaining} hidden)`;
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'load-more-row';
+    const btn = document.createElement('button');
+    btn.addEventListener('click', loadMore);
+    row.appendChild(btn);
+    messagesEl.insertBefore(row, messagesEl.firstChild);
+  } else if (messagesEl.firstChild !== row) {
+    messagesEl.insertBefore(row, messagesEl.firstChild);
+  }
+  row.querySelector('button').textContent = label;
+}
+
+function renderWindow() {
+  messagesEl.innerHTML = '';
+  lastFromRole = null;
+  lastTo = null;
+  renderLoadMoreRow();
+  for (const m of allMessages.slice(displayStart)) {
+    renderMessage(m);
+  }
+}
+
+function scrollToBottom() {
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function loadMore() {
+  const oldHeight = messagesEl.scrollHeight;
+  const oldTop = messagesEl.scrollTop;
+  displayStart = Math.max(0, displayStart - PAGE_SIZE);
+  renderWindow();
+  const newHeight = messagesEl.scrollHeight;
+  messagesEl.scrollTop = oldTop + (newHeight - oldHeight);
+}
+
+async function loadBacklog() {
+  // sagent's /api/messages returns {records: [...]} not {messages: [...]}.
+  const r = await fetch('/api/messages');
+  const data = await r.json();
+  allMessages = data.records || data.messages || [];
+  displayStart = Math.max(0, allMessages.length - PAGE_SIZE);
+  renderWindow();
+  scrollToBottom();
+  if (allMessages.length) lastTs = allMessages[allMessages.length - 1].ts || '';
+}
+
+// sagent has no /api/stream SSE; we poll /api/messages?since=<ts> every
+// 1.5s instead. Same UX, slightly more idle traffic — acceptable for
+// local-only operator use.
+async function pollMessages() {
+  try {
+    const url = lastTs
+      ? '/api/messages?since=' + encodeURIComponent(lastTs)
+      : '/api/messages';
+    const r = await fetch(url);
+    const data = await r.json();
+    const recs = data.records || [];
+    if (recs.length) {
+      const atBottom =
+        (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight) < 80;
+      for (const rec of recs) {
+        allMessages.push(rec);
+        renderMessage(rec);
+        if (rec.ts && rec.ts > lastTs) lastTs = rec.ts;
+      }
+      if (atBottom) scrollToBottom();
+    }
+    setConn('ok', '● live');
+  } catch (e) {
+    setConn('dead', '● disconnected');
+  }
+}
+
+// Per-message urgent override: Ctrl+Enter sets this for the next
+// sendMessage() call, then it resets. The persistent toggle button
+// state is the default; Ctrl+Enter is a one-shot override.
+let urgentNextSend = false;
+
+async function sendMessage() {
+  const body = inputEl.value.trim();
+  if (!body) return;
+  const recipients = parseRecipients(toInput.value);
+  if (recipients.length === 0) {
+    alert('At least one recipient required (e.g. @tl)');
+    return;
+  }
+  // Effective urgent state: explicit one-shot override OR persistent toggle.
+  const urgent = urgentNextSend || urgentToggleEl.classList.contains('active');
+  urgentNextSend = false;
+  sendBtn.disabled = true;
+  try {
+    // Fan-out: sagent's /api/post is single-target. CC by issuing one
+    // POST per recipient. The audit log records one entry per delivery,
+    // which matches sagent's per-target inbox semantics.
+    const results = await Promise.all(recipients.map(to =>
+      fetch('/api/post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to, body, urgent }),
+      })
+    ));
+    const bad = results.find(r => !r.ok);
+    if (bad) throw new Error(await bad.text());
+    inputEl.value = '';
+    autoResize();
+  } catch (e) {
+    alert('post failed: ' + e.message);
+  } finally {
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+}
+
+function autoResize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+}
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    // Ctrl+Enter is a one-shot interrupt override (regardless of toggle).
+    if (e.ctrlKey || e.metaKey) urgentNextSend = true;
+    sendMessage();
+  }
+});
+inputEl.addEventListener('input', autoResize);
+sendBtn.addEventListener('click', sendMessage);
+
+// Urgent persistent toggle: click to flip on/off. State reflected in
+// the button label so the operator can see it without checking each
+// time. Toggle persists across messages (default state for the rest of
+// the session) until clicked off; per-message override via Ctrl+Enter.
+const urgentToggleEl = document.getElementById('urgent-toggle');
+urgentToggleEl.addEventListener('click', () => {
+  const wasActive = urgentToggleEl.classList.toggle('active');
+  urgentToggleEl.textContent = 'interrupt: ' + (wasActive ? 'on' : 'off');
+  urgentToggleEl.title = wasActive
+    ? 'Every send will INTERRUPT until you click to turn it off.'
+    : 'When ON, sends INTERRUPT recipient. Ctrl+Enter is a per-message override.';
+});
+
+// --- trace panel -----------------------------------------------------
+function makeExpander(row, label, fullText) {
+  if (!fullText) return;
+  const more = document.createElement('span');
+  more.className = 'more';
+  more.textContent = '[show ' + label + ']';
+  const pre = document.createElement('pre');
+  pre.className = 'full';
+  pre.textContent = fullText;
+  pre.style.display = 'none';
+  more.addEventListener('click', () => {
+    const showing = pre.style.display !== 'none';
+    pre.style.display = showing ? 'none' : 'block';
+    more.textContent = showing ? '[show ' + label + ']' : '[hide ' + label + ']';
+  });
+  row.appendChild(more);
+  row.appendChild(pre);
+}
+
+// Sagent trace events have a different shape than chat/'s. Each line is
+// {_event, _ts, _n, ...fields}. Renderer matches the one in debug.html
+// so opening a trace here looks the same as scrubbing through it on
+// /debug → Search → Open in trace.
+function renderTraceEvent(ev) {
+  const ts = (ev._ts || '').slice(11, 19);
+  const kind = ev._event || '?';
+
+  if (kind === 'UserMessage' || kind === 'AgentSendMessage') {
+    const src = kind === 'AgentSendMessage' ? (ev.source || '?') : 'user';
+    const body = (ev.text || '').split('\n').find(l => l.trim()) || '';
+    const row = document.createElement('div');
+    row.className = 'ev';
+    row.innerHTML = `<span class="ets">${ts}</span>
+      <span class="marker begin">▶ inbound</span> from @${escapeHtml(src)}
+      <div style="margin-left:16px;color:var(--text-dim);font-size:11.5px">
+        ${escapeHtml(body.slice(0, 200))}
+      </div>`;
+    makeExpander(row, 'full inbound', ev.text);
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ModelCallStarted') {
+    const row = document.createElement('div');
+    row.className = 'ev';
+    row.innerHTML = `<span class="ets">${ts}</span>● model_call_started`;
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ModelResponsePartial') {
+    // Hidden by default — opus typically streams a 1KB assistant turn
+    // as 25-50 small ``ModelResponsePartial`` events; rendering each
+    // one as its own "stream:" row turns the trace into an
+    // unreadable wall of fragments. The full text appears in the
+    // ``ModelResponseComplete`` event below. Toggle visibility via
+    // localStorage('trace-show-partials') = '1' if you need to see
+    // the granular stream for debugging.
+    if (localStorage.getItem('trace-show-partials') !== '1') return;
+    const t = (ev.text || '').replace(/\n/g, ' ');
+    if (!t) return;
+    const row = document.createElement('div');
+    row.className = 'ev text';
+    row.innerHTML = `<span class="ets">${ts}</span>
+      <span class="snip">stream: ${escapeHtml(t.slice(0, 200))}</span>`;
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ModelResponseComplete') {
+    const m = ev.message || {};
+    const tcs = (m.tool_calls || []).map(t => t.name).filter(Boolean).join(', ');
+    // Preserve newlines in the preview so multi-line assistant text
+    // (markdown headers, bullet lists, code blocks) stays readable
+    // instead of collapsing into one wall-of-text line.
+    const txt = (m.text || '');
+    const preview = txt.length > 600 ? txt.slice(0, 600) + '…' : txt;
+    const row = document.createElement('div');
+    row.className = 'ev';
+    const tail = tcs ? ` tool_use=[${escapeHtml(tcs)}]` : '';
+    row.innerHTML = `<span class="ets">${ts}</span>
+      <span class="marker end">■ assistant</span>${tail}
+      <pre style="margin:4px 0 4px 16px;padding:6px 10px;background:var(--bg);
+                  border-left:2px solid var(--divider);white-space:pre-wrap;
+                  word-wrap:break-word;color:var(--text);font-size:11.5px;
+                  font-family:'SF Mono','Menlo','Consolas',monospace;
+                  max-height:300px;overflow-y:auto;">${escapeHtml(preview)}</pre>`;
+    if (txt.length > 600) makeExpander(row, 'full assistant text', txt);
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ModelResponseError') {
+    const row = document.createElement('div');
+    row.className = 'ev error';
+    row.innerHTML = `<span class="ets">${ts}</span>● ERROR ${escapeHtml(ev.error || 'unknown')}`;
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ToolLabel') {
+    const row = document.createElement('div');
+    row.className = 'ev tool';
+    row.innerHTML = `<span class="ets">${ts}</span>
+      <span class="name">tool</span> ${escapeHtml((ev.text || ev.label || '').slice(0, 160))}`;
+    traceBody.appendChild(row);
+    return;
+  }
+  if (kind === 'ModelIdle' || kind === 'AgentIdle' ||
+      kind === 'CohortStarted' || kind === 'CohortComplete' ||
+      kind === 'SaveSession') {
+    // Hidden by default — these are runtime bookkeeping events that
+    // fire many times per turn (opus's recap produced 29
+    // ``SaveSession`` events in one turn) and add no signal for the
+    // operator. Toggle visibility via
+    // localStorage('trace-show-bookkeeping') = '1'.
+    if (localStorage.getItem('trace-show-bookkeeping') !== '1') return;
+    const row = document.createElement('div');
+    row.className = 'ev result';
+    row.innerHTML = `<span class="ets">${ts}</span>● ${escapeHtml(kind)}`;
+    traceBody.appendChild(row);
+    return;
+  }
+  const row = document.createElement('div');
+  row.className = 'ev result';
+  row.innerHTML = `<span class="ets">${ts}</span>${escapeHtml(kind)}`;
+  traceBody.appendChild(row);
+}
+
+function closeTrace() {
+  document.getElementById('app').classList.remove('trace-open');
+  traceEl.hidden = true;
+  if (traceTimer) { clearInterval(traceTimer); traceTimer = null; }
+  traceRole = null;
+  traceTotal = 0;
+  document.querySelectorAll('.member.active')
+          .forEach(el => el.classList.remove('active'));
+}
+$('trace-close').addEventListener('click', closeTrace);
+
+(function () {
+  const app = $('app');
+  const resizer = $('trace-resizer');
+  const MIN = 360;
+  const RESERVE = 480;
+  try {
+    const saved = localStorage.getItem('channel-trace-w');
+    if (saved) app.style.setProperty('--trace-w', parseInt(saved, 10) + 'px');
+  } catch (e) {}
+  let dragging = false;
+  function clamp(w) {
+    const max = Math.max(MIN, window.innerWidth - RESERVE);
+    return Math.max(MIN, Math.min(w, max));
+  }
+  function onMove(e) {
+    if (!dragging) return;
+    app.style.setProperty('--trace-w', clamp(window.innerWidth - e.clientX) + 'px');
+  }
+  function onUp() {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    try {
+      const cur = app.style.getPropertyValue('--trace-w');
+      if (cur) localStorage.setItem('channel-trace-w', parseInt(cur, 10));
+    } catch (e) {}
+  }
+  resizer.addEventListener('mousedown', (e) => {
+    dragging = true;
+    resizer.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
+})();
+
+async function openTrace(role) {
+  if (traceRole === role) return;
+  if (traceTimer) { clearInterval(traceTimer); traceTimer = null; }
+  traceRole = role;
+  traceTotal = 0;
+  document.getElementById('app').classList.add('trace-open');
+  traceEl.hidden = false;
+  traceRoleEl.textContent = '@' + role;
+  traceRoleEl.style.color = roleColor(role);
+  traceBody.innerHTML = '';
+  traceCountEl.textContent = '0 events';
+
+  document.querySelectorAll('.member.active')
+          .forEach(el => el.classList.remove('active'));
+  const m = document.querySelector(`.member[data-role="${role}"]`);
+  if (m) m.classList.add('active');
+
+  try {
+    const r = await fetch(`/api/trace/${role}?limit=2000`);
+    if (r.status === 404) {
+      traceBody.innerHTML =
+        `<div class="ev">no trace file at sessions/${role}.trace.jsonl
+         <br>(check that trace_writer.install_on() ran for this role)</div>`;
+      return;
+    }
+    const data = await r.json();
+    (data.events || []).forEach(renderTraceEvent);
+    traceTotal = data.total || (data.events || []).length;
+    traceCountEl.textContent = traceTotal + ' events';
+    traceBody.scrollTop = traceBody.scrollHeight;
+  } catch (e) {
+    traceBody.innerHTML = `<div class="ev error">load failed: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  // Poll the tail for new events. The backend's ``total`` is now the
+  // on-disk count (NOT the post-truncation slice length), so the
+  // ``total > traceTotal`` check stays valid even after the file
+  // grows past the ?limit= window. We request a generous tail
+  // (?limit=2000) so we don't miss events between polls -- if more
+  // than 2000 events arrive in a 2-second window we'd undercount,
+  // but in practice agents emit a few dozen events per second at
+  // most.
+  traceTimer = setInterval(async () => {
+    if (!traceRole) return;
+    try {
+      const r = await fetch(`/api/trace/${traceRole}?limit=2000`);
+      if (!r.ok) return;
+      const data = await r.json();
+      const total = data.total || (data.events || []).length;
+      if (total <= traceTotal) return;
+      // Only render events past what we've seen.
+      const newCount = total - traceTotal;
+      const events = data.events || [];
+      const tail = events.slice(Math.max(0, events.length - newCount));
+      const atBottom = (traceBody.scrollHeight - traceBody.scrollTop - traceBody.clientHeight) < 60;
+      tail.forEach(renderTraceEvent);
+      traceTotal = total;
+      traceCountEl.textContent = traceTotal + ' events';
+      // Cap the DOM at 2000 rendered events so a long-running session
+      // doesn't blow up the page. Drop the oldest from the top when
+      // we cross the cap.
+      const MAX_DOM_EVENTS = 2000;
+      while (traceBody.childElementCount > MAX_DOM_EVENTS) {
+        traceBody.removeChild(traceBody.firstElementChild);
+      }
+      if (atBottom) traceBody.scrollTop = traceBody.scrollHeight;
+    } catch (e) { /* swallow polling errors */ }
+  }, 2000);
+}
+
+// --- theme toggle (shared 'channel-theme' key with /debug) -----------
+(function () {
+  const btn = $('theme-toggle');
+  function syncLabel() {
+    const t = document.documentElement.getAttribute('data-theme') === 'light'
+              ? 'light' : 'dark';
+    btn.textContent = t;
+  }
+  syncLabel();
+  btn.addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'light' ? null : 'light';
+    if (next) document.documentElement.setAttribute('data-theme', next);
+    else      document.documentElement.removeAttribute('data-theme');
+    try { localStorage.setItem('channel-theme', next || 'dark'); } catch (e) {}
+    syncLabel();
+  });
+})();
+
+// --- bootstrap -------------------------------------------------------
+(async () => {
+  await loadMembers();
+  await loadBacklog();
+  setConn('ok', '● live');
+  setInterval(pollMessages, 1500);
+  inputEl.focus();
+})();
+</script>
+</body>
+</html>

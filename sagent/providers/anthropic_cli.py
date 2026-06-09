@@ -329,7 +329,7 @@ class AnthropicCLI(Anthropic):
             mode is intended for chat-channel use cases where
             ``aborted_streaming`` recoveries must NOT lose
             ``AssistantMessage`` content — see
-            ``plugin/blackjax-chat/README.md`` for context.
+            ``examples/blackjax-ai-devs-channel/README.md`` for context.
           materialize_session: v2.1-α — when True (and ``session_id``
             is set), before every ``--resume`` spawn the session JSONL
             is rewritten from sagent's tape view, so claude reads
