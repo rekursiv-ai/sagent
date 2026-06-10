@@ -679,6 +679,9 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
         "sagent.providers.anthropic_cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+    )
 
     def _which_claude(name: str) -> str | None:
         del name
@@ -755,6 +758,9 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli._CREDS_PATH",
         tmp_path / ".credentials.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
     )
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli.shutil.which",
@@ -934,6 +940,9 @@ def test_is_retryable_provider_error_session_persistent_only(
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli._CREDS_PATH",
         tmp_path / ".credentials.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
     )
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -1933,6 +1942,9 @@ def test_cancel_in_flight_returns_false_when_no_active_subprocess(
     """No active hot-spare ⇒ ``cancel_in_flight`` returns False without raising."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+    )
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-opus-4-7")
     # Hot spare has not been acquired -> ``active`` is None.
@@ -1947,6 +1959,9 @@ def test_cancel_in_flight_signals_active_subprocess(
     """Active hot-spare ⇒ ``cancel_in_flight`` forwards to ``Subproc.interrupt``."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+    )
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-opus-4-7")
 
