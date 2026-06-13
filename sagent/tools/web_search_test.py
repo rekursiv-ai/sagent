@@ -20,8 +20,10 @@ def test_websearch_metadata() -> None:
 def test_description_resolves() -> None:
     t = WebSearch()
     desc = t.description
-    assert isinstance(desc, str)
-    assert desc != ""
+    # Assert the actual resolved content, not just type/non-emptiness, so a
+    # wrong asset or empty template is caught.
+    assert "Web search" in desc
+    assert "Sources:" in desc
 
 
 def test_summary_short_query() -> None:

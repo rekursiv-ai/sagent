@@ -103,6 +103,14 @@ async def _apply_compact(
     return resolve_context(tape).messages
 
 
+def _last_prompt_text(model: _ScriptedModel) -> str:
+    """Concatenated text of the last request's messages (the compaction prompt)."""
+    return "\n".join(
+        getattr(m, "text", "") or getattr(m, "content", "")
+        for m in model.received[-1].messages
+    )
+
+
 @dataclass(slots=True, kw_only=True)
 class _ScriptedModel(MockModelCaps):
     """Returns scripted responses from ``stream``; tracks call count."""
@@ -330,6 +338,11 @@ async def test_compact_includes_custom_instructions_in_request() -> None:
         compactor, history, model, custom_instructions="focus on errors"
     )
     assert model.stream_calls == 1
+    # The instruction text must actually reach the prompt the model saw.
+    prompt = _last_prompt_text(model)
+    assert "focus on errors" in prompt, (
+        f"custom instructions missing from compaction prompt; got {prompt[-400:]!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -341,6 +354,10 @@ async def test_compact_ignores_blank_custom_instructions() -> None:
     history: list[ModelContextEvent] = [UserMessage(text="x")]
     _ = await _apply_compact(compactor, history, model, custom_instructions="   ")
     assert model.stream_calls == 1
+    # Blank guidance must not inject an empty guidance fence.
+    assert "user_guidance" not in _last_prompt_text(model), (
+        "blank custom instructions must not add a guidance section"
+    )
 
 
 @pytest.mark.asyncio
@@ -352,8 +369,11 @@ async def test_compact_strips_image_attachments() -> None:
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     history: list[ModelContextEvent] = [UserMessage(text="see", attachments=(img,))]
     _ = await _apply_compact(compactor, history, model)
-    # The request the model saw had no binary payload (verified via the
-    # buffer call succeeding without any attachment-related branching).
+    # The compact call succeeded with an image present (no attachment-related
+    # crash). The actual stripping contract is asserted directly against
+    # ``_strip_attachments`` in ``test_strip_attachments_*`` below, which
+    # exercises the real production function rather than inferring its
+    # effect through the prompt-embedding pipeline.
     assert model.stream_calls == 1
 
 
@@ -436,7 +456,60 @@ async def test_compact_strips_tool_result_attachments() -> None:
         ToolResult(call_id="c1", content="ran", attachments=(img, pdf)),
     ]
     _ = await _apply_compact(compactor, history, model)
+    # As above: the strip contract is asserted directly against
+    # ``_strip_attachments`` below; here we only confirm a ToolResult with
+    # attachments does not break the compact pipeline.
     assert model.stream_calls == 1
+
+
+def test_strip_attachments_user_message_image_marker() -> None:
+    """A UserMessage image becomes an ``[image]`` marker; attachments cleared."""
+    img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
+    out = _strip_attachments([UserMessage(text="see", attachments=(img,))])
+    assert len(out) == 1
+    entry = out[0]
+    assert isinstance(entry, UserMessage)
+    assert entry.text == "see [image]"
+    assert entry.attachments == ()
+
+
+def test_strip_attachments_tool_result_image_and_document_markers() -> None:
+    """A ToolResult's image + pdf become ``[image] [document]``; attachments
+    cleared.
+    """
+    img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
+    pdf = BytesMessage(data=b"%PDF", descriptor="application/pdf")
+    out = _strip_attachments(
+        [ToolResult(call_id="c1", content="ran", attachments=(img, pdf))]
+    )
+    assert len(out) == 1
+    entry = out[0]
+    assert isinstance(entry, ToolResult)
+    assert entry.content == "ran [image] [document]"
+    assert entry.attachments == ()
+
+
+def test_strip_attachments_drops_empty_text_with_no_marker_attachments() -> None:
+    """Empty text + only non-BytesMessage attachments -> entry dropped.
+
+    An empty user/tool message is rejected by the provider, so a stripped
+    entry that would render empty must not survive.
+    """
+
+    class _Weird:
+        pass
+
+    out = _strip_attachments(
+        [UserMessage(text="", attachments=cast(tuple[BytesMessage, ...], (_Weird(),)))]
+    )
+    assert out == []
+
+
+def test_strip_attachments_passes_through_unattached_entries() -> None:
+    """Entries without attachments are returned unchanged (same object)."""
+    msg = UserMessage(text="plain")
+    out = _strip_attachments([msg])
+    assert out == [msg]
 
 
 @pytest.mark.asyncio
