@@ -236,6 +236,25 @@ def test_enter_during_pending_halt_dispatches_not_stages() -> None:
     assert pushed[0].text == "redirect now"
 
 
+def test_enter_during_armed_halt_with_cancel_pending_dispatches_not_stages() -> None:
+    """REGRESSION: armed Halt with uncleared model task still accepts Enter.
+
+    Ctrl+C can reach the state where ``AWAIT_USER`` is already armed, but
+    the cancelled model task has not cleared from ``runtime.model_call`` yet.
+    Staging here wedges because the armed gate suppresses ``AgentIdle``; the
+    user's message is the event that must release the gate.
+    """
+    agent = _busy_agent()
+    _inbox(agent).gate_armed = True
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    _press(kb, "enter", _fake_buf("resume through armed halt"))
+    assert not queues.has_any()
+    pushed = [i for i in _inbox(agent).items if isinstance(i, UserMessage)]
+    assert len(pushed) == 1
+    assert pushed[0].text == "resume through armed halt"
+
+
 def test_enter_during_compaction_stages_not_dispatches() -> None:
     """Spec: busy is busy. Compaction stages, never dispatches (was a bug)."""
     agent = _idle_agent()

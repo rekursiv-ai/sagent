@@ -1135,7 +1135,9 @@ class AgentRuntime:
         * **Idle** -- a pushed message fires the model gate immediately.
         * **Awaiting user** -- an ``AWAIT_USER`` / ``AWAIT_RECOVERY`` gate
           is parked (after ``Halt`` / ``Clear`` / ``ModelResponseError``);
-          the message releases it and resumes the loop.
+          the message releases it and resumes the loop. This wins over
+          stale task fields: immediately after ``Halt`` the gate can be
+          armed before the cancelled ``model_call`` slot has cleared.
         * **Mid-cohort** -- tools are running but no model is streaming
           (``model_call is None``). The ``UserMessage`` handler preempts:
           it detaches the running cohort to the background and fires a
@@ -1163,6 +1165,8 @@ class AgentRuntime:
 
         Snapshot at call time; read within one synchronous block.
         """
+        if self.inbox.gate_armed:
+            return True
         if self.model_call is None and self.compact_task is None:
             return True
         return self.model_call is not None and not self.inbox.empty()
