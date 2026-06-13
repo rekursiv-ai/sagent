@@ -445,15 +445,20 @@ class _FakeAgent:
         self._effort = value
 
     def set_thinking_state(self, state: str) -> None:
+        # Delegate to the REAL derivation so these tests exercise
+        # production logic, not a divergent copy. ``thinking`` /
+        # ``show_thinking`` mirror ``Agent.set_thinking_state``;
+        # ``redact_thinking`` mirrors the value ``Agent._provider_build_args``
+        # derives via ``should_redact_thinking`` (production computes it at
+        # provider-build time, not in ``set_thinking_state`` -- reflecting it
+        # here keeps the test assertion checking the real function).
+        canonical = cast(thinking.ThinkingState, state)
         self.thinking_state = state
-        if state.startswith("adaptive") or state == "redact-hide":
-            self.thinking = "adaptive"
-        elif state.startswith("on"):
-            self.thinking = "enabled"
-        else:
-            self.thinking = None
-        self.show_thinking = state.endswith("-show")
-        self.provider_args["redact_thinking"] = state == "redact-hide"
+        self.thinking = thinking.request_thinking(canonical)
+        self.show_thinking = thinking.should_show_thinking(canonical)
+        self.provider_args["redact_thinking"] = thinking.should_redact_thinking(
+            canonical
+        )
 
     def restore_thinking_state(
         self, state: str | None, thinking: str | None, show_thinking: bool

@@ -47,6 +47,7 @@ from sagent.agent.state import (
     agent_registry,
     tool_state_context,
 )
+from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
 from sagent.lib.json import JSON, json_freeze
 from sagent.providers import Google
@@ -3215,9 +3216,15 @@ async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
 
 @dataclass(slots=True, kw_only=True)
 class _ThresholdCompactor:
-    """Recording compactor that compacts exactly when ``should_compact`` fires."""
+    """Recording compactor that compacts exactly when ``should_compact`` fires.
+
+    Delegates the gate to a REAL ``SummaryCompactor`` so these tests
+    exercise production's threshold (including its ``buffer_tokens`` term),
+    never a re-derived copy that could silently drift from it.
+    """
 
     compacted: bool = False
+    _gate: SummaryCompactor = field(default_factory=SummaryCompactor)
 
     def should_compact(
         self,
@@ -3225,13 +3232,9 @@ class _ThresholdCompactor:
         max_request_tokens: int,
         system_tokens: int = 0,
     ) -> bool:
-        # Mirror SummaryCompactor (u=0.95, c=0.075):
-        #   body >= u * (window - system) / (1 + c*u)
-        u, c = 0.95, 0.075
-        body = max(0, current_tokens - system_tokens)
-        max_window = max(0, max_request_tokens - system_tokens)
-        threshold = u * max_window / (1.0 + c * u)
-        return body >= threshold
+        return self._gate.should_compact(
+            current_tokens, max_request_tokens, system_tokens
+        )
 
     async def compact(
         self,
