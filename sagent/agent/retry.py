@@ -1,7 +1,7 @@
 """Retry classification, backoff, and send-with-retry loop.
 
 Decides whether an error is transient (retry) or fatal (propagate),
-extracts a server-advertised delay, and surfaces 429s as
+extracts a server-advertised delay, and surfaces rate limits as
 ``RateLimitError`` so interactive callers can pretty-print
 "resumes at HH:MM:SS".
 
@@ -9,6 +9,8 @@ Constants:
 
 - ``RETRY_BASE_SEC`` - exponential-backoff base (500 ms, doubled each attempt).
 - ``MAX_RETRY_DELAY`` - normal-mode backoff cap.
+- ``RATE_LIMIT_RETRY_BUDGET_SEC`` - wall-clock budget for rate-limit
+  retries without a long advertised reset.
 - ``PERSISTENT_MAX_BACKOFF_SEC`` - persistent-mode cap (5 min) for
   unattended 429/529 loops.
 - ``RETRYABLE_STATUS_CODES`` - explicit fast-path; anything ≥ 500 also
@@ -31,7 +33,7 @@ import time
 if TYPE_CHECKING:
     import httpx
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
     httpx = lazy_import("httpx")  # 168ms
 
@@ -58,6 +60,12 @@ INTERACTIVE_MAX_SLEEP_SEC = 60.0
 # publishing a "model service suspended" banner. Server-advertised waits
 # always notify regardless of length.
 SUSPENSION_NOTICE_SEC = 5.0
+# A throttle without a long advertised reset clears in seconds-to-minutes
+# (Issue#424, session 6efa990c: every halt recovered on an immediate manual
+# retry), so rate-limit retries run on this wall-clock budget instead of the
+# attempt counter -- the generic ``max_attempts`` cap gives up after ~9s of
+# effective waiting, just before the limiter relents.
+RATE_LIMIT_RETRY_BUDGET_SEC = 180.0
 PERSISTENT_MAX_BACKOFF_SEC = 300.0
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 
@@ -73,6 +81,12 @@ DEFAULT_MAX_PERSISTENT_ATTEMPTS = 60
 # self-referencing cycle must not hang us.
 _MAX_CAUSE_DEPTH = 5
 
+# Backstop on throttle retries: termination normally comes from the
+# wall-clock budget, which a frozen or mocked clock cannot advance. The
+# ramp reaches the budget in ~9 attempts, so a legitimate loop never
+# gets here -- mirrors the counter backstops on the other branches.
+_MAX_RATE_LIMIT_ATTEMPTS = 20
+
 _MAX_STREAM_INTERRUPT_RETRIES = 2
 
 
@@ -81,12 +95,14 @@ class RetriesExhaustedError(Exception):
 
 
 class RateLimitError(Exception):
-    """429 from the provider - raised immediately in interactive mode.
+    """Provider rate limit that interactive mode will not sleep through.
 
-    Carries the reset timestamp (seconds since epoch) when the
-    provider advertised one via ``retry-after`` or
-    ``anthropic-ratelimit-unified-reset``. The message is
-    pre-formatted for REPL display.
+    Raised immediately when the server advertises a reset beyond
+    ``INTERACTIVE_MAX_SLEEP_SEC``, or once ``RATE_LIMIT_RETRY_BUDGET_SEC``
+    of capped-backoff retries fails to outlast the throttle. Carries the
+    reset timestamp (seconds since epoch) when the provider advertised
+    one via ``retry-after`` or ``anthropic-ratelimit-unified-reset``.
+    The message is pre-formatted for REPL display.
 
     Args:
       reset_time: Unix timestamp when the limit lifts, or ``None``.
@@ -128,6 +144,26 @@ def is_retryable(error: Exception, model: Model) -> bool:
     if model.is_retryable_provider_error(error):
         return True
     return _is_retryable(error, 0)
+
+
+def is_rate_limited(error: Exception) -> bool:
+    """Classify an error as a provider rate limit.
+
+    Catches both a real 429 status and a body-declared
+    ``rate_limit_error`` arriving in-band on a 200 stream: Anthropic
+    reports mid-flight throttling via an SSE ``error`` event whose HTTP
+    status is 200 and whose unified-ratelimit headers all read
+    ``allowed``, so neither the status path nor
+    :func:`extract_retry_after` sees it (Issue#424).
+
+    Args:
+      error: Exception to classify.
+
+    Returns:
+      rate_limited: True when the provider throttled the request.
+
+    """
+    return error_status(error) == 429 or _body_error_type(error) == "rate_limit_error"
 
 
 def error_status(error: Exception) -> int | None:
@@ -415,7 +451,11 @@ async def send_with_retry(
     Raises:
       RetriesExhaustedError: If all attempts fail (including persistent
           mode hitting ``max_persistent_attempts``).
-      RateLimitError: On 429 in non-persistent mode.
+      RateLimitError: On a rate limit (429 or in-band) in non-persistent
+          mode: immediately when the server advertises a reset beyond
+          ``INTERACTIVE_MAX_SLEEP_SEC``, otherwise once
+          ``RATE_LIMIT_RETRY_BUDGET_SEC`` of capped-backoff retries
+          fails to outlast the throttle.
 
     """
     if resume_retry_at is not None:
@@ -432,6 +472,8 @@ async def send_with_retry(
     attempt = -1
     stream_attempt = 0
     persistent_attempt = 0
+    rate_limit_attempt = 0
+    rate_limit_deadline: float | None = None
     stream_interrupts = 0
     while True:
         attempt += 1
@@ -500,17 +542,29 @@ async def send_with_retry(
             # jobs), promote protocol errors into the long-backoff branch
             # so transient connection cuts don't fail the operation.
             is_protocol_flake = isinstance(e, httpx.RemoteProtocolError)
+            rate_limited = is_rate_limited(e)
+            # A 529's body type is ``overloaded_error``; in-band it arrives
+            # on a 200 stream, so the status check alone misses it -- the
+            # same 200-wearing-an-error shape as the in-band rate limit.
+            overloaded = status == 529 or _body_error_type(e) == "overloaded_error"
             persistent = (
                 persistent_retry
                 and model.supports_persistent_retry
-                and (status in (429, 529) or is_protocol_flake)
+                and (rate_limited or overloaded or is_protocol_flake)
             )
             server_delay = extract_retry_after(e)
-            if status == 429 and not persistent:
-                reset_time = (
-                    time.time() + server_delay if server_delay is not None else None
-                )
-                raise RateLimitError(reset_time, e) from e
+            # Interactive (non-persistent) mode: never silently sleep for a
+            # long server-advertised backoff. A multi-minute+ wait blocks the
+            # whole REPL on one uninterruptible ``asyncio.sleep`` (the user
+            # can't even ``/login`` out of it). Surface it as a
+            # ``RateLimitError`` halt carrying the reset time so the user
+            # can switch models or wait deliberately.
+            if (
+                not persistent
+                and server_delay is not None
+                and server_delay > INTERACTIVE_MAX_SLEEP_SEC
+            ):
+                raise RateLimitError(time.time() + server_delay, e) from e
             if persistent:
                 persistent_attempt += 1
                 if persistent_attempt >= max_persistent_attempts:
@@ -525,18 +579,42 @@ async def send_with_retry(
                 if server_delay is not None:
                     delay = max(delay, server_delay)
                 attempt -= 1
+                attempt_label = persistent_attempt - 1
+            elif rate_limited:
+                # A throttle with no (or a short) advertised reset clears in
+                # seconds-to-minutes, so retry on a wall-clock budget rather
+                # than the attempt counter -- ``max_attempts`` local backoffs
+                # total ~9s, which gives up just before the limiter relents
+                # (Issue#424). Budget exhaustion halts as a rate limit
+                # ("type to retry"), not a generic retry failure.
+                if rate_limit_deadline is None:
+                    rate_limit_deadline = time.time() + RATE_LIMIT_RETRY_BUDGET_SEC
+                rate_limit_attempt += 1
+                if rate_limit_attempt >= _MAX_RATE_LIMIT_ATTEMPTS:
+                    raise RateLimitError(None, e) from e
+                base = RETRY_BASE_SEC * (2.0**rate_limit_attempt)
+                delay = min(
+                    base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
+                    INTERACTIVE_MAX_SLEEP_SEC,
+                )
+                if server_delay is not None:
+                    delay = max(delay, server_delay)
+                if time.time() + delay > rate_limit_deadline:
+                    reset_time = (
+                        time.time() + server_delay if server_delay is not None else None
+                    )
+                    raise RateLimitError(reset_time, e) from e
+                attempt -= 1
+                attempt_label = rate_limit_attempt - 1
             else:
-                # Interactive (non-persistent) mode: never silently sleep for
-                # a long server-advertised backoff. A multi-minute+ wait
-                # blocks the whole REPL on one uninterruptible ``asyncio.sleep``
-                # (the user can't even ``/login`` out of it). Surface it as a
-                # ``RateLimitError`` halt carrying the reset time so the user
-                # can switch models or wait deliberately.
-                if (
-                    server_delay is not None
-                    and server_delay > INTERACTIVE_MAX_SLEEP_SEC
-                ):
-                    raise RateLimitError(time.time() + server_delay, e) from e
+                # Exhaustion raises here, BEFORE the sleep: sleeping first
+                # paints "resumes in Ns", waits the full backoff, then fails
+                # without sending -- the retry the banner promised never goes
+                # out (Issue#424).
+                if attempt + 1 >= max_attempts:
+                    raise RetriesExhaustedError(
+                        f"Failed after {max_attempts} attempts: {e}",
+                    ) from e
                 base = RETRY_BASE_SEC * (2.0**attempt)
                 delay = min(
                     base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
@@ -544,15 +622,16 @@ async def send_with_retry(
                 )
                 if server_delay is not None:
                     delay = max(delay, server_delay)
+                attempt_label = attempt
             diagnostics = error_diagnostics(e)
             publish_recoverable(
-                f"retry attempt {attempt}, waiting {delay:.1f}s:"
+                f"retry attempt {attempt_label}, waiting {delay:.1f}s:"
                 f" {type(e).__name__}: {e}"
                 + (f" [{diagnostics}]" if diagnostics else "")
             )
             logger.warning(
                 "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.%s",
-                attempt + 1,
+                attempt_label + 1,
                 max_attempts,
                 type(e).__name__,
                 f" {status}" if status is not None else "",
@@ -589,6 +668,20 @@ def _is_retryable(error: Exception, depth: int) -> bool:
     if cause is not None and isinstance(cause, Exception) and depth < _MAX_CAUSE_DEPTH:
         return _is_retryable(cause, depth + 1)
     return False
+
+
+def _body_error_type(error: Exception) -> str | None:
+    """Extract a provider-declared error ``type`` from a JSON error body."""
+    body = getattr(error, "body", None)
+    if not isinstance(body, Mapping):
+        return None
+    typed = cast(Mapping[object, object], body)
+    error_type = typed.get("type")
+    if error_type == "error":
+        nested = typed.get("error")
+        if isinstance(nested, Mapping):
+            error_type = cast(Mapping[object, object], nested).get("type")
+    return error_type if isinstance(error_type, str) else None
 
 
 def _error_status(error: Exception, depth: int) -> int | None:

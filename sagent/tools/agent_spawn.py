@@ -27,13 +27,14 @@ import logging
 import time
 import uuid
 
+from wrapt import lazy_import
+
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import (
     PersistentAgentState,
     append_persistent_agent_lifecycle,
 )
 from sagent.lib.json import JSON, bool_val, json_freeze
-from sagent.lib.lazy_import import lazy_import
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,

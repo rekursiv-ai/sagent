@@ -54,15 +54,18 @@ records.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import MISSING, Field, dataclass, fields
+from dataclasses import MISSING, Field, dataclass, fields, replace
 
 from sagent.types.runtime import (
+    AgentSendMessage,
     AssistantMessage,
     CompactComplete,
     CompactFailed,
     CompactStarted,
     ModelContextEvent,
     ToolResult,
+    UserMessage,
+    labeled_agent_send_text,
 )
 
 
@@ -76,10 +79,13 @@ __all__ = [
     "TapeEvent",
     "TapeRecord",
     "TapeRef",
+    "coalesce_roles",
     "full_tape_mask",
     "mask_contains_ref",
     "mask_ranges_overlap",
     "merge_mask_ranges",
+    "pair_and_dedup_tool_calls",
+    "splice_safe_repair",
     "unpaired_call_ids",
 ]
 
@@ -414,6 +420,243 @@ def mask_ranges_overlap(
     return any(lr.overlaps(rr) for lr in left for rr in right)
 
 
+def pair_and_dedup_tool_calls(
+    payload: Sequence[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    """Return a splice-valid repair of ``payload``: paired, deduped, coalesced.
+
+    The single canonical tool-call repair for ``ContextSplice`` payloads, used
+    by every producer that may emit unpaired or duplicate tool calls (compaction
+    repair, on-disk load repair, the runtime rescue path). One place so the
+    policy can never drift between call sites (the drift that produced H2 in the
+    compaction path and its F1 sibling in the load path). Guarantees:
+
+    1. **Cross-AM id dedup.** A ``tool_calls`` id already declared by an earlier
+       ``AssistantMessage`` is dropped from later ones, so no two AMs share an
+       id (which the splice validator rejects).
+    2. **Hollow-turn drop.** An ``AssistantMessage`` left with no tool_calls
+       (all deduped away) and no text / thinking is dropped entirely.
+    3. **Pairing.** A real ``ToolResult`` for an open call is kept; every call
+       left unanswered when the turn closes gets a synthetic ``[interrupted]``
+       result, emitted in sorted id order (so the on-disk record and any resume
+       are deterministic). An orphan ``ToolResult`` (no open call) is dropped.
+    4. **Interrupt vs interleave.** A ``UserMessage`` is a hard interrupt: it
+       closes any open tool turn (synthesizing ``[interrupted]``). An
+       ``AgentSendMessage`` is *not* an interrupt -- a peer's send interleaves
+       with an in-flight tool turn, so it is deferred past the open pair, else
+       a real ``ToolResult`` arriving after it would be dropped as an orphan.
+       (The defer-vs-interrupt policy matches
+       :func:`summary._drop_orphan_tool_results`; the open-call *outcome*
+       diverges -- this synthesizes ``[interrupted]``, summary drops the turn.)
+    Does *not* coalesce adjacent same-role turns: dropping a hollow AM can
+    strand two real AMs adjacent, so a producer building a *splice payload*
+    must run :func:`coalesce_roles` on the result (see
+    :func:`splice_safe_repair`, which does both). Load-time callers that only
+    need orphan repair use this directly, so a valid multi-turn history is
+    never rewritten merely for adjacency. Idempotent.
+
+    Args:
+      payload: Flat provider-facing entries to repair.
+
+    Returns:
+      repaired: Entries with tool calls paired/deduped and orphans removed.
+
+    """
+    out: list[ModelContextEvent] = []
+    pending: set[str] = set()
+    seen: set[str] = set()
+    deferred: list[ModelContextEvent] = []
+
+    def _flush_interrupted() -> None:
+        for cid in sorted(pending):
+            seen.add(cid)
+            out.append(ToolResult(call_id=cid, content="[interrupted]", is_error=True))
+        pending.clear()
+        out.extend(deferred)
+        deferred.clear()
+
+    for entry in payload:
+        if isinstance(entry, AssistantMessage):
+            _flush_interrupted()
+            kept = tuple(tc for tc in entry.tool_calls if tc.id not in seen)
+            if not kept and not entry.text and not entry.thinking_blocks:
+                continue
+            out.append(
+                entry if kept == entry.tool_calls else replace(entry, tool_calls=kept)
+            )
+            pending.update(tc.id for tc in kept)
+            seen.update(tc.id for tc in kept)
+        elif isinstance(entry, ToolResult):
+            if entry.call_id in pending:
+                out.append(entry)
+                pending.discard(entry.call_id)
+        elif isinstance(entry, UserMessage):
+            _flush_interrupted()
+            out.append(entry)
+        elif pending:
+            # A peer ``AgentSendMessage`` interleaving an open tool turn: not an
+            # interrupt. Defer past the pair so a real result still lands.
+            deferred.append(entry)
+        else:
+            out.append(entry)
+    _flush_interrupted()
+    return out
+
+
+def splice_safe_repair(
+    payload: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
+    """Repair ``payload`` and coalesce it into a splice-valid shape.
+
+    The composition every *splice-payload* producer needs:
+    :func:`pair_and_dedup_tool_calls` (orphan/dup repair) followed by
+    :func:`coalesce_roles` (so a hollow-AM drop never strands adjacent
+    same-role turns). One name so no caller forgets the second half (F2);
+    load-time orphan-only repair that must not rewrite valid histories calls
+    :func:`pair_and_dedup_tool_calls` directly instead.
+    """
+    return coalesce_roles(pair_and_dedup_tool_calls(payload))
+
+
+def coalesce_roles(
+    payload: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
+    r"""Merge adjacent same-wire-role entries so ``payload`` is splice-valid.
+
+    The single canonical coalescer for ``ContextSplice`` payloads: it closes
+    both legs of the role-alternation invariant ``_validate_payload`` enforces
+    (rule 5). ``UserMessage`` and ``AgentSendMessage`` are both wire ``user``
+    role, so two adjacent user-side entries -- and likewise two adjacent
+    ``AssistantMessage`` entries -- are merged into one. Merging is by
+    ``isinstance`` of the running tail, so a ``ToolResult`` (neither user- nor
+    assistant-side) between two assistant turns blocks their merge.
+
+    User-side merge (see :func:`_merge_user`): same-source pairs keep their type
+    and identity; cross-source pairs demote to ``UserMessage`` with each part's
+    ``[from <source>]: `` label inlined so attribution survives. On a ``hidden``
+    mismatch the merged bit is the logical-and of both (visible wins) --
+    ``hidden`` is render-only, so the merge is lossless on the wire.
+
+    Assistant-side merge (see :func:`_merge_assistant`): join texts, dedupe
+    ``tool_calls`` ids, and drop signed ``thinking`` blocks (unre-signable
+    across turns).
+
+    The function performs no tool-call / tool-result pairing; callers run their
+    own pairing repair (synthesizing interrupted results, dropping orphans)
+    before or after calling this. It does, on an assistant merge, drop a second
+    turn's duplicate ``tool_calls`` ids (the dedup that keeps the merged AM
+    constructible). It is total over its input domain (never
+    raises on tool-call shape), pure, and idempotent.
+
+    Args:
+      payload: Splice payload to coalesce.
+
+    Returns:
+      coalesced: ``payload`` with adjacent same-role entries merged.
+
+    """
+    out: list[ModelContextEvent] = []
+    for entry in payload:
+        prior = out[-1] if out else None
+        if isinstance(entry, (UserMessage, AgentSendMessage)) and isinstance(
+            prior, (UserMessage, AgentSendMessage)
+        ):
+            out[-1] = _merge_user(prior, entry)
+        elif isinstance(entry, AssistantMessage) and isinstance(
+            prior, AssistantMessage
+        ):
+            out[-1] = _merge_assistant(prior, entry)
+        else:
+            out.append(entry)
+    return tuple(out)
+
+
+def _labeled_text(entry: UserMessage | AgentSendMessage) -> str:
+    """Return ``entry`` text, labeling an ``AgentSendMessage`` with its source.
+
+    ``UserMessage`` is the human and carries no label. An ``AgentSendMessage``
+    is prefixed via the shared :func:`labeled_agent_send_text` so attribution
+    survives demotion to a plain ``UserMessage`` (the structured ``source`` is
+    then gone) and the label format stays identical to the wire path.
+    """
+    if isinstance(entry, UserMessage):
+        return entry.text
+    return labeled_agent_send_text(entry)
+
+
+def _merge_user(
+    prior: UserMessage | AgentSendMessage,
+    entry: UserMessage | AgentSendMessage,
+) -> UserMessage | AgentSendMessage:
+    """Merge two adjacent user-side entries per the canonical source policy.
+
+    Same-source pairs (two ``UserMessage``; two ``AgentSendMessage`` sharing a
+    ``source``) keep their type and ``prior``'s identity. Cross-source pairs
+    demote to ``UserMessage`` with each part's ``[from <source>]: `` label
+    inlined so attribution is not lost (C-002).
+
+    ``hidden`` is render-only (the model receives the text either way; the bit
+    only suppresses REPL display), so merging across a ``hidden`` boundary is
+    lossless on the wire. The merged ``hidden`` is the AND of both: a block is
+    suppressed only if every part was, so any visible part keeps the merged
+    block visible. This keeps ``coalesce_roles`` total -- the rescue and load
+    paths must never raise on an arbitrary legacy adjacency (C-001).
+    """
+    attachments = (*prior.attachments, *entry.attachments)
+    hidden = prior.hidden and entry.hidden
+    same_source = (
+        isinstance(prior, AgentSendMessage)
+        and isinstance(entry, AgentSendMessage)
+        and prior.source == entry.source
+    ) or (isinstance(prior, UserMessage) and isinstance(entry, UserMessage))
+    merged_id = max(prior.id, entry.id)
+    if same_source:
+        text = f"{prior.text}\n\n{entry.text}"
+        return replace(
+            prior, id=merged_id, text=text, hidden=hidden, attachments=attachments
+        )
+    text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
+    return UserMessage(id=merged_id, text=text, attachments=attachments, hidden=hidden)
+
+
+def _merge_assistant(
+    prior: AssistantMessage,
+    entry: AssistantMessage,
+) -> AssistantMessage:
+    """Merge two adjacent assistant turns, keeping the result constructible.
+
+    Joins text and concatenates ``tool_calls``, dropping any ``entry`` call
+    whose id already appears in ``prior`` so the merged ``AssistantMessage``
+    never carries a duplicate id its ``__post_init__`` would reject (H1/H2).
+
+    Signed ``thinking`` blocks bind to their originating turn; a merged turn
+    cannot re-sign them, and concatenating two turns' signed blocks serializes
+    a signature set the provider rejects. Drop *every* signed ``thinking``
+    block from *both* inputs (the merged turn re-signs none of them), body
+    included -- not just the ``signature``: Anthropic requires a valid
+    signature on a thinking block, so a signature-stripped body would 400 just
+    the same, and the reasoning trace is unrecoverable across a merge either
+    way. Unsigned / ``redacted_thinking`` blocks carry no per-turn signature
+    and survive (H14, R2O-5).
+    """
+    seen = {tc.id for tc in prior.tool_calls}
+    tool_calls = prior.tool_calls + tuple(
+        tc for tc in entry.tool_calls if tc.id not in seen
+    )
+    thinking_blocks = tuple(
+        tb
+        for tb in (*prior.thinking_blocks, *entry.thinking_blocks)
+        if not (tb.get("type") == "thinking" and tb.get("signature"))
+    )
+    return replace(
+        prior,
+        id=max(prior.id, entry.id),
+        text="\n\n".join(t for t in (prior.text, entry.text) if t),
+        thinking_blocks=thinking_blocks,
+        tool_calls=tool_calls,
+    )
+
+
 def _field_default(f: Field[object]) -> object:
     """Return the dataclass field's default, raising if no default exists."""
     if f.default is not MISSING:
@@ -582,7 +825,13 @@ def _validate_payload(
                         " partner cannot be both local and external",
                     )
                 externally_consumed_by_tr.add(entry.call_id)
-                prev_role = None
+                # Only a TR closing a *local* assistant turn resets role
+                # tracking. An external-paired TR has its AM outside this
+                # payload, so no local assistant turn opened; leaving
+                # ``prev_role`` intact keeps ``[user, external-TR, user]`` a
+                # role-alternation violation (F7).
+                if prev_role == "assistant":
+                    prev_role = None
                 continue
             raise InvalidPayloadError(
                 f"orphan ToolResult for call_id {entry.call_id!r} in payload"

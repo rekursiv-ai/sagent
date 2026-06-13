@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import logging
@@ -32,6 +32,14 @@ from sagent.tools.paper_common import (
     summary_ids,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    import bs4
+else:
+    from wrapt import lazy_import
+
+    bs4 = lazy_import("bs4")  # 140ms
 
 
 logger = logging.getLogger(__name__)
@@ -67,14 +75,20 @@ def _oa_url(paper: MutableJSON) -> str | None:
     return url if isinstance(url, str) and url else None
 
 
-def _download_pdf(url: str, *, retries: int = _DOWNLOAD_RETRIES) -> bytes:
-    """Download a URL, validate it looks like a PDF, return bytes."""
-    body = fetch(url, retries=retries, timeout_sec=_DOWNLOAD_TIMEOUT)
+def _validate_pdf(url: str, body: bytes) -> bytes:
+    """Return ``body`` if it looks like a PDF, else raise ``ValueError``."""
     if not _looks_like_pdf(body):
         raise ValueError(
             f"GET {url} → non-PDF ({len(body)} bytes, prefix={body[:16]!r})"
         )
     return body
+
+
+def _download_pdf(url: str, *, retries: int = _DOWNLOAD_RETRIES) -> bytes:
+    """Download a URL, validate it looks like a PDF, return bytes."""
+    return _validate_pdf(
+        url, fetch(url, retries=retries, timeout_sec=_DOWNLOAD_TIMEOUT)
+    )
 
 
 async def _fetch_arxiv(canonical: str) -> bytes | None:
@@ -191,10 +205,11 @@ class PaperFetch:
             "type": "object",
             "properties": {
                 "ids": {
-                    "type": "array",
+                    "type": ["array", "string"],
                     "items": {"type": "string"},
                     "description": (
-                        "One or more paper identifiers: DOI (10.xxxx/yyy, "
+                        "Paper identifier(s): a single id as a bare string, or "
+                        "several as an array. Each is a DOI (10.xxxx/yyy, "
                         "optional doi:/https://doi.org/ prefix) or arXiv id "
                         "(2106.15928, arXiv:2106.15928, or legacy "
                         "hep-th/9901001). When several are given, the "

@@ -14,12 +14,13 @@ import os
 import re
 import socket
 
+from wrapt import lazy_import
+
 import cachetools
 import defusedxml.common
 import defusedxml.ElementTree
 
 from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
-from sagent.lib.lazy_import import lazy_import
 from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -703,7 +704,7 @@ def _format_rss(body: bytes) -> str:
     return "\n".join(lines).rstrip()
 
 
-def _format_atom(feed: Element) -> str:
+def _format_atom(feed: Element[str]) -> str:
     """Format an Atom feed as readable markdown."""
     lines: list[str] = []
     feed_title = (_child_text(feed, "title") or "").strip()
@@ -714,7 +715,7 @@ def _format_atom(feed: Element) -> str:
     return "\n".join(lines)
 
 
-def _append_atom_entry(entry: Element, lines: list[str]) -> None:
+def _append_atom_entry(entry: Element[str], lines: list[str]) -> None:
     """Append one Atom entry to ``lines``."""
     title = (_child_text(entry, "title") or "").strip()
     author = _atom_author(entry)
@@ -735,7 +736,7 @@ def _append_atom_entry(entry: Element, lines: list[str]) -> None:
     lines.append("")
 
 
-def _atom_author(entry: Element) -> str:
+def _atom_author(entry: Element[str]) -> str:
     """Return the Atom author name, if present."""
     author = _child(entry, "author")
     if author is None:
@@ -743,7 +744,7 @@ def _atom_author(entry: Element) -> str:
     return (_child_text(author, "name") or "").strip()
 
 
-def _atom_link(entry: Element) -> str:
+def _atom_link(entry: Element[str]) -> str:
     """Return the first Atom link href, if present."""
     for link in _children(entry, "link"):
         href = link.attrib.get("href")
@@ -752,13 +753,13 @@ def _atom_link(entry: Element) -> str:
     return ""
 
 
-def _atom_content(entry: Element) -> str:
+def _atom_content(entry: Element[str]) -> str:
     """Return cleaned Atom content or summary text."""
     raw = _child_text(entry, "content") or _child_text(entry, "summary") or ""
     return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(raw)).split())
 
 
-def _append_rss_item(item: Element, lines: list[str]) -> None:
+def _append_rss_item(item: Element[str], lines: list[str]) -> None:
     """Append one feed item (heading + meta + cluster bullets) to ``lines``."""
     title = (_child_text(item, "title") or "").strip()
     link = (_child_text(item, "link") or "").strip()
@@ -785,12 +786,12 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _children(parent: Element, name: str) -> list[Element]:
+def _children(parent: Element[str], name: str) -> list[Element[str]]:
     """Return direct children with local tag name ``name``."""
     return [child for child in list(parent) if _local_name(child.tag) == name]
 
 
-def _child(parent: Element, name: str) -> Element | None:
+def _child(parent: Element[str], name: str) -> Element[str] | None:
     """Return the first direct child with local tag name ``name``."""
     for child in list(parent):
         if _local_name(child.tag) == name:
@@ -798,7 +799,7 @@ def _child(parent: Element, name: str) -> Element | None:
     return None
 
 
-def _child_text(parent: Element, name: str) -> str | None:
+def _child_text(parent: Element[str], name: str) -> str | None:
     """Return text for the first direct child with local tag name ``name``."""
     child = _child(parent, name)
     return child.text if child is not None else None

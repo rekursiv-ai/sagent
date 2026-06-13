@@ -104,7 +104,8 @@ def json_unfreeze(obj: object) -> MutableJSONValue:
 def validate_json_schema(schema: object, value: object) -> list[str]:
     """Return JSON Schema subset validation issue strings.
 
-    Supports the schema features emitted by local tooling: ``type``,
+    Supports the schema features emitted by local tooling: ``type`` (a
+    single name or a list of names, e.g. ``["array", "string"]``),
     ``required``, ``properties``, ``items``, ``additionalProperties``,
     ``enum``, ``minimum``, and ``maximum``. Unknown schema shapes and
     unsupported keywords are ignored.
@@ -139,11 +140,14 @@ def _validate_json_schema(schema: object, value: object, path: str) -> list[str]
     issues = _validate_json_schema_type(schema_type, value_obj, path)
     if issues:
         return issues
-    if schema_type == "object" and isinstance(value, Mapping):
+    # Recursion keys off the value's actual shape, not a single declared
+    # ``type``, so a union type (e.g. ``["array", "string"]``) still walks
+    # object/array children when the value is one.
+    if isinstance(value, Mapping):
         issues.extend(
             _validate_json_object(schema_map, cast(Mapping[str, object], value), path)
         )
-    if schema_type == "array" and isinstance(value, list):
+    if isinstance(value, list):
         items = schema_map.get("items")
         value_items = cast(list[object], value)
         issues.extend(
@@ -159,12 +163,22 @@ def _validate_json_schema(schema: object, value: object, path: str) -> list[str]
 def _validate_json_schema_type(
     schema_type: object, value: object, path: str
 ) -> list[str]:
-    """Return JSON Schema type validation issues."""
-    if not isinstance(schema_type, str):
+    """Return JSON Schema type validation issues.
+
+    ``type`` may be a single name (``"string"``) or a list of names
+    (``["array", "string"]``, standard JSON Schema): the value matches when
+    it satisfies any listed type.
+    """
+    if isinstance(schema_type, str):
+        names = [schema_type]
+    elif isinstance(schema_type, (list, tuple)):
+        names = [t for t in cast(Sequence[object], schema_type) if isinstance(t, str)]
+    else:
         return []
-    if _matches_json_schema_type(schema_type, value):
+    if not names or any(_matches_json_schema_type(t, value) for t in names):
         return []
-    return [f"Parameter `{_json_schema_path_display(path)}` must be {schema_type}."]
+    expected = names[0] if len(names) == 1 else " or ".join(names)
+    return [f"Parameter `{_json_schema_path_display(path)}` must be {expected}."]
 
 
 def _matches_json_schema_type(schema_type: str, value: object) -> bool:

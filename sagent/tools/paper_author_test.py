@@ -327,12 +327,24 @@ def test_run_ids_batches_author_metadata() -> None:
     assert "Third" in result.content
 
 
-def test_run_ids_must_be_list() -> None:
-    # Non-list ids must error consistently with PaperDetails / PaperFetch,
-    # not be silently coerced to "no ids".
-    result = asyncio.run(PaperAuthor().run({"ids": "123"}))
+def test_run_bare_string_id_coerced() -> None:
+    # A single id may be passed as a bare string (coerced to a one-element
+    # list), consistent with PaperDetails / PaperFetch. One id -> single GET.
+    def fake_fetch(**kw: object) -> bytes:
+        del kw
+        return json.dumps({"authorId": "123", "name": "Solo"}).encode()
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        result = asyncio.run(PaperAuthor().run({"ids": "123"}))
+    assert not result.is_error
+    assert "Solo" in result.content
+
+
+def test_run_ids_wrong_scalar_type_errors() -> None:
+    # A non-string, non-list scalar is still rejected (not coerced).
+    result = asyncio.run(PaperAuthor().run({"ids": 123}))
     assert result.is_error
-    assert "'ids' must be a list" in result.content
+    assert "'ids' must be a list of strings or a single string" in result.content
 
 
 def test_run_ids_with_query_rejected() -> None:

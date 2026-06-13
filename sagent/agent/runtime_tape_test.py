@@ -19,6 +19,7 @@ from sagent.agent.context import (
 )
 from sagent.agent.runtime import AgentRuntime, Model
 from sagent.types.runtime import (
+    DETACHED_ARRIVED_MIMIC_PREFIX,
     DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
@@ -443,6 +444,107 @@ def test_replay_tape_with_empty_records_is_noop() -> None:
     assert runtime.tape == []
     new_ref = runtime.append_history(UserMessage(text="hi"))
     assert new_ref.ordinal == 0
+
+
+def test_replay_tape_seeds_mimic_counter_past_loaded_ids() -> None:
+    """A resumed forged ``DetachedArrived`` id must not collide with the tape.
+
+    ``_sanitize_forged_arrivals`` mints ``DetachedArrived:mimic:N`` from an
+    instance-local counter. On resume that counter restarts at 0 unless
+    ``replay_tape`` seeds it past the ids already on the loaded tape -- a
+    second ``mimic:3`` then duplicates the first, producing a duplicate
+    ``ToolResult`` call_id that wedges the model-call gate. Replay must seed
+    the counter so the next forged id is globally unique.
+    """
+    runtime = _runtime(session_id="new")
+    existing = f"{DETACHED_ARRIVED_MIMIC_PREFIX}3"
+    runtime.replay_tape(
+        [
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="old", ordinal=0),
+                event=AssistantMessage(
+                    tool_calls=(ToolCall(id=existing, name="DetachedArrived", args={}),)
+                ),
+            ),
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="old", ordinal=1),
+                event=ToolResult(call_id=existing, content="r"),
+            ),
+        ],
+    )
+    # Forge enough arrivals that an unseeded counter (starting at 0) would
+    # climb through ``mimic:0..mimic:3`` and re-mint the loaded ``mimic:3``.
+    minted = [
+        runtime._sanitize_forged_arrivals(
+            AssistantMessage(
+                tool_calls=(ToolCall(id="forged", name="DetachedArrived", args={}),)
+            ),
+        )
+        .tool_calls[0]
+        .id
+        for _ in range(5)
+    ]
+    assert existing not in minted, (
+        f"a resumed forged id re-minted the loaded {existing!r}: {minted}"
+    )
+
+
+def test_replay_tape_seeds_mimic_counter_from_lone_tool_result() -> None:
+    """Seeding must cover a mimic id surviving only as a ``ToolResult``.
+
+    ``_commit_pairing`` splices a lone mimic ``ToolResult`` (its parent
+    ``AssistantMessage`` paired externally and possibly compacted away). The
+    seed scan must read ``ToolResult.call_id`` too -- not just
+    ``AssistantMessage.tool_calls`` -- or the counter under-seeds and a resumed
+    forge re-mints the surviving id. Same partial-namespace-coverage bug the
+    counter seed exists to prevent, on the consumer side of the id.
+    """
+    runtime = _runtime(session_id="new")
+    existing = f"{DETACHED_ARRIVED_MIMIC_PREFIX}7"
+    runtime.replay_tape(
+        [
+            ContextSplice(
+                ref=TapeRef(session_id="old", ordinal=0),
+                mask=(),
+                insert_after=None,
+                payload=(ToolResult(call_id=existing, content="err", is_error=True),),
+                strategy="lazy_pairing",
+                paired_externally=frozenset({existing}),
+            ),
+        ],
+    )
+    assert runtime._mimic_counter == 8, (
+        f"lone mimic ToolResult must seed the counter; got {runtime._mimic_counter}"
+    )
+
+
+def test_replay_tape_seeds_mimic_counter_from_paired_externally_only() -> None:
+    """A legacy ``replay()`` record can carry a mimic id only in ``paired_externally``.
+
+    ``ContextSplice.replay`` (on-disk load) bypasses ``_validate_payload``, so a
+    persisted record can declare a ``paired_externally`` mimic id whose local
+    pair is absent from ``payload``. Scanning ``payload`` alone then under-seeds
+    the counter and a resumed forge re-mints the id. The seed must also read
+    ``paired_externally`` -- the load path's trust boundary, not the producer's.
+    """
+    runtime = _runtime(session_id="new")
+    existing = f"{DETACHED_ARRIVED_MIMIC_PREFIX}11"
+    runtime.replay_tape(
+        [
+            ContextSplice.replay(
+                ref=TapeRef(session_id="old", ordinal=0),
+                mask=(),
+                insert_after=None,
+                payload=(),
+                strategy="legacy",
+                paired_externally=frozenset({existing}),
+            ),
+        ],
+    )
+    assert runtime._mimic_counter == 12, (
+        f"paired_externally mimic id must seed the counter; got "
+        f"{runtime._mimic_counter}"
+    )
 
 
 # --- context() memoization and version --------------------------------------

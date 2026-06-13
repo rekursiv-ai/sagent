@@ -152,6 +152,11 @@ def test_environment_section_haiku_utility_model_has_cutoff() -> None:
     assert "February 2025" in out
 
 
+def test_environment_section_fable_has_marketing_name() -> None:
+    out = environment("claude-fable-5+1m")
+    assert "Claude Fable 5" in out
+
+
 def test_shell_name_recognizes_bash_and_zsh() -> None:
     assert _shell_name("/usr/bin/bash") == "bash"
     assert _shell_name("/bin/zsh") == "zsh"

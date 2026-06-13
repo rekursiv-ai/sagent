@@ -13,6 +13,7 @@ import asyncio
 import itertools
 import json
 import logging
+import time
 
 import pytest
 
@@ -857,13 +858,11 @@ def _make_forwarder(
     child: Agent | None = None,
 ) -> _ChildForwarder:
     """Construct a _ChildForwarder bound to ``parent``, no verbosity gating."""
-    import time as _time  # noqa: PLC0415 -- isolated to test helper
-
     return _ChildForwarder(
         parent_agent=parent,
         child=child or _make_parent(),
         forward_set=frozenset(),
-        stats=ChildStats(label=label, start=_time.monotonic()),
+        stats=ChildStats(label=label, start=time.monotonic()),
         label=label,
         notify_on_asleep=notify_on_asleep,
     )

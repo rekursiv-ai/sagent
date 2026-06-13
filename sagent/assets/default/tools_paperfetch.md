@@ -1,7 +1,8 @@
 Download scholarly paper PDFs to disk by identifier.
 
 Input:
-  - `ids` — a list of one or more identifiers. Each is a DOI
+  - `ids` — one identifier as a bare string, or several as an array.
+    Each is a DOI
     (`10.xxxx/yyy`, optional `doi:` / `https://doi.org/` prefix) or an
     arXiv id (`2106.15928`, `arXiv:2106.15928`, or legacy
     `hep-th/9901001`). Pass every paper you need at once: the

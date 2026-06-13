@@ -260,13 +260,13 @@ async def test_dispatch_kill_all_clears_local_repl_queues() -> None:
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
     queues = InputQueues(
-        urgent=[QueuedInputBlock(text="staged urgent")],
-        deferred=[QueuedInputBlock(text="staged later")],
+        queue=QueuedInputBlock(text="staged urgent"),
+        deferred=QueuedInputBlock(text="staged later"),
     )
     _ = await _dispatch(a, SlashKill(target="all"), p, queues=queues)
     assert stub.killed_all == 1
     assert not queues.has_any(), (
-        f"/kill all must clear REPL queues; got urgent={queues.urgent!r}"
+        f"/kill all must clear REPL queues; got queue={queues.queue!r}"
         f" deferred={queues.deferred!r}"
     )
 
@@ -576,7 +576,7 @@ async def test_dispatch_login_calls_run_repl() -> None:
 async def test_dispatch_login_flushes_local_deferred_queue() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
-    queues = InputQueues(deferred=[QueuedInputBlock(text="retry after login")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="retry after login"))
     _ = repl_input_mod._run_repl.do_login  # type: ignore[attr-defined] -- trigger proxy import
     with patch.object(
         repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
@@ -823,13 +823,13 @@ def test_render_input_pane_hides_agent_sourced_mid_stream() -> None:
 
 
 def test_render_input_pane_single_block_renders_full_text() -> None:
-    """Single staged block renders verbatim above the prompt."""
+    """A deferred message renders with the ``[deferred]`` prefix."""
     fp = render_input_pane(
         _as_real_agent(_FakeAgent()),
-        InputQueues(deferred=[QueuedInputBlock(text="hello world")]),
+        InputQueues(deferred=QueuedInputBlock(text="hello world")),
     )
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "deferred: hello world")
+    assert parts[0] == ("class:queued_input_pane", "[deferred] hello world")
     assert parts[1] == ("", "\n")
     assert parts[2] == ("class:input_pane", "> ")
 
@@ -839,30 +839,24 @@ def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
     fake.runtime._mid_stream_queue = [UserMessage(text="already sent")]
     fp = render_input_pane(
         _as_real_agent(fake),
-        InputQueues(deferred=[QueuedInputBlock(text="tab staged")]),
+        InputQueues(deferred=QueuedInputBlock(text="tab staged")),
     )
     rendered = "".join(t[1] for t in fp)
-    assert "deferred: tab staged" in rendered
+    assert "[deferred] tab staged" in rendered
     assert "pending: already sent" in rendered
 
 
-def test_render_input_pane_multiple_blocks_join_with_double_newline() -> None:
-    r"""Multiple staged blocks render joined by ``\\n\\n``."""
+def test_render_input_pane_deferred_above_queue() -> None:
+    """Spec: deferred pane renders above the queue pane; queue has no prefix."""
     fp = render_input_pane(
         _as_real_agent(_FakeAgent()),
         InputQueues(
-            deferred=[
-                QueuedInputBlock(text="a"),
-                QueuedInputBlock(text="b"),
-                QueuedInputBlock(text="c"),
-            ]
+            queue=QueuedInputBlock(text="q-msg"),
+            deferred=QueuedInputBlock(text="d-msg"),
         ),
     )
     parts = list(fp)
-    assert parts[0] == (
-        "class:queued_input_pane",
-        "deferred: a\n\ndeferred: b\n\ndeferred: c",
-    )
+    assert parts[0] == ("class:queued_input_pane", "[deferred] d-msg\n\nq-msg")
     assert parts[1] == ("", "\n")
     assert parts[2] == ("class:input_pane", "> ")
 
@@ -871,10 +865,10 @@ def test_render_input_pane_preserves_multi_line_block_content() -> None:
     """Internal newlines in a block are preserved verbatim (no collapse)."""
     fp = render_input_pane(
         _as_real_agent(_FakeAgent()),
-        InputQueues(deferred=[QueuedInputBlock(text="line1\nline2")]),
+        InputQueues(deferred=QueuedInputBlock(text="line1\nline2")),
     )
     parts = list(fp)
-    assert parts[0] == ("class:queued_input_pane", "deferred: line1\nline2")
+    assert parts[0] == ("class:queued_input_pane", "[deferred] line1\nline2")
 
 
 def test_next_line_returns_typed_text() -> None:
@@ -971,7 +965,7 @@ def test_next_line_keyboard_interrupt_preserves_queue() -> None:
 
     session.prompt_async = _prompt_async
     console = MagicMock()
-    queues = InputQueues(deferred=[QueuedInputBlock(text="staged line")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="staged line"))
     src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line == "resumed"
@@ -988,7 +982,7 @@ def test_quit_surfaces_queued_input_preview() -> None:
 
     session.prompt_async = _prompt_async
     console = MagicMock()
-    queues = InputQueues(deferred=[QueuedInputBlock(text="queued line")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="queued line"))
     src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line is None
@@ -996,12 +990,11 @@ def test_quit_surfaces_queued_input_preview() -> None:
     assert not queues.has_any()
 
 
-def test_quit_discard_preview_includes_count_when_multiple_blocks() -> None:
-    """F35: discard message must surface the total block count.
+def test_quit_discard_preview_includes_count_when_both_panes() -> None:
+    """The discard message surfaces the count of populated panes.
 
-    Previously the preview showed only the last block, making the user
-    believe one message was lost when several were staged. The new
-    message reports the count and ellipses any truncated preview body.
+    Both panes populated -> count 2, plural noun. The preview shows the
+    queue pane's text (it outranks deferred).
     """
     session = MagicMock()
 
@@ -1012,20 +1005,17 @@ def test_quit_discard_preview_includes_count_when_multiple_blocks() -> None:
     session.prompt_async = _prompt_async
     console = MagicMock()
     queues = InputQueues(
-        deferred=[
-            QueuedInputBlock(text="first"),
-            QueuedInputBlock(text="second"),
-            QueuedInputBlock(text="third"),
-        ]
+        queue=QueuedInputBlock(text="queued one"),
+        deferred=QueuedInputBlock(text="deferred one"),
     )
     src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line is None
     console.print.assert_called_once()
     rendered = str(console.print.call_args.args[0])
-    assert "3" in rendered, f"discard preview must include count; got {rendered!r}"
+    assert "2" in rendered, f"discard preview must include count; got {rendered!r}"
     assert "messages" in rendered, (
-        f"discard preview must use plural for >1 block; got {rendered!r}"
+        f"discard preview must use plural for >1 pane; got {rendered!r}"
     )
 
 
@@ -1044,7 +1034,7 @@ def test_quit_discard_preview_marks_truncated_body_with_ellipsis() -> None:
     session.prompt_async = _prompt_async
     console = MagicMock()
     long_text = "x" * 200
-    queues = InputQueues(deferred=[QueuedInputBlock(text=long_text)])
+    queues = InputQueues(deferred=QueuedInputBlock(text=long_text))
     src = PromptToolkitInputSource(session, queues=queues, console=console)
     line = asyncio.run(src.next_line())
     assert line is None
@@ -1062,12 +1052,13 @@ def test_quit_without_console_swallows_preview() -> None:
         return "/quit"
 
     session.prompt_async = _prompt_async
-    queues = InputQueues(deferred=[QueuedInputBlock(text="queued")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="queued"))
     src = PromptToolkitInputSource(session, queues=queues, console=None)
     line = asyncio.run(src.next_line())
     assert line is None
     # buffer left alone when there's no console to surface to.
-    assert [b.text for b in queues.deferred] == ["queued"]
+    assert queues.deferred is not None
+    assert queues.deferred.text == "queued"
 
 
 if __name__ == "__main__":

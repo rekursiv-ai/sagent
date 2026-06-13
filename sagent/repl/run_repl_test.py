@@ -28,6 +28,7 @@ from sagent.repl.keybindings import (
     NavState,
     _kb_defer,
     _kb_submit,
+    _kb_up,
 )
 from sagent.repl.render import (
     RecordingPrinter,
@@ -52,6 +53,8 @@ from sagent.types.runtime import (
     AgentIdle,
     AssistantMessage,
     ClearComplete,
+    Compact,
+    Halt,
     ModelContextEvent,
     ModelIdle,
     ModelResponseComplete,
@@ -63,6 +66,7 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
+from sagent.types.tape import ContextSplice, TapeRef
 
 
 async def wait_until(
@@ -112,15 +116,16 @@ def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
 def test_install_input_queue_committer_installs_before_tool_spawn_hook() -> None:
     agent = _QueueAgent()
     queues = InputQueues(
-        urgent=[QueuedInputBlock(text="interrupt now")],
-        deferred=[QueuedInputBlock(text="later")],
+        queue=QueuedInputBlock(text="interrupt now"),
+        deferred=QueuedInputBlock(text="later"),
     )
     _ = install_input_queue_committer(_as_queue_agent(agent), queues)
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
     pushed = hook(AssistantMessage(text="tool next"))
-    assert queues.urgent == []
-    assert [b.text for b in queues.deferred] == ["later"]
+    assert queues.queue is None
+    assert queues.deferred is not None
+    assert queues.deferred.text == "later"
     assert isinstance(pushed, UserMessage)
     assert pushed.text == "interrupt now"
 
@@ -135,14 +140,15 @@ def test_install_input_queue_committer_preserves_existing_before_tool_spawn_hook
 
     agent = _QueueAgent()
     agent.runtime.before_tool_spawn = _original
-    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+    queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
     _ = install_input_queue_committer(_as_queue_agent(agent), queues)
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
     assert hook(AssistantMessage(text="tool next")) is original_error
-    assert [block.text for block in queues.urgent] == ["interrupt now"]
+    assert queues.queue is not None
+    assert queues.queue.text == "interrupt now"
 
 
 def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
@@ -154,7 +160,7 @@ def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
 
     agent = _QueueAgent()
     agent.runtime.before_tool_spawn = _original
-    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+    queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
     _ = install_input_queue_committer(_as_queue_agent(agent), queues)
 
@@ -165,7 +171,7 @@ def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
     assert seen == [message]
     assert isinstance(pushed, UserMessage)
     assert pushed.text == "interrupt now"
-    assert queues.urgent == []
+    assert queues.queue is None
 
 
 def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
@@ -188,10 +194,11 @@ def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -
 
 def test_install_input_queue_committer_deferred_skips_model_response_complete() -> None:
     agent = _QueueAgent()
-    queues = InputQueues(deferred=[QueuedInputBlock(text="later")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="later"))
     observer = _input_queue_committer_observer(_as_queue_agent(agent), queues)
     observer(ModelResponseComplete(message=AssistantMessage(text="done")))
-    assert [b.text for b in queues.deferred] == ["later"]
+    assert queues.deferred is not None
+    assert queues.deferred.text == "later"
     assert agent.runtime.inbox.pushed == []
 
 
@@ -204,7 +211,7 @@ def test_install_input_queue_committer_uninstall_restores_before_tool_spawn() ->
     """
     agent = _QueueAgent()
     original = agent.runtime.before_tool_spawn
-    queues = InputQueues(urgent=[QueuedInputBlock(text="interrupt now")])
+    queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
     uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
     # Install: hook wrapped, observer attached.
@@ -1108,14 +1115,8 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
 
 @pytest.mark.asyncio
 async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() -> None:
-    """``AgentIdle`` with non-empty queue → coalesced ``UserDeferredMessage`` pushed; queue cleared."""
-    queues = InputQueues(
-        deferred=[
-            QueuedInputBlock(text="elephant"),
-            QueuedInputBlock(text="banana"),
-            QueuedInputBlock(text="chair"),
-        ]
-    )
+    """``AgentIdle`` with a deferred message pushes ``UserDeferredMessage``; pane cleared."""
+    queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
@@ -1130,14 +1131,15 @@ async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() ->
 
 def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
     """Non-flush events leave ``queued_input`` and the inbox untouched."""
-    queues = InputQueues(deferred=[QueuedInputBlock(text="elephant")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="elephant"))
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
     observer(ModelResponseError(RuntimeError("x")))
     observer(ModelIdle())
-    assert [b.text for b in queues.deferred] == ["elephant"]
+    assert queues.deferred is not None
+    assert queues.deferred.text == "elephant"
     assert runtime.inbox._queue.empty()
 
 
@@ -1153,7 +1155,7 @@ async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete
     Halt / error do not emit, so keying the deferred flush on it releases the
     wedge without claiming ``AWAIT_USER`` is idle.
     """
-    queues = InputQueues(deferred=[QueuedInputBlock(text="resume me")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="resume me"))
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
@@ -1182,7 +1184,7 @@ async def test_startup_idle_flushes_staged_queue_on_first_agent_idle() -> None:
     synthetic startup pulse.
     """
     queues = InputQueues(
-        deferred=[QueuedInputBlock(text="were we implementing issue 25?")]
+        deferred=QueuedInputBlock(text="were we implementing issue 25?")
     )
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
@@ -1213,7 +1215,7 @@ async def test_startup_idle_not_fired_when_history_needs_model() -> None:
     ``AgentIdle`` before ``ModelIdle`` -- otherwise the deferred queue
     would flush prematurely.
     """
-    queues = InputQueues(deferred=[QueuedInputBlock(text="for later")])
+    queues = InputQueues(deferred=QueuedInputBlock(text="for later"))
     runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
     holder = _RuntimeHolder(runtime=runtime)
     _ = install_input_queue_committer(cast(Agent, holder), queues)
@@ -1251,6 +1253,116 @@ class _TextOnlyModel:
         for ch in self.text:
             on_text(ch)
         return AssistantMessage(text=self.text)
+
+
+@dataclass(kw_only=True, slots=True)
+class _ScriptedModel:
+    """Returns successive scripted assistant messages, one per call."""
+
+    messages: list[AssistantMessage]
+    _index: int = 0
+
+    async def stream(
+        self,
+        history: list[ModelContextEvent],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, on_thinking
+        message = self.messages[min(self._index, len(self.messages) - 1)]
+        self._index += 1
+        on_text(message.text)
+        return message
+
+
+@dataclass(kw_only=True, slots=True)
+class _SlowTool:
+    """A tool that blocks long enough to still be running at detach time."""
+
+    name: str = "echo"
+    call_count: int = 0
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        self.call_count += 1
+        await asyncio.sleep(10.0)
+        return ToolResult(call_id="", content="tool output")
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+
+@dataclass(kw_only=True, slots=True)
+class _GatedTool:
+    """A tool that runs until ``release`` is set; lets a test hold a cohort.
+
+    Unlike ``_SlowTool`` (a fixed long sleep), this completes the moment
+    the test releases it, so a deferred message staged mid-cohort can
+    actually fire once the cohort drains.
+    """
+
+    release: asyncio.Event
+    name: str = "echo"
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        self.started.set()
+        await self.release.wait()
+        return ToolResult(call_id="", content="tool output")
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+
+@dataclass(kw_only=True, slots=True)
+class _GatedModel:
+    """Streams once it is released; lets a test hold the runtime mid-stream."""
+
+    release: asyncio.Event
+    text: str = "answered"
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def stream(
+        self,
+        history: list[ModelContextEvent],
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, on_thinking
+        self.started.set()
+        await self.release.wait()
+        on_text(self.text)
+        return AssistantMessage(text=self.text)
+
+
+@dataclass(kw_only=True, slots=True)
+class _GatedCompactor:
+    """Blocks compaction until released; holds the runtime mid-compaction."""
+
+    release: asyncio.Event
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def compact(
+        self,
+        tape: object,
+        context: object,
+        model: object,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        del tape, context, model, custom_instructions
+        self.started.set()
+        await self.release.wait()
+        return ContextSplice(
+            ref=mint_ref(),
+            mask=(),
+            insert_after=None,
+            payload=(),
+            strategy="test-noop",
+        )
 
 
 def _make_kb_event(text: str) -> MagicMock:
@@ -1319,6 +1431,11 @@ def _history_user_texts(runtime: agent_runtime.AgentRuntime) -> list[str]:
     return [m.text for m in runtime.context().messages if isinstance(m, UserMessage)]
 
 
+def _history_has(runtime: agent_runtime.AgentRuntime, needle: str) -> bool:
+    """True when ``needle`` appears in any user message (coalesced or not)."""
+    return any(needle in text for text in _history_user_texts(runtime))
+
+
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_harness_enter_at_cursor_zero_fresh_session_reaches_history() -> None:
@@ -1385,14 +1502,262 @@ async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_harness_enter_at_cursor_one_after_idle_dispatches_via_urgent() -> None:
-    """Enter at cursor>0 on a fully-idle agent: text reaches history.
+async def test_queued_pane_message_detaches_running_tool() -> None:
+    """REGRESSION: a queue-pane message must still trigger a tool detach.
 
-    Setup: Tab stages "draft", Up lifts it (cursor=1, snapshot captured),
-    Enter at cursor=1 commits via ``replace_from_navigation`` with
-    ``lane="urgent"``. The committed urgent block must drain so "draft"
-    appears in history. Today the urgent queue waits for ``AgentIdle``
-    too, so on a fully-idle agent it's stuck.
+    Enter-while-busy stages into the queue pane; the committer's
+    ``before_tool_spawn`` hook pops it at ``ModelResponseComplete`` and
+    the runtime relegates the model's tool calls to the background so the
+    queued message cuts in. Without the pop hook (or with a queue the
+    runtime never consults) the tool would run inline and the queued
+    message would wait a full round -- the "type to redirect" path lost.
+    """
+    queues = InputQueues()
+    runtime = agent_runtime.AgentRuntime(
+        model=_ScriptedModel(
+            messages=[
+                AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
+                AssistantMessage(text="queued answered"),
+            ]
+        ),
+        tools=[_SlowTool()],
+    )
+    holder = _RuntimeHolder(runtime=runtime)
+    _ = install_input_queue_committer(cast(Agent, holder), queues)
+
+    idle = asyncio.Event()
+
+    def _quit_on_idle(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle):
+            idle.set()
+            runtime.inbox.push_back(Quit())
+
+    runtime.observers.append(_quit_on_idle)
+
+    # Stage a queue-pane message (as Enter-while-busy would) BEFORE the
+    # round completes, so ``before_tool_spawn`` pops it at MRC.
+    queues.stage_queue("cut in line")
+    task = asyncio.create_task(runtime.run_forever())
+    try:
+        runtime.inbox.push_back(UserMessage(text="start"))
+        await asyncio.wait_for(idle.wait(), timeout=2.0)
+        await asyncio.wait_for(task, timeout=2.0)
+    finally:
+        if not task.done():
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    tool_results = [m for m in runtime.context().messages if isinstance(m, ToolResult)]
+    assert any(
+        r.call_id == "t1" and r.content == DETACHED_PLACEHOLDER for r in tool_results
+    ), f"queued message must detach the tool; results={tool_results!r}"
+    assert "cut in line" in _history_user_texts(runtime)
+    assert not queues.has_any()
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
+    """EXHAUSTIVE: typed Enter AND Tab must reach the model from every state.
+
+    The dispatch-vs-stage decision plus the commit machinery is exercised
+    end-to-end against the REAL runtime for each reachable state, rather
+    than cherry-picked cases. In every state the typed message must land
+    in history (reach the model) and nothing must be left stranded in a
+    pane. This is the regression net for "I typed and it never got
+    through" -- the bug class that keeps recurring.
+
+    States covered: cold idle, idle-after-a-turn, mid-stream, mid-cohort,
+    post-Halt (gate armed), mid-compaction. Both keys are exercised:
+    Enter (queue intent) and Tab (defer intent). They differ in WHEN the
+    message reaches the model (Enter preempts mid-cohort; Tab waits for
+    idle), but the end invariant is identical: it reaches the model and
+    nothing is stranded once the runtime settles.
+    """
+
+    async def _drive(setup: str, key: str) -> None:
+        nav = NavState()
+        release = asyncio.Event()
+        idle_events: list[type] = []
+
+        if setup == "mid_stream":
+            model: object = _GatedModel(release=release)
+        elif setup == "mid_cohort":
+            model = _ScriptedModel(
+                messages=[
+                    AssistantMessage(
+                        tool_calls=(ToolCall(id="t1", name="echo", args={}),)
+                    ),
+                    AssistantMessage(text="done"),
+                ]
+            )
+        else:
+            model = _TextOnlyModel(text="ok")
+
+        compactor = _GatedCompactor(release=release) if setup == "mid_compact" else None
+        runtime = agent_runtime.AgentRuntime(
+            model=cast(agent_runtime.Model, model),
+            tools=[_GatedTool(release=release)] if setup == "mid_cohort" else [],
+            compactor=cast(agent_runtime.Compactor, compactor)
+            if compactor is not None
+            else None,
+        )
+        queues = InputQueues()
+        holder = _RuntimeHolder(runtime=runtime)
+        _ = install_input_queue_committer(cast(Agent, holder), queues)
+        runtime.observers.append(
+            lambda ev: (
+                idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+            )
+        )
+
+        async with _running_runtime(runtime):
+            if setup == "cold_idle":
+                pass
+            elif setup == "idle_after_turn":
+                runtime.inbox.push_back(UserMessage(text="warmup"))
+                await _wait_until_idle(idle_events)
+            elif setup == "mid_stream":
+                runtime.inbox.push_back(UserMessage(text="warmup"))
+                await _wait_for(cast(_GatedModel, model).started.is_set)
+            elif setup == "mid_cohort":
+                runtime.inbox.push_back(UserMessage(text="warmup"))
+                await _wait_for(
+                    lambda: bool(runtime.cohort) and runtime.model_call is None
+                )
+            elif setup == "post_halt":
+                runtime.inbox.push_back(UserMessage(text="warmup"))
+                await _wait_until_idle(idle_events)
+                runtime.inbox.push_back(Halt())
+                await _wait_for(lambda: runtime.inbox.gate_armed)
+            elif setup == "mid_compact":
+                runtime.inbox.push_back(UserMessage(text="warmup"))
+                await _wait_until_idle(idle_events)
+                runtime.inbox.push_back(Compact(args=""))
+                await _wait_for(cast(_GatedCompactor, compactor).started.is_set)
+
+            # The universal action: the user types a message and submits
+            # it with the key under test (Enter -> queue, Tab -> defer).
+            handler = _kb_submit if key == "enter" else _kb_defer
+            handler(cast(Agent, holder), queues, nav, _make_kb_event("REACHME"))
+
+            # Mechanism check, captured BEFORE release: in a busy state the
+            # message must STAGE into the matching pane rather than dispatch
+            # -- except Enter mid-cohort, which preempts. This pins the
+            # stage-vs-dispatch decision the "reaches model" invariant
+            # cannot see (a wrongly-dispatched deferred message still
+            # eventually reaches the model).
+            staged_now = setup in ("mid_stream", "mid_compact") or (
+                setup == "mid_cohort" and key == "tab"
+            )
+            if staged_now:
+                pane = queues.deferred if key == "tab" else queues.queue
+                assert pane is not None, (
+                    f"[{setup}/{key}] busy input must stage into its pane,"
+                    f" not dispatch; queue={queues.queue!r}"
+                    f" deferred={queues.deferred!r}"
+                )
+                assert pane.text == "REACHME"
+
+            # Release any held model/compaction so the runtime can settle.
+            release.set()
+            await _wait_for(lambda: _history_has(runtime, "REACHME"), timeout_sec=3.0)
+
+        assert _history_has(runtime, "REACHME"), (
+            f"[{setup}/{key}] typed input never reached the model;"
+            f" history={_history_user_texts(runtime)}"
+            f" queue={queues.queue!r} deferred={queues.deferred!r}"
+        )
+        assert not queues.has_any(), (
+            f"[{setup}/{key}] message stranded in a pane:"
+            f" {queues.queue!r} / {queues.deferred!r}"
+        )
+        if setup == "mid_cohort":
+            # Defer semantics: Enter preempts (the tool detaches); Tab waits
+            # for the round chain (the tool completes normally, no detach).
+            results = [
+                m for m in runtime.context().messages if isinstance(m, ToolResult)
+            ]
+            detached = any(
+                r.call_id == "t1" and r.content == DETACHED_PLACEHOLDER for r in results
+            )
+            if key == "enter":
+                assert detached, (
+                    "[mid_cohort/enter] Enter must preempt and detach the tool;"
+                    f" results={results!r}"
+                )
+            else:
+                assert not detached, (
+                    "[mid_cohort/tab] Tab must DEFER, not preempt; the tool must"
+                    f" complete normally (no detach). results={results!r}"
+                )
+
+    for state in (
+        "cold_idle",
+        "idle_after_turn",
+        "mid_stream",
+        "mid_cohort",
+        "post_halt",
+        "mid_compact",
+    ):
+        for key in ("enter", "tab"):
+            await _drive(state, key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_enter_mid_cohort_detaches_running_tool() -> None:
+    """REGRESSION: Enter while TOOLS are running must detach them.
+
+    Distinct from the mid-stream case: here ``model_call is None`` and a
+    cohort is executing. The runtime's ``UserMessage`` handler preempts
+    and detaches the cohort -- but only if the REPL DISPATCHES the message
+    to the inbox. Staging into the queue pane (the busy default) never
+    reaches that handler, so the tool runs to completion: no detach. The
+    user typed to redirect and nothing happened.
+    """
+    queues = InputQueues()
+    nav = NavState()
+    runtime = agent_runtime.AgentRuntime(
+        model=_ScriptedModel(
+            messages=[
+                AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
+                AssistantMessage(text="redirected"),
+            ]
+        ),
+        tools=[_SlowTool()],
+    )
+    holder = _RuntimeHolder(runtime=runtime)
+    _ = install_input_queue_committer(cast(Agent, holder), queues)
+
+    async with _running_runtime(runtime):
+        runtime.inbox.push_back(UserMessage(text="start"))
+        # Wait until the cohort is actually running (model_call cleared).
+        await _wait_for(lambda: bool(runtime.cohort) and runtime.model_call is None)
+        # Type to redirect while tools run.
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("redirect"))
+        await _wait_for(lambda: "redirect" in _history_user_texts(runtime))
+
+    tool_results = [m for m in runtime.context().messages if isinstance(m, ToolResult)]
+    assert any(
+        r.call_id == "t1" and r.content == DETACHED_PLACEHOLDER for r in tool_results
+    ), (
+        "Enter while a tool cohort runs must detach the tool; instead it"
+        f" ran inline. results={tool_results!r}"
+    )
+    assert "redirect" in _history_user_texts(runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_enter_after_halt_dispatches_not_wedged() -> None:
+    """REGRESSION (Bug 2): Enter after a Halt must reach the model.
+
+    Halt arms ``AWAIT_USER`` and publishes neither ``AgentIdle`` nor
+    ``ClearComplete``, so a queue-staged message would never commit -- the
+    user's Enter would wedge in the queue pane. The user's post-Halt Enter
+    is precisely what releases the gate, so it must dispatch directly.
     """
     runtime, holder, queues = _harness_runtime()
     nav = NavState()
@@ -1401,23 +1766,53 @@ async def test_harness_enter_at_cursor_one_after_idle_dispatches_via_urgent() ->
         lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
     )
     async with _running_runtime(runtime):
-        # Settle the runtime: warm-up turn, then wait for full idle.
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("first"))
+        await _wait_until_idle(idle_events)
+        idle_events.clear()
+        # Simulate Ctrl+C: Halt arms AWAIT_USER. Wait until the gate is armed.
+        runtime.inbox.push_back(Halt())
+        await _wait_for(lambda: runtime.inbox.gate_armed)
+        # Now type + Enter. This must dispatch (release the gate), not stage.
+        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("resume me"))
+        await _wait_for(lambda: "resume me" in _history_user_texts(runtime))
+    assert "resume me" in _history_user_texts(runtime), (
+        "Enter after Halt must dispatch to release AWAIT_USER, not wedge in"
+        " the queue pane"
+    )
+    assert not queues.has_any()
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
+async def test_harness_enter_at_nav_stop_on_idle_dispatches() -> None:
+    """Enter at a nav stop on a fully-idle agent: text reaches history.
+
+    Setup: a message sits in the queue pane (staged while busy earlier);
+    the agent is now idle. Up unlifts it into the buffer; Enter at the
+    nav stop dispatches it immediately (idle -> dispatch), so "draft"
+    reaches history with nothing left staged.
+    """
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    idle_events: list[type] = []
+    runtime.observers.append(
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+    )
+    async with _running_runtime(runtime):
         _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("warm up"))
         await _wait_until_idle(idle_events)
         idle_events.clear()
 
-        # Simulate Tab → Up → Enter: stage deferred, capture nav snapshot,
-        # then commit-via-navigation with lane="urgent".
-        queues.stage_deferred("draft")
-        nav.begin([QueuedInputBlock(text="draft")], "", urgent_count=0)
-        # Now Enter at cursor>0 — drives _kb_submit through the nav path.
-        _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("draft"))
+        # A queued message + idle agent. Up unlifts it, Enter dispatches.
+        queues.stage_queue("draft")
+        buf = _make_kb_event("")
+        _kb_up(queues, nav, buf)
+        assert buf.current_buffer.text == "draft"
+        _kb_submit(cast(Agent, holder), queues, nav, buf)
 
         await _wait_for(lambda: "draft" in _history_user_texts(runtime))
-    assert "draft" in _history_user_texts(runtime), (
-        "Enter at cursor>0 on idle agent must dispatch the committed"
-        " urgent-lane content; today nothing wakes the drain"
-    )
+    assert "draft" in _history_user_texts(runtime)
+    assert not queues.has_any()
 
 
 @pytest.mark.asyncio
@@ -1432,13 +1827,7 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     queue back as ``UserDeferredMessage``. The runtime then drains it
     at the next gate-section pass and fires a fresh round.
     """
-    queues = InputQueues(
-        deferred=[
-            QueuedInputBlock(text="elephant"),
-            QueuedInputBlock(text="banana"),
-            QueuedInputBlock(text="chair"),
-        ]
-    )
+    queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
     agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="committed"))
 
     class _Holder:

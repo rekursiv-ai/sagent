@@ -19,13 +19,14 @@ import os
 import re
 import urllib.error
 
-from sagent.lib.lazy_import import lazy_import
 from sagent.lib.web.fetch import FetchError, fetch
 
 
 if TYPE_CHECKING:
     import bs4
 else:
+    from wrapt import lazy_import
+
     bs4 = lazy_import("bs4")
 
 

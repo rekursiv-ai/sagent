@@ -1,16 +1,13 @@
 r"""prompt-toolkit keybindings.
 
-Wires keys to the input-pane behavior contract. The contract itself
-(Up / Down / Enter / Tab semantics, including the navigation snapshot
-mechanism) is documented in :mod:`repl.input_pane`'s module docstring
--- the behavior is a property of the input zone, not of the binding.
+Wires keys to the input-pane behavior contract specified in
+``docs/private/input_ux.md``. That doc is the authority; this module is
+the wiring:
 
-This module is the wiring:
-
-- ``enter``        -> :func:`_kb_submit` (preempt-dispatch OR queue-commit)
-- ``tab``          -> :func:`_kb_defer` (queue-commit)
-- ``down``         -> :func:`_kb_down` (navigation walk back)
-- ``up``           -> :func:`_kb_up` (navigation walk older)
+- ``enter``        -> :func:`_kb_submit` (dispatch or stage to queue pane)
+- ``tab``          -> :func:`_kb_defer` (dispatch or stage to deferred pane)
+- ``up``           -> :func:`_kb_up` (walk toward older stops)
+- ``down``         -> :func:`_kb_down` (walk toward the input stop)
 - ``escape enter`` -> literal newline (Alt+Enter)
 - ``s-up`` / ``s-down`` -> prefix history search
 - ``c-x c-e``      -> open buffer in ``$EDITOR``
@@ -18,18 +15,28 @@ This module is the wiring:
 - ``c-z``          -> suspend to background
 - ``c-_`` / ``escape z`` -> undo
 
-Up/Down navigation maintains a :class:`NavState` (cursor + snapshot)
-so the user can scroll through queue+history and have their original
-state restored on the final Down. See :mod:`repl.input_pane`'s
-``Behavior contract: Up / Down navigation`` section for the figure.
+Navigation model (see ``input_ux.md`` for the full spec): Up/Down move a
+single cursor over an ordered list of *stops* built when navigation
+begins::
 
-Backslash continuation: ``foo\`` + Enter inserts a literal newline
-(no dispatch); see ``_kb_submit``.
+    [ input value, queue message?, deferred message?, sent[-1], sent[-2], ... ]
+
+Each stop owns its current value. There is no snapshot. The buffer is
+the only mutable truth; the stop the cursor sits on has its value in the
+buffer. Up applies the *modified-test*: leaving a pane stop with the
+buffer unchanged restores that pane's message; leaving it modified (or
+cleared) does not, and the edited value rides the cursor. Down is a pure
+replay back toward the input, handing each stop its current value with
+edits intact.
+
+Backslash continuation: ``foo\`` + Enter inserts a literal newline (no
+dispatch); see ``_kb_submit``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 import functools
@@ -37,12 +44,12 @@ import functools
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.key_binding import KeyBindings
 
-from sagent.repl.input_queues import (
-    InputQueues,
-    Lane,
-    QueuedInputBlock,
+from sagent.repl.input_queues import InputQueues, QueuedInputBlock
+from sagent.types.runtime import (
+    BytesMessage,
+    UserDeferredMessage,
+    UserMessage,
 )
-from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
@@ -52,43 +59,63 @@ if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
 
+class StopKind(Enum):
+    """Which surface a navigation stop's value came from."""
+
+    INPUT = auto()
+    QUEUE = auto()
+    DEFERRED = auto()
+    HISTORY = auto()
+
+
+@dataclass(slots=True, kw_only=True)
+class Stop:
+    """One position in the Up/Down walk.
+
+    ``loaded`` is the value this stop held when the cursor first arrived
+    (the modified-test compares the buffer against it). ``current`` is
+    the value the stop holds now -- updated from the buffer whenever the
+    cursor leaves the stop, so Down replays edits intact.
+
+    ``consumed`` applies only to pane stops (QUEUE / DEFERRED). It starts
+    ``False`` ("the pane still owns a message"). The first Up that leaves
+    the stop runs the modified-test once: an edited/cleared value sets
+    ``consumed = True`` permanently -- the pane is emptied for good and
+    the stop behaves like a plain history edit position thereafter (no
+    pane interaction in either direction). An unchanged pass-through
+    leaves ``consumed = False``, so the pane keeps tracking the cursor
+    (empty while sat on, restored when left).
+    """
+
+    kind: StopKind
+    loaded: str
+    current: str
+    attachments: tuple[BytesMessage, ...] = ()
+    consumed: bool = False
+
+
 @dataclass(slots=True, kw_only=True)
 class NavState:
-    """Up/Down navigation cursor + snapshot.
+    """Up/Down navigation cursor over a list of stops.
 
-    ``cursor == 0`` means "not navigating": the buffer holds the user's
-    typing and the REPL queue preview shows urgent/deferred blocks.
-    ``cursor > 0`` means navigation is in progress; ``snapshot`` holds
-    the queued blocks plus the original buffer text captured when Up was
-    pressed. Final Down restores the snapshot; Enter / Tab at
-    ``cursor > 0`` commits the buffer back into the queues and restores
-    the original buffer text.
+    ``cursor == 0`` means "not navigating": the buffer is live input and
+    ``stops`` is empty. ``cursor > 0`` means navigation is active;
+    ``stops[cursor]`` is loaded in the buffer. ``stops[0]`` is always the
+    INPUT stop (the buffer value at navigation start). Pane stops (QUEUE,
+    DEFERRED) follow, then HISTORY stops most-recent-first.
     """
 
     cursor: int = 0
-    snapshot_queue: tuple[QueuedInputBlock, ...] = field(default_factory=tuple)
-    snapshot_urgent_count: int = 0
-    snapshot_input: str = ""
+    stops: list[Stop] = field(default_factory=list)
 
-    def begin(
-        self,
-        queued: list[QueuedInputBlock],
-        buffer_text: str,
-        *,
-        urgent_count: int = 0,
-    ) -> None:
-        """Capture a snapshot at the start of navigation."""
-        self.snapshot_queue = tuple(queued)
-        self.snapshot_urgent_count = urgent_count
-        self.snapshot_input = buffer_text
-        self.cursor = 1
+    def active(self) -> bool:
+        """Return whether navigation is in progress."""
+        return self.cursor > 0
 
     def end(self) -> None:
-        """Clear the snapshot when navigation completes."""
+        """Clear navigation state."""
         self.cursor = 0
-        self.snapshot_queue = ()
-        self.snapshot_urgent_count = 0
-        self.snapshot_input = ""
+        self.stops = []
 
 
 def build_key_bindings(
@@ -98,9 +125,8 @@ def build_key_bindings(
 
     Args:
       agent: Agent these key handlers will mutate.
-      queues: REPL-local urgent/deferred input queues.
-      nav: Up/Down navigation state. Created fresh if omitted (for
-          callers that don't share state across binding builds).
+      queues: The queue and deferred panes.
+      nav: Up/Down navigation state. Created fresh if omitted.
 
     Returns:
       kb: Configured ``KeyBindings``.
@@ -133,60 +159,71 @@ def build_key_bindings(
     return kb
 
 
-def _commit_queued_and_restore(
-    queues: InputQueues, nav: NavState, buf_text: str, *, lane: Lane = "deferred"
-) -> str:
-    """Commit ``buf_text`` to queue + restore snapshot; return restored buffer.
-
-    Shared helper for Enter and Tab at ``cursor > 0``.
-
-    Cursor / edit_mode / lane truth table::
-
-        cursor  snapshot_queue  derived edit_mode  case
-        1       non-empty       True               edit-in-place (replace head)
-        1       empty           False              extension (Case 2 fallback)
-        >1      *               False              extension (scrolled past)
-
-    Lane mapping::
-
-        caller  lane         result
-        Enter   "urgent"     committed block dispatches at next chat-safe
-                             boundary
-        Tab     "deferred"   navigation-from-tab still defers
-
-    The snapshot is cleared and the snapshot-input is returned so the
-    caller can restore the buffer to the user's pre-navigation typing.
-    """
-    queues.replace_from_navigation(
-        nav.snapshot_queue,
-        buf_text,
-        edit_mode=nav.cursor == 1 and bool(nav.snapshot_queue),
-        urgent_count=nav.snapshot_urgent_count,
-        lane=lane,
-    )
-    restored = nav.snapshot_input
-    nav.end()
-    return restored
-
-
-def _restore_navigation_snapshot(
-    queues: InputQueues, nav: NavState, buf: Buffer
+def _stage_or_dispatch(
+    agent: Agent,
+    queues: InputQueues,
+    text: str,
+    *,
+    deferred: bool,
+    attachments: tuple[BytesMessage, ...] = (),
 ) -> None:
-    """Restore queue + buffer from the nav snapshot; clear nav state.
+    """Dispatch ``text`` when the runtime accepts it, else stage into a pane.
 
-    Shared by the whitespace-Enter / whitespace-Tab paths: the user
-    cleared their edit while navigating, so treat it as a "cancel my
-    edit" gesture -- the same effect as a final Down at ``cursor == 1``.
-    Without this, the snapshot would strand: cursor stays at 1 forever
-    and the lifted queue blocks disappear.
+    Dispatch-vs-stage consults the predicate matching the key's intent:
+    Enter (``deferred=False``) uses ``accepts_user_dispatch`` -- it
+    dispatches mid-cohort to redirect. Tab (``deferred=True``) uses
+    ``accepts_deferred_dispatch`` -- it STAGES mid-cohort, because a defer
+    must wait behind the running round chain rather than preempt it. The
+    two predicates differ only in the mid-cohort state. ``attachments``
+    ride the committed message (a lifted queued/deferred block may carry
+    image/PDF payloads). Empty/whitespace text is a no-op (the caller
+    guards this) and never reaches here.
     """
-    queues.restore_from_snapshot(
-        nav.snapshot_queue, urgent_count=nav.snapshot_urgent_count
+    dispatches = (
+        agent.runtime.accepts_deferred_dispatch
+        if deferred
+        else agent.runtime.accepts_user_dispatch
     )
-    snapshot_input = nav.snapshot_input
-    nav.end()
-    buf.text = snapshot_input
-    buf.cursor_position = len(snapshot_input)
+    if dispatches:
+        message = (
+            UserDeferredMessage(text=text, attachments=attachments)
+            if deferred
+            else UserMessage(text=text, attachments=attachments)
+        )
+        agent.runtime.inbox.push_back(message)
+        return
+    if deferred:
+        queues.stage_deferred(text, attachments)
+    else:
+        queues.stage_queue(text, attachments)
+
+
+def _commit_nav_stop(
+    queues: InputQueues, nav: NavState, text: str, *, deferred: bool, agent: Agent
+) -> None:
+    """Commit ``text`` from the current nav stop, then end navigation.
+
+    Placement follows the spec: at a pane's OWN stop, staging replaces
+    that pane's message (no doubling); at any other stop, staging appends
+    via the pane's coalesce. Idle dispatches immediately regardless of
+    stop. The current stop's attachments ride the committed message so a
+    lifted image/PDF payload is never silently dropped. The buffer is
+    cleared by the caller via ``nav.end`` + reset.
+    """
+    stop = nav.stops[nav.cursor]
+    own_pane = (stop.kind is StopKind.QUEUE and not deferred) or (
+        stop.kind is StopKind.DEFERRED and deferred
+    )
+    if own_pane:
+        # Replace: this stop emptied its own pane on unlift; staging the
+        # edited value back must not coalesce with a phantom existing.
+        if deferred:
+            queues.deferred = None
+        else:
+            queues.queue = None
+    _stage_or_dispatch(
+        agent, queues, text, deferred=deferred, attachments=stop.attachments
+    )
 
 
 def _kb_submit(
@@ -195,81 +232,45 @@ def _kb_submit(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    r"""Enter handler. See :mod:`repl.input_pane` for the full contract.
+    r"""Enter handler. See ``docs/private/input_ux.md`` for the contract.
 
     Branches:
 
-    - Slash command: route through pump via ``validate_and_handle``.
-    - Buffer ends with ``\``: backslash continuation. Replace the
-      trailing ``\`` with a literal newline (``\n``) and stay in the
-      buffer; do not dispatch.
-    - Empty / whitespace-only buffer: no-op (whitespace also resets
-      the buffer to clear stale spaces).
-    - ``cursor > 0`` (navigation active): commit buffer as a queued
-      block, restore ``snapshot_input`` to buffer.
-    - ``cursor == 0``: preempt-dispatch as a ``UserMessage``.
+    - Slash command: route through the pump via ``validate_and_handle``.
+    - Buffer ends with ``\``: backslash continuation -> literal newline.
+    - Empty / whitespace-only buffer: no-op; ends navigation.
+    - Navigation active: commit the stop's value (replace own pane /
+      append elsewhere / dispatch when idle); end navigation.
+    - Not navigating: dispatch when idle, else stage into the queue pane.
     """
     buf = event.current_buffer
     text = buf.text
     stripped = text.strip()
     if stripped.startswith("/"):
+        # A slash command abandons any in-flight navigation: restore the
+        # sat-on pane (the buffer holds the command, not the lifted pane
+        # value) before the command routes through the pump.
+        _abandon_navigation(queues, nav)
         buf.validate_and_handle()
         return
     if text.endswith("\\"):
-        # Backslash continuation: swap trailing ``\`` for ``\n``.
         buf.text = text[:-1] + "\n"
         buf.cursor_position = len(buf.text)
         return
-    if not text:
-        return
     if not stripped:
-        # Whitespace-only Enter: during navigation, "discard my edit" --
-        # restore the snapshot (queue + buffer text) so the lifted blocks
-        # don't strand. Outside navigation, just clear the stale spaces.
-        if nav.cursor > 0:
-            _restore_navigation_snapshot(queues, nav, buf)
-            return
+        # Empty/whitespace is a no-op and ends navigation: a cleared stop
+        # is the delete gesture, already realized by Up's modified-test;
+        # there is nothing to commit and nothing to restore.
+        nav.end()
         buf.reset()
         return
-    if nav.cursor > 0:
-        restored = _commit_queued_and_restore(queues, nav, text, lane="urgent")
-        # No ``buf.append_to_history()`` / ``buf.reset()`` here -- the
-        # nav-Enter contract restores the user's pre-navigation typing
-        # to the buffer. The committed text was lifted from a queued
-        # block (already in history's queue lane), not freshly typed;
-        # appending it to prompt-toolkit history would double-record
-        # navigation echoes. Resetting would discard the restored
-        # snapshot.
-        buf.text = restored
-        buf.cursor_position = len(buf.text)
-        # An already-idle runtime won't fire another ``AgentIdle`` to
-        # drain the freshly-staged urgent block, so push it now.
-        if agent.runtime.is_idle:
-            queues.commit_urgent(agent)
+    if nav.active():
+        _commit_nav_stop(queues, nav, text, deferred=False, agent=agent)
+        nav.end()
+        buf.append_to_history()
+        buf.reset()
         return
-    if (
-        agent.runtime.model_call is not None
-        and not agent.runtime.cohort
-        and not agent.runtime.inbox.gate_armed
-        and agent.runtime.inbox.empty()
-    ):
-        # prompt-toolkit does not surface pasted attachments today;
-        # pass the empty tuple explicitly so a future input source that
-        # threads them through cannot silently drop them here.
-        #
-        # ``inbox.empty()`` closes a halt race: between Ctrl+C
-        # (``agent.halt()`` queues ``Halt``) and the runtime draining
-        # that ``Halt`` to arm ``AWAIT_USER``, ``gate_armed`` is still
-        # False and ``model_call`` still set. Staging here would orphan
-        # the block -- the imminent gate-arm makes ``_fully_drained``
-        # False, so no ``AgentIdle`` ever fires to commit a staged
-        # urgent block, and the gate's ``drain`` blocks forever on an
-        # empty inbox. A pending inbox item (the queued ``Halt``) means
-        # the runtime is mid-transition: push directly so the message
-        # lands in the inbox and releases the gate.
-        queues.stage_urgent(text, attachments=())
-    else:
-        agent.runtime.inbox.push_back(UserMessage(text=text))
+    _stage_or_dispatch(agent, queues, text, deferred=False)
     buf.append_to_history()
     buf.reset()
 
@@ -280,42 +281,53 @@ def _kb_defer(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Tab handler: stage buffer for deferred dispatch.
+    """Tab handler. See ``docs/private/input_ux.md`` for the contract.
 
-    At ``cursor == 0`` (no navigation): the text is appended to the
-    deferred queue and the buffer is cleared. ``install_input_queue_committer``
-    in :mod:`repl.run_repl` commits deferred input as a single
-    ``UserDeferredMessage`` on ``AgentIdle``; an already-armed user gate is
-    released immediately because no future ``AgentIdle`` will arrive.
-
-    At ``cursor > 0`` (navigation active): same commit path as Enter --
-    queue gets ``snapshot_queue + [buffer]`` and the buffer is restored
-    to ``snapshot_input`` so the user's pre-navigation typing isn't
-    lost.
+    Mirror of Enter with the deferred pane as the target: dispatch when
+    idle (as a ``UserDeferredMessage``), else stage into the deferred
+    pane. Empty/whitespace is a no-op and ends navigation. During
+    navigation, commit the stop's value to the deferred pane (replace own
+    pane / append elsewhere) and end navigation.
     """
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
-        # Whitespace-only Tab: during navigation, treat as "discard my edit"
-        # and restore the snapshot. Outside navigation, no-op (Tab on an
-        # empty buffer has never staged anything).
-        if nav.cursor > 0:
-            _restore_navigation_snapshot(queues, nav, buf)
+        nav.end()
+        buf.reset()
         return
-    if nav.cursor > 0:
-        restored = _commit_queued_and_restore(queues, nav, text)
-        buf.text = restored
-        buf.cursor_position = len(buf.text)
+    if nav.active():
+        _commit_nav_stop(queues, nav, text, deferred=True, agent=agent)
+        nav.end()
+        buf.append_to_history()
+        buf.reset()
         return
-    queues.stage_deferred(text)
-    # An already-idle runtime won't fire another ``AgentIdle`` to drain
-    # the freshly-staged block, so push it now. An armed user gate
-    # (post-Halt) also needs an immediate push because the gate will
-    # release on the deferred message itself.
-    if agent.runtime.inbox.gate_armed or agent.runtime.is_idle:
-        queues.commit_deferred_on_idle(agent)
+    _stage_or_dispatch(agent, queues, text, deferred=True)
     buf.append_to_history()
     buf.reset()
+
+
+def _kb_up(
+    queues: InputQueues,
+    nav: NavState,
+    event: KeyPressEvent,
+) -> None:
+    """Up handler. Walk toward older stops; see ``input_ux.md``.
+
+    First Up builds the stop list from the current input, the panes, and
+    sent history. Each subsequent Up applies the modified-test to the
+    stop being left, then advances. Up at the oldest stop is a no-op.
+    """
+    buf = event.current_buffer
+    if not nav.active():
+        _begin_navigation(queues, nav, buf)
+        return
+    current = nav.stops[nav.cursor]
+    current.current = buf.text
+    if nav.cursor + 1 >= len(nav.stops):
+        return  # Oldest stop -- no-op (hard top).
+    _leave_stop_upward(queues, current)
+    nav.cursor += 1
+    _enter_stop(queues, nav.stops[nav.cursor], buf)
 
 
 def _kb_down(
@@ -323,45 +335,128 @@ def _kb_down(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Down handler. See :mod:`repl.input_pane` for the full contract.
+    """Down handler. Walk back toward the input stop; see ``input_ux.md``.
 
-    - ``cursor == 0`` (no navigation): preserve historical behavior --
-      clear the buffer if non-empty, no-op if empty.
-    - ``cursor == 1``: final Down -- restore ``snapshot_queue`` and
-      ``snapshot_input`` atomically (queue reappears in queue_pane,
-      buffer holds original typing).
-    - ``cursor >= 2``: walk back one step toward the snapshot
-      (newer history; eventually back to the queue-dequeued
-      position in case 1).
+    Pure replay: hand back each stop's current value with edits intact;
+    never re-derive. Leaving a pane stop downward restores that pane (the
+    cursor no longer sits on it). Down at the input stop ends navigation.
     """
     buf = event.current_buffer
-    if nav.cursor == 0:
+    if not nav.active():
         if buf.text:
             buf.reset()
         return
-    case_1 = bool(nav.snapshot_queue)
-    if nav.cursor == 1:
-        # Final Down: restore snapshot atomically.
-        snapshot_input = nav.snapshot_input
-        queues.restore_from_snapshot(
-            nav.snapshot_queue,
-            urgent_count=nav.snapshot_urgent_count,
-        )
-        buf.text = snapshot_input
+    current = nav.stops[nav.cursor]
+    current.current = buf.text
+    _leave_stop_downward(queues, current)
+    nav.cursor -= 1
+    if nav.cursor == 0:
+        # Back at the input stop: restore its value and end navigation.
+        buf.text = nav.stops[0].current
         buf.cursor_position = len(buf.text)
         nav.end()
         return
-    nav.cursor -= 1
-    history_strings = _history_strings(buf)
-    if case_1 and nav.cursor == 1:
-        # Back to "queue dequeued" position.
-        buf.text = "\n\n".join(block.text for block in nav.snapshot_queue)
-    else:
-        offset = nav.cursor - 1 if case_1 else nav.cursor
-        buf.text = (
-            history_strings[-offset] if 1 <= offset <= len(history_strings) else ""
+    _enter_stop(queues, nav.stops[nav.cursor], buf)
+
+
+def _begin_navigation(queues: InputQueues, nav: NavState, buf: Buffer) -> None:
+    """Build the stop list and load the first stop above the input."""
+    stops: list[Stop] = [Stop(kind=StopKind.INPUT, loaded=buf.text, current=buf.text)]
+    if queues.queue is not None:
+        stops.append(
+            Stop(
+                kind=StopKind.QUEUE,
+                loaded=queues.queue.text,
+                current=queues.queue.text,
+                attachments=queues.queue.attachments,
+            )
         )
+    if queues.deferred is not None:
+        stops.append(
+            Stop(
+                kind=StopKind.DEFERRED,
+                loaded=queues.deferred.text,
+                current=queues.deferred.text,
+                attachments=queues.deferred.attachments,
+            )
+        )
+    stops.extend(
+        Stop(kind=StopKind.HISTORY, loaded=entry, current=entry)
+        for entry in reversed(_history_strings(buf))
+    )
+    if len(stops) == 1:
+        return  # Nothing above the input -- no-op.
+    nav.stops = stops
+    nav.cursor = 1
+    _enter_stop(queues, nav.stops[1], buf)
+
+
+def _enter_stop(queues: InputQueues, stop: Stop, buf: Buffer) -> None:
+    """Load ``stop`` into the buffer; empty its pane if it is a live pane stop.
+
+    A pane stop that still owns its message (``not consumed``) empties
+    its pane while the cursor sits on it -- its value is in the buffer.
+    A consumed pane stop, or a history/input stop, owns no live pane.
+    """
+    if not stop.consumed:
+        if stop.kind is StopKind.QUEUE:
+            queues.queue = None
+        elif stop.kind is StopKind.DEFERRED:
+            queues.deferred = None
+    buf.text = stop.current
     buf.cursor_position = len(buf.text)
+
+
+def _leave_stop_upward(queues: InputQueues, stop: Stop) -> None:
+    """Modified-test as the cursor leaves ``stop`` going up.
+
+    Runs once per pane stop. Unchanged -> restore the pane (scrolling
+    past). Modified or cleared -> mark the stop consumed; the pane stays
+    empty and the edited value rides the cursor. No-op for non-pane or
+    already-consumed stops.
+    """
+    if stop.kind not in (StopKind.QUEUE, StopKind.DEFERRED) or stop.consumed:
+        return
+    if stop.current != stop.loaded:
+        stop.consumed = True
+        return
+    _restore_pane(queues, stop, stop.current)
+
+
+def _leave_stop_downward(queues: InputQueues, stop: Stop) -> None:
+    """Restore a live pane stop's pane as the cursor leaves it going down.
+
+    Down never re-derives: it restores the pane to the stop's CURRENT
+    value (edits intact). A consumed pane stop owns no pane. The
+    modified-test is Up-only, so Down does not consult ``loaded``.
+    """
+    if stop.kind not in (StopKind.QUEUE, StopKind.DEFERRED) or stop.consumed:
+        return
+    _restore_pane(queues, stop, stop.current)
+
+
+def _restore_pane(queues: InputQueues, stop: Stop, text: str) -> None:
+    """Put ``text`` back into the pane ``stop`` represents."""
+    block = QueuedInputBlock(text=text, attachments=stop.attachments)
+    if stop.kind is StopKind.QUEUE:
+        queues.queue = block
+    elif stop.kind is StopKind.DEFERRED:
+        queues.deferred = block
+
+
+def _abandon_navigation(queues: InputQueues, nav: NavState) -> None:
+    """Restore the sat-on live pane stop and end navigation.
+
+    Used when the user runs a slash command mid-navigation: the buffer
+    now holds the command, not the lifted pane content, so the pane the
+    cursor sat on must return to its ``loaded`` value rather than vanish.
+    A consumed or non-pane stop owns no live pane and needs no restore.
+    """
+    if nav.active():
+        stop = nav.stops[nav.cursor]
+        if stop.kind in (StopKind.QUEUE, StopKind.DEFERRED) and not stop.consumed:
+            _restore_pane(queues, stop, stop.loaded)
+    nav.end()
 
 
 def _kb_newline(event: KeyPressEvent) -> None:
@@ -370,10 +465,11 @@ def _kb_newline(event: KeyPressEvent) -> None:
 
 
 def _history_strings(buf: object) -> list[str]:
-    """Return the buffer's history entries as a list, oldest-first.
+    """Return the sagent input history entries, oldest-first.
 
+    The walk reads ``.sagent_history`` (prompt-toolkit ``FileHistory``).
     Accessed via duck-typing so tests can supply ``MagicMock`` buffers
-    without wiring a real ``History`` instance.
+    without a real ``History``.
     """
     history = getattr(buf, "history", None)
     if history is None:
@@ -383,52 +479,6 @@ def _history_strings(buf: object) -> list[str]:
         return []
     strings = get_strings()
     return list(strings) if strings is not None else []
-
-
-def _kb_up(
-    queues: InputQueues,
-    nav: NavState,
-    event: KeyPressEvent,
-) -> None:
-    """Up handler. See :mod:`repl.input_pane` for the full contract.
-
-    First Up: capture ``(queued_blocks, buffer_text)`` snapshot
-    and either (case 1) lift the queue into the buffer, or (case 2)
-    pull ``history[-1]`` into the buffer. Subsequent Ups walk older
-    history. No-op when there's neither a queue nor history available.
-    """
-    buf = event.current_buffer
-    history_strings = _history_strings(buf)
-    if nav.cursor == 0:
-        restore_blocks = queues.restore_blocks()
-        if restore_blocks:
-            # Case 1: lift queued input.
-            nav.begin(
-                list(queues.snapshot_blocks()),
-                buf.text,
-                urgent_count=len(queues.urgent),
-            )
-            buf.text = "\n\n".join(restore_blocks)
-            queues.clear()
-        elif history_strings:
-            # Case 2: walk history[-1] in.
-            nav.begin([], buf.text)
-            buf.text = history_strings[-1]
-        else:
-            # No queue, no history -- nothing to do.
-            return
-        buf.cursor_position = len(buf.text)
-        return
-    # Continuing navigation: walk older history.
-    case_1 = bool(nav.snapshot_queue)
-    # cursor=1 case_1 = queue content; cursor=2 = history[-1]; ...
-    # cursor=1 case_2 = history[-1]; cursor=2 = history[-2]; ...
-    next_offset = nav.cursor if case_1 else nav.cursor + 1
-    if next_offset > len(history_strings):
-        return  # No more history.
-    buf.text = history_strings[-next_offset]
-    buf.cursor_position = len(buf.text)
-    nav.cursor += 1
 
 
 def _kb_history_prefix_back(event: KeyPressEvent) -> None:
@@ -463,8 +513,7 @@ def _kb_open_editor(event: KeyPressEvent) -> None:
     Blocks the prompt-toolkit event loop until the editor exits --
     prompt-toolkit's ``open_in_editor`` shells out synchronously. The
     REPL renderer and the underlying agent loop both pause for the
-    editor session; this is the documented prompt-toolkit behavior, not
-    a defect to work around here.
+    editor session; this is documented prompt-toolkit behavior.
     """
     event.current_buffer.open_in_editor()
 
@@ -472,28 +521,17 @@ def _kb_open_editor(event: KeyPressEvent) -> None:
 def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
     r"""Abandon the line being composed; never exit the REPL.
 
-    One rule, matching every Unix line editor (bash, readline, ipython):
-    Ctrl+C abandons the line you are composing and gives you a fresh
-    prompt. The abandoned text is recorded in history (Up-arrow recalls
-    it) but is never carried into the next turn -- typing a new line must
-    not re-inject the old one.
+    One rule, matching every Unix line editor: Ctrl+C abandons the line
+    you are composing and gives you a fresh prompt. The abandoned text is
+    recorded in the sagent input history (Up-arrow recalls it) but is
+    never carried into the next turn.
 
-    Two facts stay orthogonal to that rule:
-
-    - When the agent is busy (``agent.work`` -- a model call or
-      compaction -- or a non-empty ``runtime.cohort``), Ctrl+C also halts
-      the running turn. That is the same "abandon the current activity"
-      intent applied to the agent rather than the line.
-    - Queued urgent/deferred blocks were *deliberately submitted* with
-      Enter/Tab; they are not the line being composed, so Ctrl+C leaves
-      them untouched -- this handler never reads or mutates the queues.
+    When the agent is busy (``agent.work`` -- a model call or compaction
+    -- or a non-empty ``runtime.cohort``), Ctrl+C also halts the running
+    turn. Queued/deferred panes are deliberately submitted content, not
+    the line being composed, so Ctrl+C leaves them untouched.
 
     To exit the REPL use Ctrl+D or ``/quit``.
-
-    Args:
-      agent: Agent whose running turn is halted when busy.
-      event: Key event carrying the buffer to abandon.
-
     """
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()

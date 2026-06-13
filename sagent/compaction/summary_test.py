@@ -15,7 +15,6 @@ from sagent.agent.context import resolve_context
 from sagent.compaction.summary import (
     SummaryCompactor,
     _attach_markers,
-    _coalesce_adjacent_users,
     _drop_orphan_tool_results,
     _format_summary,
     _request_entries,
@@ -43,6 +42,7 @@ from sagent.types.tape import (
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    coalesce_roles,
 )
 
 
@@ -1017,65 +1017,74 @@ def test_drop_orphan_tool_results_keeps_interleaved_sibling_and_result() -> None
     assert out.index(am) < out.index(tr)
 
 
-# --- H1: coalesce must not merge across AgentSendMessage sources ----------
+# --- H1: canonical coalesce closes both user-side legs --------------------
 
 
-def test_coalesce_adjacent_users_does_not_merge_cross_source_agent_sends() -> None:
-    out = _coalesce_adjacent_users(
-        [
+def test_coalesce_demotes_cross_source_agent_sends_to_user() -> None:
+    """Cross-source AgentSends merge under the canonical policy.
+
+    The compactor formerly LEFT two differing-source AgentSends unmerged,
+    which ``ContextSplice``'s role-alternation validator then rejected (two
+    adjacent wire-``user`` entries). The single canonical ``coalesce_roles``
+    merges them and demotes to ``UserMessage`` -- one structured ``source``
+    cannot honestly own two senders.
+    """
+    out = coalesce_roles(
+        (
             AgentSendMessage(source="X", text="a"),
             AgentSendMessage(source="Y", text="b"),
-        ]
+        )
     )
-    assert len(out) == 2
-    first, second = out
-    assert isinstance(first, AgentSendMessage)
-    assert isinstance(second, AgentSendMessage)
-    assert first.source == "X"
-    assert second.source == "Y"
+    assert len(out) == 1
+    only = out[0]
+    assert type(only) is UserMessage
+    # Demotion drops structured ``source``; the canonical coalescer applies
+    # the in-text ``[from X]: `` label so attribution survives (C-002).
+    assert only.text == "[from X]: a\n\n[from Y]: b"
 
 
-def test_coalesce_adjacent_users_merges_same_source_agent_sends() -> None:
-    out = _coalesce_adjacent_users(
-        [
+def test_coalesce_merges_same_source_agent_sends() -> None:
+    out = coalesce_roles(
+        (
             AgentSendMessage(source="X", text="a"),
             AgentSendMessage(source="X", text="b"),
-        ]
+        )
     )
     assert len(out) == 1
     only = out[0]
     assert isinstance(only, AgentSendMessage)
     assert only.source == "X"
-    assert "a" in only.text
-    assert "b" in only.text
+    assert only.text == "a\n\nb"
 
 
-def test_coalesce_adjacent_users_does_not_merge_cross_type() -> None:
-    """User and AgentSend are different sources: never merged, types preserved.
+def test_coalesce_demotes_cross_type_to_user() -> None:
+    """User and AgentSend are both wire-``user``: they merge, demoting to User.
 
-    Codifies the contract behind the (now-removed) cross-type merge branches:
-    ``_same_source`` returns False for cross-type pairs, so they stay distinct
-    and structured attribution is not falsified.
+    Replaces the (now-removed) divergent contract that left cross-type pairs
+    distinct. Both pairs are wire-``user`` role, so leaving them adjacent
+    violates the splice validator; the canonical merge demotes to
+    ``UserMessage`` and the in-text labels carry attribution.
     """
-    out = _coalesce_adjacent_users(
-        [
+    out = coalesce_roles(
+        (
             UserMessage(text="human"),
             AgentSendMessage(source="X", text="bot"),
-        ]
+        )
     )
-    assert len(out) == 2
-    assert isinstance(out[0], UserMessage)
-    assert isinstance(out[1], AgentSendMessage)
-    # And the reverse order, likewise unmerged.
-    out2 = _coalesce_adjacent_users(
-        [
+    assert len(out) == 1
+    assert type(out[0]) is UserMessage
+    # The agent send is labeled on demotion; the human turn is not.
+    assert out[0].text == "human\n\n[from X]: bot"
+    # And the reverse order, likewise merged to a single UserMessage.
+    out2 = coalesce_roles(
+        (
             AgentSendMessage(source="X", text="bot"),
             UserMessage(text="human"),
-        ]
+        )
     )
-    assert len(out2) == 2
-    assert isinstance(out2[0], AgentSendMessage)
-    assert isinstance(out2[1], UserMessage)
+    assert len(out2) == 1
+    assert type(out2[0]) is UserMessage
+    assert out2[0].text == "[from X]: bot\n\nhuman"
 
 
 # --- H6: empty model output must record summary_fallback ------------------

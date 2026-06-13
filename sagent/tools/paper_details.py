@@ -104,10 +104,11 @@ class PaperDetails:
             "type": "object",
             "properties": {
                 "ids": {
-                    "type": "array",
+                    "type": ["array", "string"],
                     "items": {"type": "string"},
                     "description": (
-                        "One or more paper identifiers: a DOI (10.xxxx/yyy, "
+                        "Paper identifier(s): a single id as a bare string, or "
+                        "several as an array. Each is a DOI (10.xxxx/yyy, "
                         "optional doi:/https://doi.org/ prefix) or an arXiv id "
                         "(2106.15928, arXiv:2106.15928, or legacy "
                         "hep-th/9901001). For metadata, pass every id you "

@@ -108,7 +108,9 @@ __all__ = [
     "UserDeferredMessage",
     "UserMessage",
     "UserQueuedMessage",
+    "labeled_agent_send_text",
     "reset_id_counter",
+    "wire_role",
 ]
 
 
@@ -203,6 +205,21 @@ class AgentSendMessage(SessionMessage):
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
+
+
+def labeled_agent_send_text(entry: AgentSendMessage) -> str:
+    """Return ``entry.text`` prefixed with its ``[from <source>]: `` label.
+
+    The single source of truth for agent-send attribution labels, shared by
+    the splice-build coalescer (``types.tape._merge_user``) and the wire
+    materializer (``request_materialization._label_agent_sends``) so the
+    format can never drift between the two paths. ``startswith``-guarded so
+    re-labeling an already-labeled body is a no-op (idempotent); ``startswith``
+    not substring ``in`` so a body legitimately quoting the marker is still
+    labeled.
+    """
+    prefix = f"[from {entry.source}]: "
+    return entry.text if entry.text.startswith(prefix) else f"{prefix}{entry.text}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -839,6 +856,32 @@ class ChildDoneEvent:
 
 
 type ModelContextEvent = UserMessage | AgentSendMessage | AssistantMessage | ToolResult
+
+
+def wire_role(entry: ModelContextEvent) -> str | None:
+    """Return the provider-wire role for ``entry``.
+
+    ``UserMessage`` and ``AgentSendMessage`` both serialize as
+    ``user``-role on the wire. Several runtime, materialization,
+    session, and compactor sites need to reason about wire-role
+    alternation rather than Python type identity, and treating the two
+    classes as distinct produces wire-invalid contexts (back-to-back
+    user-role turns the provider rejects).
+
+    Args:
+      entry: A provider-facing model context event.
+
+    Returns:
+      role: ``"user"`` for ``UserMessage``/``AgentSendMessage``,
+          ``"assistant"`` for ``AssistantMessage``, ``None`` for
+          ``ToolResult`` (which has its own pairing rules).
+
+    """
+    if isinstance(entry, (UserMessage, AgentSendMessage)):
+        return "user"
+    if isinstance(entry, AssistantMessage):
+        return "assistant"
+    return None
 
 
 type RuntimeEvent = (

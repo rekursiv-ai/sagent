@@ -96,6 +96,7 @@ from sagent.types.tape import (
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    splice_safe_repair,
     unpaired_call_ids,
 )
 
@@ -2998,36 +2999,8 @@ class _AgentCompactor:
 def _repair_compact_payload(
     payload: Sequence[types.runtime.ModelContextEvent],
 ) -> list[types.runtime.ModelContextEvent]:
-    repaired: list[types.runtime.ModelContextEvent] = []
-    pending: set[str] = set()
-    for entry in payload:
-        if isinstance(entry, types.runtime.AssistantMessage):
-            _append_interrupted_results(repaired, pending)
-            repaired.append(entry)
-            pending.update(tc.id for tc in entry.tool_calls)
-        elif isinstance(entry, types.runtime.ToolResult):
-            if entry.call_id in pending:
-                repaired.append(entry)
-                pending.discard(entry.call_id)
-        else:
-            _append_interrupted_results(repaired, pending)
-            repaired.append(entry)
-    _append_interrupted_results(repaired, pending)
-    return repaired
-
-
-def _append_interrupted_results(
-    payload: list[types.runtime.ModelContextEvent],
-    pending: set[str],
-) -> None:
-    while pending:
-        payload.append(
-            types.runtime.ToolResult(
-                call_id=pending.pop(),
-                content="[interrupted]",
-                is_error=True,
-            ),
-        )
+    """List-wrap :func:`tape.splice_safe_repair` so the caller can append."""
+    return list(splice_safe_repair(payload))
 
 
 def _should_cancel_background(

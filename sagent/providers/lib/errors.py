@@ -10,7 +10,7 @@ from sagent.types.exceptions import UserFacingError
 if TYPE_CHECKING:
     import httpx
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
     httpx = lazy_import("httpx")
 

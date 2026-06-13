@@ -245,7 +245,7 @@ def _before_tool_spawn(
         event = previous_before_tool_spawn(message)
         if event is not None:
             return event
-    return queues.pop_urgent_message()
+    return queues.pop_queue_message()
 
 
 def _commit_local_queues(
@@ -261,9 +261,7 @@ def _commit_local_queues(
     # the only ``AWAIT_USER`` arm that publishes a distinguishing terminal
     # event (Halt / ModelResponseError do not), so the released input lands
     # exactly where a fresh user redirect would.
-    if isinstance(event, (AgentIdle, ClearComplete)) and not queues.commit_urgent(
-        agent
-    ):
+    if isinstance(event, (AgentIdle, ClearComplete)) and not queues.commit_queue(agent):
         queues.commit_deferred_on_idle(agent)
 
 
