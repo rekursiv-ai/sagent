@@ -439,9 +439,20 @@ class _FakeAgent:
 
     @effort.setter
     def effort(self, value: str | None) -> None:
-        if value is not None and value not in self.model.valid_efforts:
-            quoted = ", ".join(repr(e) for e in self.model.valid_efforts)
-            raise ValueError(f"effort must be one of {quoted}, got {value!r}")
+        # Mirror ``Agent.effort`` setter EXACTLY (agent.py), including the
+        # no-support branch the earlier copy omitted, so this fake cannot
+        # diverge from production. The real setter's own branches are
+        # tested directly in agent_test.py (test_effort_setter_*); this
+        # mirror only lets the REPL-adapter tests drive a faithful agent.
+        if value is not None:
+            valid = self.model.valid_efforts
+            if not valid:
+                raise ValueError(
+                    f"Model {self.model.model_id!r} does not support effort."
+                )
+            if value not in valid:
+                quoted = ", ".join(repr(e) for e in valid)
+                raise ValueError(f"effort must be one of {quoted}, got {value!r}")
         self._effort = value
 
     def set_thinking_state(self, state: str) -> None:

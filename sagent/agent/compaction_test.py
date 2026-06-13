@@ -209,8 +209,11 @@ async def test_post_compact_enrich_runs_restorable_tool_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_compact_enrich_swallows_restorable_failures() -> None:
+async def test_post_compact_enrich_swallows_restorable_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A raising tool hook is logged and skipped without aborting the pipeline."""
+    calls: list[str] = []
 
     @dataclass(slots=True, kw_only=True)
     class BadRestorable(_StubTool):
@@ -224,20 +227,46 @@ async def test_post_compact_enrich_swallows_restorable_failures() -> None:
             budget_chars: int = 100_000,
         ) -> None:
             del history, tool_state, budget_chars
+            calls.append("B")
             raise RuntimeError("nope")
 
+    # A second hook AFTER the failing one must still run (the failure is
+    # skipped, not fatal to the pipeline).
+    @dataclass(slots=True, kw_only=True)
+    class GoodRestorable(_StubTool):
+        name: str = "C"
+
+        async def post_compact_restore(
+            self,
+            history: list[ModelContextEvent],
+            tool_state: ToolState,
+            *,
+            budget_chars: int = 100_000,
+        ) -> None:
+            del history, tool_state, budget_chars
+            calls.append("C")
+
     history: list[ModelContextEvent] = [UserMessage(text="x")]
-    tools_map: Mapping[str, Tool] = {"B": BadRestorable()}
-    await post_compact_enrich(
-        history=history,
-        tool_state=ToolState(),
-        budget=_budget(),
-        tools=tools_map,
-        background_tasks={},
-        estimate_tokens=0,
-        headroom=0,
-    )
-    # Pipeline completed despite the failure (no assertions on side effects).
+    tools_map: Mapping[str, Tool] = {"B": BadRestorable(), "C": GoodRestorable()}
+    with caplog.at_level("WARNING"):
+        await post_compact_enrich(
+            history=history,
+            tool_state=ToolState(),
+            budget=_budget(),
+            tools=tools_map,
+            background_tasks={},
+            estimate_tokens=0,
+            headroom=0,
+        )
+    # The failing hook ran...
+    assert "B" in calls
+    # ...the failure was logged (not silently swallowed)...
+    assert any(
+        "post_compact_restore failed" in r.getMessage() and "B" in r.getMessage()
+        for r in caplog.records
+    ), f"expected a logged warning naming the failed hook; got {caplog.records!r}"
+    # ...and a later hook still ran (the pipeline was not aborted).
+    assert "C" in calls, "a hook after the failing one must still run"
 
 
 @pytest.mark.asyncio

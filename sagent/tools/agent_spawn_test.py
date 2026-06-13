@@ -1374,7 +1374,11 @@ def test_directive_schema_documents_notify_on_asleep() -> None:
     """
     rendered = repr(AgentSpawn().directive_schema)
     assert "'notify_on_asleep'" in rendered
-    assert "'persistent only'" in rendered.lower() or "persistent" in rendered.lower()
+    # Assert the actual description text, not a bare keyword: the param is
+    # documented as persistent-only and as defaulting to true.
+    lowered = rendered.lower()
+    assert "persistent only" in lowered
+    assert "the default" in lowered
 
 
 def test_directive_schema_prefers_subscription_providers() -> None:
