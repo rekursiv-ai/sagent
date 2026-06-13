@@ -13,7 +13,7 @@ from runtime import trace_writer
 @dataclass
 class _FakeAssistantMessage:
     text: str
-    tool_calls: tuple = ()
+    tool_calls: tuple[object, ...] = ()
 
 
 @dataclass
@@ -32,7 +32,7 @@ class _FakeWeirdEvent:
 
 class _StubAgentRuntime:
     def __init__(self) -> None:
-        self.observers: list = []
+        self.observers: list[object] = []
 
 
 class _StubAgent:

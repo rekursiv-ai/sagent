@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import os
 
@@ -121,7 +122,7 @@ def build_provider():
     return AnthropicCLI.from_credentials()
 
 
-def _sagent_mcp_server_entry(role: str) -> dict:
+def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     """Per-role stdio MCP entry for the CLI's ``--mcp-config``.
 
     Spawns ``mcp_sagent/server.py`` with three env vars:

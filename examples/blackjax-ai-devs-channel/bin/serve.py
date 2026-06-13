@@ -375,7 +375,7 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
 
     try:
         idle_events: dict[str, asyncio.Event] = {}
-        observers: list = []
+        observers: list[Any] = []
         for label, agent in agents.items():
             evt = asyncio.Event()
             idle_events[label] = evt
@@ -433,7 +433,7 @@ _DEBUG_HTML_PATH = _PLUGIN_DIR / "web" / "debug.html"
 _INDEX_HTML_PATH = _PLUGIN_DIR / "web" / "index.html"
 
 
-def _event_search_text(ev: dict) -> tuple[str, str]:
+def _event_search_text(ev: dict[str, Any]) -> tuple[str, str]:
     """Return ``(kind, flattened-searchable-text)`` for one trace event.
 
     Mirrors ``chat/chat:_event_search_text`` but uses sagent's event
@@ -496,10 +496,10 @@ def _iter_trace_files():
         yield p.name[: -len(".trace.jsonl")], p
 
 
-def _read_jsonl(path) -> list[dict]:
+def _read_jsonl(path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -514,9 +514,9 @@ def _read_jsonl(path) -> list[dict]:
     return out
 
 
-def _search_all(q: str, scope: str, limit: int) -> tuple[list[dict], bool]:
+def _search_all(q: str, scope: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
     """Grep ``main.jsonl`` and/or every ``sessions/*.trace.jsonl`` for ``q``."""
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     if not q:
         return results, False
     ql = q.lower()
@@ -556,7 +556,7 @@ def _search_all(q: str, scope: str, limit: int) -> tuple[list[dict], bool]:
     return results, False
 
 
-def _diagnose_agent(label: str, agent) -> dict:
+def _diagnose_agent(label: str, agent) -> dict[str, Any]:
     """Compute status + diagnosis for one agent, mirroring chat/'s _agents_status fields.
 
     Sagent's single-process model maps the chat/ status set (dead, hung,
@@ -635,7 +635,7 @@ def _diagnose_agent(label: str, agent) -> dict:
             inflight = "model thinking"
 
     # Last completed turn outcome.
-    last_result: dict | None = None
+    last_result: dict[str, Any] | None = None
     for ev in reversed(events):
         k = ev.get("_event") or "?"
         if k == "ModelResponseComplete":
@@ -687,7 +687,7 @@ def _diagnose_agent(label: str, agent) -> dict:
     # asyncio.Queue doesn't expose its underlying deque publicly; we peek
     # at the private ``_queue`` (collections.deque) for the preview.
     # Best-effort and read-only — never mutated.
-    pending_preview: list[dict] = []
+    pending_preview: list[dict[str, Any]] = []
     try:
         deque_items = list(agent.runtime.inbox._queue._queue)
         for item in deque_items[:4]:
@@ -870,10 +870,10 @@ def _build_http_app(agents):
             }
         )
 
-    def _read_all_records() -> list[dict]:
+    def _read_all_records() -> list[dict[str, Any]]:
         if not _MAIN_JSONL.exists():
             return []
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         with open(_MAIN_JSONL, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -959,7 +959,7 @@ def _build_http_app(agents):
         if not path.exists():
             return JSONResponse({"events": [], "total": 0})
 
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()

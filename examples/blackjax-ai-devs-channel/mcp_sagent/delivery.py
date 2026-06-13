@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import fcntl
 import json
@@ -129,7 +130,7 @@ def append_user_message(*, to_role: str, body: str, ts: str | None = None) -> No
 # --------------------------------------------------------------------------
 
 
-def _http_post(path: str, payload: dict) -> tuple[bool, str, int]:
+def _http_post(path: str, payload: dict[str, Any]) -> tuple[bool, str, int]:
     """POST JSON to ``<serve_url><path>``. Returns ``(ok, body_or_error, status_code)``."""
     url = f"{_SERVE_URL}{path}"
     data = json.dumps(payload).encode()

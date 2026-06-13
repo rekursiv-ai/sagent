@@ -48,6 +48,7 @@ MCP bridge without re-running the probe.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import asyncio
 import logging
@@ -261,7 +262,9 @@ def _text(s: str, is_error: bool = False) -> list[mcp_types.ContentBlock]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[mcp_types.ContentBlock]:
+async def call_tool(
+    name: str, arguments: dict[str, Any]
+) -> list[mcp_types.ContentBlock]:
     # Each call resolves the sender identity from the module-level
     # constant (set from env at startup). This means a single MCP
     # server instance serves a single agent — the sagent.serve.py

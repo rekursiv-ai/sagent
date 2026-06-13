@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import argparse
 import heapq
@@ -36,7 +37,7 @@ _DEFAULT_CHANNEL = (
 _DEFAULT_SAGENT = Path(__file__).resolve().parent.parent / "main.jsonl"
 
 
-def _iter_records(path: Path, runtime_tag: str) -> Iterator[tuple[str, dict]]:
+def _iter_records(path: Path, runtime_tag: str) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield ``(ts, record)`` pairs from a jsonl file with the runtime stamped."""
     if not path.exists():
         return
@@ -62,7 +63,7 @@ def merge(
     *,
     since: str | None = None,
     only_runtime: str | None = None,
-) -> Iterator[dict]:
+) -> Iterator[dict[str, Any]]:
     """K-way merge across sources by ``ts``.
 
     ``ts`` is ISO-8601 with a uniform precision (``YYYY-MM-DDTHH:MM:SS.mmmZ``),
