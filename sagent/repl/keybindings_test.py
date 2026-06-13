@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 
 import asyncio
 
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.key_binding.key_bindings import (
     KeyBindingsBase,
@@ -791,6 +793,119 @@ def test_ctrl_c_wins_over_prompt_session_default() -> None:
     assert inner is keybindings_mod._kb_ctrl_c
     handler(cast(KeyPressEvent, _fake_event(_fake_buf(""))))
     assert agent.halt_calls == 1
+
+
+# --- real prompt-toolkit Buffer ---------------------------------------
+# The tests above drive a MagicMock buffer (fast, lets us inspect calls).
+# These drive a REAL ``prompt_toolkit.buffer.Buffer`` end-to-end, so the
+# handlers are validated against actual buffer semantics -- cursor moves,
+# history append on reset, ``get_strings`` -- not a mock's stored fields.
+# Closes the "MagicMock buffer hides behavior" gap.
+
+
+def _real_buf(text: str = "", history: list[str] | None = None) -> Buffer:
+    hist = InMemoryHistory()
+    for entry in history or []:
+        hist.append_string(entry)
+    buf = Buffer(history=hist, multiline=True)
+    buf.text = text
+    buf.cursor_position = len(text)
+    return buf
+
+
+def _real_event(buf: Buffer) -> KeyPressEvent:
+    ev = MagicMock()
+    ev.current_buffer = buf
+    return cast(KeyPressEvent, ev)
+
+
+def test_real_buffer_enter_idle_dispatches() -> None:
+    agent = _idle_agent()
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    buf = _real_buf("hello")
+    _handler(kb, ("enter",))(_real_event(buf))
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).text == "hello"
+    assert buf.text == ""  # real buffer reset
+
+
+def test_real_buffer_enter_busy_stages_and_resets() -> None:
+    agent = _busy_agent()
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    buf = _real_buf("queued")
+    _handler(kb, ("enter",))(_real_event(buf))
+    assert queues.queue == QueuedInputBlock(text="queued")
+    assert buf.text == ""
+
+
+def test_real_buffer_full_nav_round_trip() -> None:
+    """Real Buffer: input -> Q -> history -> back, queue restored, edits intact."""
+    agent = _busy_agent()
+    queues = InputQueues(queue=QueuedInputBlock(text="Q"))
+    nav = NavState()
+    kb = _build(agent, queues, nav)
+    buf = _real_buf("typed", history=["h1", "h2", "h3"])
+    up = _handler(kb, ("up",))
+    down = _handler(kb, ("down",))
+
+    up(_real_event(buf))
+    assert buf.text == "Q"
+    assert queues.queue is None
+    up(_real_event(buf))
+    assert buf.text == "h3"
+    assert queues.queue == QueuedInputBlock(text="Q")  # restored on pass
+    up(_real_event(buf))
+    assert buf.text == "h2"
+    down(_real_event(buf))
+    assert buf.text == "h3"
+    down(_real_event(buf))
+    assert buf.text == "Q"
+    assert queues.queue is None  # re-unlifted on the way down
+    down(_real_event(buf))
+    assert buf.text == "typed"
+    assert queues.queue == QueuedInputBlock(text="Q")
+    assert not nav.active()
+
+
+def test_real_buffer_modified_test_delete_gesture() -> None:
+    """Real Buffer: clear a lifted queue message, Up -> it stays deleted."""
+    agent = _busy_agent()
+    queues = InputQueues(queue=QueuedInputBlock(text="Q"))
+    nav = NavState()
+    kb = _build(agent, queues, nav)
+    buf = _real_buf("typed", history=["h1"])
+    up = _handler(kb, ("up",))
+    up(_real_event(buf))  # lift Q
+    assert buf.text == "Q"
+    buf.text = ""  # delete
+    up(_real_event(buf))  # modified -> not restored
+    assert queues.queue is None
+    assert buf.text == "h1"
+
+
+def test_real_buffer_enter_appends_to_history_on_dispatch() -> None:
+    """Real Buffer: a dispatched message lands in the buffer's history."""
+    agent = _idle_agent()
+    queues = InputQueues()
+    kb = _build(agent, queues)
+    buf = _real_buf("remember me")
+    _handler(kb, ("enter",))(_real_event(buf))
+    assert "remember me" in buf.history.get_strings()
+
+
+def test_real_buffer_nav_commit_at_queue_stop_replaces() -> None:
+    agent = _busy_agent()
+    queues = InputQueues(queue=QueuedInputBlock(text="Q"))
+    nav = NavState()
+    kb = _build(agent, queues, nav)
+    buf = _real_buf("typed")
+    _handler(kb, ("up",))(_real_event(buf))
+    buf.text = "Q-edited"
+    _handler(kb, ("enter",))(_real_event(buf))
+    assert queues.queue == QueuedInputBlock(text="Q-edited")
+    assert not nav.active()
 
 
 if __name__ == "__main__":
