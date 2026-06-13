@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock
 
+import asyncio
+
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.key_binding.key_bindings import (
     KeyBindingsBase,
@@ -15,19 +17,32 @@ from prompt_toolkit.key_binding.key_bindings import (
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 
+from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent
 from sagent.repl import keybindings as keybindings_mod
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.types.runtime import (
+    AssistantMessage,
     BytesMessage,
+    RuntimeEvent,
     UserDeferredMessage,
     UserMessage,
 )
 
 
 @dataclass(slots=True, kw_only=True)
-class _FakeInbox:
+class _ListInbox:
+    """A list-backed inbox: pure storage, no dispatch logic to drift.
+
+    The hidden-bug risk in earlier fakes was a *re-implemented predicate*
+    (``accepts_user_dispatch`` etc.). An inbox has none -- it is a queue.
+    So this dumb stand-in is safe: the dispatch predicates under test run
+    on the REAL ``AgentRuntime`` (see ``_make_runtime``); only the queue
+    is stubbed so tests can read ``items`` without draining a real
+    ``GatedDeque``.
+    """
+
     items: list[object] = field(default_factory=list)
     gate_armed: bool = False
 
@@ -38,47 +53,57 @@ class _FakeInbox:
         return not self.items
 
 
-@dataclass(slots=True, kw_only=True)
-class _FakeRuntime:
-    inbox: _FakeInbox = field(default_factory=_FakeInbox)
-    cohort: set[str] = field(default_factory=set)
-    model_call: object = None
-    compact_task: object = None
-    running_tools: dict[str, object] = field(default_factory=dict)
-    _mid_stream_queue: list[object] = field(default_factory=list)
+class _TrivialModel:
+    """A model the runtime can hold but a keybinding test never invokes."""
 
-    @property
-    def is_idle(self) -> bool:
-        return (
-            self.model_call is None
-            and self.compact_task is None
-            and not self.cohort
-            and not self.inbox.gate_armed
-            and not self.running_tools
-            and not self._mid_stream_queue
-        )
+    async def stream(
+        self,
+        history: object,
+        on_text: Callable[[str], None],
+        on_thinking: Callable[[str], None],
+    ) -> AssistantMessage:
+        del history, on_text, on_thinking
+        return AssistantMessage(text="unused")
 
-    @property
-    def accepts_user_dispatch(self) -> bool:
-        if self.model_call is None and self.compact_task is None:
-            return True
-        return self.model_call is not None and not self.inbox.empty()
 
-    @property
-    def accepts_deferred_dispatch(self) -> bool:
-        return self.accepts_user_dispatch and not self.cohort and not self.running_tools
+def _make_runtime() -> agent_runtime.AgentRuntime:
+    """A REAL ``AgentRuntime`` with a list-backed inbox for poking state.
+
+    The dispatch predicates (``is_idle`` / ``accepts_user_dispatch`` /
+    ``accepts_deferred_dispatch``) are the real ones -- never copied --
+    so a keybinding test cannot pass against a broken predicate.
+    """
+    runtime = agent_runtime.AgentRuntime(
+        model=cast(agent_runtime.Model, _TrivialModel())
+    )
+    runtime.inbox = cast("agent_runtime.GatedDeque[RuntimeEvent]", _ListInbox())
+    return runtime
+
+
+def _sentinel_task() -> asyncio.Task[None]:
+    """A stand-in ``Task`` for poking ``model_call`` / ``compact_task``.
+
+    The dispatch predicates only test these for ``is not None``; a real
+    ``Task`` is never awaited here, so an opaque sentinel typed as the
+    field's declared type suffices and keeps the checkers honest.
+    """
+    return cast("asyncio.Task[None]", object())
 
 
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
-    """Minimal stand-in for ``Agent`` matching only the surface keybindings touch."""
+    """Minimal stand-in for ``Agent``; wraps a REAL runtime for predicates."""
 
     work: object = None
-    runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+    runtime: agent_runtime.AgentRuntime = field(default_factory=_make_runtime)
     halt_calls: int = 0
 
     def halt(self) -> None:
         self.halt_calls += 1
+
+
+def _inbox(agent: _FakeAgent) -> _ListInbox:
+    return cast(_ListInbox, agent.runtime.inbox)
 
 
 def _idle_agent() -> _FakeAgent:
@@ -87,7 +112,7 @@ def _idle_agent() -> _FakeAgent:
 
 def _busy_agent() -> _FakeAgent:
     a = _FakeAgent()
-    a.runtime.model_call = object()
+    a.runtime.model_call = _sentinel_task()
     a.work = a.runtime.model_call
     return a
 
@@ -164,8 +189,8 @@ def test_enter_idle_dispatches_user_message() -> None:
     buf = _fake_buf("hello")
     _press(kb, "enter", buf)
     assert not queues.has_any()
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserMessage]
-    assert cast(UserMessage, agent.runtime.inbox.items[0]).text == "hello"
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).text == "hello"
 
 
 def test_enter_busy_stages_into_queue_pane() -> None:
@@ -176,7 +201,7 @@ def test_enter_busy_stages_into_queue_pane() -> None:
     _press(kb, "enter", buf)
     assert queues.queue == QueuedInputBlock(text="hello")
     assert queues.deferred is None
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 def test_enter_busy_coalesces_into_queue_pane() -> None:
@@ -199,12 +224,12 @@ def test_enter_during_pending_halt_dispatches_not_stages() -> None:
     means mid-transition -> push directly.
     """
     agent = _busy_agent()
-    agent.runtime.inbox.items.append(object())  # a queued Halt, not drained
+    _inbox(agent).items.append(object())  # a queued Halt, not drained
     queues = InputQueues()
     kb = _build(agent, queues)
     _press(kb, "enter", _fake_buf("redirect now"))
     assert not queues.has_any()
-    pushed = [i for i in agent.runtime.inbox.items if isinstance(i, UserMessage)]
+    pushed = [i for i in _inbox(agent).items if isinstance(i, UserMessage)]
     assert len(pushed) == 1
     assert pushed[0].text == "redirect now"
 
@@ -212,12 +237,12 @@ def test_enter_during_pending_halt_dispatches_not_stages() -> None:
 def test_enter_during_compaction_stages_not_dispatches() -> None:
     """Spec: busy is busy. Compaction stages, never dispatches (was a bug)."""
     agent = _idle_agent()
-    agent.runtime.compact_task = object()
+    agent.runtime.compact_task = _sentinel_task()
     queues = InputQueues()
     kb = _build(agent, queues)
     _press(kb, "enter", _fake_buf("during compact"))
     assert queues.queue == QueuedInputBlock(text="during compact")
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 def test_enter_mid_cohort_dispatches_to_preempt() -> None:
@@ -233,8 +258,8 @@ def test_enter_mid_cohort_dispatches_to_preempt() -> None:
     kb = _build(agent, queues)
     _press(kb, "enter", _fake_buf("during tools"))
     assert not queues.has_any()
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserMessage]
-    assert cast(UserMessage, agent.runtime.inbox.items[0]).text == "during tools"
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).text == "during tools"
 
 
 def test_tab_mid_cohort_stages_to_deferred_not_dispatch() -> None:
@@ -250,7 +275,7 @@ def test_tab_mid_cohort_stages_to_deferred_not_dispatch() -> None:
     kb = _build(agent, queues)
     _press(kb, "tab", _fake_buf("hold this"))
     assert queues.deferred == QueuedInputBlock(text="hold this")
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 def test_tab_idle_dispatches_deferred_message() -> None:
@@ -259,8 +284,8 @@ def test_tab_idle_dispatches_deferred_message() -> None:
     kb = _build(agent, queues)
     _press(kb, "tab", _fake_buf("for later"))
     assert not queues.has_any()
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserDeferredMessage]
-    assert cast(UserDeferredMessage, agent.runtime.inbox.items[0]).text == "for later"
+    assert [type(i) for i in _inbox(agent).items] == [UserDeferredMessage]
+    assert cast(UserDeferredMessage, _inbox(agent).items[0]).text == "for later"
 
 
 def test_enter_when_gate_armed_dispatches_to_release() -> None:
@@ -272,23 +297,23 @@ def test_enter_when_gate_armed_dispatches_to_release() -> None:
     ``model_call is None`` with the gate armed.
     """
     agent = _idle_agent()
-    agent.runtime.inbox.gate_armed = True
+    _inbox(agent).gate_armed = True
     queues = InputQueues()
     kb = _build(agent, queues)
     _press(kb, "enter", _fake_buf("resume me"))
     assert not queues.has_any()
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserMessage]
-    assert cast(UserMessage, agent.runtime.inbox.items[0]).text == "resume me"
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).text == "resume me"
 
 
 def test_tab_when_gate_armed_dispatches_to_release() -> None:
     agent = _idle_agent()
-    agent.runtime.inbox.gate_armed = True
+    _inbox(agent).gate_armed = True
     queues = InputQueues()
     kb = _build(agent, queues)
     _press(kb, "tab", _fake_buf("resume deferred"))
     assert not queues.has_any()
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserDeferredMessage]
+    assert [type(i) for i in _inbox(agent).items] == [UserDeferredMessage]
 
 
 def test_tab_busy_stages_into_deferred_pane() -> None:
@@ -298,7 +323,7 @@ def test_tab_busy_stages_into_deferred_pane() -> None:
     _press(kb, "tab", _fake_buf("for later"))
     assert queues.deferred == QueuedInputBlock(text="for later")
     assert queues.queue is None
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 def test_tab_busy_coalesces_into_deferred_pane() -> None:
@@ -320,7 +345,7 @@ def test_enter_empty_is_noop() -> None:
         kb = _build(agent, queues)
         _press(kb, "enter", _fake_buf(""))
         assert not queues.has_any()
-        assert agent.runtime.inbox.items == []
+        assert _inbox(agent).items == []
 
 
 def test_enter_whitespace_is_noop() -> None:
@@ -329,7 +354,7 @@ def test_enter_whitespace_is_noop() -> None:
         kb = _build(agent, queues)
         _press(kb, "enter", _fake_buf("   "))
         assert not queues.has_any()
-        assert agent.runtime.inbox.items == []
+        assert _inbox(agent).items == []
 
 
 def test_tab_empty_is_noop() -> None:
@@ -338,7 +363,7 @@ def test_tab_empty_is_noop() -> None:
         kb = _build(agent, queues)
         _press(kb, "tab", _fake_buf(""))
         assert not queues.has_any()
-        assert agent.runtime.inbox.items == []
+        assert _inbox(agent).items == []
 
 
 def test_tab_whitespace_is_noop() -> None:
@@ -347,7 +372,7 @@ def test_tab_whitespace_is_noop() -> None:
     kb = _build(agent, queues)
     _press(kb, "tab", _fake_buf("  \t "))
     assert not queues.has_any()
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 # --- slash + backslash continuation -----------------------------------
@@ -360,7 +385,7 @@ def test_enter_slash_routes_through_pump() -> None:
     buf = _fake_buf("/model")
     _press(kb, "enter", buf)
     buf.validate_and_handle.assert_called_once()
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
     assert not queues.has_any()
 
 
@@ -392,7 +417,7 @@ def test_enter_trailing_backslash_inserts_newline_no_dispatch() -> None:
     _press(kb, "enter", buf)
     assert buf.text == "first line\n"
     assert not queues.has_any()
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 # --- navigation: the Up/Down walk -------------------------------------
@@ -586,8 +611,8 @@ def test_nav_commit_dispatch_preserves_attachments_when_idle() -> None:
     buf = _fake_buf("g")
     _press(kb, "up", buf)
     _press(kb, "enter", buf)
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserMessage]
-    assert cast(UserMessage, agent.runtime.inbox.items[0]).attachments == (img,)
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).attachments == (img,)
 
 
 def test_tab_during_navigation_moves_queue_to_deferred() -> None:
@@ -615,7 +640,7 @@ def test_whitespace_enter_during_navigation_ends_nav_no_restore() -> None:
     _press(kb, "enter", buf)
     assert nav.cursor == 0
     assert queues.queue is None  # not restored; the gesture deletes
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 # --- idle dispatch after navigation -----------------------------------
@@ -630,8 +655,8 @@ def test_enter_after_navigation_idle_dispatches() -> None:
     _press(kb, "up", buf)  # -> h1
     buf.text = "h1-edited"
     _press(kb, "enter", buf)
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserMessage]
-    assert cast(UserMessage, agent.runtime.inbox.items[0]).text == "h1-edited"
+    assert [type(i) for i in _inbox(agent).items] == [UserMessage]
+    assert cast(UserMessage, _inbox(agent).items[0]).text == "h1-edited"
     assert nav.cursor == 0
 
 
@@ -643,8 +668,8 @@ def test_tab_after_navigation_idle_dispatches_deferred() -> None:
     buf = _fake_buf("g", history=["h1"])
     _press(kb, "up", buf)  # -> h1
     _press(kb, "tab", buf)
-    assert [type(i) for i in agent.runtime.inbox.items] == [UserDeferredMessage]
-    assert cast(UserDeferredMessage, agent.runtime.inbox.items[0]).text == "h1"
+    assert [type(i) for i in _inbox(agent).items] == [UserDeferredMessage]
+    assert cast(UserDeferredMessage, _inbox(agent).items[0]).text == "h1"
     assert nav.cursor == 0
 
 
@@ -666,7 +691,7 @@ def test_down_on_non_empty_buf_clears_when_not_navigating() -> None:
     _press(kb, "down", buf)
     buf.reset.assert_called_once()
     assert not queues.has_any()
-    assert agent.runtime.inbox.items == []
+    assert _inbox(agent).items == []
 
 
 def test_open_editor() -> None:
