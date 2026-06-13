@@ -242,7 +242,6 @@ from sagent.agent.context import (
     alive_splices,
     resolve_context,
     validate_context,
-    wire_role,
 )
 from sagent.types.exceptions import (
     log_exception_or_warning,
@@ -294,6 +293,7 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
     UserQueuedMessage,
+    wire_role,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -308,6 +308,7 @@ from sagent.types.tape import (
     mask_contains_ref,
     mask_ranges_overlap,
     merge_mask_ranges,
+    splice_safe_repair,
     unpaired_call_ids,
 )
 
@@ -432,100 +433,80 @@ def _preserved_mask_gaps_by_session(
 def _sanitize_for_send(
     entries: Sequence[ModelContextEvent],
 ) -> tuple[ModelContextEvent, ...]:
-    """Return a wire-format-valid version of ``entries``.
+    """Return a wire-format-valid version of ``entries`` for the rescue path.
 
-    Also drops orphan ``ToolResult`` entries (no preceding
-    ``AssistantMessage`` declaring the ``call_id``) and duplicate
-    ``call_id`` entries.
-    Inserts synthetic ``[interrupted]`` ``ToolResult`` records for any
-    ``AssistantMessage.tool_calls`` id that lacks a matching
-    ``ToolResult`` before the next ``AssistantMessage`` or non-``TR``
-    entry.
+    Used by the runtime gate when structural repair can't pair
+    tool_use / tool_result across overrides (e.g. accumulated microcompact
+    debt from a session predating the cache-warm gate fix).
 
-    Used by the runtime gate's rescue path when structural repair
-    can't pair tool_use / tool_result across overrides (e.g.
-    accumulated microcompact debt from a session predating the
-    cache-warm gate fix).
-
-    Idempotent.
+    A thin wrapper over the canonical :func:`tape.splice_safe_repair`, so the
+    rescue path shares one pair/dedup/synthesize/coalesce policy with the
+    compaction repair and cannot drift from it (the H2/F1 disease). The repair
+    detail lives at that canonical site. Idempotent.
     """
-    out: list[ModelContextEvent] = []
-    pending: set[str] = set()
-    seen: set[str] = set()
+    return splice_safe_repair(entries)
 
-    def _flush_pending() -> None:
-        for cid in pending:
-            out.append(
-                ToolResult(
-                    call_id=cid,
-                    content="[interrupted]",
-                    is_error=True,
-                ),
-            )
-            seen.add(cid)
-        pending.clear()
 
-    for entry in entries:
-        if isinstance(entry, AssistantMessage):
-            _flush_pending()
-            # Drop tool_calls whose id was already emitted by an earlier
-            # AssistantMessage (already paired in ``seen`` or open in
-            # ``pending``). A duplicate forward-delivery pair resolves to two
-            # AssistantMessages sharing a ``f"{id}:detached"`` id; keeping both
-            # makes ``_rescue_context``'s constructor reject the payload, the
-            # exact wedge this sanitizer exists to absorb (``Issue#294``).
-            deduped = tuple(
-                tc
-                for tc in entry.tool_calls
-                if tc.id not in seen and tc.id not in pending
-            )
-            if not deduped and not entry.text and not entry.thinking_blocks:
-                continue  # wholly-duplicate turn: drop, preserving alternation
-            message = (
-                entry
-                if deduped == entry.tool_calls
-                else dataclasses.replace(entry, tool_calls=deduped)
-            )
-            out.append(message)
-            pending.update(tc.id for tc in message.tool_calls)
-        elif isinstance(entry, ToolResult):
-            if entry.call_id in seen:
-                continue
-            if entry.call_id not in pending:
-                continue  # orphan: drop
-            out.append(entry)
-            pending.discard(entry.call_id)
-            seen.add(entry.call_id)
+def _mimic_index_of(cid: str) -> int | None:
+    """Return the ``N`` of a ``DetachedArrived:mimic:N`` id, or ``None``."""
+    if not cid.startswith(DETACHED_ARRIVED_MIMIC_PREFIX):
+        return None
+    suffix = cid.removeprefix(DETACHED_ARRIVED_MIMIC_PREFIX)
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _mimic_indices(entry: object) -> list[int]:
+    """Return numeric indices of any ``DetachedArrived:mimic:N`` id in ``entry``.
+
+    Covers both sides of the mimic id namespace: an ``AssistantMessage``
+    contributes its ``tool_calls`` ids, a ``ToolResult`` its ``call_id``.
+    Scanning only one side would under-seed the counter when the tape
+    preserves a lone partner -- e.g. ``_commit_pairing`` splices a mimic
+    ``ToolResult`` whose parent ``AssistantMessage`` was compacted away.
+    """
+    if isinstance(entry, AssistantMessage):
+        ids = [tc.id for tc in entry.tool_calls]
+    elif isinstance(entry, ToolResult):
+        ids = [entry.call_id]
+    else:
+        return []
+    return [n for cid in ids if (n := _mimic_index_of(cid)) is not None]
+
+
+def _max_mimic_index(records: Sequence[TapeRecord]) -> int:
+    """Return the largest ``DetachedArrived:mimic:N`` index in ``records``.
+
+    Scans both ``ReferrableTapeEvent`` events and ``ContextSplice`` payloads,
+    on both sides of the id namespace (see :func:`_mimic_indices`). Masked
+    (dead) splice payloads are scanned too: undelete can resurrect them, so
+    their ids must still reserve namespace. A splice's ``paired_externally``
+    ids are also scanned: ``ContextSplice.replay`` (legacy on-disk load)
+    bypasses ``_validate_payload``, so a persisted record can declare a mimic
+    id whose local pair is absent from ``payload`` -- reading only ``payload``
+    would then under-seed. Returns ``-1`` when no mimic id is present, so the
+    caller can seed its counter to ``result + 1`` and start at ``0`` on a clean
+    tape.
+
+    Args:
+      records: Loaded tape records to scan.
+
+    Returns:
+      max_index: Largest mimic index found, or ``-1`` when none exist.
+
+    """
+    found = [-1]
+    for record in records:
+        if isinstance(record, ReferrableTapeEvent):
+            found.extend(_mimic_indices(record.event))
         else:
-            _flush_pending()
-            if out and wire_role(out[-1]) == wire_role(entry):
-                prior = out[-1]
-                assert isinstance(prior, (UserMessage, AgentSendMessage))
-                assert isinstance(entry, (UserMessage, AgentSendMessage))
-                text = f"{prior.text}\n\n{entry.text}"
-                attachments = prior.attachments + entry.attachments
-                if isinstance(prior, AgentSendMessage):
-                    out[-1] = dataclasses.replace(
-                        prior,
-                        text=text,
-                        attachments=attachments,
-                    )
-                elif isinstance(entry, AgentSendMessage):
-                    out[-1] = dataclasses.replace(
-                        entry,
-                        text=text,
-                        attachments=attachments,
-                    )
-                else:
-                    out[-1] = dataclasses.replace(
-                        prior,
-                        text=text,
-                        attachments=attachments,
-                    )
-            else:
-                out.append(entry)
-    _flush_pending()
-    return tuple(out)
+            for entry in record.payload:
+                found.extend(_mimic_indices(entry))
+            found.extend(
+                n
+                for cid in record.paired_externally
+                if (n := _mimic_index_of(cid)) is not None
+            )
+    return max(found)
 
 
 def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
@@ -1142,6 +1123,72 @@ class AgentRuntime:
             and not self._mid_stream_queue
         )
 
+    @property
+    def accepts_user_dispatch(self) -> bool:
+        """True iff a directly-pushed user message would make progress now.
+
+        The REPL's dispatch-vs-stage predicate. Dispatch (push a
+        ``UserMessage`` straight to the inbox) whenever the runtime can
+        act on it without discarding in-flight model work -- i.e. when no
+        model call is streaming and no compaction is running. This covers:
+
+        * **Idle** -- a pushed message fires the model gate immediately.
+        * **Awaiting user** -- an ``AWAIT_USER`` / ``AWAIT_RECOVERY`` gate
+          is parked (after ``Halt`` / ``Clear`` / ``ModelResponseError``);
+          the message releases it and resumes the loop.
+        * **Mid-cohort** -- tools are running but no model is streaming
+          (``model_call is None``). The ``UserMessage`` handler preempts:
+          it detaches the running cohort to the background and fires a
+          fresh round for the user's input ("type to redirect"). Staging
+          instead would never reach that handler -- the queue pane only
+          commits at the next ``ModelResponseComplete`` /
+          ``AgentIdle``, so the tools would run to completion with no
+          detach.
+
+        Only two states STAGE (return False): a streaming ``model_call``
+        (the mid-stream buffer + the ``before_tool_spawn`` pop at
+        ``ModelResponseComplete`` perform the detach there, preserving the
+        partial stream) and an in-flight ``compact_task`` (compaction is
+        not cleanly preemptible; the staged message commits after).
+
+        Exception -- a pending inbox item while ``model_call`` is set
+        forces dispatch. This closes the ``Halt`` race: between Ctrl+C
+        (which queues ``Halt`` but does not drain it) and the runtime
+        cancelling the model call, ``model_call`` is still set. Staging
+        then would orphan the message -- the imminent ``AWAIT_USER`` arm
+        suppresses ``AgentIdle``, the only edge that commits a staged
+        queue block, so it would never reach the model. A non-empty inbox
+        means the runtime is mid-transition: dispatch so the message lands
+        in the inbox and is processed in the same drain.
+
+        Snapshot at call time; read within one synchronous block.
+        """
+        if self.model_call is None and self.compact_task is None:
+            return True
+        return self.model_call is not None and not self.inbox.empty()
+
+    @property
+    def accepts_deferred_dispatch(self) -> bool:
+        """True iff a directly-pushed DEFERRED message would dispatch now.
+
+        Tab's dispatch-vs-stage predicate, distinct from
+        :attr:`accepts_user_dispatch` (Enter's) in exactly one state:
+        **mid-cohort**. Tab means "defer until the current round chain
+        goes idle," so while a cohort runs Tab must STAGE into the deferred
+        pane, never dispatch -- dispatching a ``UserDeferredMessage``
+        mid-cohort would preempt the very work the user chose not to
+        interrupt. Enter, by contrast, dispatches mid-cohort to redirect.
+
+        So Tab dispatches only when no tool work is actively running that
+        the defer should wait behind: ``accepts_user_dispatch`` (idle,
+        awaiting-user, halt-race) AND an empty cohort / no running tools.
+        Streaming and compaction already stage via
+        ``accepts_user_dispatch`` returning False.
+
+        Snapshot at call time; read within one synchronous block.
+        """
+        return self.accepts_user_dispatch and not self.cohort and not self.running_tools
+
     def _fully_drained(self) -> bool:
         """True iff the agent has no work to do and no gate is armed.
 
@@ -1433,6 +1480,7 @@ class AgentRuntime:
             return
         self.tape.extend(records)
         self._next_ordinal = max(r.ref.ordinal for r in records) + 1
+        self._mimic_counter = max(self._mimic_counter, _max_mimic_index(records) + 1)
         self._cached_resolved = None
         for record in records:
             self._index_record(record)

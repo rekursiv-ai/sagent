@@ -7030,6 +7030,33 @@ def test_sanitize_for_send_drops_duplicate_tool_call_ids() -> None:
     validate_context(list(out))
 
 
+def test_sanitize_for_send_coalesces_assistants_after_dropping_dup() -> None:
+    """Dropping a wholly-duplicate AM must not strand two adjacent assistants.
+
+    The real wedge: a duplicate ``DetachedArrived`` pair sits between two
+    *non-duplicate* assistant turns. Dropping the duplicate AM (its only
+    tool_call already seen) removes the entry separating those neighbours, so
+    a naive drop yields assistant->assistant -- which ``validate_context`` and
+    ``ContextSplice``'s constructor both reject, defeating rescue's "total"
+    promise. Sanitize must coalesce the resulting adjacency so its output is
+    always wire-valid.
+    """
+    dup_id = "DetachedArrived:mimic:3"
+    am0 = AssistantMessage(tool_calls=(ToolCall(id=dup_id, name="x", args={}),))
+    tr0 = ToolResult(call_id=dup_id, content="first")
+    before = AssistantMessage(text="before the dup")
+    dup_am = AssistantMessage(tool_calls=(ToolCall(id=dup_id, name="x", args={}),))
+    dup_tr = ToolResult(call_id=dup_id, content="second")
+    after = AssistantMessage(text="after the dup")
+    out = agent_runtime._sanitize_for_send([am0, tr0, before, dup_am, dup_tr, after])
+
+    validate_context(list(out))
+    assistant_ids = [
+        tc.id for e in out if isinstance(e, AssistantMessage) for tc in e.tool_calls
+    ]
+    assert assistant_ids.count(dup_id) == 1
+
+
 @pytest.mark.asyncio
 async def test_gate_failure_surfaces_model_response_error() -> None:
     """An unrepairable gate-context failure publishes a UI-visible error.

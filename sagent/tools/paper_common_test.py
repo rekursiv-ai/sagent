@@ -27,12 +27,15 @@ from sagent.tools.paper_common import (
     normalize_id,
     openalex_reconstruct_abstract,
     papers_cache_dir,
+    parse_optional_ids,
+    resolve_id_args,
     s2_batch,
     s2_get,
     s2_paginate,
     s2_paper_to_record,
     s2_wire_id,
     short_id,
+    summary_ids,
     truncation_notice,
     validate_limit,
     year_in_range,
@@ -618,6 +621,45 @@ def test_s2_paginate_non_advancing_cursor_terminates() -> None:
     assert not isinstance(page, ToolResult)
     assert not page.complete
     assert calls["i"] <= 3  # bailed on non-advancing cursor, did not spin
+
+
+def test_parse_optional_ids_coerces_bare_string() -> None:
+    assert parse_optional_ids({"ids": "10.1/x"}) == ["10.1/x"]
+
+
+def test_parse_optional_ids_strips_list() -> None:
+    assert parse_optional_ids({"ids": [" a ", "", "b"]}) == ["a", "b"]
+
+
+def test_parse_optional_ids_absent_is_empty() -> None:
+    assert parse_optional_ids({}) == []
+
+
+def test_parse_optional_ids_rejects_non_string_scalar() -> None:
+    result = parse_optional_ids({"ids": 7})
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
+def test_resolve_id_args_coerces_bare_string() -> None:
+    assert resolve_id_args({"ids": "10.1/x"}) == ["10.1/x"]
+
+
+def test_summary_ids_bare_string() -> None:
+    """A bare-string id must label like a single-element list, not '?'."""
+    assert summary_ids({"ids": "10.1/x"}) == "10.1/x"
+
+
+def test_summary_ids_single_list() -> None:
+    assert summary_ids({"ids": ["10.1/x"]}) == "10.1/x"
+
+
+def test_summary_ids_multiple_appends_count() -> None:
+    assert summary_ids({"ids": ["10.1/a", "10.1/b", "10.1/c"]}) == "10.1/a (+2 more)"
+
+
+def test_summary_ids_absent_is_question_mark() -> None:
+    assert summary_ids({}) == "?"
 
 
 def test_validate_limit_rejects_non_positive() -> None:

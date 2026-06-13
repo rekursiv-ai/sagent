@@ -32,10 +32,14 @@ from sagent.tools.web_fetch import (
     _KIND_MARKDOWN,
     _KIND_RSS,
     WebFetch,
+    _extract_text,
+    _fetch_body,
+    _fetch_with_fallback,
     _format_rss,
     _GoogleNewsAdapter,
     _match_http_fetch,
     _parse_rss_cluster,
+    _reader_proxy_fetch,
     _RedditAdapter,
     _request_bodies,
     _rss_url,
@@ -394,8 +398,6 @@ def test_run_fetch_error_oserror() -> None:
 
 def test_fetch_body_non_reddit_path() -> None:
     """Non-Reddit URLs take the simple ``_safe_fetch`` path."""
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
     with patch(
         "sagent.tools.web_fetch._safe_fetch",
         return_value=b"hello",
@@ -446,10 +448,6 @@ def test_rss_url_normalizes_reddit_urls(input_url: str, expected_url: str) -> No
 
 def test_extract_text_html_path_uses_trafilatura() -> None:
     """``_extract_text`` for HTML goes through trafilatura.extract."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _extract_text,
-    )
-
     with patch(
         "sagent.tools.web_fetch.trafilatura.extract",
         return_value="cleaned text",
@@ -466,10 +464,6 @@ def test_extract_text_html_path_uses_trafilatura() -> None:
 
 def test_extract_text_html_fallback_when_extract_none() -> None:
     """When trafilatura returns nothing, the raw decoded content is returned."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _extract_text,
-    )
-
     with patch(
         "sagent.tools.web_fetch.trafilatura.extract",
         return_value=None,
@@ -486,8 +480,6 @@ def test_extract_text_html_fallback_when_extract_none() -> None:
 
 def test_extract_text_markdown_kind_returns_as_is() -> None:
     """Markdown kind (reader-proxy output) skips trafilatura."""
-    from sagent.tools.web_fetch import _extract_text  # noqa: PLC0415
-
     md = b"# Title\n\nReader proxy returned this verbatim.\n"
     # If trafilatura ran, it would strip the markdown structure; we use
     # a sentinel return value to assert it stayed untouched.
@@ -502,10 +494,6 @@ def test_extract_text_markdown_kind_returns_as_is() -> None:
 
 def test_fetch_with_fallback_passthrough_on_success() -> None:
     """Initial rung success returns ``(body, _KIND_HTML)`` with no fallback."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     proxy = MagicMock(return_value=b"PROXY")
     with (
         patch(
@@ -530,10 +518,6 @@ def test_fetch_with_fallback_passthrough_on_success() -> None:
 
 def test_fetch_with_fallback_403_falls_to_reader_proxy() -> None:
     """A 403 GET routes through ``_reader_proxy_fetch`` with kind=markdown."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     err = FetchError(url="https://x", status=403, headers={}, body=b"blocked")
     proxy = MagicMock(return_value=b"# extracted")
     with (
@@ -559,10 +543,6 @@ def test_fetch_with_fallback_403_falls_to_reader_proxy() -> None:
 
 def test_fetch_with_fallback_429_and_503_also_trigger_fallback() -> None:
     """The bot-wall set is {403, 429, 503} — all three engage the ladder."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     for status in (429, 503):
         err = FetchError(url="https://x", status=status, headers={}, body=b"")
         proxy = MagicMock(return_value=b"# md")
@@ -588,10 +568,6 @@ def test_fetch_with_fallback_429_and_503_also_trigger_fallback() -> None:
 
 def test_fetch_with_fallback_404_does_not_engage_ladder() -> None:
     """Non-bot-wall errors (404) surface immediately, no fallback."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     err = FetchError(url="https://x", status=404, headers={}, body=b"")
     proxy = MagicMock()
     with (
@@ -617,10 +593,6 @@ def test_fetch_with_fallback_404_does_not_engage_ladder() -> None:
 
 def test_fetch_with_fallback_post_403_does_not_engage_ladder() -> None:
     """POST 403 surfaces immediately — fallback is GET-only."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     err = FetchError(url="https://x", status=403, headers={}, body=b"")
     proxy = MagicMock()
     with (
@@ -646,10 +618,6 @@ def test_fetch_with_fallback_post_403_does_not_engage_ladder() -> None:
 
 def test_fetch_with_fallback_all_rungs_fail_raises_original_error() -> None:
     """When proxy also fails, the original (rung-1) FetchError is raised."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     orig = FetchError(url="https://x", status=403, headers={}, body=b"orig")
     proxy_err = FetchError(
         url="https://r.jina.ai/...", status=500, headers={}, body=b""
@@ -684,10 +652,6 @@ def test_reader_proxy_fetch_raises_on_soft_failure_sentinel() -> None:
     The proxy must detect that sentinel and raise FetchError so the
     ladder treats it as a fall-through, not as a successful fetch.
     """
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _reader_proxy_fetch,
-    )
-
     soft_fail = (
         b"Title: example.org\n\n"
         b"Warning: Target URL returned error 403: Forbidden\n\n"
@@ -707,10 +671,6 @@ def test_reader_proxy_fetch_raises_on_soft_failure_sentinel() -> None:
 
 def test_fetch_with_fallback_jina_soft_failure_surfaces_rung1_error() -> None:
     """Soft-failed proxy + 403 rung-1 surfaces the original rung-1 error."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _fetch_with_fallback,
-    )
-
     orig = FetchError(url="https://x", status=403, headers={}, body=b"akamai")
     soft_fail = b"Warning: Target URL returned error 403\n"
 
@@ -738,10 +698,6 @@ def test_fetch_with_fallback_jina_soft_failure_surfaces_rung1_error() -> None:
 
 def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
     """Reader proxy targets r.jina.ai with the user URL as path data."""
-    from sagent.tools.web_fetch import (  # noqa: PLC0415
-        _reader_proxy_fetch,
-    )
-
     captured: dict[str, object] = {}
 
     def fake_safe_fetch(url: str, **_kw: object) -> bytes:
@@ -788,8 +744,6 @@ def test_adapter_registry_contains_all_three_hosts() -> None:
 
 def test_fetch_body_unmatched_url_uses_generic_ladder() -> None:
     """A URL with no matching adapter falls through to ``_fetch_with_fallback``."""
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
     with patch(
         "sagent.tools.web_fetch._fetch_with_fallback",
         return_value=(b"generic", _KIND_HTML),
@@ -809,8 +763,6 @@ def test_fetch_body_unmatched_url_uses_generic_ladder() -> None:
 
 def test_fetch_body_post_bypasses_adapters() -> None:
     """POST requests skip adapter dispatch even on matching hosts."""
-    from sagent.tools.web_fetch import _fetch_body  # noqa: PLC0415
-
     with patch(
         "sagent.tools.web_fetch._fetch_with_fallback",
         return_value=(b"posted", _KIND_HTML),
@@ -866,8 +818,6 @@ def test_google_news_rewrites_front_page_paths_to_rss(
         body, kind = asyncio.run(_GoogleNewsAdapter().fetch(input_url))
     fetched = captured["url"]
     assert isinstance(fetched, str)
-    from urllib.parse import urlparse  # noqa: PLC0415
-
     assert urlparse(fetched).path == expected_path
     assert kind == _KIND_RSS
     assert body.startswith(b"<?xml")

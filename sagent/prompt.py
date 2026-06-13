@@ -55,6 +55,7 @@ def _load_static() -> str:
 # Per-model marketing name + knowledge cutoff.
 # Opus 4.8 and 4.7 cutoffs verified against Anthropic's docs (January 2026).
 _MODEL_INFO: dict[str, tuple[str, str]] = {
+    "claude-fable-5": ("Claude Fable 5", "unknown"),
     "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
     "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
     "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),

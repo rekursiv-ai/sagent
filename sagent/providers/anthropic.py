@@ -40,12 +40,12 @@ if TYPE_CHECKING:
 
     import sagent.lib.image as image_lib
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
     anthropic = lazy_import("anthropic")  # 569ms cold
     httpx = lazy_import("httpx")  # 168ms cold
-    AsyncMessageStream = lazy_import("anthropic.lib.streaming").AsyncMessageStream
-    AsyncStream = lazy_import("anthropic._streaming").AsyncStream
+    AsyncMessageStream = lazy_import("anthropic.lib.streaming", "AsyncMessageStream")
+    AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log, token_count
@@ -129,6 +129,7 @@ _FAST_MODE_MODELS = frozenset(
         "claude-opus-4-6",
     }
 )
+_DEFAULT_1M_MODELS = frozenset({"claude-fable-5"})
 
 
 def supports_fast_mode(model_id: str) -> bool:
@@ -150,6 +151,7 @@ def supports_fast_mode(model_id: str) -> bool:
 # the +1m variants identically (same base model).
 _CONTEXT_MANAGEMENT_MODELS = frozenset(
     {
+        "claude-fable-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
@@ -177,7 +179,10 @@ def context_betas(model_id: str) -> list[str]:
 
     """
     betas: list[str] = []
-    if model_id.lower().endswith("+1m"):
+    if (
+        model_id.lower().endswith("+1m")
+        and base_model_id(model_id) not in _DEFAULT_1M_MODELS
+    ):
         betas.append(_CONTEXT_1M_BETA)
     if supports_native_context_management(model_id):
         betas.append(_CONTEXT_MANAGEMENT_BETA)
@@ -272,6 +277,12 @@ _OPUS_FAST_4_6_7 = Pricing(
     fast_request=30.0,
     fast_response=150.0,
 )
+_FABLE = Pricing(
+    request=10.0,
+    response=50.0,
+    cache_write=12.5,
+    cache_read=1.0,
+)
 _SONNET = Pricing(
     request=3.0,
     response=15.0,
@@ -316,6 +327,24 @@ class Anthropic:
     #     400s 'not supported'), readable text. Efforts: opus-4-5
     #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "claude-fable-5": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_FABLE,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+        ),
+        "claude-fable-5+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_FABLE,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+        ),
         "claude-opus-4-8": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,

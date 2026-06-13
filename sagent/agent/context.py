@@ -49,6 +49,7 @@ from sagent.types.runtime import (
     ModelContextEvent,
     ToolResult,
     UserMessage,
+    wire_role,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -66,34 +67,7 @@ __all__ = [
     "masked_refs_by_alive",
     "resolve_context",
     "validate_context",
-    "wire_role",
 ]
-
-
-def wire_role(entry: ModelContextEvent) -> str | None:
-    """Return the provider-wire role for ``entry``.
-
-    ``UserMessage`` and ``AgentSendMessage`` both serialize as
-    ``user``-role on the wire. Several runtime, materialization,
-    session, and compactor sites need to reason about wire-role
-    alternation rather than Python type identity, and treating the two
-    classes as distinct produces wire-invalid contexts (back-to-back
-    user-role turns the provider rejects).
-
-    Args:
-      entry: A provider-facing model context event.
-
-    Returns:
-      role: ``"user"`` for ``UserMessage``/``AgentSendMessage``,
-          ``"assistant"`` for ``AssistantMessage``, ``None`` for
-          ``ToolResult`` (which has its own pairing rules).
-
-    """
-    if isinstance(entry, (UserMessage, AgentSendMessage)):
-        return "user"
-    if isinstance(entry, AssistantMessage):
-        return "assistant"
-    return None
 
 
 logger = logging.getLogger(__name__)

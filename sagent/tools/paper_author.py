@@ -168,11 +168,12 @@ class PaperAuthor:
                     ),
                 },
                 "ids": {
-                    "type": "array",
+                    "type": ["array", "string"],
                     "items": {"type": "string"},
                     "description": (
-                        "One or more Semantic Scholar author ids (opaque "
-                        "integer strings, e.g. '1741101'). Mutually exclusive "
+                        "Semantic Scholar author id(s) (opaque integer "
+                        "strings, e.g. '1741101'): a single id as a bare "
+                        "string, or several as an array. Mutually exclusive "
                         "with 'query'. For author metadata, pass every id at "
                         "once: they are resolved in ONE batched request (up "
                         "to 500), far more efficient against the 1 "

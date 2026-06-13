@@ -3,7 +3,8 @@ Backed by the Semantic Scholar Graph API. Set env var `SEMANTIC_SCHOLAR_API_KEY`
 for higher rate limits; omit it to use unauthenticated API limits.
 
 Operations (dispatched by which fields are set):
-  - Metadata — pass `ids` (a list of one or more), omit `operation`.
+  - Metadata — pass `ids` (a bare string for one, or an array for
+    several), omit `operation`.
     Returns a block per paper with title, authors, year, venue,
     abstract, citation and reference counts, and an open-access PDF URL
     when available. Pass every id you need at once: they resolve in ONE

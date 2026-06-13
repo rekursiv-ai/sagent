@@ -558,13 +558,8 @@ def summary_ids(args: Mapping[str, object]) -> str:
         or ``"?"`` when none are present.
 
     """
-    raw = args.get("ids")
-    ids = (
-        [str(x).strip() for x in cast(list[object], raw) if str(x).strip()]
-        if isinstance(raw, list)
-        else []
-    )
-    if not ids:
+    ids = parse_optional_ids(args)
+    if isinstance(ids, ToolResult) or not ids:
         return "?"
     head = short_id(ids[0])
     return head if len(ids) == 1 else f"{head} (+{len(ids) - 1} more)"
@@ -573,25 +568,32 @@ def summary_ids(args: Mapping[str, object]) -> str:
 def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
     """Parse and validate the ``ids`` argument, allowing its absence.
 
-    Shared shape-checker so every id-taking Paper* tool rejects a malformed
-    ``ids`` identically. Absence yields ``[]`` (the caller decides whether
-    that is allowed). Size is not pre-checked -- S2 rejects an oversized
-    batch with its own error, which the request path surfaces.
+    Shared shape-checker so every id-taking Paper* tool accepts ``ids``
+    identically. A bare string is coerced to a single-element list -- the
+    one-paper case is common and the array wrapper is pure ceremony there.
+    Absence yields ``[]`` (the caller decides whether that is allowed). Size
+    is not pre-checked -- S2 rejects an oversized batch with its own error,
+    which the request path surfaces.
 
     Args:
       args: Tool arguments.
 
     Returns:
       ids: Stripped, non-empty identifier strings (possibly ``[]`` when
-        ``ids`` is absent), or a ``ToolResult`` error on non-list input.
+        ``ids`` is absent), or a ``ToolResult`` error on non-list,
+        non-string input.
 
     """
     raw_ids = args.get("ids")
     if raw_ids is None:
         return []
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
     if not isinstance(raw_ids, list):
         return ToolResult(
-            call_id="", content="'ids' must be a list of strings.", is_error=True
+            call_id="",
+            content="'ids' must be a list of strings or a single string.",
+            is_error=True,
         )
     return [str(x).strip() for x in cast(list[object], raw_ids) if str(x).strip()]
 

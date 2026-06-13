@@ -37,7 +37,6 @@ from hypothesis.strategies import (
 from sagent.agent.context import (
     InvalidContextError,
     validate_context,
-    wire_role,
 )
 from sagent.agent.runtime import _sanitize_for_send
 from sagent.request_materialization import (
@@ -53,6 +52,12 @@ from sagent.types.runtime import (
     ToolCall,
     ToolResult,
     UserMessage,
+    wire_role,
+)
+from sagent.types.tape import (
+    ContextSplice,
+    TapeRef,
+    splice_safe_repair,
 )
 
 
@@ -460,6 +465,29 @@ def test_sanitize_output_satisfies_tool_pairing(
     violation = _tool_pairing_violation(out)
     assert violation is None, (
         f"sanitized output violates pairing: {violation}\nout={out!r}"
+    )
+
+
+@settings(max_examples=300, deadline=None)
+@given(_message_history())
+def test_splice_safe_repair_output_always_constructs(
+    history: list[ModelContextEvent],
+) -> None:
+    """``splice_safe_repair`` output is always a valid ``ContextSplice`` payload.
+
+    The H2/F1 seal: ``_message_history`` may collide tool_call ids across
+    assistant turns (unlike ``_unique_id_history``). The canonical repair must
+    dedup and coalesce so the splice constructor -- which rejects duplicate
+    ids, orphan results, and role-alternation breaks -- never raises, for ANY
+    input. This is the property whose absence wedged sessions repeatedly.
+    """
+    payload = splice_safe_repair(history)
+    ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        strategy="rescue",
+        payload=tuple(payload),
     )
 
 

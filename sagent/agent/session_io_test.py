@@ -1463,6 +1463,44 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
     assert any("[interrupted]" in tr.content for tr in tool_results)
 
 
+def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
+    tmp_path: Path,
+) -> None:
+    """Legacy tape with two AMs sharing a tool_call id must load, not wedge.
+
+    The canonical repair drops the duplicate id from the later AM and, when
+    that leaves the AM hollow (no text / thinking), drops the AM entirely. No
+    two AMs then share an id, so the validating ``ContextSplice`` constructor
+    accepts the repair splice instead of raising ``duplicate tool_call id``
+    and wedging the resume (F1, sibling of the compaction-path H2).
+    """
+    session_file = tmp_path / "session.jsonl"
+    _write_jsonl(
+        session_file,
+        {"kind": "meta", "session_id": "abc"},
+        cast(
+            "dict[str, object]",
+            {
+                "kind": "history",
+                "ref": {"session_id": "abc", "ordinal": 0},
+                "type": "assistant",
+                "tool_calls": [{"id": "t1", "name": "echo", "args": {}}],
+            },
+        ),
+        cast(
+            "dict[str, object]",
+            {
+                "kind": "history",
+                "ref": {"session_id": "abc", "ordinal": 1},
+                "type": "assistant",
+                "tool_calls": [{"id": "t1", "name": "echo", "args": {}}],
+            },
+        ),
+    )
+    loaded = load_session(tmp_path, {})
+    assert loaded is not None
+
+
 def test_sort_tape_by_session_id_then_ordinal() -> None:
     """Same-ordinal records from different sessions order by ``session_id``."""
     rec_a = ReferrableTapeEvent(

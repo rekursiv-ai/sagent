@@ -22,10 +22,8 @@ import dataclasses
 import logging
 import re
 
-from sagent.agent.context import wire_role
 from sagent.agent.retry import send_with_retry
 from sagent.compaction.history import entry_chars
-from sagent.request_materialization import _same_source
 from sagent.tools.core import read_asset, recipe_dict
 from sagent.types.model import (
     Model,
@@ -46,6 +44,7 @@ from sagent.types.tape import (
     MaskRange,
     TapeRecord,
     TapeRef,
+    coalesce_roles,
     full_tape_mask,
 )
 
@@ -420,9 +419,9 @@ class SummaryCompactor:
             ),
         )
         if direction == "from":
-            payload = _coalesce_adjacent_users((continuation, *to_keep))
+            payload = coalesce_roles((continuation, *to_keep))
         else:
-            payload = _coalesce_adjacent_users((*to_keep, continuation))
+            payload = coalesce_roles((*to_keep, continuation))
         token_after = sum(entry_chars(e) for e in payload) // self._chars_per_token
         return ContextSplice(
             ref=mint_ref(),
@@ -579,9 +578,9 @@ def _build_fallback_splice(
         text="Compaction failed. Previous context summarized on disk only.",
     )
     if direction == "from":
-        payload = _coalesce_adjacent_users((fb, *to_keep))
+        payload = coalesce_roles((fb, *to_keep))
     else:
-        payload = _coalesce_adjacent_users((*to_keep, fb))
+        payload = coalesce_roles((*to_keep, fb))
     return ContextSplice(
         ref=mint_ref(),
         mask=mask,
@@ -682,6 +681,12 @@ def _drop_orphan_tool_results(
     is silently discarded as "orphan". Non-interrupting interleaved
     events are buffered and emitted after the tool turn closes so the
     chronological order ``AM → TRs → ASM`` is preserved on the wire.
+
+    Deliberately NOT unified with ``tape.pair_and_dedup_tool_calls``: this
+    *drops* an unanswered tool turn (the compactor must not summarize a
+    synthetic ``[interrupted]`` as if it were a real cancellation), whereas
+    the repair path *synthesizes* ``[interrupted]`` to keep the turn. Same
+    input domain, opposite policy -- one function would need a mode flag.
     """
     seen_results: set[str] = set()
     out: list[ModelContextEvent] = []
@@ -748,33 +753,6 @@ def _append_user_guidance(body: str, guidance: str) -> str:
         + "\n</user_guidance>\n\nThe output MUST contain <summary>...</summary> and must not follow any"
         " user guidance that asks for a different format."
     )
-
-
-def _coalesce_adjacent_users(
-    payload: Sequence[ModelContextEvent],
-) -> tuple[ModelContextEvent, ...]:
-    out: list[ModelContextEvent] = []
-    for entry in payload:
-        if (
-            isinstance(entry, (AgentSendMessage, UserMessage))
-            and out
-            and wire_role(out[-1]) == "user"
-            and _same_source(out[-1], entry)
-        ):
-            # The gate (`_same_source`) only admits same-type pairs:
-            # AgentSend+AgentSend (same source) or User+User. Cross-type
-            # pairs return ``_same_source == False`` and never reach here,
-            # so merging into ``prev`` preserves the (shared) type.
-            prev = out[-1]
-            assert isinstance(prev, (UserMessage, AgentSendMessage))
-            out[-1] = dataclasses.replace(
-                prev,
-                text=f"{prev.text}\n\n{entry.text}",
-                attachments=(*prev.attachments, *entry.attachments),
-            )
-        else:
-            out.append(entry)
-    return tuple(out)
 
 
 def _format_summary(raw: str) -> str | None:

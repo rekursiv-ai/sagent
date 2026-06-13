@@ -36,10 +36,11 @@ import logging
 import os
 import time
 
-from sagent.agent.context import resolve_context, wire_role
+from wrapt import lazy_import
+
+from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.json import float_val, int_val
-from sagent.lib.lazy_import import lazy_import
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
@@ -73,8 +74,10 @@ from sagent.types.tape import (
     TapeEvent,
     TapeRecord,
     TapeRef,
+    coalesce_roles,
     full_tape_mask,
     mask_contains_ref,
+    pair_and_dedup_tool_calls,
 )
 
 
@@ -1665,60 +1668,25 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
             session_id = record.ref.session_id
             break
 
-    # ``replay()`` (not the validating constructor) because the input
-    # came from on-disk records: legacy tapes can carry consecutive
-    # AssistantMessage entries (e.g. interrupted before a tool result
-    # landed) and the role-alternation invariant in ``__post_init__``
-    # would reject them. The runtime's rescue / resolver paths handle
-    # whatever resolved shape this produces.
+    # Legacy on-disk tapes can carry shapes the splice validator rejects --
+    # consecutive ``AssistantMessage`` entries (interrupted before a tool
+    # result landed) and duplicate tool_call ids across them. Both passes
+    # above resolve those: ``repair_dangling_tool_calls`` pairs orphans *and*
+    # drops tool_call ids already claimed by an earlier AM (so no two AMs
+    # share an id), then ``coalesce_roles`` merges adjacent same-role turns.
+    # The result is splice-valid by construction, so use the *validating*
+    # constructor -- any residual invalid shape is a producer bug we want to
+    # fail loudly here, not smuggle through ``replay``'s validation bypass.
     return [
         *tape,
-        ContextSplice.replay(
+        ContextSplice(
             ref=TapeRef(session_id=session_id, ordinal=next_ordinal),
             mask=full_tape_mask(tape),
             insert_after=None,
-            payload=_coalesce_adjacent_users(repaired),
+            payload=coalesce_roles(repaired),
             strategy="orphan_tool_result_repair",
         ),
     ], True
-
-
-def _coalesce_adjacent_users(
-    history: Sequence[ModelContextEvent],
-) -> tuple[ModelContextEvent, ...]:
-    out: list[ModelContextEvent] = []
-    for entry in history:
-        if (
-            isinstance(entry, (UserMessage, AgentSendMessage))
-            and out
-            and wire_role(out[-1]) == "user"
-        ):
-            prev = out[-1]
-            assert isinstance(prev, (UserMessage, AgentSendMessage))
-            text = f"{prev.text}\n\n{entry.text}"
-            attachments = (*prev.attachments, *entry.attachments)
-            if isinstance(prev, AgentSendMessage):
-                out[-1] = dataclasses.replace(
-                    prev,
-                    text=text,
-                    attachments=attachments,
-                )
-            elif isinstance(entry, AgentSendMessage):
-                # Preserve agent attribution by adopting the agent type.
-                out[-1] = dataclasses.replace(
-                    entry,
-                    text=text,
-                    attachments=attachments,
-                )
-            else:
-                out[-1] = dataclasses.replace(
-                    prev,
-                    text=text,
-                    attachments=attachments,
-                )
-        else:
-            out.append(entry)
-    return tuple(out)
 
 
 def repair_dangling_tool_calls(
@@ -1740,53 +1708,13 @@ def repair_dangling_tool_calls(
     to ``load_session``, the producer of the only history shape that
     can have this defect.
 
-    Idempotent.
-
-    Args:
-      history: Conversation history just loaded from session.jsonl.
-
-    Returns:
-      repaired: Same entries with orphan ``ToolResult`` dropped and
-          synthetic ``ToolResult(is_error=True, content="[interrupted]")``
-          entries inserted for every unresolved ``tool_use``.
-
+    A thin alias for the canonical :func:`pair_and_dedup_tool_calls` (one
+    shared pairing / cross-AM dedup / hollow-drop policy, so it cannot drift
+    from the compaction repair -- the H2/F1 disease). Repair-only, *not*
+    coalescing, so a valid multi-turn history loaded from disk is never
+    rewritten merely for adjacency. Idempotent.
     """
-    out: list[ModelContextEvent] = []
-    i = 0
-    while i < len(history):
-        msg = history[i]
-        if isinstance(msg, AssistantMessage):
-            out.append(msg)
-            if msg.tool_calls:
-                expected = {tc.id for tc in msg.tool_calls}
-                seen: set[str] = set()
-                j = i + 1
-                while j < len(history) and isinstance(history[j], ToolResult):
-                    tr = history[j]
-                    assert isinstance(tr, ToolResult)
-                    if tr.call_id in expected and tr.call_id not in seen:
-                        seen.add(tr.call_id)
-                        out.append(tr)
-                    j += 1
-                out.extend(
-                    ToolResult(
-                        call_id=tc.id,
-                        content="[interrupted]",
-                        is_error=True,
-                    )
-                    for tc in msg.tool_calls
-                    if tc.id not in seen
-                )
-                i = j
-            else:
-                i += 1
-        elif isinstance(msg, ToolResult):
-            # Orphan tool_result with no preceding assistant tool_use; drop it.
-            i += 1
-        else:
-            out.append(msg)
-            i += 1
-    return out
+    return pair_and_dedup_tool_calls(history)
 
 
 def _preserve_corrupt_session(session_file: Path) -> None:

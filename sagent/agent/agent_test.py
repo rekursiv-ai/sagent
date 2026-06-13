@@ -1949,7 +1949,6 @@ async def test_swap_model_logs_close_failure_via_log_task_exception(
     explicitly) preserves the traceback. Pin both contracts here:
     ERROR level, AND traceback present.
     """
-    import logging  # noqa: PLC0415 -- test-local
 
     @dataclass(slots=True, kw_only=True)
     class CrashingCloseModel(StubModel):
@@ -6650,6 +6649,165 @@ def test_repair_compact_payload_fills_missing_tool_results_with_interrupted() ->
         if isinstance(e, types.runtime.ToolResult) and e.content == "[interrupted]"
     ]
     assert len(interrupted) == 10
+
+
+def test_repair_compact_payload_coalesces_cross_source_user_turns() -> None:
+    """Adjacent user-side turns must collapse so the splice stays valid.
+
+    A persistent reviewer's ``AgentSendMessage`` abutting a human
+    ``UserMessage`` in the compaction tail are both wire ``user`` role.
+    ``ContextSplice.__post_init__`` (re-run by ``dataclasses.replace`` in
+    ``_AgentCompactor.compact``) rejects two consecutive user-side entries
+    with ``InvalidPayloadError: payload violates role alternation`` -- the
+    wedge that halted session 98aebeae (``[from rev-gpt2]``) and recurred
+    on every retry and on compaction. Repair must coalesce them, demoting
+    the cross-source pair to ``UserMessage`` so attribution is not falsified.
+    """
+    out = _repair_compact_payload(
+        [
+            types.runtime.UserMessage(text="please review"),
+            types.runtime.AgentSendMessage(source="rev-gpt2", text="End of review."),
+        ],
+    )
+    assert len(out) == 1
+    merged = out[0]
+    assert isinstance(merged, types.runtime.UserMessage)
+    # The agent send keeps its attribution via an inlined ``[from X]: `` label
+    # on demotion; the human turn is unlabeled.
+    assert merged.text == "please review\n\n[from rev-gpt2]: End of review."
+    # The construct-time validator the live wedge tripped must now accept it.
+    splice = ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        strategy="summary",
+        payload=(types.runtime.UserMessage(text="[summary]"),),
+    )
+    replace(splice, payload=tuple(out))
+
+
+def test_repair_compact_payload_keeps_same_source_agent_send_type() -> None:
+    """Same-source ``AgentSendMessage`` pairs keep their type and ``source``."""
+    out = _repair_compact_payload(
+        [
+            types.runtime.AgentSendMessage(source="a", text="x"),
+            types.runtime.AgentSendMessage(source="a", text="y"),
+        ],
+    )
+    assert len(out) == 1
+    merged = out[0]
+    assert isinstance(merged, types.runtime.AgentSendMessage)
+    assert merged.source == "a"
+    assert merged.text == "x\n\ny"
+
+
+def test_repair_compact_payload_dedups_tool_call_ids_across_assistants() -> None:
+    """Two AMs sharing a tool_call id must not yield a dup-id splice payload.
+
+    ``_repair_compact_payload`` tracks only one AM-TR window, so two AMs
+    declaring the same id each get a synthetic ``[interrupted]`` result ->
+    ``[AM(t1), TR(t1), AM(t1), TR(t1)]``: duplicate ``ToolResult`` call_id
+    (rule 3) and duplicate tool_call id across AMs (rule 4). The downstream
+    ``dataclasses.replace`` that rebuilds the ``ContextSplice`` then raises
+    ``InvalidPayloadError`` and wedges compaction. Repair must dedupe so its
+    output is splice-valid.
+    """
+    tc = types.runtime.ToolCall(id="t1", name="x", args={})
+    out = _repair_compact_payload(
+        [
+            types.runtime.AssistantMessage(tool_calls=(tc,)),
+            types.runtime.AssistantMessage(tool_calls=(tc,)),
+        ],
+    )
+    tr_ids = [e.call_id for e in out if isinstance(e, types.runtime.ToolResult)]
+    assert len(tr_ids) == len(set(tr_ids)), f"duplicate ToolResult ids: {tr_ids}"
+    # Exactly one synthetic [interrupted] result survives -- locks that the
+    # cross-AM dedup (here) and the in-merge dedup (_merge_assistant) together
+    # collapse the colliding id to a single TR, not two (R2O-1).
+    assert len(tr_ids) == 1
+    # Must construct as a splice payload (the live wedge was here).
+    ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        strategy="summary",
+        payload=tuple(out),
+    )
+
+
+def test_repair_compact_payload_drops_hollow_dup_only_assistant() -> None:
+    """A dup-only AM with no text/thinking must not survive as a hollow turn.
+
+    When every tool_call id of a later AM was already claimed, dedup empties
+    it; with no text or thinking it carries nothing. If it is not adjacent to
+    another AM (so coalescing can't absorb it), it ships as an empty assistant
+    turn -- wire-dropped by the provider but polluting the splice payload and
+    size accounting. Mirror ``_sanitize_for_send``: drop it (F6).
+    """
+    tc = types.runtime.ToolCall(id="t1", name="x", args={})
+    out = _repair_compact_payload(
+        [
+            types.runtime.AssistantMessage(tool_calls=(tc,)),
+            types.runtime.ToolResult(call_id="t1", content="r"),
+            types.runtime.UserMessage(text="hi"),
+            types.runtime.AssistantMessage(tool_calls=(tc,)),
+        ],
+    )
+    hollow = [
+        e
+        for e in out
+        if isinstance(e, types.runtime.AssistantMessage)
+        and not e.tool_calls
+        and not e.text
+        and not e.thinking_blocks
+    ]
+    assert hollow == [], f"hollow AM leaked into payload: {out!r}"
+
+
+def test_repair_compact_payload_interrupted_results_are_ordered() -> None:
+    """Synthetic [interrupted] results are emitted in deterministic order.
+
+    ``_append_interrupted_results`` iterates ``sorted(pending)`` rather than
+    ``set.pop()`` (arbitrary), so the same input always yields the same
+    on-disk ``session.jsonl`` and a deterministic resume (R2O-6).
+    """
+    calls = tuple(
+        types.runtime.ToolCall(id=f"c{i}", name="x", args={}) for i in range(8)
+    )
+    out = _repair_compact_payload(
+        [types.runtime.AssistantMessage(tool_calls=calls)],
+    )
+    tr_ids = [e.call_id for e in out if isinstance(e, types.runtime.ToolResult)]
+    assert tr_ids == sorted(tr_ids) == [f"c{i}" for i in range(8)]
+
+
+def test_repair_compact_payload_coalesces_adjacent_assistants() -> None:
+    """Two adjacent assistant turns must collapse, not just user-side ones.
+
+    The role-alternation invariant ``ContextSplice`` enforces has two legs:
+    user->user and assistant->assistant. ``_repair_compact_payload`` closed
+    the user leg but left ``[AM, AM]`` flowing through untouched, so the
+    identical ``InvalidPayloadError: payload violates role alternation``
+    still wedges compaction when the payload tail carries two assistant
+    turns (e.g. an interrupted turn re-summarized beside a fresh one). The
+    repair pass must coalesce both legs so its output is always splice-valid.
+    """
+    out = _repair_compact_payload(
+        [
+            types.runtime.AssistantMessage(text="one"),
+            types.runtime.AssistantMessage(text="two"),
+        ],
+    )
+    # The construct-time validator the live wedge tripped must now accept it.
+    splice = ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        strategy="summary",
+        payload=(types.runtime.UserMessage(text="[summary]"),),
+    )
+    replace(splice, payload=tuple(out))
+    assert sum(isinstance(e, types.runtime.AssistantMessage) for e in out) == 1
 
 
 @pytest.mark.asyncio

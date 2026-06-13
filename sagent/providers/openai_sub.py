@@ -84,7 +84,7 @@ if TYPE_CHECKING:
 
     import sagent.lib.image as image_lib
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
     httpx = lazy_import("httpx")  # 100ms cold
     openai = lazy_import("openai")  # 493ms cold

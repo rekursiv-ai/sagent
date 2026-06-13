@@ -150,6 +150,49 @@ def test_validate_tool_input_rejects_additional_property_schema_type() -> None:
     assert "string" in err
 
 
+def test_validate_tool_input_union_type_accepts_either() -> None:
+    """A list-valued ``type`` accepts any listed type."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "ids": {"type": ["array", "string"], "items": {"type": "string"}}
+            },
+        }
+    )
+    assert validate_tool_input("Paper", schema, {"ids": "10.1/x"}) is None
+    assert validate_tool_input("Paper", schema, {"ids": ["10.1/x"]}) is None
+
+
+def test_validate_tool_input_union_type_rejects_other() -> None:
+    """A value matching none of the listed types is reported with both."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {"ids": {"type": ["array", "string"]}},
+        }
+    )
+    err = validate_tool_input("Paper", schema, {"ids": 7})
+    assert err is not None
+    assert "array or string" in err
+
+
+def test_validate_tool_input_union_type_validates_array_items() -> None:
+    """Array items are still validated under a union ``type``."""
+    schema = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "ids": {"type": ["array", "string"], "items": {"type": "string"}}
+            },
+        }
+    )
+    err = validate_tool_input("Paper", schema, {"ids": [1]})
+    assert err is not None
+    assert "ids[0]" in err
+    assert "string" in err
+
+
 def test_validate_tool_input_valid_passes() -> None:
     """Well-formed args return ``None``."""
     schema = json_freeze(

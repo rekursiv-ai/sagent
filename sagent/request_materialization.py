@@ -6,7 +6,6 @@ from collections.abc import Iterable, Sequence
 
 import dataclasses
 
-from sagent.agent.context import wire_role
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -14,6 +13,8 @@ from sagent.types.runtime import (
     ModelContextEvent,
     ToolResult,
     UserMessage,
+    labeled_agent_send_text,
+    wire_role,
 )
 
 
@@ -125,18 +126,21 @@ def _label_agent_sends(
     ``[from <source>]: `` marker is left unchanged. ``startswith`` (not
     substring ``in``) avoids the trap where a body that legitimately
     quotes the marker -- e.g. ``"please write [from bob]: literally"``
-    -- gets silently passed through unlabelled. Cross-type coalescing
-    is handled by ``_coalesce_adjacent_users`` after labeling: any
-    merged user-side entry whose text quotes a marker has already been
-    labelled here at the producer, so re-labeling never happens.
+    -- gets silently passed through unlabelled. Coalescing runs after
+    labeling: a cross-source merge demotes to a ``UserMessage`` (skipped
+    here) carrying per-segment labels, so it is never re-labeled; a
+    same-source ``AgentSendMessage`` merge keeps its type and un-labeled
+    text, and this prepends one outer label to the whole -- correct, since
+    one source authored every segment.
     """
     for entry in messages:
         if isinstance(entry, AgentSendMessage):
-            prefix = f"[from {entry.source}]: "
-            if entry.text.startswith(prefix):
-                yield entry
-            else:
-                yield dataclasses.replace(entry, text=f"{prefix}{entry.text}")
+            labeled = labeled_agent_send_text(entry)
+            yield (
+                entry
+                if labeled == entry.text
+                else dataclasses.replace(entry, text=labeled)
+            )
         else:
             yield entry
 
@@ -222,11 +226,11 @@ def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
     ``AgentSendMessage`` are same-source iff their ``source`` values
     match. A ``UserMessage`` paired with an ``AgentSendMessage`` is
     *not* same-source: the human did not author the agent's content
-    and the agent did not author the human's. Cross-type or
-    cross-source pairs are therefore left unmerged by
-    :func:`_coalesce_adjacent_users` so structured attribution is not
-    falsified; they remain distinct entries and reach the provider as
-    separate (both user-role) turns.
+    and the agent did not author the human's. :func:`_coalesce_adjacent_users`
+    still merges cross-type / cross-source pairs (both are wire-``user`` and
+    cannot reach the provider as adjacent turns) but *demotes* them to a
+    plain ``UserMessage`` so the structured ``source`` never falsely claims
+    one sender authored the other's text; same-source pairs preserve type.
     """
     if type(left) is not type(right):
         return False

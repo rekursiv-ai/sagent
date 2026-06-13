@@ -25,6 +25,7 @@ from sagent.agent.retry import (
     error_diagnostics,
     error_status,
     extract_retry_after,
+    is_rate_limited,
     is_retryable,
     send_with_retry,
     service_error_snapshot,
@@ -123,6 +124,29 @@ class _StatusCodeError(Exception):
         self.status_code = status_code
 
 
+class _InBandRateLimitError(Exception):
+    """Anthropic in-band body-typed error on a 200 stream.
+
+    Mirrors the transcript shape (session 6efa990c, repl.log:38860): the
+    SDK raises ``APIStatusError`` with a body-declared error type (e.g.
+    ``rate_limit_error``) while the HTTP status is 200 and every
+    unified-ratelimit header reports ``allowed`` -- so neither the status
+    path nor ``extract_retry_after`` sees anything wrong.
+    """
+
+    def __init__(self, error_type: str = "rate_limit_error") -> None:
+        super().__init__(f"{error_type} in-band")
+        self.body = {"type": "error", "error": {"type": error_type}}
+        self.response = _FakeResponse(
+            200,
+            {
+                "anthropic-ratelimit-unified-status": "allowed",
+                "anthropic-ratelimit-unified-5h-status": "allowed",
+                "anthropic-ratelimit-unified-reset": str(time.time() + 15_000.0),
+            },
+        )
+
+
 def test_is_retryable_provider_short_circuit() -> None:
     model = _ScriptedModel(is_retryable_provider=True)
     assert is_retryable(ValueError("anything"), model) is True
@@ -188,6 +212,19 @@ def test_constants_have_sane_values() -> None:
     assert RETRY_BASE_SEC > 0.0
     assert MAX_RETRY_DELAY > RETRY_BASE_SEC
     assert PERSISTENT_MAX_BACKOFF_SEC > MAX_RETRY_DELAY
+
+
+def test_is_rate_limited_429_status() -> None:
+    assert is_rate_limited(_HTTPError(_FakeResponse(429))) is True
+
+
+def test_is_rate_limited_in_band_body() -> None:
+    assert is_rate_limited(_InBandRateLimitError()) is True
+
+
+def test_is_rate_limited_other_errors_false() -> None:
+    assert is_rate_limited(_HTTPError(_FakeResponse(503))) is False
+    assert is_rate_limited(ValueError("plain")) is False
 
 
 def test_error_status_via_status_code_attr() -> None:
@@ -578,8 +615,19 @@ async def test_send_with_retry_retries_exhausted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_429_raises_rate_limit_when_not_persistent() -> None:
-    err = _HTTPError(_FakeResponse(429, {"retry-after": "5"}))
+async def test_send_with_retry_429_long_reset_halts_when_not_persistent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 429 advertising a reset beyond the interactive ceiling halts
+    # immediately with the reset clock; sleeping through it would wedge
+    # the REPL for hours.
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "15000"}))
     model = _ScriptedModel(stream_responses=[err])
     with pytest.raises(RateLimitError):
         _ = await send_with_retry(
@@ -590,6 +638,159 @@ async def test_send_with_retry_429_raises_rate_limit_when_not_persistent() -> No
             persistent_retry=False,
             publish_recoverable=_silent,
         )
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_429_short_retry_after_retries_to_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#424: a 429 with a short advertised wait is a transient throttle,
+    # not a quota halt -- honor the wait and retry instead of halting the
+    # REPL over a delay the user would happily sit out.
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "5"}))
+    model = _ScriptedModel(stream_responses=[err, _resp("ok")])
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    assert slept == [pytest.approx(5.0)]
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_exhaustion_skips_final_backoff_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#424 bug #1: the loop slept the final backoff ("resumes in 9s"),
+    # then re-entered, hit the attempt cap, and raised WITHOUT sending --
+    # the user waits out the banner and still gets the error. Exhaustion
+    # must raise instead of sleeping a wait no send will follow.
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(_FakeResponse(503))
+    model = _ScriptedModel(stream_responses=[err, err])
+    with pytest.raises(RetriesExhaustedError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=2,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert model.stream_calls == 2
+    assert len(slept) == 1, "no sleep after the final failed attempt"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_in_band_rate_limit_outlasts_attempt_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#424 bug #2: an in-band rate_limit_error (200 stream, headers all
+    # ``allowed``) clears in tens of seconds, but the generic transient
+    # budget (5 attempts, ~9s effective wait) gives up first. Rate-limit
+    # retries run on a wall-clock budget, not the attempt counter.
+    async def fake_sleep(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    errors: list[BaseException | ModelResponse] = [
+        _InBandRateLimitError() for _ in range(7)
+    ]
+    model = _ScriptedModel(
+        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+    )
+    notes: list[str] = []
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=notes.append,
+    )
+    assert resp.message.text == "ok"
+    assert model.stream_calls == 8
+    assert notes[0].startswith("retry attempt 0"), "labels count throttle retries"
+    assert notes[6].startswith("retry attempt 6")
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_in_band_rate_limit_halts_as_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the throttle does NOT clear, the wall-clock budget halts the loop
+    # as a RateLimitError ("type to retry"), never RetriesExhaustedError, and
+    # no single sleep exceeds the interactive ceiling.
+    clock = {"now": 1_000.0}
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        clock["now"] += delay_sec
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    model = _ScriptedModel(
+        stream_responses=[_InBandRateLimitError() for _ in range(50)],
+        is_retryable_provider=True,
+    )
+    with pytest.raises(RateLimitError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=5,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert all(s <= INTERACTIVE_MAX_SLEEP_SEC for s in slept)
+    assert sum(slept) > 60.0, "budget must outlast the old ~9s attempt cap"
+    assert sum(slept) < 300.0, "budget must still halt within minutes"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_rate_limit_backstop_survives_frozen_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The throttle loop's normal exit is the wall-clock budget; a frozen
+    # clock (mocked time, fake event loop) never reaches it. The attempt
+    # backstop must halt the loop as a RateLimitError instead of spinning.
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+
+    async def fake_sleep(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    model = _ScriptedModel(
+        stream_responses=[_InBandRateLimitError() for _ in range(50)],
+        is_retryable_provider=True,
+    )
+    with pytest.raises(RateLimitError):
+        _ = await send_with_retry(
+            model,
+            _request(),
+            on_text=_silent,
+            max_attempts=5,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert model.stream_calls < 50
 
 
 @pytest.mark.asyncio
@@ -659,24 +860,34 @@ async def test_send_with_retry_in_band_warning_retries_to_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_429_with_unread_streaming_body_still_classified() -> (
-    None
-):
+async def test_send_with_retry_429_with_unread_streaming_body_still_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # End-to-end regression for the transcript bug: a 429 whose response is
     # an unread streaming body (`.text`/`.content` raise ResponseNotRead)
     # must still be classified as a rate limit -- the diagnostics body-read
     # must not let ResponseNotRead escape and turn a retryable error fatal.
+    # Under the Issue#424 policy the short advertised wait (5s) is honored
+    # and the send retries instead of halting.
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
-    model = _ScriptedModel(stream_responses=[err])
-    with pytest.raises(RateLimitError):
-        _ = await send_with_retry(
-            model,
-            _request(),
-            on_text=_silent,
-            max_attempts=3,
-            persistent_retry=False,
-            publish_recoverable=_silent,
-        )
+    assert is_rate_limited(err) is True
+    model = _ScriptedModel(stream_responses=[err, _resp("ok")])
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    assert slept == [pytest.approx(5.0)]
 
 
 @dataclass(slots=True, kw_only=True)
@@ -702,6 +913,91 @@ async def test_send_with_retry_persistent_loops_on_429() -> None:
         publish_recoverable=_silent,
     )
     assert resp.message.text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_persistent_loops_on_in_band_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue#424: an in-band rate_limit_error is the same condition as a 429
+    # wearing a 200 status; persistent (unattended) mode must route it into
+    # the long-backoff branch instead of the 5-attempt transient loop.
+    async def fake_sleep(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    errors: list[BaseException | ModelResponse] = [
+        _InBandRateLimitError() for _ in range(5)
+    ]
+    model = _PersistentModel(
+        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+    )
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    assert model.stream_calls == 6
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_persistent_loops_on_in_band_overload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 529's body type is ``overloaded_error``; in-band it rides a 200
+    # stream, so the ``status == 529`` gate alone misses it and unattended
+    # compaction would die in the generic 5-attempt loop.
+    async def fake_sleep(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    errors: list[BaseException | ModelResponse] = [
+        _InBandRateLimitError("overloaded_error") for _ in range(5)
+    ]
+    model = _PersistentModel(
+        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+    )
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    assert model.stream_calls == 6
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_persistent_sleeps_through_long_server_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The interactive long-reset halt is gated on ``not persistent``:
+    # unattended mode must sleep out a long advertised reset, not halt --
+    # there is no user at the REPL to hand the RateLimitError to.
+    slept: list[float] = []
+
+    async def fake_sleep(delay_sec: float) -> None:
+        slept.append(delay_sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    err = _HTTPError(_FakeResponse(429, {"retry-after": "120"}))
+    model = _PersistentModel(stream_responses=[err, _resp("ok")])
+    resp = await send_with_retry(
+        model,
+        _request(),
+        on_text=_silent,
+        max_attempts=3,
+        persistent_retry=True,
+        publish_recoverable=_silent,
+    )
+    assert resp.message.text == "ok"
+    assert slept == [pytest.approx(120.0)]
 
 
 @pytest.mark.asyncio

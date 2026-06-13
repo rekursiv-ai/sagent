@@ -1,84 +1,19 @@
-r"""REPL input zone: bar rendering + pump + ``InputSource`` abstraction.
+r"""REPL input zone: pane rendering + pump + ``InputSource`` abstraction.
 
-This module owns everything about the *input* zone of the REPL --
-the bar where the user types, the dim ``queued_input_pane`` preview
-rendered just above it when the staging queue is non-empty, and the
-pump that consumes slash submissions.
+This module owns the *input* zone of the REPL -- the bar where the user
+types, the dim preview of the deferred and queue panes rendered just
+above it, and the pump that consumes slash submissions.
 
-Behavior contract: Up / Down navigation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Up / Down arrows traverse a virtual stack of (queue, history) without
-losing user state. The first Up captures a snapshot of
-``(queued_input, buffer)``; the final Down restores it.
-
-The slot rows render top-to-bottom as ``history[-N]`` (oldest) through
-``queue`` then ``input``. ``[DONE]`` means the slot has no content to
-display at that step.
-
-Case 1 -- queue is non-empty::
-
-                  t=0    t=1     t=2     t=3    t=4
-                         UP      UP      DN     DN
-    history[-3]    d      c       b       c      d
-    history[-2]    e      d       c       d      e
-    history[-1]  [DNE]    e       d       e    [DNE]
-    queue          f    [DNE]   [DNE]   [DNE]    f
-    input          g      f       e       f      g
-
-- First Up "edits" the queue: queue text joins on ``\n\n``, lands in
-  buffer; queue slot empties. A snapshot of ``(queued_input, buffer)``
-  is captured.
-- Subsequent Ups walk older history into buffer; queue slot stays
-  empty during navigation.
-- Down reverses the walk; the final Down at the navigation boundary
-  restores the snapshot (queue and buffer return to t=0 state).
-
-Case 2 -- queue is empty::
-
-                  t=0    t=1     t=2     t=3    t=4
-                         UP      UP      DN     DN
-    history[-3]    d      c       b       c      d
-    history[-2]    e      d       c       d      e
-    history[-1]    f      e       d       e      f
-    input          g      f       e       f      g
-
-- First Up walks ``history[-1]`` into buffer; snapshot captured.
-- Subsequent Ups walk older history; queue slot stays empty (there was
-  no queue to restore).
-- Down reverses; final Down restores buffer to its pre-navigation value.
-
-Enter
-~~~~~
-
-- No navigation active (``cursor == 0``): send immediately when idle,
-  during tool wait, or while awaiting user input. While a model is
-  streaming, stage the text in the urgent queue; it is still editable
-  with Up and fires at ``ModelResponseComplete`` before tool calls run.
-- Navigation active (``cursor > 0``): commit the buffer back to the
-  queued lanes, preserving urgent/deferred lane metadata from the
-  snapshot. The snapshot is discarded; ``cursor`` returns to 0.
-- Text ending in ``\``: backslash continuation -- replace trailing
-  ``\`` with literal ``\n``, stay in buffer, do not dispatch.
-- Empty buffer: nothing.
-- Slash command: route through pump.
-
-Tab
-~~~
-
-Tab stages the buffer in the deferred queue (REPL-local). The
-``install_input_queue_committer`` observer commits deferred blocks as a
-single ``UserQueuedMessage`` on ``AgentIdle``. If the runtime is already
-awaiting user input, Tab commits immediately because no future
-``AgentIdle`` will release the gate.
-
-Urgent/deferred queues are local draft state. Up-arrow's lift is a true
-retract because the queued text has not entered runtime history.
+The Up / Down navigation contract, the queue / deferred pane semantics,
+and the dispatch-vs-stage rule are specified in
+``docs/private/input_ux.md`` (the authority) and wired in
+:mod:`repl.keybindings`. Briefly: each pane holds at most one coalesced
+message; Enter stages into the queue pane (or dispatches when idle), Tab
+into the deferred pane; Up/Down walk a stop list whose entries own their
+edits (no snapshot).
 
 Headless callers without a Tab key use the ``/defer <text>`` slash
-command, which pushes ``UserDeferredMessage`` directly through the pump
--- not retractable, but a one-shot defer gesture is sufficient for
-non-interactive contexts.
+command, which pushes ``UserDeferredMessage`` directly through the pump.
 
 Pump
 ~~~~
@@ -113,9 +48,9 @@ import time
 
 from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
+from wrapt import lazy_import
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.lib.lazy_import import lazy_import
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -595,7 +530,7 @@ class PromptToolkitInputSource(InputSource):
         """
         if not self.queues.has_any() or self._console is None:
             return
-        total = len(self.queues.urgent) + len(self.queues.deferred)
+        total = (self.queues.queue is not None) + (self.queues.deferred is not None)
         raw = self.queues.peek_tail_preview().replace("\n", " ")
         truncated = len(raw) > _PREVIEW_CHARS
         preview = raw[:_PREVIEW_CHARS] + ("…" if truncated else "")
@@ -610,42 +545,40 @@ class PromptToolkitInputSource(InputSource):
 
 
 def render_input_pane(agent: Agent, queues: InputQueues) -> FormattedText:
-    r"""Build the input-pane ``FormattedText``: full queue + prompt sigil.
+    r"""Build the input-pane ``FormattedText``: panes + prompt sigil.
 
-    Renders all pending user content above the ``> `` prompt sigil
-    (blocks joined by ``\n\n``). Two buffers contribute:
+    Renders pending user content above the ``> `` prompt sigil, top to
+    bottom per the spec: the deferred pane (``[deferred]`` prefix), then
+    the queue pane (no prefix), then runtime mid-stream pending items.
 
-    - ``queues`` -- REPL-local urgent/deferred blocks. Up-arrow can lift
-      these back into the input buffer for editing.
+    - ``queues`` -- the deferred and queue panes. Up-arrow can lift these
+      back into the input buffer for editing.
     - ``agent.runtime._mid_stream_queue`` -- externally submitted
       mid-stream blocks, already committed to the runtime. Shown for
       visibility when present.
 
-    Both are pending model consumption; rendering them together gives
-    the user one canonical "what's queued" surface.
-
     Args:
       agent: Agent whose runtime ``_mid_stream_queue`` is consulted.
-      queues: REPL-local urgent/deferred input queues.
+      queues: The deferred and queue panes.
 
     Returns:
       formatted: The input pane's formatted text.
 
     """
-    blocks = queues.render_blocks()
+    lines = queues.render_lines()
     # Only surface human-typed pending items. ``_mid_stream_queue``
     # also buffers ``AgentSendMessage`` arriving while the model is
     # streaming, but agent-to-agent payloads are runtime plumbing the
     # user can't edit or retract -- they don't belong in the queue
     # preview meant for staged human input.
-    blocks.extend(
+    lines.extend(
         f"pending: {m.text}"
         for m in agent.runtime.pending_mid_stream()
         if isinstance(m, UserMessage)
     )
     parts: list[tuple[str, str]] = []
-    if blocks:
-        parts.append(("class:queued_input_pane", "\n\n".join(blocks)))
+    if lines:
+        parts.append(("class:queued_input_pane", "\n\n".join(lines)))
         parts.append(("", "\n"))
     parts.append(("class:input_pane", "> "))
     return FormattedText(parts)

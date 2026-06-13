@@ -45,6 +45,7 @@ dependencies = [
     "trafilatura",
     "uvicorn>=0.30",
     "webp>=0.4.0",
+    "wrapt",
     "zstandard",
 ]
 

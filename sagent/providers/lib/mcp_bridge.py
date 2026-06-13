@@ -47,11 +47,12 @@ if TYPE_CHECKING:
     import mcp.types as mcp_types
     import uvicorn
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
-    # ``lazy_import("foo").attr`` triggers ``__getattr__`` at module load,
-    # which materializes the proxy and imports ``foo`` eagerly. Keep the
-    # proxy as a module reference and defer ``.attr`` to the call site.
+    # ``lazy_import("foo")`` (no attr) keeps a deferred module proxy
+    # that imports ``foo`` only on first attribute access. Bind the module
+    # proxy here and defer ``.attr`` to the call site; a second arg would
+    # bind the symbol eagerly at first use instead.
     mcp_types = lazy_import("mcp.types")
     _mcp_server_lowlevel = lazy_import("mcp.server.lowlevel")
     _mcp_streamable_http_manager = lazy_import("mcp.server.streamable_http_manager")

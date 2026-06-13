@@ -60,9 +60,14 @@ def test_context_betas_one_million_emits_beta() -> None:
     assert "context-1m-2025-08-07" in context_betas("claude-opus-4-7+1m")
 
 
+def test_context_betas_skip_one_million_beta_for_default_1m_model() -> None:
+    assert "context-1m-2025-08-07" not in context_betas("claude-fable-5+1m")
+
+
 def test_context_betas_native_context_management_for_supported_models() -> None:
     assert "context-management-2025-06-27" in context_betas("claude-haiku-4-5")
     assert "context-management-2025-06-27" in context_betas("claude-opus-4-7+1m")
+    assert "context-management-2025-06-27" in context_betas("claude-fable-5+1m")
 
 
 def test_context_betas_skip_native_context_management_for_unknown_models() -> None:
@@ -580,6 +585,25 @@ def test_anthropic_model_pricing_exposed() -> None:
     assert m.pricing.request > 0
 
 
+def test_anthropic_fable_model_profile() -> None:
+    p = Anthropic.from_key("k")
+    assert Anthropic.DEFAULT_MODEL == "claude-opus-4-8+1m"
+    m = p.model("claude-fable-5")
+    assert m.max_request_tokens == 1_000_000
+    assert m.max_response_tokens == 128_000
+    assert m.pricing.request == 10.0
+    assert m.pricing.response == 50.0
+    assert m.pricing.cache_write == 12.5
+    assert m.pricing.cache_read == 1.0
+
+
+def test_anthropic_fable_one_million_alias() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-fable-5+1m")
+    assert m.model_id == "claude-fable-5+1m"
+    assert m.max_request_tokens == 1_000_000
+
+
 @pytest.mark.asyncio
 async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
     """``actual_request_tokens`` routes through the SDK's ``count_tokens``."""
@@ -715,6 +739,7 @@ def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
     p = Anthropic.from_key("k")
     assert p.model("claude-opus-4-8").valid_latency_modes == ("fast",)
     assert p.model("claude-opus-4-8+1m").valid_latency_modes == ("fast",)
+    assert p.model("claude-fable-5").valid_latency_modes == ()
     assert p.model("claude-haiku-4-5").valid_latency_modes == ()
 
 
@@ -731,7 +756,7 @@ def test_anthropic_fast_latency_sets_speed_and_beta() -> None:
 
 def test_anthropic_fast_latency_rejected_on_unsupported_model() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("claude-haiku-4-5")
+    m = p.model("claude-fable-5")
     req = ModelRequest(messages=[UserMessage(text="x")], latency="fast")
     with pytest.raises(ValueError, match="does not support fast mode"):
         m._build_kwargs(req, [])

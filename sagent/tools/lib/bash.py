@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     import bashlex
     import bashlex.errors
 else:
-    from sagent.lib.lazy_import import lazy_import
+    from wrapt import lazy_import
 
     bashlex = lazy_import("bashlex")  # 88ms cold
     Node = object
