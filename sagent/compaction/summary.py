@@ -23,7 +23,7 @@ import logging
 import re
 
 from sagent.agent.retry import send_with_retry
-from sagent.compaction.history import entry_chars
+from sagent.compaction.history import estimate_entry_tokens
 from sagent.tools.core import read_asset, recipe_dict
 from sagent.types.model import (
     Model,
@@ -52,7 +52,7 @@ from sagent.types.tape import (
 __all__ = [
     "SummaryCompactor",
     "build_continuation",
-    "entry_chars",
+    "estimate_entry_tokens",
 ]
 
 
@@ -97,10 +97,8 @@ class SummaryCompactor:
           ``(0, 1]``. Default ``0.95``.
       compression: Compaction compression factor
           (``post_compact_size / pre_compact_size``) for the non-system body,
-          reserved out of the window. Default ``0.075`` -- the p95 of observed
-          summary compactions (n=48; p50 0.051, p95 0.075, max 0.091). See
+          reserved out of the window. Default ``0.01``. See
           ``should_compact`` for the full inequality.
-      chars_per_token: Conversion factor for token-gap to char-gap math.
       max_attempts: Retries on ``PromptTooLongError`` before giving up.
       keep_recent: Default ``keep_recent`` when ``compact`` doesn't override.
       proactive: When True, the continuation resumes work autonomously.
@@ -122,8 +120,7 @@ class SummaryCompactor:
         partial_prompt: str | None = None,
         buffer_tokens: int = 0,
         utilization_trigger: float = 0.95,
-        compression: float = 0.075,
-        chars_per_token: int = 4,
+        compression: float = 0.01,
         max_attempts: int = 3,
         keep_recent: int = 0,
         direction: Literal["from", "up_to"] = "from",
@@ -152,7 +149,6 @@ class SummaryCompactor:
         self._buffer_tokens = buffer_tokens
         self._utilization_trigger = utilization_trigger
         self._compression = compression
-        self._chars_per_token = chars_per_token
         self._max_attempts = max_attempts
         self._keep_recent = keep_recent
         self._direction: Literal["from", "up_to"] = direction
@@ -309,7 +305,7 @@ class SummaryCompactor:
             to_summarize = history
             to_keep = []
 
-        token_before = sum(entry_chars(e) for e in history) // self._chars_per_token
+        token_before = estimate_entry_tokens(compact_model, history)
 
         def fallback_splice(reason: str) -> ContextSplice:
             return _build_fallback_splice(
@@ -319,7 +315,7 @@ class SummaryCompactor:
                 mint_ref=mint_ref,
                 mask=mask,
                 token_before=token_before,
-                chars_per_token=self._chars_per_token,
+                model=compact_model,
             )
 
         if to_keep:
@@ -374,7 +370,7 @@ class SummaryCompactor:
                         self._max_attempts,
                     )
                     continue
-                drop = _groups_to_drop(groups, exc, self._chars_per_token)
+                drop = _groups_to_drop(groups, exc, compact_model)
                 logger.warning(
                     "Prompt too long (attempt %d/%d), dropping %d groups.",
                     attempt + 1,
@@ -422,7 +418,7 @@ class SummaryCompactor:
             payload = coalesce_roles((continuation, *to_keep))
         else:
             payload = coalesce_roles((*to_keep, continuation))
-        token_after = sum(entry_chars(e) for e in payload) // self._chars_per_token
+        token_after = estimate_entry_tokens(compact_model, payload)
         return ContextSplice(
             ref=mint_ref(),
             mask=mask,
@@ -498,7 +494,7 @@ class SummaryCompactor:
                         self._max_attempts,
                     )
                     continue
-                drop = _groups_to_drop(groups, exc, self._chars_per_token)
+                drop = _groups_to_drop(groups, exc, compact_model)
                 logger.warning(
                     "Verifier prompt too long (attempt %d/%d), dropping %d groups.",
                     attempt + 1,
@@ -539,18 +535,21 @@ def _should_compact(
 def _groups_to_drop(
     groups: list[list[ModelContextEvent]],
     error: PromptTooLongError,
-    chars_per_token: int = 4,
+    model: Model,
 ) -> int:
-    """How many leading groups to drop to cover the token gap."""
+    """How many leading groups to drop to cover the token gap.
+
+    Measured directly in tokens via the model's estimator -- the
+    provider's ``token_gap`` and each group's size are both token
+    quantities, so there is no character intermediary.
+    """
     gap = error.token_gap
     if gap is None:
         return max(1, len(groups) // 5)
-    target_chars = gap * chars_per_token
-    chars = 0
+    tokens = 0
     for i, g in enumerate(groups):
-        for entry in g:
-            chars += entry_chars(entry)
-        if chars >= target_chars:
+        tokens += estimate_entry_tokens(model, g)
+        if tokens >= gap:
             return i + 1
     return max(1, len(groups) // 5)
 
@@ -563,7 +562,7 @@ def _build_fallback_splice(
     mint_ref: Callable[[], TapeRef],
     mask: tuple[MaskRange, ...],
     token_before: int,
-    chars_per_token: int,
+    model: Model,
 ) -> ContextSplice:
     """Build the no-summary ``summary_fallback`` ContextSplice.
 
@@ -588,7 +587,7 @@ def _build_fallback_splice(
         payload=payload,
         strategy="summary_fallback",
         token_before=token_before,
-        token_after=sum(entry_chars(e) for e in payload) // chars_per_token,
+        token_after=estimate_entry_tokens(model, payload),
         fallback_reason=reason,
         preserved_tail_count=len(to_keep),
     )

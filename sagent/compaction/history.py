@@ -8,11 +8,14 @@ Agent-coupled enrichment pipeline lives in
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import dataclasses
 
+from sagent.lib.token_count import entry_tokens
+from sagent.types.model import Model
 from sagent.types.runtime import (
     AgentSendMessage,
-    AssistantMessage,
     ModelContextEvent,
     UserMessage,
 )
@@ -21,7 +24,7 @@ from sagent.types.runtime import (
 __all__ = [
     "MAX_CONSECUTIVE_COMPACT_FAILURES",
     "append_to_first_user",
-    "entry_chars",
+    "estimate_entry_tokens",
 ]
 
 
@@ -36,13 +39,16 @@ compactor indefinitely. Reset on any successful compaction.
 
 
 def append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
-    """Append ``text`` to the first ``UserMessage`` in ``history``, or insert one.
+    """Append ``text`` to the first user-role message, or insert one.
 
     The compactor and its post-enrich steps inject context (reattached
     files, background-task status, skill bodies) ahead of the prompt.
-    The simplest place is the first user message; if none exists yet
-    (e.g. compactor returned an assistant-led summary), insert a fresh
-    one at position 0.
+    The simplest place is the first user-role message -- ``UserMessage``
+    or ``AgentSendMessage`` (both are user-role on the wire). Appending
+    to whichever comes first keeps the injected context after that
+    message rather than prepended before it, which would reorder the
+    conversation. If no user-role message exists yet (e.g. the compactor
+    returned an assistant-led summary), insert a fresh one at position 0.
 
     Args:
       history: History to mutate in place.
@@ -50,24 +56,21 @@ def append_to_first_user(history: list[ModelContextEvent], text: str) -> None:
 
     """
     for j, entry in enumerate(history):
-        if isinstance(entry, UserMessage):
+        if isinstance(entry, (UserMessage, AgentSendMessage)):
             joined = f"{entry.text}\n\n{text}" if entry.text else text
             history[j] = dataclasses.replace(entry, text=joined)
             return
     history.insert(0, UserMessage(text=text))
 
 
-def entry_chars(entry: ModelContextEvent) -> int:
-    """Approximate character count of an entry's payload.
+def estimate_entry_tokens(model: Model, entries: Sequence[ModelContextEvent]) -> int:
+    """Model-derived token estimate of ``entries`` across every wire surface.
 
-    The shared size estimator for compaction planners and producers, so a
-    partition's pre/post estimates stay aligned across modules.
+    Delegates to :func:`token_count.entry_tokens` -- the single per-entry
+    estimator the request builder uses -- so compaction sizing
+    (``token_before``/``token_after``, scrunch partitions, group drops)
+    can never drift from the request the provider actually receives.
+    Counts tool-call id/name/args JSON, thinking blocks, and attachments,
+    not just bare text.
     """
-    if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return len(entry.text)
-    if isinstance(entry, AssistantMessage):
-        n = len(entry.text)
-        for tc in entry.tool_calls:
-            n += len(tc.name) + sum(len(str(v)) for v in tc.args.values())
-        return n
-    return len(entry.content)
+    return sum(entry_tokens(e, model) for e in entries)

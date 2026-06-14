@@ -44,8 +44,10 @@ from sagent.types.runtime import (
     AgentIdle,
     AgentSendMessage,
     AssistantMessage,
+    ChildDoneEvent,
     ChildEvent,
     ModelIdle,
+    ModelResponsePartial,
     ModelServiceSuspended,
     NoticeMessage,
     SaveSession,
@@ -1066,6 +1068,73 @@ def test_forwarder_always_forwards_usage_notice() -> None:
     assert len(seen) == 1
     assert seen[0].label == "child"
     assert seen[0].inner is notice
+
+
+@dataclass(slots=True, kw_only=True)
+class _RatioStubModel(StubProviderModel):
+    """Stub whose token estimator is ``len(text) // ratio_divisor``.
+
+    Distinguishes a model-derived child response-token count from the
+    forwarder's old hardcoded ``chars // 4``.
+    """
+
+    ratio_divisor: int = 2
+
+    @override
+    def approx_text_tokens(self, text: str) -> int:
+        return len(text) // self.ratio_divisor
+
+
+def _child_done_tokens(parent: Agent, fwd: _ChildForwarder) -> int:
+    """Run ``emit_done`` and return the published ``ChildDoneEvent.tokens``."""
+    seen: list[ChildDoneEvent] = []
+    parent.runtime.observers.append(
+        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None
+    )
+    fwd.emit_done()
+    assert len(seen) == 1
+    return seen[0].tokens
+
+
+def test_forwarder_response_tokens_use_child_model_estimator_not_chars4() -> None:
+    """``ChildDoneEvent.tokens`` must use the child model's tokenizer over
+    the whole streamed text, not a hardcoded ``chars // 4``.
+
+    A child model at 2 chars/token over 800 streamed chars is 400 tokens;
+    ``// 4`` would report 200.
+    """
+    child = _make_parent(_RatioStubModel(ratio_divisor=2))
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=False, child=child)
+
+    fwd(ModelResponsePartial(text="x" * 500))
+    fwd(ModelResponsePartial(text="y" * 300))
+
+    assert _child_done_tokens(parent, fwd) == child.model.approx_text_tokens("z" * 800)
+
+
+def test_forwarder_response_tokens_tokenize_whole_not_per_chunk() -> None:
+    """Tiny chunks must not floor to zero.
+
+    A truncating estimator (``int(len/3)``) over nine 1-char chunks reads
+    0 per chunk but 3 for the joined text; the forwarder must tokenize the
+    accumulated whole.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _Floor3Model(StubProviderModel):
+        model_id: str = "floor3"
+
+        @override
+        def approx_text_tokens(self, text: str) -> int:
+            return int(len(text) / 3)
+
+    child = _make_parent(_Floor3Model())
+    parent = _make_parent()
+    fwd = _make_forwarder(parent, "child", notify_on_asleep=False, child=child)
+    for _ in range(9):
+        fwd(ModelResponsePartial(text="x"))
+    assert _child_done_tokens(parent, fwd) == 3
 
 
 @pytest.mark.asyncio

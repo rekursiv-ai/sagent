@@ -77,6 +77,7 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
+from sagent.compaction.history import estimate_entry_tokens
 from sagent.compaction.scrunch import (
     ScrunchTooLargeError,
     scrunch_to_fit,
@@ -139,8 +140,10 @@ class ActivityTracker:
     current_compact_start: float = 0.0
     """Event-loop time when the current compaction started (``0`` when idle)."""
 
-    live_response_chars: int = 0
-    """Characters streamed so far in the current response."""
+    live_response_text: str = ""
+    """Response text streamed so far in the current call. Tokenized as a
+    whole (not per chunk) by readers so sub-token chunk boundaries don't
+    floor to zero; the model's estimator is applied to the full string."""
 
     active: bool = False
     """True between ``types.runtime.ModelCallStarted`` and ``types.runtime.ModelResponseComplete`` /
@@ -1634,12 +1637,14 @@ class Agent:
                 self.activity.elapsed_seconds += max(0.0, prior)
             self.activity.active = True
             self.activity.current_call_start = now
-            self.activity.live_response_chars = 0
+            self.activity.live_response_text = ""
         elif isinstance(event, types.runtime.ModelResponsePartial):
             # Resume timing if the prior chunk arrived after a suspension.
             if self.activity.active and self.activity.current_call_start == 0.0:
                 self.activity.current_call_start = asyncio.get_running_loop().time()
-            self.activity.live_response_chars += len(event.text)
+            # Accumulate raw text; readers tokenize the whole string so a
+            # chunk shorter than one token does not floor to zero tokens.
+            self.activity.live_response_text += event.text
         elif isinstance(event, types.runtime.ModelResponseThinking):
             if self.activity.active and self.activity.current_call_start == 0.0:
                 self.activity.current_call_start = asyncio.get_running_loop().time()
@@ -2869,10 +2874,20 @@ class _AgentCompactor:
                 )
             else:
                 if payload_tokens_for_scrunch > target:
+                    # ``scrunch_to_fit`` measures messages only, but the gate
+                    # above measured the whole request. Reserve the fixed
+                    # system+tools overhead so the messages-only budget
+                    # scrunch fits leaves room for it; otherwise a payload
+                    # whose messages already fit produces no reduction and the
+                    # next provider call re-overflows on the same overhead.
+                    overhead = payload_tokens_for_scrunch - estimate_entry_tokens(
+                        self._agent.model, payload
+                    )
+                    scrunch_target = max(1, target - max(0, overhead))
                     payload = await self._scrunch_payload(
                         payload=payload,
                         mint_ref=mint_ref,
-                        target_input_tokens=target,
+                        target_input_tokens=scrunch_target,
                     )
                     # Scrunch re-runs the producer per partition and may
                     # emit a fresh ``AssistantMessage`` whose tool_calls
@@ -2991,7 +3006,6 @@ class _AgentCompactor:
             )
             for i, entry in enumerate(payload)
         ]
-        chars_per_token = self._agent.budget.chars_per_token or 4
         try:
             result = await scrunch_to_fit(
                 context=payload,
@@ -3001,7 +3015,6 @@ class _AgentCompactor:
                 mint_ref=mint_ref,
                 target_input_tokens=target_input_tokens,
                 max_partition_tokens=target_input_tokens,
-                chars_per_token=chars_per_token,
             )
         except ScrunchTooLargeError as exc:
             # Scrunch hit its forward-progress floor: typically a
