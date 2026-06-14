@@ -2912,16 +2912,45 @@ async def test_activity_current_compact_start_resets_on_compact_complete() -> No
 
 
 @pytest.mark.asyncio
-async def test_streaming_chars_recorded_in_activity() -> None:
-    """``_track_activity`` accumulates streamed chars on types.runtime.ModelResponsePartial."""
+async def test_streaming_tokens_recorded_in_activity() -> None:
+    """``_track_activity`` records streamed response text so the live token
+    estimate tokenizes the WHOLE response, not each chunk in isolation.
+
+    The model estimator here is ``max(1, len // 4)``; the cumulative
+    12-char response is 3 tokens.
+    """
     a = _build_agent()
-    # Push a partial event through the publish path.
+    # Pre-bracket partial is ignored (handler only acts when ``active``).
     a.publish(types.runtime.ModelResponsePartial(text="abc"))
-    # The handler only acts when ``active`` is True; bracket via
-    # types.runtime.ModelCallStarted first.
     a.publish(types.runtime.ModelCallStarted())
-    a.publish(types.runtime.ModelResponsePartial(text="defg"))
-    assert a.activity.live_response_chars == 4
+    a.publish(types.runtime.ModelResponsePartial(text="x" * 8))
+    a.publish(types.runtime.ModelResponsePartial(text="y" * 4))
+    assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
+
+
+@pytest.mark.asyncio
+async def test_streaming_live_tokens_tokenize_whole_not_per_chunk() -> None:
+    """Tiny chunks must not floor to zero.
+
+    Regression: per-chunk ``int(len(chunk)/cpt)`` floors every sub-ratio
+    chunk to 0, so a response streamed one character at a time read 0
+    tokens for the entire stream. The fix tokenizes the cumulative text.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _Floor3Model(StubModel):
+        model_id: str = "floor3"
+
+        @override
+        def approx_text_tokens(self, text: str) -> int:  # int(), no max(1)
+            return int(len(text) / 3)
+
+    a = _build_agent(model=_Floor3Model())
+    a.publish(types.runtime.ModelCallStarted())
+    for _ in range(9):  # nine 1-char chunks
+        a.publish(types.runtime.ModelResponsePartial(text="x"))
+    # Per-chunk: 9 * int(1/3) = 0. Whole: int(9/3) = 3.
+    assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
 
 
 def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
@@ -4128,6 +4157,105 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
     assert seen_targets[0] == expected, (
         f"scrunch target {seen_targets[0]} != agent budget {expected}"
         f" (model cap is {a.model.max_request_tokens})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -> None:
+    """Scrunch target must reserve room for system+tools, not just messages.
+
+    The bridge enters scrunch when the FULL request (system + tools +
+    messages) exceeds the budget, but ``scrunch_to_fit`` measures
+    messages only. If the target handed to scrunch is the whole-request
+    budget, a payload whose messages alone already fit produces no
+    reduction and the next provider call re-overflows. The target passed
+    to ``_scrunch_payload`` must be the budget minus the fixed
+    system+tools overhead.
+    """
+    seen_targets: list[int] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _SystemCountingModel(StubModel):
+        max_request_tokens: int = 1_000_000
+        max_response_tokens: int = 100
+
+        @override
+        def approx_text_tokens(self, text: str) -> int:
+            return len(text) // 4
+
+        @override
+        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+            total = len(request.system or "") // 4
+            for m in request.messages:
+                if isinstance(
+                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
+                ):
+                    total += len(m.text) // 4
+            return total
+
+    @dataclass(slots=True, kw_only=True)
+    class _OversizedCompactor:
+        compact_calls: int = 0
+
+        def should_compact(
+            self, current_tokens: int, max_request_tokens: int, system_tokens: int = 0
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            self.compact_calls += 1
+            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
+            return _summary_override(
+                [types.runtime.UserMessage(text=payload_text)],
+                mint_ref,
+                tape=tape or None,
+            )
+
+    # System prompt of 800 chars -> 200 tokens of fixed overhead.
+    system = "s" * 800
+    budget = types.model.ContextBudget(
+        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+    )
+    a = Agent(
+        model=_SystemCountingModel(),
+        compactor=_OversizedCompactor(),
+        budget=budget,
+        system=system,
+    )
+
+    async def _spy(
+        self: _AgentCompactor,
+        *,
+        payload: list[types.runtime.ModelContextEvent],
+        mint_ref: Callable[[], TapeRef],
+        target_input_tokens: int,
+    ) -> list[types.runtime.ModelContextEvent]:
+        del self, mint_ref
+        seen_targets.append(target_input_tokens)
+        return list(payload)
+
+    with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
+        a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+        await a.compact_now()
+
+    assert seen_targets, "scrunch was never invoked"
+    budget_target = (
+        a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+    )
+    system_overhead = a.model.approx_text_tokens(system)  # 200
+    # The messages-only scrunch target must reserve the system overhead.
+    assert seen_targets[0] == budget_target - system_overhead, (
+        f"scrunch target {seen_targets[0]} did not subtract system overhead"
+        f" {system_overhead} from budget target {budget_target}"
     )
 
 

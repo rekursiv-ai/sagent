@@ -65,7 +65,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     """
     total = model.approx_text_tokens(request.system or "")
     for entry in request.messages:
-        total += _entry_tokens(entry, model)
+        total += entry_tokens(entry, model)
     for tool in request.tools or ():
         total += model.approx_text_tokens(tool.description or "")
         total += model.approx_text_tokens(
@@ -74,8 +74,15 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     return total
 
 
-def _entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
-    """Approximate tokens for one history entry across every wire surface."""
+def entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
+    """Approximate tokens for one history entry across every wire surface.
+
+    The single per-entry token estimator: tool-call id/name/args JSON,
+    thinking blocks, attachments, and text. Both request sizing
+    (:func:`approx_request_tokens`) and compaction sizing
+    (``compaction.history.estimate_entry_tokens``) route through here so
+    the two never drift.
+    """
     if isinstance(entry, (AgentSendMessage, UserMessage)):
         total = model.approx_text_tokens(entry.text)
         for att in entry.attachments:

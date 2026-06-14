@@ -37,7 +37,8 @@ from typing import Protocol
 
 import logging
 
-from sagent.compaction.history import entry_chars
+from sagent.compaction.history import estimate_entry_tokens
+from sagent.lib.token_count import entry_tokens
 from sagent.types.model import Model
 from sagent.types.runtime import (
     AssistantMessage,
@@ -59,7 +60,7 @@ __all__ = [
     "ScrunchPlan",
     "ScrunchResult",
     "ScrunchTooLargeError",
-    "entry_chars",
+    "estimate_entry_tokens",
     "plan_scrunch",
     "scrunch_to_fit",
 ]
@@ -117,9 +118,9 @@ class ScrunchResult:
     view: tuple[ModelContextEvent, ...]
 
 
-def _approx_tokens(context: Sequence[ModelContextEvent], chars_per_token: int) -> int:
-    """Estimate token count of ``context``."""
-    return sum(entry_chars(e) for e in context) // chars_per_token
+def _approx_tokens(context: Sequence[ModelContextEvent], model: Model) -> int:
+    """Estimate token count of ``context`` via the model's own tokenizer."""
+    return estimate_entry_tokens(model, context)
 
 
 def _pair_safe_boundaries(
@@ -149,42 +150,54 @@ def _pair_safe_boundaries(
 def plan_scrunch(
     *,
     context: Sequence[ModelContextEvent],
+    model: Model,
     target_input_tokens: int,
     max_partition_tokens: int,
-    chars_per_token: int = 4,
-    summary_size_estimate_chars: int = 4_000,
+    summary_size_estimate_tokens: int = 1_500,
 ) -> ScrunchPlan:
     """Compute the partition layout for a scrunch maneuver.
 
     Walks ``context`` oldest-to-newest and packs consecutive entries
-    into partitions, each capped by ``max_partition_tokens`` (the
+    into partitions, each targeting ``max_partition_tokens`` (the
     largest input the producer compactor's own ``stream`` can safely
     accept). Each partition's stop index is snapped forward to the
     next pair-safe boundary so a tool_use/tool_result pair is never
     split across partitions.
 
+    ``max_partition_tokens`` is a SOFT target, not a hard ceiling: two
+    rules may grow a partition past it -- pair-safety (a tool_use/result
+    pair straddling the cap cannot be split) and the forward-progress
+    floor (a partition must exceed ``summary_size_estimate_tokens`` or it
+    would not shrink). When either fires, ``scrunch_to_fit`` logs the
+    overshoot and proceeds; the producer compactor's own retry loop
+    shrinks oversized tool results to fit its ``stream`` call. The
+    ``summary_size_estimate_tokens < max_partition_tokens`` precondition
+    guarantees the floor alone never forces every partition past the cap.
+
     Net tokens removed per partition is estimated as
-    ``partition_chars - summary_size_estimate_chars``: each producer
+    ``partition_tokens - summary_size_estimate_tokens``: each producer
     call replaces its input with one summary of roughly that size.
     The planner stops allocating partitions once cumulative net
     removal covers the deficit ``current_total - target_input_tokens``.
     A partition smaller than the summary estimate would make no
     progress (or move backwards), so partitions are grown to a floor
-    of ``summary_size_estimate_chars + chars_per_token`` to guarantee
-    forward progress. The executor verifies the estimate after each
-    pass; the planner is allowed to over-allocate on the high side
-    without harm.
+    of ``summary_size_estimate_tokens + 1`` to guarantee forward
+    progress. The executor verifies the estimate after each pass; the
+    planner is allowed to over-allocate on the high side without harm.
+
+    Every size is measured in tokens via ``model.approx_text_tokens``;
+    there is no character intermediary.
 
     Args:
       context: Resolved messages to scrunch.
+      model: Model whose tokenizer measures partition sizes.
       target_input_tokens: Token budget the resolved view must end up
           under. Typically ``model.max_request_tokens -
           model.max_response_tokens - safety_floor``.
       max_partition_tokens: Per-partition cap. Typically
           ``model.max_request_tokens - safety_floor`` so each
           producer-compactor call fits.
-      chars_per_token: Conversion factor for the heuristic estimate.
-      summary_size_estimate_chars: Expected char count of one
+      summary_size_estimate_tokens: Expected token count of one
           producer-compactor summary. Tightens the cumulative-removed
           estimate and sets the minimum partition size (smaller
           partitions wouldn't actually reduce the resolved view).
@@ -194,24 +207,34 @@ def plan_scrunch(
           the executor will fold. Empty when ``context`` already fits.
 
     Raises:
-      ValueError: ``max_partition_tokens`` or ``chars_per_token`` not
-          positive, or ``summary_size_estimate_chars`` negative.
+      ValueError: ``max_partition_tokens`` not positive,
+          ``summary_size_estimate_tokens`` negative, or
+          ``summary_size_estimate_tokens >= max_partition_tokens``.
 
     """
     if max_partition_tokens <= 0:
         raise ValueError(
             f"max_partition_tokens must be > 0, got {max_partition_tokens}"
         )
-    if chars_per_token <= 0:
-        raise ValueError(f"chars_per_token must be > 0, got {chars_per_token}")
-    if summary_size_estimate_chars < 0:
+    if summary_size_estimate_tokens < 0:
         raise ValueError(
-            f"summary_size_estimate_chars must be >= 0, got"
-            f" {summary_size_estimate_chars}"
+            f"summary_size_estimate_tokens must be >= 0, got"
+            f" {summary_size_estimate_tokens}"
         )
-    total = _approx_tokens(context, chars_per_token)
+    total = _approx_tokens(context, model)
     if total <= target_input_tokens:
         return ScrunchPlan(partitions=())
+    if summary_size_estimate_tokens >= max_partition_tokens:
+        # The forward-progress floor grows a partition until it exceeds
+        # the summary estimate; if that floor is at or above the per-call
+        # cap, every partition is forced past the cap by construction --
+        # a degenerate config, not a runtime condition to paper over.
+        # Checked only once partitions will actually be built (past the
+        # already-fits early return).
+        raise ValueError(
+            f"summary_size_estimate_tokens ({summary_size_estimate_tokens}) must be"
+            f" < max_partition_tokens ({max_partition_tokens})"
+        )
 
     n = len(context)
     if n == 0:
@@ -222,43 +245,42 @@ def plan_scrunch(
     partitions: list[range] = []
     cumulative_removed = 0
     start = 0
-    cap_chars = max_partition_tokens * chars_per_token
     # Each partition must be larger than the summary it produces or
     # it would not reduce the resolved view. A tiny floor avoids the
     # degenerate ``len(input) == len(output)`` partition.
-    min_partition_chars = summary_size_estimate_chars + chars_per_token
+    min_partition_tokens = summary_size_estimate_tokens + 1
     while start < n:
-        remaining_deficit_chars = max(0, deficit - cumulative_removed) * chars_per_token
+        remaining_deficit = max(0, deficit - cumulative_removed)
         # Per-call cap: the tighter of producer-input cap and what we
         # still need to remove (so the planner doesn't over-allocate
         # for a small deficit). The deficit cap is widened by the
         # summary size estimate -- a partition that just barely covers
         # the deficit on its input side actually reduces the view by
         # ``input - summary_estimate``, so we need that much input.
-        partition_chars_cap = min(
-            cap_chars,
-            remaining_deficit_chars + summary_size_estimate_chars,
+        partition_tokens_cap = min(
+            max_partition_tokens,
+            remaining_deficit + summary_size_estimate_tokens,
         )
         # Enforce the minimum so a partition always makes progress.
-        partition_chars_cap = max(partition_chars_cap, min_partition_chars)
+        partition_tokens_cap = max(partition_tokens_cap, min_partition_tokens)
         # Greedy pack: extend ``stop`` as far as possible without
-        # exceeding the per-partition char cap. Always include at
+        # exceeding the per-partition token cap. Always include at
         # least one entry so the loop makes progress when even the
         # first entry alone exceeds the cap (raises downstream).
         stop = start
-        chars = 0
+        tokens = 0
         while stop < n:
-            stop_chars = entry_chars(context[stop])
-            if stop > start and chars + stop_chars > partition_chars_cap:
+            stop_tokens = entry_tokens(context[stop], model)
+            if stop > start and tokens + stop_tokens > partition_tokens_cap:
                 break
-            chars += stop_chars
+            tokens += stop_tokens
             stop += 1
         # Snap forward to a pair-safe stop. If the cap forced us to
         # break mid-pair, growing the partition here is the
         # forward-progress option; the resolver invariant guarantees
         # the matching tool_result lives within ``n``.
         while stop < n and not safe[stop]:
-            chars += entry_chars(context[stop])
+            tokens += entry_tokens(context[stop], model)
             stop += 1
         # Forward-progress floor: a partition whose input is no larger
         # than the producer's expected summary output would replace N
@@ -267,15 +289,15 @@ def plan_scrunch(
         # shrinks it, ignoring the per-call cap as needed (the
         # producer's own retry loop handles oversize input by
         # truncating tool results).
-        while stop < n and chars <= summary_size_estimate_chars:
-            chars += entry_chars(context[stop])
+        while stop < n and tokens <= summary_size_estimate_tokens:
+            tokens += entry_tokens(context[stop], model)
             stop += 1
         if stop <= start:
             break
         partitions.append(range(start, stop))
         # Net removal is partition input minus expected summary output.
-        net_removed_chars = max(0, chars - summary_size_estimate_chars)
-        cumulative_removed += net_removed_chars // chars_per_token
+        net_removed = max(0, tokens - summary_size_estimate_tokens)
+        cumulative_removed += net_removed
         if cumulative_removed >= deficit:
             break
         start = stop
@@ -310,8 +332,7 @@ async def scrunch_to_fit(
     mint_ref: Callable[[], TapeRef],
     target_input_tokens: int,
     max_partition_tokens: int,
-    chars_per_token: int = 4,
-    summary_size_estimate_chars: int = 4_000,
+    summary_size_estimate_tokens: int = 1_500,
     max_passes: int = 16,
 ) -> ScrunchResult:
     """Run partition-from-oldest scrunch passes until ``context`` fits.
@@ -350,8 +371,7 @@ async def scrunch_to_fit(
       mint_ref: Factory for fresh ``TapeRef`` values.
       target_input_tokens: Budget the resolved view must end up under.
       max_partition_tokens: Per-partition cap (per producer call).
-      chars_per_token: Conversion factor for the heuristic estimate.
-      summary_size_estimate_chars: Expected char count of one summary;
+      summary_size_estimate_tokens: Expected token count of one summary;
           passed to :func:`plan_scrunch`.
       max_passes: Safety bound on total producer calls.
 
@@ -366,12 +386,22 @@ async def scrunch_to_fit(
           summary that did not shrink the partition.
 
     """
+    if max_passes < 1:
+        raise ValueError(f"max_passes must be >= 1, got {max_passes}")
+    # Keep the summary estimate strictly below the per-call cap so the
+    # forward-progress floor cannot, by itself, force every partition past
+    # the cap (``plan_scrunch`` enforces this precondition). A tiny budget
+    # clamps the estimate rather than raising on an otherwise valid call.
+    if max_partition_tokens > 0:
+        summary_size_estimate_tokens = min(
+            summary_size_estimate_tokens, max(0, max_partition_tokens - 1)
+        )
     plan = plan_scrunch(
         context=context,
+        model=model,
         target_input_tokens=target_input_tokens,
         max_partition_tokens=max_partition_tokens,
-        chars_per_token=chars_per_token,
-        summary_size_estimate_chars=summary_size_estimate_chars,
+        summary_size_estimate_tokens=summary_size_estimate_tokens,
     )
     if not plan.partitions:
         return ScrunchResult(splices=(), view=tuple(context))
@@ -379,16 +409,16 @@ async def scrunch_to_fit(
     produced: list[ContextSplice] = []
     working_context: list[ModelContextEvent] = list(context)
     working_tape: list[TapeRecord] = list(tape)
-    last_size = _approx_tokens(working_context, chars_per_token)
+    last_size = _approx_tokens(working_context, model)
     for pass_idx in range(max_passes):
-        if _approx_tokens(working_context, chars_per_token) <= target_input_tokens:
+        if _approx_tokens(working_context, model) <= target_input_tokens:
             break
         plan = plan_scrunch(
             context=working_context,
+            model=model,
             target_input_tokens=target_input_tokens,
             max_partition_tokens=max_partition_tokens,
-            chars_per_token=chars_per_token,
-            summary_size_estimate_chars=summary_size_estimate_chars,
+            summary_size_estimate_tokens=summary_size_estimate_tokens,
         )
         if not plan.partitions:
             break
@@ -401,7 +431,7 @@ async def scrunch_to_fit(
             )
         partition_context = working_context[partition.start : partition.stop]
         partition_tape = working_tape[partition.start : partition.stop]
-        if _approx_tokens(partition_context, chars_per_token) > max_partition_tokens:
+        if _approx_tokens(partition_context, model) > max_partition_tokens:
             # Pair-safe grow forced the partition past the cap. Producer
             # may still succeed (its own retry shrinks tool results)
             # but warn so test runs see why we proceeded.
@@ -409,7 +439,7 @@ async def scrunch_to_fit(
                 "scrunch pass %d: pair-safe partition exceeds cap "
                 "(%d > %d tokens); proceeding",
                 pass_idx,
-                _approx_tokens(partition_context, chars_per_token),
+                _approx_tokens(partition_context, model),
                 max_partition_tokens,
             )
         try:
@@ -440,7 +470,12 @@ async def scrunch_to_fit(
             splice,
             *working_tape[partition.stop :],
         ]
-        new_size = _approx_tokens(working_context, chars_per_token)
+        # Progress is measured on the WHOLE resolved view, not the single
+        # partition: scrunch's contract is to shrink the total toward
+        # ``target``. A pass that shrinks its partition locally but leaves
+        # the total unchanged (or larger) is not making global progress
+        # and would spin -- the whole-view axis is the correct guard.
+        new_size = _approx_tokens(working_context, model)
         if new_size >= last_size:
             raise ScrunchTooLargeError(
                 f"scrunch pass {pass_idx}: producer summary did not"
@@ -450,10 +485,10 @@ async def scrunch_to_fit(
         last_size = new_size
     else:
         # max_passes exhausted with the context still over target.
-        if _approx_tokens(working_context, chars_per_token) > target_input_tokens:
+        if _approx_tokens(working_context, model) > target_input_tokens:
             raise ScrunchTooLargeError(
                 f"scrunch did not fit after {max_passes} passes; final"
-                f" estimate {_approx_tokens(working_context, chars_per_token)}"
+                f" estimate {_approx_tokens(working_context, model)}"
                 f" still exceeds target {target_input_tokens}",
             )
     return ScrunchResult(splices=tuple(produced), view=tuple(working_context))

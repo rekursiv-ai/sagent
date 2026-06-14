@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import cast
+from typing import cast, override
 
 import pytest
 
@@ -127,9 +127,9 @@ def test_plan_scrunch_already_fits_returns_empty_plan() -> None:
     context: list[ModelContextEvent] = [_user("x" * 40)]  # ~10 tokens
     plan = plan_scrunch(
         context=context,
+        model=_stub_model(),
         target_input_tokens=1000,
         max_partition_tokens=500,
-        chars_per_token=4,
     )
     assert plan.partitions == ()
 
@@ -140,10 +140,10 @@ def test_plan_scrunch_one_oversized_partition_returns_single_pass() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(4)]
     plan = plan_scrunch(
         context=context,
+        model=_stub_model(),
         target_input_tokens=50,
         max_partition_tokens=200,
-        chars_per_token=4,
-        summary_size_estimate_chars=10,
+        summary_size_estimate_tokens=2,
     )
     # Must produce at least one partition; first partition covers oldest.
     assert len(plan.partitions) >= 1
@@ -159,10 +159,10 @@ def test_plan_scrunch_multiple_partitions_when_budget_too_small() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(10)]
     plan = plan_scrunch(
         context=context,
+        model=_stub_model(),
         target_input_tokens=50,
         max_partition_tokens=50,
-        chars_per_token=4,
-        summary_size_estimate_chars=10,
+        summary_size_estimate_tokens=2,
     )
     assert len(plan.partitions) >= 3
     # Partitions are non-overlapping and ordered from oldest.
@@ -185,10 +185,10 @@ def test_plan_scrunch_partition_is_pair_safe_grows_to_include_tool_result() -> N
     ]
     plan = plan_scrunch(
         context=context,
+        model=_stub_model(),
         target_input_tokens=20,
         max_partition_tokens=200,
-        chars_per_token=4,
-        summary_size_estimate_chars=10,
+        summary_size_estimate_tokens=2,
     )
     assert len(plan.partitions) >= 1
     # First partition must include the AM/TR pair together (or neither).
@@ -211,10 +211,10 @@ def test_plan_scrunch_stops_allocating_once_deficit_covered() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(8)]
     plan = plan_scrunch(
         context=context,
+        model=_stub_model(),
         target_input_tokens=175,
         max_partition_tokens=500,
-        chars_per_token=4,
-        summary_size_estimate_chars=10,
+        summary_size_estimate_tokens=2,
     )
     total_covered = sum(p.stop - p.start for p in plan.partitions)
     assert total_covered < len(context), (
@@ -227,20 +227,65 @@ def test_plan_scrunch_rejects_zero_partition_cap() -> None:
     with pytest.raises(ValueError, match=r"max_partition_tokens"):
         _ = plan_scrunch(
             context=[],
+            model=_stub_model(),
             target_input_tokens=0,
             max_partition_tokens=0,
-            chars_per_token=4,
         )
 
 
-def test_plan_scrunch_rejects_zero_chars_per_token() -> None:
-    with pytest.raises(ValueError, match=r"chars_per_token"):
+def test_plan_scrunch_rejects_negative_summary_estimate() -> None:
+    with pytest.raises(ValueError, match=r"summary_size_estimate_tokens"):
         _ = plan_scrunch(
             context=[],
+            model=_stub_model(),
             target_input_tokens=0,
             max_partition_tokens=10,
-            chars_per_token=0,
+            summary_size_estimate_tokens=-1,
         )
+
+
+def test_plan_scrunch_rejects_summary_estimate_at_or_above_cap() -> None:
+    # A summary estimate >= the per-call cap forces every partition past
+    # the cap via the forward-progress floor -- a degenerate config.
+    with pytest.raises(ValueError, match=r"< max_partition_tokens"):
+        _ = plan_scrunch(
+            context=[_user("x" * 100)],
+            model=_stub_model(),
+            target_input_tokens=1,
+            max_partition_tokens=10,
+            summary_size_estimate_tokens=10,
+        )
+
+
+def test_plan_scrunch_measures_tokens_via_model_not_chars() -> None:
+    """The planner must size partitions by ``model.approx_text_tokens``,
+    not by a char count over a fixed ratio.
+
+    A model that tokenizes at 1 token per 2 chars sees a 200-char message
+    as 100 tokens; under the old ``chars // 4`` it would have been 50.
+    With ``target=60`` the 100-token message is over budget and must be
+    partitioned; a chars//4 planner would have called it already-fitting.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _HalfModel(MockModelCaps):
+        model_id: str = "half"
+        max_request_tokens: int = 200_000
+
+        @override
+        def approx_text_tokens(self, text: str) -> int:  # 2 chars/token
+            return len(text) // 2
+
+    context: list[ModelContextEvent] = [_user("x" * 200)]  # 100 tokens at 2 c/tok
+    plan = plan_scrunch(
+        context=context,
+        model=cast(Model, _HalfModel()),
+        target_input_tokens=60,
+        max_partition_tokens=500,
+        summary_size_estimate_tokens=2,
+    )
+    # 100 tokens > 60 target -> must plan a partition. chars//4 = 50 would not.
+    assert len(plan.partitions) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +307,6 @@ async def test_scrunch_to_fit_already_fits_returns_no_splices() -> None:
         mint_ref=_ref_factory(len(tape)),
         target_input_tokens=1000,
         max_partition_tokens=500,
-        chars_per_token=4,
     )
     assert result.splices == ()
     # Already-fits: the view is the input verbatim.
@@ -285,8 +329,7 @@ async def test_scrunch_to_fit_one_pass_when_one_partition_suffices() -> None:
         mint_ref=_ref_factory(len(tape)),
         target_input_tokens=50,
         max_partition_tokens=500,
-        chars_per_token=4,
-        summary_size_estimate_chars=20,
+        summary_size_estimate_tokens=5,
     )
     assert len(result.splices) >= 1
     assert len(compactor.calls) == len(result.splices)
@@ -309,8 +352,7 @@ async def test_scrunch_to_fit_returns_splices_in_order() -> None:
         mint_ref=_ref_factory(len(tape)),
         target_input_tokens=40,
         max_partition_tokens=400,
-        chars_per_token=4,
-        summary_size_estimate_chars=20,
+        summary_size_estimate_tokens=5,
     )
     refs = [s.ref.ordinal for s in result.splices]
     assert refs == sorted(refs)
@@ -331,8 +373,7 @@ async def test_scrunch_to_fit_stops_early_once_fits() -> None:
         mint_ref=_ref_factory(len(tape)),
         target_input_tokens=500,
         max_partition_tokens=2_000,
-        chars_per_token=4,
-        summary_size_estimate_chars=10,
+        summary_size_estimate_tokens=2,
     )
     # We don't pin an exact count; we pin "fewer than the worst case".
     assert len(result.splices) < len(context)
@@ -373,8 +414,7 @@ async def test_scrunch_to_fit_view_matches_flat_fold_across_passes() -> None:
         mint_ref=_ref_factory(len(tape)),
         target_input_tokens=100,
         max_partition_tokens=400,
-        chars_per_token=4,
-        summary_size_estimate_chars=20,
+        summary_size_estimate_tokens=5,
     )
     # Multiple passes ran (the fold needed more than one partition).
     assert len(result.splices) >= 2, (
@@ -429,7 +469,6 @@ async def test_scrunch_to_fit_raises_when_producer_overflows() -> None:
             mint_ref=_ref_factory(len(tape)),
             target_input_tokens=200,
             max_partition_tokens=200,
-            chars_per_token=4,
         )
 
 
@@ -454,9 +493,42 @@ async def test_scrunch_to_fit_raises_when_summary_does_not_shrink() -> None:
             mint_ref=_ref_factory(len(tape)),
             target_input_tokens=50,
             max_partition_tokens=500,
-            chars_per_token=4,
-            summary_size_estimate_chars=20,
+            summary_size_estimate_tokens=5,
         )
+
+
+@pytest.mark.asyncio
+async def test_scrunch_to_fit_rejects_zero_max_passes() -> None:
+    with pytest.raises(ValueError, match=r"max_passes"):
+        _ = await scrunch_to_fit(
+            context=[_user("x" * 100)],
+            tape=_tape_from([_user("x" * 100)]),
+            model=_stub_model(),
+            compactor=_SizedCompactor(),
+            mint_ref=_ref_factory(1),
+            target_input_tokens=1,
+            max_partition_tokens=500,
+            max_passes=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_scrunch_to_fit_clamps_summary_estimate_below_cap() -> None:
+    # Default summary estimate (1500) exceeds a tiny per-call cap; the
+    # executor clamps it rather than raising the planner precondition.
+    context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(4)]
+    tape = _tape_from(context)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=_SizedCompactor(summary_chars=4),
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=10,
+        max_partition_tokens=30,  # < default summary_size_estimate_tokens (1500)
+    )
+    # No ValueError; scrunch ran and produced at least one splice.
+    assert len(result.splices) >= 1
 
 
 if __name__ == "__main__":

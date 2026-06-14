@@ -39,12 +39,21 @@ class _FakeRuntime:
 
 
 @dataclass(slots=True, kw_only=True)
+class _FakeModel:
+    """Model stub: ``approx_text_tokens`` at 4 chars/token (truncating)."""
+
+    def approx_text_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+
+@dataclass(slots=True, kw_only=True)
 class _FakeAgent:
     """Minimal stand-in for ``Agent`` matching only the surface the status pane reads."""
 
     activity: ActivityTracker = field(default_factory=ActivityTracker)
     cost_tracker: _FakeCostTracker = field(default_factory=_FakeCostTracker)
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+    model: _FakeModel = field(default_factory=_FakeModel)
     budget: ContextBudget = field(
         default_factory=lambda: ContextBudget(
             max_request_tokens=200_000,
@@ -98,8 +107,8 @@ def _agent(**overrides: object) -> _FakeAgent:
             a.activity.current_call_start = cast(float, v)
         elif k == "current_compact_start":
             a.activity.current_compact_start = cast(float, v)
-        elif k == "live_response_chars":
-            a.activity.live_response_chars = cast(int, v)
+        elif k == "live_response_text":
+            a.activity.live_response_text = cast(str, v)
         elif k == "compact_task":
             a.runtime.compact_task = v
         elif k == "service_suspended_until":
@@ -188,6 +197,8 @@ def test_active_prefixes_spinner() -> None:
 
 @pytest.mark.usefixtures("patched_loop_time")
 def test_active_includes_live_output_estimate() -> None:
+    # The status pane tokenizes the streamed text as a whole and adds it
+    # to the settled output total while active (1000 chars // 4 = 250).
     a = _agent(
         active=True,
         current_call_start=0.0,
@@ -195,7 +206,7 @@ def test_active_includes_live_output_estimate() -> None:
         input_tokens=100,
         output_tokens=500,
         total_cost_usd=0.10,
-        live_response_chars=1000,  # / 4 chars_per_token = 250 tokens added
+        live_response_text="x" * 1000,
     )
     s = render_status_pane(_as_agent(a))
     assert "750↓" in s
@@ -208,7 +219,7 @@ def test_idle_ignores_live_output_estimate() -> None:
         input_tokens=100,
         output_tokens=500,
         total_cost_usd=0.10,
-        live_response_chars=1000,
+        live_response_text="x" * 1000,
     )
     s = render_status_pane(_as_agent(a))
     assert "500↓" in s
