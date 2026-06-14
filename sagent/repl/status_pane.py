@@ -55,7 +55,7 @@ def render_status_pane(agent: Agent) -> str:
     # model-call boundary; the discrepancy snaps back in at each
     # ``ModelResponseComplete``.
     live_response_tokens = (
-        activity.live_response_chars // agent.budget.chars_per_token
+        agent.model.approx_text_tokens(activity.live_response_text)
         if activity.active
         else 0
     )

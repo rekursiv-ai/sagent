@@ -1099,11 +1099,9 @@ class ChildStats:
     start: float
     """Monotonic clock seconds when the child run began."""
 
-    model_response_tokens: int = 0
-    """Approximate response tokens streamed so far."""
-
-    model_response_chars: int = 0
-    """Response characters streamed so far (drives the token estimate)."""
+    model_response_text: str = ""
+    """Response text streamed so far. Tokenized as a whole by readers so
+    sub-token chunk boundaries don't floor to zero."""
 
     cost_usd: float = 0.0
     """Running cost in USD attributed to the child."""
@@ -1201,8 +1199,9 @@ class _ChildForwarder:
             )
             return
         if isinstance(event, ModelResponsePartial):
-            self._stats.model_response_chars += len(event.text)
-            self._stats.model_response_tokens = self._stats.model_response_chars // 4
+            # Accumulate raw text; tokenize the whole at emit_done so a
+            # chunk shorter than one token does not floor to zero.
+            self._stats.model_response_text += event.text
         always_forward = isinstance(event, _ALWAYS_FORWARD_TYPES) or (
             isinstance(event, ToolResult) and event.is_error
         )
@@ -1218,7 +1217,9 @@ class _ChildForwarder:
             ChildDoneEvent(
                 label=self._label,
                 elapsed=elapsed,
-                tokens=self._stats.model_response_tokens,
+                tokens=self._child.model.approx_text_tokens(
+                    self._stats.model_response_text
+                ),
                 cost=self._stats.cost_usd,
             ),
         )

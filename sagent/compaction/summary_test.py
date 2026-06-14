@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from sagent.agent.context import resolve_context
+from sagent.compaction.history import estimate_entry_tokens
 from sagent.compaction.summary import (
     SummaryCompactor,
     _attach_markers,
@@ -255,13 +256,13 @@ def test_should_compact_compression_reserves_response() -> None:
 def test_should_compact_default_no_token_constant() -> None:
     """Rule: ``body >= u*(W-S)/(1+c*u)``; every term proportional.
 
-    Defaults u=0.95, c=0.075. On a 1M window, system=0:
-    threshold = 0.95 * 1_000_000 / (1 + 0.075*0.95) = 950_000 / 1.07125
-    = 886_814.47 -> fires at body >= 886_814.47, i.e. current >= 886_815.
+    Defaults u=0.95, c=0.01. On a 1M window, system=0:
+    threshold = 0.95 * 1_000_000 / (1 + 0.01*0.95) = 950_000 / 1.0095
+    = 941_059.93 -> fires at body >= 941_059.93, i.e. current >= 941_060.
     """
     compactor = SummaryCompactor()
-    assert compactor.should_compact(886_815, 1_000_000, 0) is True
-    assert compactor.should_compact(886_814, 1_000_000, 0) is False
+    assert compactor.should_compact(941_060, 1_000_000, 0) is True
+    assert compactor.should_compact(941_059, 1_000_000, 0) is False
 
 
 def test_should_compact_buffer_adds_live_slack() -> None:
@@ -1345,6 +1346,98 @@ def test_drop_orphan_tool_results_buffers_agent_send_until_tool_turn_closes() ->
     assert tr2 in out
     assert out.index(am) < out.index(asm)
     assert out.index(tr2) < out.index(asm)
+
+
+# --- token_before/token_after must use the model's estimator, not chars//4 --
+
+
+@dataclass(slots=True, kw_only=True)
+class _RatioModel(_ScriptedModel):
+    """Model whose token estimator is ``len(text) // ratio_divisor``.
+
+    Lets a test distinguish a model-derived token count from the
+    compactor's hardcoded ``chars_per_token=4``: pick a divisor != 4 and
+    the two diverge.
+    """
+
+    ratio_divisor: int = 2
+
+    @override
+    def approx_text_tokens(self, text: str) -> int:
+        return len(text) // self.ratio_divisor
+
+
+def _real_tokens(model: Model, entries: list[ModelContextEvent]) -> int:
+    """Model's token estimate of ``entries`` via the production helper."""
+    return estimate_entry_tokens(model, entries)
+
+
+@pytest.mark.asyncio
+async def test_compact_token_before_uses_model_estimator_not_chars4() -> None:
+    """``token_before`` must reflect the model's tokenizer, not ``chars//4``.
+
+    The displayed ``[compaction complete: ~N tokens]`` and the
+    ``ContextSplice.token_before`` both flow from this value. A model at
+    2 chars/token over an 800-char history yields ~400 tokens; the
+    hardcoded ``chars_per_token=4`` yields ~200 -- the wrong unit scaled
+    by the wrong ratio.
+    """
+    body = "summary body"
+    model = _RatioModel(
+        ratio_divisor=2,
+        stream_responses=[_summary_resp(body)],
+    )
+    history: list[ModelContextEvent] = [
+        UserMessage(text="u" * 400),
+        AssistantMessage(text="a" * 400),
+    ]
+    compactor = SummaryCompactor()
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary"
+    # Model estimate of the summarized history (~400 tok), not chars//4 (~200).
+    expected = _real_tokens(model, history)
+    assert override.token_before == expected
+
+
+@pytest.mark.asyncio
+async def test_compact_token_after_uses_model_estimator_not_chars4() -> None:
+    """``token_after`` (injected payload size) must use the model estimator."""
+    body = "summary body"
+    model = _RatioModel(
+        ratio_divisor=2,
+        stream_responses=[_summary_resp(body)],
+    )
+    history: list[ModelContextEvent] = [
+        UserMessage(text="u" * 400),
+        AssistantMessage(text="a" * 400),
+    ]
+    compactor = SummaryCompactor()
+    override = await _build_compact_override(compactor, history, model)
+    expected = _real_tokens(model, list(override.payload))
+    assert override.token_after == expected
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_token_before_uses_model_estimator() -> None:
+    """The fallback splice's ``token_before`` must also use the estimator.
+
+    A missing ``<summary>`` routes through ``_build_fallback_splice``;
+    its reported pre-compaction size must match the model's tokenizer so
+    the observability number is consistent with the success path.
+    """
+    model = _RatioModel(
+        ratio_divisor=2,
+        stream_responses=[ModelResponse(message=AssistantMessage(text="no tag here"))],
+    )
+    history: list[ModelContextEvent] = [
+        UserMessage(text="u" * 400),
+        AssistantMessage(text="a" * 400),
+    ]
+    compactor = SummaryCompactor()
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary_fallback"
+    expected = _real_tokens(model, history)
+    assert override.token_before == expected
 
 
 if __name__ == "__main__":

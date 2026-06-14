@@ -459,7 +459,11 @@ class Model(Protocol):
     def approx_text_tokens(self, text: str) -> int:
         """Cheap local estimate of input tokens for a text string.
 
-        Synchronous; no I/O. Uses ``chars_per_token`` or a local heuristic.
+        Synchronous; no I/O. The chars-per-token ratio (or a real
+        tokenizer) is a provider-internal detail. Consumers must call
+        this for any token estimate and must NOT divide a character count
+        by a ratio of their own -- that mislabels chars as tokens and
+        breaks for non-linear tokenizers.
 
         Args:
           text: Text to score.
