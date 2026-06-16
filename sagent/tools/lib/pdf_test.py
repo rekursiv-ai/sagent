@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import io
+import threading
 
 from PIL import Image
 
@@ -147,3 +148,42 @@ def test_extracted_jpeg_is_decodable(tmp_path: Path) -> None:
     # 1-inch page rendered at 144 DPI → ~144x144 px.
     assert 100 <= img.width <= 200
     assert 100 <= img.height <= 200
+
+
+def test_concurrent_extract_does_not_corrupt_heap(tmp_path: Path) -> None:
+    """Many threads rasterizing distinct PDFs at once must not crash.
+
+    PDFium's C core is not thread-safe; before ``_PDFIUM_LOCK`` serialized
+    every entry point, the ``Read`` tool's ``asyncio.to_thread`` dispatch
+    let batched PDF reads race and double-free the native heap ("double
+    free or corruption", tcmalloc abort). A lock-free regression aborts
+    the whole interpreter, so a green run is the proof.
+    """
+    # Distinct files (separate dirs) so threads don't share a doc handle.
+    paths: list[Path] = []
+    for i in range(8):
+        d = tmp_path / f"doc{i}"
+        d.mkdir()
+        paths.append(_make_pdf(d, 3))
+
+    errors: list[BaseException] = []
+    results: list[int] = []
+
+    def work(p: Path) -> None:
+        try:
+            for _ in range(4):
+                pages = extract_pdf_pages(p, first=1, last=3)
+                assert len(pages) == 3
+                assert get_pdf_page_count(p) == 3
+                results.append(len(pages))
+        except BaseException as e:  # noqa: BLE001 -- surface any thread fault to the assert below
+            errors.append(e)
+
+    threads = [threading.Thread(target=work, args=(p,)) for p in paths]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert len(results) == len(paths) * 4

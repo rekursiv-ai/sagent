@@ -12,8 +12,18 @@ from typing import TYPE_CHECKING
 
 import io
 import re
+import threading
 
 import pypdfium2 as pdfium
+
+
+# PDFium's C core is not thread-safe: its library-init and allocator state
+# are process-global, so concurrent open/render from different threads race
+# and double-free the native heap ("double free or corruption", tcmalloc
+# abort). The Read tool runs each call in its own thread (asyncio.to_thread)
+# and the model batches PDF reads, so this lock serializes every PDFium
+# entry point -- held across open->render->close, not just open.
+_PDFIUM_LOCK = threading.Lock()
 
 
 if TYPE_CHECKING:
@@ -83,14 +93,15 @@ def get_pdf_page_count(path: Path) -> int | None:
     """Page count, or ``None`` if the file is unreadable as PDF."""
     if not is_pdf(path):
         return None
-    try:
-        doc = _open(path)
-    except PdfError:
-        return None
-    try:
-        return len(doc)
-    finally:
-        doc.close()
+    with _PDFIUM_LOCK:
+        try:
+            doc = _open(path)
+        except PdfError:
+            return None
+        try:
+            return len(doc)
+        finally:
+            doc.close()
 
 
 def extract_pdf_pages(
@@ -104,29 +115,30 @@ def extract_pdf_pages(
     page. Returns one JPEG byte string per page in range. Raises
     :class:`PdfError` on out-of-range, unsupported, or invalid input.
     """
-    doc = _open(path)
-    try:
-        n_pages = len(doc)
-        if n_pages == 0:
-            raise PdfError("PDF has no pages")
-        lo = 1 if first is None else first
-        hi = n_pages if last is None else min(last, n_pages)
-        if lo < 1 or lo > n_pages:
-            raise PdfError(f"page {lo} out of range (PDF has {n_pages} page(s))")
-        if hi < lo:
-            raise PdfError(f"empty page range {lo}-{hi}")
-        out: list[bytes] = []
-        for i in range(lo - 1, hi):
-            page = doc[i]
-            try:
-                bitmap = page.render(scale=_RENDER_SCALE)
-                pil = bitmap.to_pil()
-                out.append(_encode_jpeg(pil))
-            finally:
-                page.close()
-        return out
-    finally:
-        doc.close()
+    with _PDFIUM_LOCK:
+        doc = _open(path)
+        try:
+            n_pages = len(doc)
+            if n_pages == 0:
+                raise PdfError("PDF has no pages")
+            lo = 1 if first is None else first
+            hi = n_pages if last is None else min(last, n_pages)
+            if lo < 1 or lo > n_pages:
+                raise PdfError(f"page {lo} out of range (PDF has {n_pages} page(s))")
+            if hi < lo:
+                raise PdfError(f"empty page range {lo}-{hi}")
+            out: list[bytes] = []
+            for i in range(lo - 1, hi):
+                page = doc[i]
+                try:
+                    bitmap = page.render(scale=_RENDER_SCALE)
+                    pil = bitmap.to_pil()
+                    out.append(_encode_jpeg(pil))
+                finally:
+                    page.close()
+            return out
+        finally:
+            doc.close()
 
 
 def _encode_jpeg(img: Image.Image) -> bytes:
