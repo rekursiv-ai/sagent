@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import gzip
 import hashlib
 import json
 import logging
@@ -306,3 +307,42 @@ def search(
     ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e
     raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime
+
+
+def _refresh_gsa_useragents() -> None:
+    """Regenerate the User-Agent pool from upstream source data.
+
+    Downloads the upstream user-agent dataset (a gzipped JSON array of
+    ``{"userAgent": ...}`` records) and rewrites ``gsa_useragents.txt``.
+
+    Run via ``python -m sagent.lib.web.search`` (scheduled in CI).
+    """
+    url = (
+        "https://raw.githubusercontent.com/intoli/user-agents/"
+        "main/src/user-agents.json.gz"
+    )
+    raw = gzip.decompress(fetch(url, timeout_sec=30))
+    records = json.loads(raw)
+    selected: set[str] = set()
+    for record in records:
+        ua = record.get("userAgent", "") if isinstance(record, dict) else ""
+        if (
+            "Android" in ua
+            and "Chrome" in ua
+            and "Samsung" not in ua
+            and "Android 10; K" not in ua
+        ):
+            selected.add(ua)
+    if not selected:
+        raise RuntimeError(
+            f"refresh produced 0 user agents from {url}; upstream shape changed?",
+        )
+    text = "\n".join(sorted(selected)) + "\n"
+    _GSA_USERAGENTS_PATH.write_text(text)
+    _get_gsa_useragents.cache_clear()
+    logger.info("wrote %d user agents to %s", len(selected), _GSA_USERAGENTS_PATH)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    _refresh_gsa_useragents()
