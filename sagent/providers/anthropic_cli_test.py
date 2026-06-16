@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 
 import pytest
 
@@ -31,10 +32,9 @@ from sagent.providers.anthropic_cli import (
     _is_event_retryable,
     _round_context_tokens,
     _serialize_for_stdin,
-    _session_jsonl_exists,
+    _session_jsonl_path,
     _user_line,
 )
-from sagent.providers.anthropic_cli_session import session_jsonl_path
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.subproc import (
     Subproc,
@@ -373,22 +373,18 @@ def test_model_session_id_initialises_session_persistent_mode() -> None:
     assert m_stateless._hot_spare is not None
 
 
-def test_session_jsonl_exists_is_cwd_aware(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The resume-vs-mint probe only sees sessions under THIS cwd's
-    encoded project dir.
+def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
+    """The session path is keyed by THIS cwd's encoded project dir.
 
     Claude indexes sessions per encoded-cwd project dir and ``--resume``
-    cannot reach across. The probe used to glob across ALL project dirs,
-    which broke the moment two deployments derived the same
-    deterministic per-role uuid: live repro 2026-06-09 — a second
-    server instance launched from a scratch cwd found the primary
-    deployment's JSONL via the glob, chose ``--resume``, and claude
-    exited ``No conversation found``, wedging warmup for all five
-    agents.
+    cannot reach across. The path encoding maps every non-``[A-Za-z0-9-]``
+    char of the RESOLVED cwd to ``-``, so two different cwds produce two
+    different project dirs: live repro 2026-06-09 — a second server
+    instance launched from a scratch cwd resumed the primary
+    deployment's JSONL and claude exited ``No conversation found``,
+    wedging warmup for all five agents.
     """
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    h = tmp_path / "home"
     sid = "deadbeef-1234-5678-9abc-deadbeef1234"
 
     cwd_a = tmp_path / "deploy-a"
@@ -396,15 +392,14 @@ def test_session_jsonl_exists_is_cwd_aware(
     cwd_a.mkdir()
     cwd_b.mkdir()
 
-    # Record a session under deploy-a's encoded dir only.
-    jsonl_a = session_jsonl_path(sid, cwd=cwd_a)
-    jsonl_a.parent.mkdir(parents=True, exist_ok=True)
-    jsonl_a.write_text("{}\n")
+    path_a = _session_jsonl_path(sid, cwd=cwd_a, home=h)
+    path_b = _session_jsonl_path(sid, cwd=cwd_b, home=h)
 
-    monkeypatch.chdir(cwd_a)
-    assert _session_jsonl_exists(sid) is True  # same cwd → resume
-    monkeypatch.chdir(cwd_b)
-    assert _session_jsonl_exists(sid) is False  # other cwd → fresh session
+    # Different cwds -> different encoded project dirs -> different paths.
+    assert path_a != path_b
+
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(cwd_a.resolve()))
+    assert path_a == h / ".claude" / "projects" / encoded / f"{sid}.jsonl"
 
 
 def test_user_line_text_only() -> None:
@@ -444,34 +439,18 @@ def test_anthropic_subprocess_env_skip_history_off_when_persistent(
     assert "CLAUDE_CODE_SKIP_PROMPT_HISTORY" not in env
 
 
-def test_anthropic_subprocess_env_disables_autocompact_in_materialize_mode(
+def test_anthropic_subprocess_env_always_disables_autocompact(
     tmp_path: Path,
 ) -> None:
-    """v2.1-α: ``materialize_session=True`` must disable claude's auto-compact.
+    """Auto-compact is disabled in both session and stateless modes.
 
-    Rationale: in materialize mode sagent's tape is the source of truth
-    and overwrites the on-disk JSONL each turn. If claude auto-compacts
-    mid-session, it writes a ``system/compact_boundary`` to the file
-    that sagent's tape doesn't carry. The next materialize-overwrite
-    cycle would clobber claude's compaction, restoring the full
-    pre-compaction history and re-triggering the blocking_limit. So we
-    suppress claude's compactor and rely on sagent's own (which
-    records compactions as ``ContextSplice`` on the tape, which the
-    materializer renders as the resolved view).
+    Sagent owns history in both modes, so claude's own compactor (which
+    would write a ``system/compact_boundary`` to a file sagent
+    overwrites next turn) must stay off.
     """
-    # v2 baseline: session-persistent + NOT materialize → auto-compact ENABLED
-    env_v2 = _anthropic_subprocess_env(
-        tmp_path, persist_session=True, materialize_session=False
-    )
-    assert "DISABLE_AUTO_COMPACT" not in env_v2
+    env_persistent = _anthropic_subprocess_env(tmp_path, persist_session=True)
+    assert env_persistent.get("DISABLE_AUTO_COMPACT") == "1"
 
-    # v2.1-α: session-persistent + materialize → auto-compact DISABLED
-    env_v21 = _anthropic_subprocess_env(
-        tmp_path, persist_session=True, materialize_session=True
-    )
-    assert env_v21.get("DISABLE_AUTO_COMPACT") == "1"
-
-    # Stateless mode (regardless of materialize flag) always disables
     env_stateless = _anthropic_subprocess_env(tmp_path, persist_session=False)
     assert env_stateless.get("DISABLE_AUTO_COMPACT") == "1"
 
@@ -612,32 +591,6 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     assert model._last_input_tokens == 96_003
 
 
-def test_seed_session_marks_prefix_synced() -> None:
-    """``seed_session``: the rehydration handshake after ``replay_tape``.
-
-    Declares the on-disk session JSONL already holds the first N tape
-    entries, so the next spawn resumes with ``--resume`` instead of
-    minting a new session, and the prefix is not re-fed via stdin.
-    Public API so host applications (e.g. the blackjax-ai-devs-channel
-    example) never touch provider-private attributes. No-op in
-    stateless mode.
-    """
-    provider = AnthropicCLI()
-    seeded = provider.model(
-        "claude-haiku-4-5",
-        session_id="deadbeef-1234-5678-9abc-deadbeef1234",
-    )
-    assert seeded.session_id == "deadbeef-1234-5678-9abc-deadbeef1234"
-    seeded.seed_session(42)
-    assert seeded._last_sent_index == 42
-    assert seeded._session_initialized is True
-
-    stateless = provider.model("claude-haiku-4-5")
-    assert stateless.session_id is None
-    stateless.seed_session(42)  # no session to seed → no-op
-    assert stateless._last_sent_index == 0
-
-
 def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
     """``AnthropicCLI.model(subprocess_read_timeout_sec=…)`` plumbs to the model.
 
@@ -702,9 +655,10 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # (``_last_sent_index == 2``, on-disk session JSONL present).
     model._last_sent_index = 2
     model._session_initialized = True
-    proj_dir = tmp_path / ".claude" / "projects" / "-some-cwd"
-    proj_dir.mkdir(parents=True)
-    jsonl = proj_dir / f"{sid}.jsonl"
+    # Place the JSONL where the provider computes the path: the resolved
+    # cwd encoded into the project dir, under the tmp HOME.
+    jsonl = _session_jsonl_path(sid, cwd=Path.cwd(), home=tmp_path)
+    jsonl.parent.mkdir(parents=True, exist_ok=True)
     jsonl.write_text("{}\n", encoding="utf-8")
     assert jsonl.exists()
 
@@ -967,51 +921,6 @@ def test_is_retryable_provider_error_session_persistent_only(
 
     # Random Exception that isn't a subprocess error: never retried.
     assert persistent.is_retryable_provider_error(RuntimeError("oops")) is False
-
-
-def test_model_session_initialized_probes_disk_at_construction(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Host-application restart should pick up prior conversations
-    transparently: at construction time the provider probes for the
-    session JSONL under THIS cwd's encoded project dir and sets
-    ``_session_initialized = True`` on a hit -- so the first spawn
-    uses ``--resume`` (not ``--session-id``, which would error with
-    "Session ID is already in use"). The probe is cwd-aware: a JSONL
-    for the same uuid under a DIFFERENT cwd's project dir must not
-    count (claude's ``--resume`` can't see it; see
-    ``test_session_jsonl_exists_is_cwd_aware``).
-    """
-    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
-    other = "1c0705bd-ecf6-55a2-91cc-9d519e9ca6f6"
-
-    # Stage 1: empty $HOME -> session_initialized is False.
-    monkeypatch.setenv("HOME", str(tmp_path))
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
-    monkeypatch.chdir(workdir)
-    provider = AnthropicCLI()
-    model = provider.model("claude-haiku-4-5", session_id=sid)
-    assert model._session_initialized is False
-
-    # Stage 2: drop a session JSONL for OUR sid under THIS cwd's
-    # encoded project dir -> session_initialized flips to True.
-    ours = session_jsonl_path(sid, cwd=workdir)
-    ours.parent.mkdir(parents=True, exist_ok=True)
-    ours.write_text("{}\n", encoding="utf-8")
-    model = provider.model("claude-haiku-4-5", session_id=sid)
-    assert model._session_initialized is True
-
-    # Stage 3: jsonl exists for a DIFFERENT uuid but not ours -> still False.
-    other_jsonl = session_jsonl_path(other, cwd=workdir)
-    other_jsonl.write_text("{}\n", encoding="utf-8")
-    ours.unlink()
-    model = provider.model("claude-haiku-4-5", session_id=sid)
-    assert model._session_initialized is False
-
-    # Stage 4: stateless mode (session_id=None) is always False.
-    model = provider.model("claude-haiku-4-5")
-    assert model._session_initialized is False
 
 
 def test_anthropic_subprocess_env_inherits_real_home_when_tmpdir_none() -> None:
@@ -1936,10 +1845,10 @@ def test_serialize_for_stdin_user_passthrough() -> None:
     assert line["type"] == "user"
 
 
-def test_cancel_in_flight_returns_false_when_no_active_subprocess(
+def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No active hot-spare ⇒ ``cancel_in_flight`` returns False without raising."""
+    """No active hot-spare ⇒ ``_interrupt_active_proc`` returns False without raising."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
     monkeypatch.setattr(
@@ -1950,13 +1859,13 @@ def test_cancel_in_flight_returns_false_when_no_active_subprocess(
     # Hot spare has not been acquired -> ``active`` is None.
     assert model._hot_spare is not None
     assert model._hot_spare.active is None
-    assert model.cancel_in_flight() is False
+    assert model._interrupt_active_proc() is False
 
 
-def test_cancel_in_flight_signals_active_subprocess(
+def test_interrupt_active_proc_signals_active_subprocess(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Active hot-spare ⇒ ``cancel_in_flight`` forwards to ``Subproc.interrupt``."""
+    """Active hot-spare ⇒ ``_interrupt_active_proc`` forwards to ``Subproc.interrupt``."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
     monkeypatch.setattr(
@@ -1975,7 +1884,7 @@ def test_cancel_in_flight_signals_active_subprocess(
 
     fake = _FakeActiveSubproc()
     monkeypatch.setattr(model._hot_spare, "_active", fake)
-    assert model.cancel_in_flight() is True
+    assert model._interrupt_active_proc() is True
     assert fake.interrupt_calls == 1
 
 

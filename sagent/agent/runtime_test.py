@@ -7249,27 +7249,37 @@ def test_runtime_has_no_dead_system_param() -> None:
 
 
 # ----------------------------------------------------------------------
-# preempt_in_flight: provider-side cancel on mid-stream peer messages.
+# preempt_in_flight: task-cancel on mid-stream peer messages.
 #
-# These tests cover the runtime branch added for CLI-driven providers
-# (AnthropicCLI / GoogleCLI) whose tool loop runs opaquely inside a
-# subprocess. ``_stop_all_tools`` has no cohort entries to act on for
-# those providers, so the only mid-turn cancellation surface is
-# ``model.cancel_in_flight()`` (provider-side SIGINT).
+# The runtime cancels the ``model_call`` task (``_cancel_model_call`` ->
+# ``self.model_call.cancel()``), which propagates ``asyncio.CancelledError``
+# into the awaited ``model.stream(...)``. ``_stream_and_post`` catches it
+# and publishes ``ModelResponseCancelled``; the buffered urgent message
+# then drains into history. No provider-specific cancel method exists --
+# cancellation is the universal primitive (``runtime.py``
+# ``_cancel_model_call``).
 # ----------------------------------------------------------------------
 
 
 @dataclass(kw_only=True, slots=True)
 class _CancellableBlockingModel:
-    """Model that blocks until cancelled; records cancel_in_flight calls."""
+    """Model that blocks until its ``stream`` receives ``CancelledError``.
 
-    cancel_calls: list[float] = field(default_factory=list)
+    Records the cancellation so tests can assert the runtime's task-cancel
+    propagated into ``stream``. The second ``stream`` call (issued after
+    the buffered urgent message drains) completes naturally.
+    """
+
+    stream_cancelled_count: int = field(default=0, init=False)
     started: asyncio.Event = field(default_factory=asyncio.Event)
-    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     _final: AssistantMessage = field(
         default_factory=lambda: AssistantMessage(text="after-resume")
     )
     _first_call: bool = field(default=True, init=False)
+
+    @property
+    def stream_was_cancelled(self) -> bool:
+        return self.stream_cancelled_count > 0
 
     async def stream(
         self,
@@ -7282,30 +7292,25 @@ class _CancellableBlockingModel:
             self._first_call = False
             self.started.set()
             try:
-                # Long sleep simulates an in-flight CLI turn that only
-                # exits when cancel_in_flight propagates a transport
-                # error from the subprocess. In the test the cancel sets
-                # ``self.cancelled``, which we use here to exit early.
-                await asyncio.wait_for(self.cancelled.wait(), timeout=10.0)
-            except TimeoutError:
-                pytest.fail("cancel was never observed; preempt branch did not fire")
-            raise RuntimeError("simulated provider transport error after SIGINT")
+                # Block as an in-flight turn would. The runtime cancels the
+                # model_call task, raising CancelledError out of this await.
+                await asyncio.sleep(10.0)
+            except asyncio.CancelledError:
+                self.stream_cancelled_count += 1
+                raise
+            raise RuntimeError("stream completed without being cancelled")
         # Second turn after preempt drains the queued message.
         for ch in self._final.text:
             on_text(ch)
         return self._final
 
-    def cancel_in_flight(self) -> bool:
-        self.cancel_calls.append(asyncio.get_running_loop().time())
-        self.cancelled.set()
-        return True
-
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_calls_cancel_on_urgent_agent_send_mid_stream() -> None:
-    """``urgent=True`` AgentSendMessage mid-stream triggers
-    ``model.cancel_in_flight`` when ``preempt_in_flight=True``.
+async def test_preempt_in_flight_cancels_stream_on_urgent_agent_send_mid_stream() -> None:
+    """``urgent=True`` AgentSendMessage mid-stream cancels the model_call
+    task -- propagating ``CancelledError`` into ``model.stream`` -- when
+    ``preempt_in_flight=True``.
 
     Updated 2026-06-04: prior behaviour preempted every
     ``AgentSendMessage``; empirically ~72% of those preempts were
@@ -7335,8 +7340,8 @@ async def test_preempt_in_flight_calls_cancel_on_urgent_agent_send_mid_stream() 
         send_correction(),
     )
 
-    assert len(model.cancel_calls) == 1, (
-        f"expected exactly one cancel_in_flight call, got {len(model.cancel_calls)}"
+    assert model.stream_cancelled_count == 1, (
+        f"expected stream cancelled exactly once, got {model.stream_cancelled_count}"
     )
     # The queued correction must have drained into history.
     sends = [m for m in agent.context().messages if isinstance(m, AgentSendMessage)]
@@ -7364,12 +7369,13 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
     cancellation needed) -- the goal is to demonstrate the routine
     message DIDN'T preempt, not that it survived a preempt.
     """
-    cancel_calls: list[float] = []
     started = asyncio.Event()
 
     @dataclass(kw_only=True, slots=True)
     class _NaturalCompletionModel:
-        """Completes after a short sleep; records any cancel calls."""
+        """Completes after a short sleep; records stream cancellation."""
+
+        stream_cancelled: bool = field(default=False, init=False)
 
         async def stream(
             self,
@@ -7380,17 +7386,17 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
             del history, on_thinking
             started.set()
             # 1s window for the routine inbound to arrive + be processed
-            # by the drain loop. If preempt-on-routine fires, cancel_calls
-            # would record it (and we'd want the assertion below to
-            # catch the regression).
-            await asyncio.sleep(1.0)
+            # by the drain loop. If preempt-on-routine fires, the model_call
+            # task would be cancelled and CancelledError would surface here
+            # (recorded below for the regression assertion).
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                self.stream_cancelled = True
+                raise
             for ch in "ok":
                 on_text(ch)
             return AssistantMessage(text="ok")
-
-        def cancel_in_flight(self) -> bool:
-            cancel_calls.append(0.0)
-            return True
 
     model = _NaturalCompletionModel()
     agent = agent_runtime.AgentRuntime(model=model, preempt_in_flight=True)
@@ -7413,9 +7419,9 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
         send_routine(),
     )
 
-    assert len(cancel_calls) == 0, (
-        f"routine (urgent=False) AgentSendMessage should NOT call "
-        f"cancel_in_flight; got {len(cancel_calls)} calls"
+    assert not model.stream_cancelled, (
+        "routine (urgent=False) AgentSendMessage should NOT cancel the "
+        "model stream"
     )
     # The buffered routine message must still reach history.
     sends = [m for m in agent.context().messages if isinstance(m, AgentSendMessage)]
@@ -7426,8 +7432,8 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_calls_cancel_on_user_message_mid_stream() -> None:
-    """``UserMessage`` mid-stream triggers cancel when ``preempt_in_flight=True``.
+async def test_preempt_in_flight_cancels_stream_on_user_message_mid_stream() -> None:
+    """``UserMessage`` mid-stream cancels the model stream when ``preempt_in_flight=True``.
 
     Default ``UserMessage.urgent=True`` preserves the historical
     behaviour: tests + internal sagent callers that construct a
@@ -7448,7 +7454,11 @@ async def test_preempt_in_flight_calls_cancel_on_user_message_mid_stream() -> No
         type_correction(),
     )
 
-    assert len(model.cancel_calls) == 1
+    assert model.stream_cancelled_count == 1
+    users = [m for m in agent.context().messages if isinstance(m, UserMessage)]
+    assert any("do something else" in m.text for m in users), (
+        f"queued UserMessage did not reach history; got {[m.text for m in users]!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -7465,11 +7475,12 @@ async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_
     doesn't waste the recipient's in-flight compute on routine
     follow-ups. Companion to the routine-peer-no-preempt test above.
     """
-    cancel_calls: list[float] = []
     started = asyncio.Event()
 
     @dataclass(kw_only=True, slots=True)
     class _NaturalCompletionModel:
+        stream_cancelled: bool = field(default=False, init=False)
+
         async def stream(
             self,
             history: list[ModelContextEvent],
@@ -7478,14 +7489,14 @@ async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_
         ) -> AssistantMessage:
             del history, on_thinking
             started.set()
-            await asyncio.sleep(1.0)
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                self.stream_cancelled = True
+                raise
             for ch in "ok":
                 on_text(ch)
             return AssistantMessage(text="ok")
-
-        def cancel_in_flight(self) -> bool:
-            cancel_calls.append(0.0)
-            return True
 
     model = _NaturalCompletionModel()
     agent = agent_runtime.AgentRuntime(model=model, preempt_in_flight=True)
@@ -7504,9 +7515,8 @@ async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_
         send_routine_followup(),
     )
 
-    assert len(cancel_calls) == 0, (
-        f"non-urgent UserMessage should NOT call cancel_in_flight; "
-        f"got {len(cancel_calls)} calls"
+    assert not model.stream_cancelled, (
+        "non-urgent UserMessage should NOT cancel the model stream"
     )
     # The buffered follow-up must still reach history.
     users = [m for m in agent.context().messages if isinstance(m, UserMessage)]
@@ -7518,44 +7528,80 @@ async def test_preempt_in_flight_does_not_cancel_on_non_urgent_user_message_mid_
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_default_off_does_not_call_cancel() -> None:
-    """Without ``preempt_in_flight=True``, the existing buffer-only path is preserved."""
-    model = _CancellableBlockingModel()
+async def test_preempt_in_flight_default_off_does_not_cancel() -> None:
+    """Without ``preempt_in_flight=True``, the existing buffer-only path is
+    preserved -- the urgent message buffers and the model stream is never
+    cancelled.
+    """
+    started = asyncio.Event()
+
+    @dataclass(kw_only=True, slots=True)
+    class _NaturalCompletionModel:
+        stream_cancelled: bool = field(default=False, init=False)
+
+        async def stream(
+            self,
+            history: list[ModelContextEvent],
+            on_text: Callable[[str], None],
+            on_thinking: Callable[[str], None],
+        ) -> AssistantMessage:
+            del history, on_thinking
+            started.set()
+            try:
+                # Window for the mid-stream send to arrive. Default-off means
+                # the runtime must NOT cancel; this completes naturally.
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                self.stream_cancelled = True
+                raise
+            for ch in "ok":
+                on_text(ch)
+            return AssistantMessage(text="ok")
+
+    model = _NaturalCompletionModel()
     agent = agent_runtime.AgentRuntime(model=model)  # default off
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="start"))
 
-    async def send_correction_then_release() -> None:
-        await model.started.wait()
+    async def send_correction() -> None:
+        await started.wait()
         agent.inbox.push_back(
-            AgentSendMessage(source="tl", text="hello"),
+            AgentSendMessage(source="tl", text="hello", urgent=True),
         )
-        # Without preempt, the runtime won't cancel — release manually so
-        # the model can return, the buffered message drains, and Quit can fire.
-        await asyncio.sleep(0.1)
-        model.cancelled.set()
 
     await asyncio.gather(
         run_with_quit(agent, timeout_sec=5.0),
-        send_correction_then_release(),
+        send_correction(),
     )
 
-    assert len(model.cancel_calls) == 0, (
-        "default off must not invoke cancel_in_flight; "
-        f"got {len(model.cancel_calls)} calls"
+    assert not model.stream_cancelled, (
+        "default off must not cancel the model stream even for an urgent "
+        "mid-stream message"
+    )
+    # The buffered message must still reach history.
+    sends = [m for m in agent.context().messages if isinstance(m, AgentSendMessage)]
+    assert any("hello" in m.text for m in sends), (
+        f"buffered message did not reach history; got {[m.text for m in sends]!r}"
     )
 
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_silent_for_model_without_cancel_attr() -> None:
-    """A model lacking ``cancel_in_flight`` is handled silently (no AttributeError)."""
+async def test_preempt_in_flight_cancels_plain_model() -> None:
+    """A model with NO special cancel handling still gets ``CancelledError``.
+
+    Task-cancel is the universal primitive: ``_cancel_model_call`` cancels
+    the ``model_call`` task, raising ``CancelledError`` out of whatever the
+    model's ``stream`` is awaiting -- here a plain ``Event.wait()`` with no
+    ``except CancelledError`` clause. The buffered urgent message then drains
+    into history and a fresh ``stream`` call completes.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class PlainBlockingModel:
         started: asyncio.Event = field(default_factory=asyncio.Event)
-        released: asyncio.Event = field(default_factory=asyncio.Event)
+        # No event release, no cancel handling: relies entirely on task-cancel.
         _first_call: bool = field(default=True, init=False)
 
         async def stream(
@@ -7568,7 +7614,8 @@ async def test_preempt_in_flight_silent_for_model_without_cancel_attr() -> None:
             if self._first_call:
                 self._first_call = False
                 self.started.set()
-                await self.released.wait()
+                # Blocks forever; only task-cancel can break this await.
+                await asyncio.Event().wait()
             return AssistantMessage(text="done")
 
     model = PlainBlockingModel()
@@ -7577,19 +7624,24 @@ async def test_preempt_in_flight_silent_for_model_without_cancel_attr() -> None:
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="start"))
 
-    async def send_then_release() -> None:
+    async def send_urgent() -> None:
         await model.started.wait()
-        # Should not raise even though the model has no cancel_in_flight.
-        agent.inbox.push_back(AgentSendMessage(source="tl", text="poke"))
-        await asyncio.sleep(0.1)
-        model.released.set()
+        agent.inbox.push_back(
+            AgentSendMessage(source="tl", text="poke", urgent=True),
+        )
 
     await asyncio.gather(
         run_with_quit(agent, timeout_sec=5.0),
-        send_then_release(),
+        send_urgent(),
     )
-    # No assertion needed beyond "did not raise" — the test passes if
-    # run_with_quit returned without an exception.
+
+    # Cancellation broke the otherwise-infinite wait, the buffered urgent
+    # message drained, and the second stream returned -- proving task-cancel
+    # works without any model-side cancel support.
+    sends = [m for m in agent.context().messages if isinstance(m, AgentSendMessage)]
+    assert any("poke" in m.text for m in sends), (
+        f"buffered urgent message did not reach history; got {[m.text for m in sends]!r}"
+    )
 
 
 if __name__ == "__main__":

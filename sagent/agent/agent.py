@@ -178,15 +178,17 @@ class Agent:
       persistent_retry: Enable persistent-mode backoff for 429/529.
       preempt_in_flight: When True, a ``UserMessage`` or
           ``AgentSendMessage`` arriving while ``model_call`` is in flight
-          additionally calls ``model.cancel_in_flight()`` (provider-side
-          SIGINT for CLI-driven providers) before buffering. Use with
-          CLI-driven providers like ``AnthropicCLI`` whose tool loops
-          run opaquely inside a subprocess and are otherwise
-          uninterruptible from sagent's runtime. The cancelled turn
-          resolves as ``ModelResponseError``; partial assistant text is
-          lost (intentional — caller is preempting precisely because
-          that work is no longer wanted). Defaults False so existing
-          callers see no behaviour change.
+          cancels the in-flight model-call task before buffering.
+          Cancellation propagates ``CancelledError`` into
+          ``model.stream()``; CLI-driven providers (``AnthropicCLI``,
+          ``GoogleCLI``) translate it into a subprocess SIGINT /
+          ``session/cancel`` so their opaque tool loop aborts, and API
+          providers' awaited stream is torn down by standard
+          cancellation. The cancelled turn resolves as
+          ``ModelResponseCancelled``; partial assistant text is lost
+          (intentional — caller is preempting precisely because that
+          work is no longer wanted). Defaults False so existing callers
+          see no behaviour change.
 
     Side effects:
       Constructing with a non-``None`` ``model_spec`` (and
@@ -2219,25 +2221,20 @@ def _default_model_for(prov_name: str) -> str:
 def _schedule_close(model: types.model.Model) -> None:
     """Fire-and-forget async teardown for a swapped-out model.
 
-    CLI-style providers (``AnthropicCLI``, ``GoogleCLI``) own subprocess
-    pools via ``HotSpare`` and define ``async def close()``; API-key
-    providers don't. Schedule the teardown on the running loop so the
-    prior subprocess and its warming-spare task don't outlive the swap.
-    No-op when no event loop is running (e.g. ``Agent.resume`` before
+    ``Model.close()`` is a required contract method: CLI-style providers
+    (``AnthropicCLI``, ``GoogleCLI``) tear down their subprocess pools;
+    API providers close their SDK/HTTP client; resource-free models
+    no-op. Schedule the teardown on the running loop so the prior
+    subprocess and its warming-spare task don't outlive the swap. No-op
+    when no event loop is running (e.g. ``Agent.resume`` before
     ``serve_forever``): the model hasn't been used yet so there is
     nothing to close.
     """
-    close = getattr(model, "close", None)
-    if not callable(close):
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    coro = close()
-    if not asyncio.iscoroutine(coro):
-        return
-    task = loop.create_task(coro)
+    task = loop.create_task(model.close())
     task.add_done_callback(
         types.exceptions.log_task_exception(logger, "swapped-out model close failed"),
     )
@@ -2264,17 +2261,6 @@ class _AgentModel:
 
         """
         self._inner = inner
-
-    def cancel_in_flight(self) -> bool:
-        """Forward to the wrapped provider model if it supports cancel.
-
-        Returns False (silent no-op) for providers that don't expose the
-        method; runtime callers check ``callable(...)`` before invoking.
-        """
-        cancel = getattr(self._inner, "cancel_in_flight", None)
-        if not callable(cancel):
-            return False
-        return bool(cancel())
 
     async def stream(
         self,

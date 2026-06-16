@@ -28,8 +28,6 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import os
-
 from sagent.compaction.summary import SummaryCompactor
 from sagent.types.tools import Tool
 
@@ -195,6 +193,20 @@ def _session_id_for(role_name: str) -> str:
     return str(_uuid.uuid5(namespace, f"blackjax-chat:{role_name}"))
 
 
+def _session_dir_for(role_name: str) -> Path:
+    """Per-role sagent persistence dir (holds ``session.jsonl``).
+
+    Lives under the data dir so ``serve.py`` restarts can
+    ``load_session`` + ``Agent.resume`` each role's tape. Co-located
+    with the per-role traces under ``<SAGENT_DATA_DIR>/sessions/``.
+    """
+    from mcp_sagent import delivery
+
+    path = delivery.SESSIONS_DIR / f"{role_name}.sagent"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def build_agent(
     *,
     role_name: str,
@@ -232,22 +244,6 @@ def build_agent(
     from sagent.agent import Agent
 
     provider = build_provider()
-    # v2.1-β graduated 2026-06-09: sagent owns the on-disk session
-    # JSONL by default, rewriting it from its tape view before every
-    # ``--resume`` spawn. Operators can opt out (fall back to v2
-    # CLI-owned mode) by setting ``SAGENT_CLI_OWN_SESSION=0`` (or
-    # ``false``/``no``). See ``sagent/providers/anthropic_cli_session/``
-    # and the ``v2.1-cli-session-materialize`` worklog thread for
-    # the live-validation that gated the graduation
-    # (canary smoke + 3 critical-path live tests + 1 production
-    # multi-agent live run including a vmap-debug session).
-    opt_out = os.environ.get("SAGENT_CLI_OWN_SESSION", "").lower() in (
-        "0",
-        "false",
-        "no",
-    )
-    materialize_session = not opt_out
-
     # Stdout-idle timeout for the ``claude`` subprocess transport
     # (Subproc default is 60s). Bumped to 300s to accommodate
     # long-running synchronous Bash tool calls — e.g. tuningfork's
@@ -266,19 +262,17 @@ def build_agent(
     # hangs without false-positive timing out on legitimate work.
     subprocess_read_timeout_sec = 300.0
 
-    # SummaryCompactor wired (v2.1-β.2 graduation, 2026-06-09).
-    # Without a compactor, the agent's tape grows uncapped and the
-    # provider hits the API output-cap / context-window edge for
-    # heavy multi-PR work — observed in production today as SWE's
-    # 3.4M cache_read_input_tokens over a ~5h session, with
-    # increasing ``aborted_streaming`` retryable errors and
-    # eventual stream-cuts. SummaryCompactor's defaults
+    # SummaryCompactor wired. Without a compactor, the agent's tape
+    # grows uncapped and the provider hits the API output-cap /
+    # context-window edge for heavy multi-PR work — observed in
+    # production as SWE's 3.4M cache_read_input_tokens over a ~5h
+    # session, with increasing ``aborted_streaming`` retryable errors
+    # and eventual stream-cuts. SummaryCompactor's defaults
     # (``utilization_trigger=0.95``, ``compression=0.075``) fire
     # compaction at ~95% of the usable window after reserving 7.5%
-    # for the compacted result; the resulting ``ContextSplice``
-    # rides the tape and the materializer renders it on the next
-    # spawn. Replaces claude's auto-compact (which we disabled in
-    # materializer mode to avoid the overwrite-clobber race).
+    # for the compacted result; the resulting ``ContextSplice`` rides
+    # sagent's tape and is fed to claude on the next turn. sagent owns
+    # compaction; claude's auto-compact is disabled by the provider.
     compactor = SummaryCompactor()
 
     # NOTE: must not collide with sagent's bridge server name (``"sagent"``,
@@ -291,20 +285,26 @@ def build_agent(
         model=provider.model(
             model_id,
             extra_mcp_servers={"sagent_chat": _sagent_mcp_server_entry(role_name)},
-            # Session persistence: claude owns the transcript on disk,
-            # we no longer re-feed history via stdin, and respawn after
-            # ``aborted_streaming`` ``--resume``s the live session
-            # (including all assistant turns + tool_use blocks) instead
-            # of inheriting a stripped re-feed. See sagent commit on
-            # the v2 session-persistence arc on ``feat/AnthropicCLI`` (worklog thread v2.1-cli-session-materialize) for the full rationale.
+            # CLI session-persistence: ``--session-id``/``--resume`` keeps
+            # the prompt cache warm across turns. sagent's tape is the
+            # source of truth — the provider rebuilds the on-disk session
+            # from the tape on the first turn (including the first turn
+            # after a restart, once ``Agent.resume`` has rehydrated the
+            # tape from sagent's own ``session.jsonl``) and feeds only
+            # deltas thereafter. The claude-side file is a cache, never
+            # parsed back.
             session_id=_session_id_for(role_name),
-            materialize_session=materialize_session,
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
         ),
         model_spec=_model_spec_for(model_id),
         system=load_system_prompt(role_md_path),
         tools=list(tools),
         name=role_name,
+        # sagent-owned persistence: writes ``<session_dir>/session.jsonl``
+        # so a ``serve.py`` restart can ``load_session`` + ``Agent.resume``
+        # the tape (which then drives the CLI session rebuild). This is
+        # the standard sagent resume path — no claude-session-file parsing.
+        session_dir=_session_dir_for(role_name),
         max_tool_call_rounds=max_tool_call_rounds,
         max_budget_usd=max_budget_usd,
         preempt_in_flight=True,

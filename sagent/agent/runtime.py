@@ -931,13 +931,15 @@ class AgentRuntime:
         coalesce_inbox: bool = True,
     ) -> None:
         self.model = model
-        # When True, mid-stream UserMessage / AgentSendMessage attempts a
-        # provider-side cancel (``model.cancel_in_flight()``) before
-        # buffering. Only useful with providers that drive their own
-        # tool loop opaquely (e.g. AnthropicCLI / GoogleCLI), where
-        # ``_stop_all_tools`` has no cohort entries to act on. Default
-        # off: changes user-observable timing (the in-flight model
-        # response is truncated to a ModelResponseError) and only the
+        # When True, an urgent mid-stream UserMessage / AgentSendMessage
+        # cancels the in-flight model-call task (``_cancel_model_call``)
+        # before buffering. Cancellation propagates ``CancelledError``
+        # into ``model.stream()``; CLI-driven providers (AnthropicCLI /
+        # GoogleCLI) translate it into a subprocess SIGINT /
+        # ``session/cancel`` so their opaque tool loop stops, while API
+        # providers' awaited stream is torn down by standard
+        # cancellation. Default off: changes user-observable timing (the
+        # in-flight turn resolves as ModelResponseCancelled) and only the
         # caller knows whether that tradeoff is desired for this agent.
         self._preempt_in_flight = preempt_in_flight
         # When True (default — the sagent-design behaviour), consecutive
@@ -1516,6 +1518,23 @@ class AgentRuntime:
         for record in records:
             self._index_record(record)
 
+    def _cancel_model_call(self) -> None:
+        """Cancel the in-flight model-call task, if any.
+
+        Cancelling the task propagates ``CancelledError`` into
+        ``model.stream()``. CLI-driven providers translate that into a
+        subprocess SIGINT (``claude``) or a ``session/cancel``
+        notification (``gemini`` ACP) inside their own ``stream``; API
+        providers' awaited SDK/HTTP stream is torn down by the standard
+        cancellation. ``_stream_and_post`` catches ``CancelledError`` and
+        publishes ``ModelResponseCancelled``. No provider-specific cancel
+        method is required -- cancellation is the universal primitive.
+        """
+        if self.model_call is not None:
+            self.model_call.cancel()
+            self.model_call = None
+            self._model_call_generation += 1
+
     def mint_ref(self) -> TapeRef:
         """Mint the next ``TapeRef`` and advance the ordinal counter.
 
@@ -2085,30 +2104,24 @@ class AgentRuntime:
                                 # If ``preempt_in_flight`` is enabled AND the
                                 # message is flagged ``urgent`` (the historical
                                 # default, preserved for tests/internal
-                                # callers that don't specify), additionally
-                                # SIGINT the provider so a CLI-driven opaque
-                                # turn aborts immediately rather than waiting
-                                # for natural completion. ``urgent=False`` lets
-                                # ingress layers (e.g. plugin web UIs) opt
-                                # operator messages into queue-by-default so
-                                # back-to-back operator typing doesn't waste
-                                # the recipient's in-flight compute on routine
-                                # follow-ups; see AgentSendMessage handler
-                                # below for the symmetric peer case.
+                                # callers that don't specify), cancel the
+                                # in-flight model-call task so a CLI-driven
+                                # opaque turn aborts immediately rather than
+                                # waiting for natural completion. Cancellation
+                                # propagates ``CancelledError`` into
+                                # ``model.stream()``; CLI-driven providers
+                                # translate it into a subprocess SIGINT /
+                                # ``session/cancel`` in their own ``stream``,
+                                # so no provider-specific cancel method is
+                                # needed. ``urgent=False`` lets ingress layers
+                                # (e.g. plugin web UIs) opt operator messages
+                                # into queue-by-default so back-to-back operator
+                                # typing doesn't waste the recipient's in-flight
+                                # compute on routine follow-ups; see
+                                # AgentSendMessage handler below for the
+                                # symmetric peer case.
                                 if self._preempt_in_flight and item.urgent:
-                                    cancel = getattr(
-                                        self.model,
-                                        "cancel_in_flight",
-                                        None,
-                                    )
-                                    if callable(cancel):
-                                        try:
-                                            cancel()
-                                        except Exception:
-                                            logger.exception(
-                                                "preempt_in_flight: "
-                                                "model.cancel_in_flight() raised",
-                                            )
+                                    self._cancel_model_call()
                                 self._mid_stream_queue.append(item)
                             else:
                                 # Mid-cohort or idle: preempt and append.
@@ -2123,15 +2136,15 @@ class AgentRuntime:
 
                         case AgentSendMessage():
                             if self.model_call is not None:
-                                # Provider-side cancel for CLI-driven models
-                                # whose tool loop is opaque (no cohort to
-                                # detach). When enabled, SIGINT the
-                                # subprocess so the in-flight call resolves
-                                # as ModelResponseError; the buffered
-                                # message drains on the next gate firing.
-                                # No-op for providers without
-                                # ``cancel_in_flight`` or when the runtime
-                                # was not opted into preempt-in-flight.
+                                # Cancel the in-flight model-call task for a
+                                # CLI-driven model whose tool loop is opaque
+                                # (no cohort to detach). Cancellation
+                                # propagates ``CancelledError`` into
+                                # ``model.stream()``; CLI-driven providers
+                                # translate it into a subprocess SIGINT /
+                                # ``session/cancel`` in their own ``stream``.
+                                # The buffered message drains on the next gate
+                                # firing.
                                 #
                                 # Peer messages preempt only when the
                                 # sender flagged the message as ``urgent``
@@ -2147,19 +2160,7 @@ class AgentRuntime:
                                 # all -- this gate eliminates that
                                 # wasted compute.
                                 if self._preempt_in_flight and item.urgent:
-                                    cancel = getattr(
-                                        self.model,
-                                        "cancel_in_flight",
-                                        None,
-                                    )
-                                    if callable(cancel):
-                                        try:
-                                            cancel()
-                                        except Exception:
-                                            logger.exception(
-                                                "preempt_in_flight: "
-                                                "model.cancel_in_flight() raised",
-                                            )
+                                    self._cancel_model_call()
                                 self._mid_stream_queue.append(item)
                             else:
                                 self._stop_all_tools(mode="detach")

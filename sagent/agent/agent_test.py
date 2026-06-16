@@ -183,6 +183,14 @@ class StubModel:
         )
         return types.model.ModelResponse(message=msg)
 
+    async def close(self) -> None:
+        """No-op teardown -- the stub holds no resources.
+
+        ``close`` is a required ``Model`` contract member; a
+        resource-free model satisfies it by returning immediately.
+        """
+        return
+
 
 _STUB_SCHEMA: JSON = json_freeze({"type": "object"})
 _STRING_SCHEMA: JSON = json_freeze({"type": "string"})
@@ -4437,6 +4445,9 @@ class _OverflowModel:
             message=types.runtime.AssistantMessage(text="recovered")
         )
 
+    async def close(self) -> None:
+        return
+
 
 @dataclass(slots=True, kw_only=True)
 class _RawOverflowModel:
@@ -4519,6 +4530,9 @@ class _RawOverflowModel:
         return types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text="recovered")
         )
+
+    async def close(self) -> None:
+        return
 
 
 @pytest.mark.asyncio
@@ -4703,6 +4717,9 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             return types.model.ModelResponse(
                 message=types.runtime.AssistantMessage(text="ok"),
             )
+
+        async def close(self) -> None:
+            return
 
     model = _RecordingModel(order_log=order)
     a = Agent(model=model, tools=[], compactor=_OneShotCompactor())

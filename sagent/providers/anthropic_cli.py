@@ -18,21 +18,19 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 
 from sagent.lib import token_count
 from sagent.lib.json import JSON, MutableJSON, int_val, validate_json_schema
 from sagent.providers.anthropic import Anthropic
-from sagent.providers.anthropic_cli_session import (
-    materialize_session,
-    session_jsonl_path,
-)
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
@@ -297,14 +295,13 @@ class AnthropicCLI(Anthropic):
         return cls(account=account)
 
     @override
-    def model(  # ty: ignore[invalid-method-override]  -- shared catalog, different transport; the CLI model can't subclass _AnthropicModel
+    def model(  # ty: ignore[invalid-method-override]  -- subclasses Anthropic for the shared model catalog + auth, but the CLI transport returns a different Model and accepts provider-specific options; both still satisfy the Provider protocol's ``model(..., **provider_options)`` shape
         self,
         model_id: str | None = None,
         max_request_tokens: int | None = None,
         *,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
-        materialize_session: bool = False,
         subprocess_read_timeout_sec: float | None = None,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
@@ -318,40 +315,27 @@ class AnthropicCLI(Anthropic):
             ``{"command": "...", "args": [...], "env": {...}}`` for
             stdio or ``{"type": "http", "url": "..."}`` for HTTP. Keys
             colliding with sagent's own bridge server name are dropped.
-          session_id: When set, every ``claude`` subprocess is spawned
-            with ``--session-id <uuid>`` (first turn) or
-            ``--resume <uuid>`` (subsequent turns) instead of
-            ``--no-session-persistence``. Sagent stops re-feeding
-            history via stdin: only the latest user-like inbound is
-            sent each turn, and ``claude`` itself owns the
-            conversation transcript at
-            ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``. This
-            mode is intended for chat-channel use cases where
-            ``aborted_streaming`` recoveries must NOT lose
-            ``AssistantMessage`` content — see
-            ``examples/blackjax-ai-devs-channel/README.md`` for context.
-          materialize_session: v2.1-α — when True (and ``session_id``
-            is set), before every ``--resume`` spawn the session JSONL
-            is rewritten from sagent's tape view, so claude reads
-            sagent's canonical history rather than the file claude
-            itself appended on the prior turn. The two transcripts
-            stay synchronized; sagent is the source of truth. Default
-            False to preserve v2 behaviour. See
-            ``sagent/providers/anthropic_cli_session/`` and the
-            ``v2.1-cli-session-materialize`` worklog thread.
+          session_id: When set, the CLI runs in session-persistence
+            mode: ``--session-id <uuid>`` on the first turn, ``--resume
+            <uuid>`` thereafter, so ``claude`` keeps the transcript on
+            disk and the prompt cache stays warm across turns. Sagent's
+            tape remains the single source of truth: on the first call
+            (including the first call after a host restart, when the
+            tape has been rehydrated via ``Agent.resume``) sagent feeds
+            the full history via stdin, which rebuilds the on-disk
+            session; every subsequent turn feeds only the new entries
+            and resumes. ``None`` (default) uses the stateless
+            ``--no-session-persistence`` path. The on-disk file is an
+            internal cache the provider rebuilds from the request --
+            it is never parsed back or treated as a source of truth, so
+            no separate session-file format coupling exists.
           subprocess_read_timeout_sec: Stdout-idle timeout (seconds)
             for the ``claude`` subprocess transport. ``None`` keeps
             the ``Subproc`` default (60s). Set higher when the
             agent's tools include long-running synchronous Bash
             commands (e.g. ``pre-commit run --files ...``,
             ``ty check``, big test suites) that legitimately go
-            silent for >60s while claude awaits the result —
-            without a bump, the transport reads silence as a hang,
-            raises ``SubprocessTransportError``, and
-            ``send_with_retry`` may emit a divergence marker that
-            eats the closing assistant message. Verified live
-            2026-06-09 on SWE's PR3 ``pre-commit + git commit``
-            chain.
+            silent for >60s while claude awaits the result.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -380,7 +364,6 @@ class AnthropicCLI(Anthropic):
             ),
             extra_mcp_servers=extra_mcp_servers,
             session_id=session_id,
-            materialize_session=materialize_session,
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
         )
 
@@ -420,7 +403,6 @@ class _AnthropicCLIModel:
         max_request_tokens: int,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
-        materialize_session: bool = False,
         subprocess_read_timeout_sec: float | None = None,
     ) -> None:
         self._provider = provider
@@ -433,18 +415,6 @@ class _AnthropicCLIModel:
         self._last_input_tokens = 0
         self._tools_bridge: ToolsBridge | None = None
         self._warming_proc: Subproc | None = None
-        # v2.1-α: when True, the session JSONL the CLI reads on
-        # ``--resume`` is rewritten from sagent's tape view BEFORE
-        # every spawn. Whatever claude appended on the prior turn gets
-        # overwritten by sagent's canonical record. Requires
-        # ``session_id is not None`` -- materialization only makes
-        # sense in session-persistence mode. See
-        # ``sagent/providers/anthropic_cli_session/`` and the
-        # ``v2.1-cli-session-materialize`` worklog thread for
-        # rationale.
-        self._materialize_session: bool = materialize_session and (
-            session_id is not None
-        )
         # Stdout-idle timeout (seconds) for the ``claude`` subprocess
         # transport. ``None`` defers to the ``Subproc`` default (60s).
         # Bumped to ~3-5min for v2 plugin agents whose tools include
@@ -470,15 +440,22 @@ class _AnthropicCLIModel:
         #     ``/tmp/resume_probe/`` test A from 2026-06-02 evening:
         #     concurrent ``--resume`` branches the conversation tree).
         self._session_id: str | None = session_id
-        # ``_session_initialized = True`` means "claude already has a
-        # session JSONL for this uuid on disk, use ``--resume``"; False
-        # means "first time we've seen this uuid, use ``--session-id``".
-        # We probe the operator's real ``~/.claude/projects/`` at
-        # construction time so server restarts pick up prior
-        # conversations transparently.
-        self._session_initialized: bool = (
-            session_id is not None and _session_jsonl_exists(session_id)
-        )
+        # ``_session_initialized = True`` means "this PROCESS has spawned
+        # at least one successful turn under this uuid, so the on-disk
+        # session is ours to ``--resume``". Always False at construction:
+        # implicit session mode never trusts a pre-existing on-disk file
+        # it didn't write this process. On the first call -- including
+        # the first call after a host restart, when ``Agent.resume`` has
+        # rehydrated the tape so ``request.messages`` carries the full
+        # history -- sagent re-feeds that history via stdin under
+        # ``--session-id``, which REBUILDS the on-disk session from
+        # sagent's canonical tape. Every later turn feeds only new
+        # entries and ``--resume``s. This makes the on-disk file a pure
+        # cache derived from the request, never a source of truth, so
+        # there is no session-file format to parse or keep in sync.
+        # The one cost is a single cold (full-history) turn after a
+        # restart; thereafter the prompt cache is warm.
+        self._session_initialized: bool = False
         if session_id is None:
             self._hot_spare: HotSpare | None = HotSpare(
                 self._spawn_spare_initialized,
@@ -540,6 +517,13 @@ class _AnthropicCLIModel:
         # ``--mcp-config`` at subprocess spawn time. See
         # :func:`_build_anthropic_argv`.
         self._extra_mcp_servers = extra_mcp_servers
+        # Session mode: drop any session file a prior process left on
+        # disk. We don't trust it -- the first turn rebuilds the session
+        # from the (possibly rehydrated) tape via ``--session-id``. A
+        # leftover file would make that spawn error "Session ID already
+        # in use".
+        if session_id is not None:
+            self._delete_session_jsonl(reason="construction (rebuild from tape)")
 
     @property
     def max_request_tokens(self) -> int:
@@ -551,29 +535,25 @@ class _AnthropicCLIModel:
         """Model identifier passed to ``claude --model``."""
         return self._model_id
 
-    def cancel_in_flight(self) -> bool:
+    def _interrupt_active_proc(self) -> bool:
         """SIGINT the active CLI subprocess to abort the current turn.
 
+        Called from ``stream``'s ``CancelledError`` handler: when the
+        runtime cancels the in-flight model-call task (peer/operator
+        preempt), ``CancelledError`` propagates into the awaiting
+        ``stream``; we translate it into a subprocess SIGINT so the
+        opaque CLI tool loop actually stops, then re-raise so the
+        runtime's standard cancellation path (``_stream_and_post`` ->
+        ``ModelResponseCancelled``) runs. The full CLI tool loop runs
+        in-process inside the subprocess, so the runtime cannot
+        ``Detach``/``Kill`` individual tool calls; SIGINT is the only
+        mid-turn cancellation surface.
+
         Returns True if a live subprocess was signalled, False otherwise
-        (idle, never started, or already closed). Non-blocking: callers
-        do not await termination here. The currently-awaiting ``stream``
-        call observes the subprocess closing its stdout and resolves as
-        a :class:`SubprocessTransportError`, which the runtime surfaces
-        as ``ModelResponseError``; the next ``stream`` call triggers
-        ``_hot_spare.respawn_after_transport_failure`` transparently.
-
-        The CLI subprocess does *not* emit a terminal ``result`` event
-        on SIGINT -- partial assistant text and token-usage telemetry
-        for the cancelled turn are lost. This is the intended behaviour
-        when the caller is preempting because the in-flight work is no
-        longer wanted; do not call this method to soft-pause a turn
-        that should resume.
-
-        Use case: peer-message preempt for CLI-driven providers. The
-        full CLI tool loop runs in-process inside the subprocess (see
-        ``providers/lib/mcp_bridge.py`` lines 16-20), so the runtime
-        cannot ``Detach``/``Kill`` individual tool calls; SIGINT to
-        the subprocess is the only mid-turn cancellation surface.
+        (idle, never started, already closed). Non-blocking. Partial
+        assistant text + usage telemetry for the cancelled turn are lost
+        -- intentional, the caller is preempting precisely because that
+        work is no longer wanted.
         """
         if self._hot_spare is not None:
             active = self._hot_spare.active
@@ -652,40 +632,6 @@ class _AnthropicCLIModel:
     def supports_account_auth(self) -> bool:
         """``True``: the provider runs on the user's CLI subscription."""
         return True
-
-    @property
-    def session_id(self) -> str | None:
-        """Session UUID in session-persistence mode, ``None`` in stateless."""
-        return self._session_id
-
-    def seed_session(self, synced_entries: int) -> None:
-        """Declare the on-disk session JSONL already holds the tape prefix.
-
-        Host applications that rehydrate an agent's tape from the
-        session JSONL on restart (``parse_jsonl_to_messages`` →
-        ``repair_dangling_tool_calls`` → ``runtime.replay_tape``) must
-        tell the provider the disk and the tape now agree on a common
-        prefix of ``synced_entries`` tape entries, so that:
-
-        - the next spawn resumes the existing session with ``--resume``
-          instead of minting a new one with ``--session-id`` (which
-          would error: the UUID is already in use), and
-        - only entries appended AFTER the prefix are fed via stdin —
-          re-feeding the prefix would duplicate the conversation claude
-          already has on disk.
-
-        No-op in stateless mode (no session to seed).
-
-        Args:
-          synced_entries: Number of leading tape entries already
-              present in the on-disk JSONL (typically ``len(messages)``
-              right after ``replay_tape``).
-
-        """
-        if self._session_id is None:
-            return
-        self._last_sent_index = max(0, int(synced_entries))
-        self._session_initialized = True
 
     @property
     def pricing(self) -> Pricing:
@@ -830,6 +776,14 @@ class _AnthropicCLIModel:
             response = await self._exchange_turn(proc, request, on_text, on_thinking)
             self._system_hash = _hash_system(self._pending_system)
             self._last_sent_index = len(request.messages)
+        except asyncio.CancelledError:
+            # Runtime cancelled the model-call task (preempt). Translate
+            # into a subprocess SIGINT so the opaque CLI tool loop stops,
+            # then re-raise so the runtime's cancellation path runs.
+            self._interrupt_active_proc()
+            self._reset_active_state()
+            await self._hot_spare.respawn_after_transport_failure()
+            raise
         except SubprocessTransportError:
             self._reset_active_state()
             await self._hot_spare.respawn_after_transport_failure()
@@ -882,15 +836,6 @@ class _AnthropicCLIModel:
         # then continue as if this is a fresh session.
         if self._last_sent_index > len(request.messages):
             self._reset_for_clear()
-
-        # v2.1-α: rewrite the on-disk JSONL from sagent's tape view
-        # before each ``--resume`` spawn. Anything claude appended on
-        # the prior turn is now superseded by sagent's canonical
-        # record. The first turn skips this -- nothing prior exists
-        # on disk, and ``--session-id`` will create the file from
-        # claude's processing of the stdin-fed entry.
-        if self._materialize_session and self._session_initialized:
-            self._materialize_prior_state(request)
 
         new_entries = request.messages[self._last_sent_index :]
         # user-like entries only: filter out AssistantMessage / ToolResult
@@ -960,6 +905,16 @@ class _AnthropicCLIModel:
                 on_text,
                 on_thinking,
             )
+        except asyncio.CancelledError:
+            # Runtime cancelled the model-call task (preempt). SIGINT the
+            # subprocess so the opaque CLI tool loop stops, then re-raise
+            # so the runtime's cancellation path runs. ``_last_sent_index``
+            # already reflects every entry written to stdin, so the next
+            # ``--resume`` skips them.
+            self._interrupt_active_proc()
+            await proc.close()
+            self._active_proc = None
+            raise
         except SubprocessTransportError:
             # ``claude`` died mid-turn. ``_last_sent_index`` already
             # reflects every entry we wrote to stdin; the next
@@ -1236,7 +1191,6 @@ class _AnthropicCLIModel:
         env = _anthropic_subprocess_env(
             tmpdir,
             persist_session=self._session_id is not None,
-            materialize_session=self._materialize_session,
         )
         # ``None`` defers to ``Subproc``'s own default (60s); an explicit
         # value (set by the plugin for long pre-commit/ty/JAX tool calls)
@@ -1295,99 +1249,62 @@ class _AnthropicCLIModel:
             return
         self._last_sent_index = 0
         self._session_initialized = False
-        # Find + delete the session JSONL. Path:
-        #   <HOME>/.claude/projects/-<encoded-cwd>/<uuid>.jsonl
-        # where HOME is either the persistent tmpdir (per-account
-        # mode) or the operator's real $HOME (single-account mode).
-        home = self._persistent_tmpdir or Path(os.environ.get("HOME", "~")).expanduser()
-        projects = home / ".claude" / "projects"
-        if not projects.exists():
-            return
-        # The cwd-encoded subdir is opaque to us (claude picks the
-        # encoding); glob across all subdirs for safety.
-        for jsonl in projects.glob(f"*/{self._session_id}.jsonl"):
-            try:
-                jsonl.unlink()
-                logger.info(
-                    "AnthropicCLI(session_persistent): cleared session "
-                    "JSONL at %s after agent.clear()",
-                    jsonl,
-                )
-            except OSError as exc:
-                logger.warning(
-                    "AnthropicCLI(session_persistent): failed to delete %s: %s",
-                    jsonl,
-                    exc,
-                )
+        self._delete_session_jsonl(reason="agent.clear()")
 
-    def _materialize_prior_state(self, request: ModelRequest) -> None:
-        """Rewrite the on-disk session JSONL from sagent's tape view.
+    def _delete_session_jsonl(self, *, reason: str) -> None:
+        """Delete the on-disk session JSONL for this uuid, if present.
 
-        Materializes ``request.messages[:self._last_sent_index]`` --
-        the slice of the resolved tape view that should ALREADY be on
-        disk before the upcoming spawn. New entries (the
-        ``[self._last_sent_index:]`` slice) are still fed via stdin
-        the way they are in v2; on the next turn, sagent will
-        re-materialize with those entries included, overwriting
-        whatever claude appended in between.
-
-        No-op when ``self._last_sent_index == 0`` -- the first spawn
-        creates the file via ``--session-id``, and overwriting an
-        empty materialization would race against that flow.
+        The on-disk file is a pure cache the provider rebuilds from the
+        request; a stale copy (left by a prior process, or invalidated
+        by ``agent.clear()``) must be removed so the next
+        ``--session-id <same-uuid>`` spawn doesn't error with "Session
+        ID is already in use". Called at construction (drop any prior
+        process's file -- we rebuild from the rehydrated tape) and from
+        ``_reset_for_clear``.
         """
-        if self._session_id is None or not self._materialize_session:
+        if self._session_id is None:
             return
-        if self._last_sent_index <= 0:
+        path = self._session_jsonl_path()
+        if path is None or not path.exists():
             return
-        # Resolve target HOME the same way ``_reset_for_clear`` does:
-        # persistent_tmpdir for per-account mode, real HOME otherwise.
-        home = (
-            self._persistent_tmpdir
-            or Path(
-                os.environ.get("HOME", "~"),
-            ).expanduser()
-        )
-        # Resolve cwd for the encoded-path computation. We use the
-        # current process cwd: claude is spawned with the same cwd,
-        # so the encoded subdir lines up.
+        try:
+            path.unlink()
+            logger.info(
+                "AnthropicCLI(session): cleared session JSONL at %s (%s)",
+                path,
+                reason,
+            )
+        except OSError as exc:
+            logger.warning(
+                "AnthropicCLI(session): failed to delete %s: %s",
+                path,
+                exc,
+            )
+
+    def _session_jsonl_path(self) -> Path | None:
+        """On-disk session-file path for this uuid under the spawn cwd.
+
+        ``None`` in stateless mode. Resolves HOME the way the spawn does
+        (per-account tmpdir, else the operator's real HOME honoring
+        ``CLAUDE_CONFIG_DIR``) and the cwd the way claude encodes it
+        (canonicalized, non-alnum -> ``-``), so the path the provider
+        computes is the path claude reads/writes.
+        """
+        if self._session_id is None:
+            return None
         try:
             cwd = Path.cwd()
         except OSError:
-            logger.warning(
-                "AnthropicCLI(materialize): cwd unreadable; skipping turn",
-            )
-            return
-        prior = ModelRequest(
-            messages=request.messages[: self._last_sent_index],
-            system=request.system,
-            tools=request.tools,
-        )
-        try:
-            path, _ = materialize_session(
-                prior,
-                session_id=self._session_id,
-                cwd=cwd,
-                home=home,
-            )
-        except (OSError, ValueError, TypeError) as exc:
-            # Materialization is best-effort -- if it fails, fall back
-            # to v2 behaviour (claude's prior JSONL on disk drives
-            # ``--resume``). Log loudly so the operator notices the
-            # silent v2-fallback rather than discovering it via drift.
-            # Narrow catch: filesystem (OSError) + bad input shape
-            # (ValueError / TypeError). A bug elsewhere should
-            # propagate.
-            logger.warning(
-                "AnthropicCLI(materialize): failed to rewrite session "
-                "JSONL: %s; falling back to v2 CLI-owned mode for this turn",
-                exc,
-            )
-            return
-        logger.debug(
-            "AnthropicCLI(materialize): rewrote %s from %d tape entries",
-            path,
-            self._last_sent_index,
-        )
+            return None
+        return _session_jsonl_path(self._session_id, cwd=cwd, home=self._claude_home())
+
+    def _claude_home(self) -> Path:
+        """Resolve the HOME the ``claude`` subprocess uses.
+
+        Per-account mode pins a hermetic tmpdir; single-account mode
+        inherits the operator's real HOME.
+        """
+        return self._persistent_tmpdir or _real_home()
 
     def _reset_delta_state(self) -> None:
         """Reset sent-history delta tracking."""
@@ -1462,32 +1379,39 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     return _parse_cli_credentials(raw)
 
 
-def _session_jsonl_exists(session_id: str) -> bool:
-    """Check whether claude already has a session transcript for this
-    uuid on disk, under THIS cwd's encoded project dir.
+def _real_home() -> Path:
+    """The HOME claude uses when sagent doesn't override it.
 
-    Used at construction time so that on a host-application restart we
-    pick the right initial flag: ``--resume`` (the JSONL exists, we
-    continue the prior conversation) vs ``--session-id`` (no prior
-    session, we establish a fresh one). Picking the wrong one makes
-    ``claude --print`` exit non-zero before consuming stdin --
-    ``--session-id`` on an existing session errors with "Session ID
-    is already in use", ``--resume`` on a nonexistent one errors
-    with "No conversation found".
-
-    The check must be cwd-AWARE: claude indexes sessions per
-    encoded-cwd project dir (``~/.claude/projects/-<encoded-cwd>/``)
-    and ``--resume`` cannot see a session recorded under a different
-    cwd. The original implementation globbed ACROSS project dirs
-    ("the encoding is opaque to us") -- a latent bug once two
-    deployments derive the same deterministic session uuid: live repro
-    2026-06-09, where a second server instance launched from a scratch
-    cwd globbed the primary deployment's JSONL into ``True``, spawned
-    ``--resume``, and claude exited ``No conversation found``, wedging
-    warmup for all five agents. ``session_jsonl_path`` mirrors the
-    CLI's encoding exactly, so ask the question claude will answer.
+    Honors ``CLAUDE_CONFIG_DIR`` the way the CLI does: when set, claude
+    stores ``projects/`` under it rather than ``$HOME/.claude``. We
+    return a path such that ``<return>/.claude/projects`` equals claude's
+    projects root in both cases.
     """
-    return session_jsonl_path(session_id, cwd=Path.cwd()).exists()
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        # claude treats CLAUDE_CONFIG_DIR as the ``.claude`` dir itself;
+        # return its parent so the shared ``/.claude/projects`` suffix
+        # in ``_session_jsonl_path`` resolves correctly.
+        return Path(config_dir).expanduser().parent
+    return Path(os.environ.get("HOME", "~")).expanduser()
+
+
+def _session_jsonl_path(session_id: str, *, cwd: Path, home: Path) -> Path:
+    """On-disk session-file path claude uses for ``(session_id, cwd)``.
+
+    Mirrors the CLI's encoding so the path sagent computes is the path
+    claude reads/writes: the cwd is canonicalized (symlinks resolved --
+    e.g. macOS ``/tmp`` -> ``/private/tmp``) and every non-``[A-Za-z0-9-]``
+    character becomes ``-``. Must stay cwd-aware: claude indexes sessions
+    per encoded-cwd project dir and ``--resume`` cannot see a session
+    recorded under a different cwd.
+    """
+    try:
+        resolved = cwd.resolve()
+    except OSError:
+        resolved = cwd
+    encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(resolved))
+    return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
 
 
 def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
@@ -1506,7 +1430,6 @@ def _anthropic_subprocess_env(
     tmpdir: Path | None,
     *,
     persist_session: bool = False,
-    materialize_session: bool = False,
 ) -> dict[str, str]:
     """Build the env for the ``claude`` subprocess (telemetry off, hermetic HOME).
 
@@ -1522,17 +1445,12 @@ def _anthropic_subprocess_env(
     gh, git, ...) find ``~/.config/`` and ``~/.gitconfig`` naturally.
     Used by the session-persistent + single-account path.
 
-    ``materialize_session`` (v2.1-α): when True, sagent owns the
-    on-disk JSONL via the materializer and overwrites claude's writes
-    each turn. Claude's auto-compact would record a
-    ``system/compact_boundary`` to the file that sagent's tape doesn't
-    know about; the next materialize-overwrite cycle would clobber
-    it, restoring the full pre-compaction history and re-triggering
-    the blocking_limit. So in materialize mode we suppress claude's
-    auto-compact and rely on sagent's own ``SummaryCompactor`` (which
-    records compaction as a ``ContextSplice`` on the tape, which the
-    materializer renders as the resolved view). Mirrors the
-    stateless-mode rule.
+    Auto-compact is always disabled: sagent owns history in both modes
+    (stateless re-feeds it each turn; session mode rebuilds the on-disk
+    file from the tape on the first turn and feeds deltas thereafter).
+    Claude's auto-compact would write a ``system/compact_boundary`` to a
+    file sagent overwrites next turn, so sagent's own ``SummaryCompactor``
+    is the sole compaction authority.
     """
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     if tmpdir is not None:
@@ -1550,14 +1468,9 @@ def _anthropic_subprocess_env(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP": "1",
             "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS": "1",
+            "DISABLE_AUTO_COMPACT": "1",
         }
     )
-    # Auto-compact: disable when sagent owns history (stateless mode
-    # AND v2.1-α materialize mode); enable in v2 session-persistent
-    # mode where claude is the sole writer.
-    sagent_owns_history = not persist_session or materialize_session
-    if sagent_owns_history:
-        env["DISABLE_AUTO_COMPACT"] = "1"
     if not persist_session:
         env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
     return env
@@ -1655,20 +1568,17 @@ def _build_anthropic_argv(
             "bypassPermissions",
         ]
     )
-    # Deny the Claude-Teams / Agent-SDK ``SendMessage`` built-in. In
-    # session-persistence mode we omit ``--tools`` (above) so MCP tools
-    # survive, which means the CLI's DEFAULT allowlist applies -- and that
-    # set includes ``SendMessage``. Agents (SWE especially) intermittently
-    # reach for it to "message tl", but it routes to Claude Teams' private
-    # agent registry, which is EMPTY in the sagent context: the message is
-    # silently dropped (a "PR is open" notification was lost this way on
-    # 2026-06-09, and the model mis-read the empty registry as "tl isn't
-    # running"). The ONLY working peer channel is
-    # ``mcp__sagent_chat__sagent_send``; PEER_MESSAGING names the trap in
-    # prose as belt-and-suspenders. Other Teams orchestration built-ins
-    # (Agent / Task*) would also route to the void, but SendMessage is the
-    # only confirmed leak -- extend this list if more surface. See worklog
-    # thread v2.1-cli-session-materialize.
+    # Defensively deny the Claude-Teams / Agent-SDK ``SendMessage``
+    # built-in. Per the CLI source it is gated behind
+    # ``isAgentSwarmsEnabled()`` (``USER_TYPE=ant`` / ``--agent-teams`` /
+    # the experimental env flag) and is therefore NOT in the default
+    # allowlist for ordinary external builds -- so this is usually a
+    # no-op. We keep it because if the flag ever IS on, ``SendMessage``
+    # routes to a private Teams registry that is EMPTY in the sagent
+    # context, silently dropping the message (observed losing a "PR is
+    # open" notification when an ant-flavored CLI was in use). The only
+    # working peer channel is an external MCP tool such as
+    # ``mcp__sagent_chat__sagent_send``.
     base.extend(["--disallowedTools", "SendMessage"])
     return base
 

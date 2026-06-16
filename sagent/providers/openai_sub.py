@@ -692,6 +692,20 @@ class _OpenAISubModel(_OpenAIModel):
     _provider: OpenAISubscription  # type: narrowed from OpenAICompat
 
     @override
+    async def close(self) -> None:
+        """Release the Responses-API SDK and the inherited HTTP client.
+
+        The base ``OpenAICompatModel.close`` only tears down the shared
+        ``httpx.AsyncClient``; the subscription path additionally owns an
+        ``AsyncOpenAI`` SDK (``_sdk``), so close both.
+        """
+        if self._sdk is not None:
+            await self._sdk.close()
+            self._sdk = None
+            self._sdk_token = None
+        await super().close()
+
+    @override
     def _is_effort_model(self, model_id: str) -> bool:
         """True for OpenAI reasoning models that accept ``reasoning_effort``."""
         return any(model_id.startswith(p) for p in _EFFORT_PREFIXES)

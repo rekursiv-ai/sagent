@@ -54,26 +54,9 @@ sys.path.insert(0, str(_PLUGIN_DIR))
 # for end-of-day merges that union this plugin's main.jsonl with the
 # sibling chat/ runtime's main.jsonl in one directory.
 from datetime import UTC
-
-# v2.1-β: imported at module scope (rather than inside
-# ``_run_materializer_tripwire``) so test fixtures can monkeypatch it.
-# When the parent ``sagent`` install is older than the materializer
-# module, the import silently no-ops and the tripwire treats it as
-# "v2 fallback". Operators on older sagent: upgrade to pick up v2.1.
 from typing import Any
 
 from mcp_sagent import delivery
-
-
-arun_canary_against_live_cli: Any
-try:
-    from sagent.providers.anthropic_cli_session import (
-        arun_canary_against_live_cli as _live_canary,
-    )
-
-    arun_canary_against_live_cli = _live_canary
-except ImportError:
-    arun_canary_against_live_cli = None
 
 
 _DEFAULT_HOST = "127.0.0.1"
@@ -148,173 +131,39 @@ async def _serve_agents_forever(agents):
     return tasks
 
 
-_MATERIALIZER_TRIPWIRE_ENV = "SAGENT_CLI_OWN_SESSION"
+def _resume_agents_from_session_dir(agents) -> None:
+    """Rehydrate each agent's tape from its sagent ``session.jsonl``.
 
+    Standard sagent restart-resume: each role's ``build_agent`` wired a
+    per-role ``session_dir`` (``Agent(session_dir=...)``), so a prior
+    ``serve.py`` run persisted its tape to ``<session_dir>/session.jsonl``.
+    On boot we ``load_session`` + ``Agent.resume`` each one. The resumed
+    tape then drives the provider: on the agent's first turn after resume,
+    the AnthropicCLI model re-feeds that full history to ``claude
+    --session-id``, which rebuilds the on-disk CLI session; every later
+    turn ``--resume``s and feeds only deltas. No claude-session-file
+    parsing -- sagent's own tape is the single source of truth.
 
-async def _run_materializer_tripwire() -> None:
-    """Startup tripwire for the CLI session materializer (default-on since
-    v2.1-β graduated 2026-06-09).
-
-    Materializer mode is the default: sagent owns the on-disk session
-    JSONL. Operators can opt out by setting
-    ``SAGENT_CLI_OWN_SESSION=0`` (or ``false``/``no``) — that skips
-    the tripwire entirely and ``_build_all_agents`` falls back to v2
-    CLI-owned mode.
-
-    When NOT opted out, the tripwire spawns a 1-turn canary against
-    ``claude --print``, schema-checks claude's JSONL output, runs a
-    structural round-trip diff against what the materializer would
-    have written, and:
-
-    - On clean verdict: leaves the env unchanged (default-on stays
-      on); ``_build_all_agents`` passes ``materialize_session=True``
-      to every provider.
-    - On drift / canary unavailable / canary raised: sets
-      ``SAGENT_CLI_OWN_SESSION=0`` so ``_build_all_agents`` falls
-      back to v2 CLI-owned mode. The findings are logged at WARNING
-      level so the operator sees the cause and can pin the CLI
-      version or update the materializer.
-
-    Always logs the verdict (one INFO line on success, one WARNING
-    line per finding on drift) so the boot transcript shows whether
-    materialization mode is live for this run.
-    """
-    opt_out = os.environ.get(_MATERIALIZER_TRIPWIRE_ENV, "").lower() in (
-        "0",
-        "false",
-        "no",
-    )
-    if opt_out:
-        _LOG.info(
-            "materializer tripwire: %s=0 — v2 CLI-owned mode (operator opt-out)",
-            _MATERIALIZER_TRIPWIRE_ENV,
-        )
-        return
-
-    if arun_canary_against_live_cli is None:
-        _LOG.warning(
-            "materializer tripwire: import unavailable; falling back to v2 mode"
-        )
-        os.environ[_MATERIALIZER_TRIPWIRE_ENV] = "0"
-        return
-
-    _LOG.info("materializer tripwire: spawning canary against claude --print…")
-    try:
-        result = await arun_canary_against_live_cli()
-    except Exception as exc:
-        _LOG.warning(
-            "materializer tripwire: canary raised %s: %s; falling back to v2 mode",
-            type(exc).__name__,
-            exc,
-        )
-        os.environ[_MATERIALIZER_TRIPWIRE_ENV] = "0"
-        return
-
-    if result.is_safe:
-        _LOG.info(
-            "materializer tripwire: PASS — sagent will own the session JSONL "
-            "for this boot (default-on, %s unset/non-zero)",
-            _MATERIALIZER_TRIPWIRE_ENV,
-        )
-        return
-
-    _LOG.warning(
-        "materializer tripwire: FAIL — %d finding(s); falling back to v2 mode",
-        len(result.findings),
-    )
-    for finding in result.findings:
-        _LOG.warning("  drift @ %s: %s", finding.location, finding.detail)
-    os.environ[_MATERIALIZER_TRIPWIRE_ENV] = "0"
-
-
-def _rehydrate_agents_from_jsonl(agents) -> None:
-    """Seed each agent's tape from its on-disk claude JSONL (materialize-mode
-    resume-from-memory).
-
-    After a ``serve.py`` restart, sagent's in-memory tape is empty (the
-    plugin does not persist sagent's own ``session.jsonl``). In materialize
-    mode that is fatal to continuity: on the second turn the materializer
-    rewrites the on-disk JSONL from the short fresh tape and CLOBBERS the
-    full pre-restart history. To preserve continuity we reconstruct the
-    tape from the claude JSONL itself -- the materializer module ships the
-    inverse parser -- so the resolved view matches the prior conversation
-    and the materializer rewrites it faithfully (no clobber).
-
-    Steps per role agent: ``parse_jsonl_to_messages`` -> repair any dangling
-    tool-call pairing (truncated mid-tool writes) -> wrap each message as a
-    ``ReferrableTapeEvent`` -> ``runtime.replay_tape`` ->
-    ``model.seed_session(len(messages))`` so the provider knows the on-disk
-    JSONL already holds that tape prefix (new entries go via stdin, not
-    re-fed; the next spawn uses ``--resume``).
-
-    No-op when materialization is off (``SAGENT_CLI_OWN_SESSION`` opted out),
-    where ``claude --resume`` already owns and resumes the on-disk history
-    natively. Best-effort and never crashes boot: a per-agent failure logs a
+    Best-effort and never crashes boot: a per-agent failure logs a
     warning and that agent starts fresh.
     """
-    opt_out = os.environ.get(_MATERIALIZER_TRIPWIRE_ENV, "").lower() in (
-        "0",
-        "false",
-        "no",
-    )
-    if opt_out:
-        _LOG.info("rehydrate: v2 CLI-owned mode — claude --resume owns history")
-        return
-    try:
-        from sagent.agent.session_io import repair_dangling_tool_calls
-        from sagent.providers.anthropic_cli_session import (
-            parse_jsonl_to_messages,
-            session_jsonl_path,
-        )
-        from sagent.types.tape import ReferrableTapeEvent, TapeRef
-    except ImportError as exc:
-        _LOG.warning("rehydrate: import unavailable (%s); agents start fresh", exc)
-        return
+    from sagent.agent.session_io import load_session
 
-    cwd = Path.cwd()
     for label, agent in agents.items():
-        # ``agents`` holds only the 5 real role agents (the ``user`` /
-        # ``system`` FakeAgents live in ``agent_registry``, not here), so
-        # ``agent.model`` is always the ``_AnthropicCLIModel``. ``model``
-        # is dynamically typed (``Any``) because the generic ``Model``
-        # protocol doesn't carry the session-persistence surface
-        # (``session_id`` / ``seed_session``) — both are public API on
-        # the AnthropicCLI model.
-        model: Any = agent.model
-        session_id = getattr(model, "session_id", None)
-        if not isinstance(session_id, str) or not session_id:
+        session_dir = agent.session_dir
+        if session_dir is None:
             continue
         try:
-            path = session_jsonl_path(session_id, cwd=cwd)
-            if not path.exists():
-                _LOG.info("rehydrate %s: no prior JSONL — fresh start", label)
+            loaded = load_session(session_dir, {})
+            if loaded is None:
+                _LOG.info("resume %s: no prior session.jsonl — fresh start", label)
                 continue
-            parsed: list[Any] = list(parse_jsonl_to_messages(path))
-            messages = repair_dangling_tool_calls(parsed)
-            if not messages:
-                _LOG.info("rehydrate %s: JSONL parsed empty — fresh start", label)
-                continue
-            records = [
-                ReferrableTapeEvent(
-                    ref=TapeRef(session_id=session_id, ordinal=i),
-                    event=message,
-                )
-                for i, message in enumerate(messages)
-            ]
-            agent.runtime.replay_tape(records)
-            # Mark the on-disk JSONL as the already-synced prefix so the
-            # materializer rewrites it faithfully and new entries go via
-            # stdin rather than being re-fed.
-            model.seed_session(len(messages))
-            _LOG.info(
-                "rehydrate %s: seeded %d messages from %s",
-                label,
-                len(messages),
-                path.name,
-            )
+            meta, tape, tool_state = loaded
+            agent.resume(meta, tape, tool_state)
+            _LOG.info("resume %s: rehydrated %d tape records", label, len(tape))
         except Exception as exc:
             _LOG.warning(
-                "rehydrate %s: failed (%s: %s); agent starts fresh",
+                "resume %s: failed (%s: %s); agent starts fresh",
                 label,
                 type(exc).__name__,
                 exc,
@@ -1189,8 +1038,6 @@ def _build_http_app(agents):
 
 
 async def _amain(host: str, port: int) -> int:
-    import os
-
     import uvicorn
 
     logging.basicConfig(
@@ -1206,27 +1053,16 @@ async def _amain(host: str, port: int) -> int:
     # process; this env var is the only handshake.
     os.environ["SAGENT_HTTP_PORT"] = str(port)
 
-    # v2.1-β startup tripwire. When the operator has opted into
-    # sagent-owned session JSONLs (``SAGENT_CLI_OWN_SESSION=1``), run
-    # a 1-turn canary through ``claude --print`` first, compare its
-    # JSONL output against what the materializer would have written,
-    # and only KEEP the env flag if the verdict is clean. A drift
-    # finding (unknown entry type, missing required field, structural
-    # round-trip diff) clears the env var so ``_build_all_agents``
-    # falls back to v2 CLI-owned mode for this boot.
-    await _run_materializer_tripwire()
-
     agents = _build_all_agents()
     _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
 
-    # Materialize-mode resume-from-memory: seed each agent's tape from its
-    # on-disk claude JSONL BEFORE it starts serving (and before warmup), so
-    # the materializer rewrites the full prior history instead of clobbering
-    # it from a fresh (empty) tape on the second turn after a restart. The
-    # persisted "memory" is the claude JSONL; the materializer's parser
-    # reconstructs the tape from it. No-op in v2 (opt-out) mode, where
-    # ``claude --resume`` owns and resumes the history natively.
-    _rehydrate_agents_from_jsonl(agents)
+    # Restart-resume: rehydrate each agent's tape from its sagent
+    # ``session.jsonl`` BEFORE it starts serving (and before warmup).
+    # On the first turn after resume, the provider re-feeds that tape to
+    # ``claude --session-id`` and rebuilds the CLI session; later turns
+    # ``--resume`` and feed only deltas. Standard sagent persistence --
+    # no claude-session-file parsing.
+    _resume_agents_from_session_dir(agents)
 
     serve_tasks = await _serve_agents_forever(agents)
 

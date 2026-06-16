@@ -632,6 +632,19 @@ class Model(Protocol):
         """
         ...
 
+    async def close(self) -> None:
+        """Release any resources the model holds.
+
+        Required, total, and idempotent. CLI-style providers tear down
+        their subprocess pool; API providers close their SDK/HTTP
+        client; a model that holds nothing returns immediately. Always
+        safe to call more than once and safe to call on a never-used
+        model. Callers (e.g. ``Agent.swap_model`` / shutdown) invoke it
+        unconditionally -- there is no "does this model define close?"
+        probe, because every model answers.
+        """
+        ...
+
 
 def default_buffer_tokens(max_request_tokens: int) -> int:
     """Proportional compaction headroom for a given input window.
