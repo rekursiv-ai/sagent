@@ -31,7 +31,18 @@ _MODEL_PROVIDER_MAP: list[tuple[str, str]] = [
     ("minimax", "MiniMax"),
 ]
 
-_ACCOUNT_OVERRIDES: dict[str, str] = {}
+# Maps API-key provider names to their account-auth (subscription /
+# credentials-file) variant. When ``infer_provider`` sees a model_id
+# whose prefix maps to an API-key provider (e.g. ``claude-...`` →
+# ``Anthropic``) AND the user's *current* provider is the account
+# variant (e.g. ``AnthropicCLI``), the inference resolves to the
+# account variant + ``credentials`` auth instead of the API-key path.
+# Without this, ``AgentSelf(model_id="claude-sonnet-4-6")`` from an
+# AnthropicCLI-backed agent would silently try to build a fresh
+# Anthropic API provider, requiring ``ANTHROPIC_API_KEY`` to be set.
+_ACCOUNT_OVERRIDES: dict[str, str] = {
+    "Anthropic": "AnthropicCLI",
+}
 _ACCOUNT_PROVIDERS: set[str] = set(_ACCOUNT_OVERRIDES.values())
 
 

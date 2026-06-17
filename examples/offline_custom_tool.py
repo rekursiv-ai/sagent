@@ -163,6 +163,10 @@ class ScriptedModel:
             on_text(response.message.text)
         return response
 
+    async def close(self) -> None:
+        """No-op teardown; this scripted model holds no resources."""
+        return
+
 
 async def run_example() -> str:
     """Run the offline custom-tool example.

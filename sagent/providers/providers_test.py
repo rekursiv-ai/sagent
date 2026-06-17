@@ -65,6 +65,28 @@ def test_infer_provider_returns_none_when_already_matches() -> None:
     assert infer_provider("claude-sonnet-4-6", current_provider="Anthropic") is None
 
 
+def test_infer_provider_prefers_account_variant_for_account_callers() -> None:
+    """A claude-prefixed model id resolves to the ACCOUNT provider when the
+    caller already runs on one.
+
+    ``AgentSelf(model_id="claude-...")`` from an AnthropicCLI-backed
+    agent must not silently build a fresh API-key ``Anthropic`` provider
+    (which would demand ``ANTHROPIC_API_KEY`` even though the operator
+    authenticates via the CLI subscription). Same-provider stays a
+    no-op; API-key callers are unaffected.
+    """
+    # CLI-backed caller asking for another claude model: the override maps
+    # Anthropic -> AnthropicCLI, which matches the current provider, so no
+    # rebuild at all. Without the override this returned ("Anthropic",
+    # "env") -- a fresh API-key provider.
+    assert infer_provider("claude-haiku-4-5", current_provider="AnthropicCLI") is None
+    # Cross-vendor from a CLI caller still maps to the vendor's API path.
+    assert infer_provider("gpt-5.5", current_provider="AnthropicCLI") == (
+        "OpenAI",
+        "env",
+    )
+
+
 def test_infer_provider_returns_none_for_unknown_prefix() -> None:
     assert infer_provider("mystery-model", current_provider="OpenAI") is None
 
