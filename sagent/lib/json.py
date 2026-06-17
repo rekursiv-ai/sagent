@@ -411,7 +411,7 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
     for name, raw in data.items():
         if name == _TYPE_TAG or name not in hints:
             continue
-        kwargs[name] = _decode(hints[name], raw)
+        kwargs[name] = decode(hints[name], raw)
     return cls(**kwargs)
 
 
@@ -493,7 +493,22 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 
 
-def _decode(annotation: object, raw: object) -> object:
+def decode(annotation: object, raw: object) -> object:
+    """Coerce a JSON-decoded value to the type named by ``annotation``.
+
+    Type-hint-driven: dispatches on the resolved annotation (scalar, union,
+    ``Path`` / ``UUID`` / ``datetime`` / ``bytes`` / ``Enum``, nested
+    dataclass, ``list`` / ``tuple`` / ``dict``), mirroring how
+    :func:`dataclass_from_json` decodes a field.
+
+    Args:
+      annotation: The target type annotation (a resolved type, not a string).
+      raw: A JSON-decoded value (scalar, list, or mapping).
+
+    Returns:
+      value: ``raw`` coerced to ``annotation``.
+
+    """
     ann = _strip_optional(_resolve_alias(annotation))
     origin = get_origin(ann)
     # Nested dataclass.
@@ -516,14 +531,14 @@ def _decode(annotation: object, raw: object) -> object:
     if origin in (tuple, list) and isinstance(raw, list):
         args = get_args(ann)
         elem: object = args[0] if args else object
-        decoded = [_decode(elem, v) for v in cast("list[object]", raw)]
+        decoded = [decode(elem, v) for v in cast("list[object]", raw)]
         return tuple(decoded) if origin is tuple else decoded
     # Mapping (dict[K, V]): decode each value against the value annotation.
     if origin in (dict, Mapping) and isinstance(raw, Mapping):
         args = get_args(ann)
         val_ann: object = args[1] if len(args) == 2 else object
         return {
-            k: _decode(val_ann, v)
+            k: decode(val_ann, v)
             for k, v in cast("Mapping[object, object]", raw).items()
         }
     # Non-Optional union of special scalars (e.g. ``Path | bytes``): the
@@ -536,7 +551,37 @@ def _decode(annotation: object, raw: object) -> object:
         if isinstance(name, str):
             member = _scalar_member(get_args(ann), name)
             if member is not None:
-                return _decode(member, raw_map.get(_VALUE_TAG))
+                return decode(member, raw_map.get(_VALUE_TAG))
+    # Plain scalars. ``raw`` may already match the declared scalar, or be a
+    # different scalar that should coerce to it (an ``int`` for a ``float``
+    # field, a ``str`` token for a ``bool``). Coerce to the declared type:
+    # ``bool`` by token via ``bool_val`` -- ``bool("False")`` is ``True``, so a
+    # plain ``bool(raw)`` would mis-read a ``"false"`` token -- the others by
+    # their constructor. Coercion is idempotent for an already-correct value.
+    if raw is None:
+        return None
+    if ann is bool:
+        # ``raw`` is the ``object``-typed decode input; pyright tracks it as
+        # partially ``Unknown`` through the recursive cast sites above.
+        # ``bool_val`` accepts ``object``, so the value is correct.
+        return bool_val(raw)  # pyright: ignore[reportUnknownArgumentType]
+    if ann is int and isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
+        return int(raw)
+    if (
+        ann is float
+        and isinstance(raw, (str, int, float))
+        and not isinstance(raw, bool)
+    ):
+        return float(raw)
+    if ann is str:
+        if isinstance(raw, str):
+            return raw
+        # A non-str scalar (int / float / bool) for a str field becomes its
+        # lexical form. Restrict to scalars: stringifying an arbitrary object
+        # here would silently accept a structurally wrong value.
+        if isinstance(raw, (int, float)):
+            return str(raw)
+        raise TypeError(f"cannot coerce {raw!r} to str")
     # Scalar special-cases.
     if ann is bytes and isinstance(raw, str):
         return base64.b64decode(raw)
