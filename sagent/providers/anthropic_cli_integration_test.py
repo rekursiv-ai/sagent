@@ -269,9 +269,7 @@ async def test_real_claude_drives_full_detach_path() -> None:
         return "PELICAN"
 
     sid = str(_uuid.uuid4())
-    model = AnthropicCLI.from_credentials().model(
-        "claude-sonnet-4-6", session_id=sid
-    )
+    model = AnthropicCLI.from_credentials().model("claude-sonnet-4-6", session_id=sid)
     try:
         # Turn 1: claude must background the tool and end the turn on the
         # detached placeholder, with no answer yet.
@@ -305,8 +303,7 @@ async def test_real_claude_drives_full_detach_path() -> None:
         )
         # And it did NOT already have the answer (it came up for air).
         assert "PELICAN" not in turn1.message.text.upper(), (
-            f"turn 1 should not contain the answer yet; got "
-            f"{turn1.message.text!r}"
+            f"turn 1 should not contain the answer yet; got {turn1.message.text!r}"
         )
 
         # Turn 2: the detached result rides --resume; claude reads it.
