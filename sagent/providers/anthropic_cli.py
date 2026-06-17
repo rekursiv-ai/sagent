@@ -1332,9 +1332,7 @@ class _AnthropicCLIModel:
         # -- ``_await_mcp_listed`` is a no-op otherwise and would never prune
         # the entry, so a long-lived tool-less session would accrete them.
         if self._tools_bridge.has_tools:
-            self._mcp_baseline_by_proc[id(proc)] = (
-                self._tools_bridge.listed_snapshot()
-            )
+            self._mcp_baseline_by_proc[id(proc)] = self._tools_bridge.listed_snapshot()
         self._warming_proc = proc
         try:
             await proc.start()
