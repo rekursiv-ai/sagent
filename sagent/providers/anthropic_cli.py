@@ -417,14 +417,11 @@ class _AnthropicCLIModel:
         self._warming_proc: Subproc | None = None
         # Stdout-idle timeout (seconds) for the ``claude`` subprocess
         # transport. ``None`` defers to the ``Subproc`` default (60s).
-        # Bumped to ~3-5min for v2 plugin agents whose tools include
-        # long-running ``pre-commit run`` / ``ty check`` / heavy test
-        # invocations; without the bump, a >60s tool wait makes the
-        # transport read claude's silence as a hang and triggers
-        # ``send_with_retry``, whose retried response often diverges
-        # from the cached partial and eats the closing assistant
-        # message. See worklog ``v2.1-cli-session-materialize`` →
-        # 2026-06-09 SWE PR3 divergence diagnosis.
+        # Set higher (~3-5min) for agents whose tools include
+        # long-running synchronous Bash calls (``pre-commit run`` /
+        # ``ty check`` / heavy tests); without the bump a >60s tool wait
+        # makes the transport read claude's silence as a hang and
+        # raises ``SubprocessTransportError`` on a healthy turn.
         self._subprocess_read_timeout_sec: float | None = subprocess_read_timeout_sec
         # Session-persistence mode (see ``AnthropicCLI.model``'s
         # ``session_id`` arg). When set:
@@ -1040,14 +1037,10 @@ class _AnthropicCLIModel:
         # Aggregated thinking-block signature. Anthropic's stream
         # emits a ``signature_delta`` event alongside ``thinking_delta``;
         # the final signature is the concatenation of those deltas
-        # (typically a single delta). Required because Anthropic's API
-        # rejects an assistant message with a signature-less thinking
-        # block (HTTP 400 ``thinking.signature: Field required``).
-        # Pre-2026-06-09 this parser ignored signature_delta and v2's
-        # session-persistent path didn't notice — claude owned the
-        # JSONL and never re-sent unsigned thinking blocks via wire.
-        # v2.1-α materialize mode IS the wire-resender, so the
-        # signature became load-bearing.
+        # (typically a single delta). Required because the assistant
+        # message is re-sent on the wire when a session-mode turn
+        # rebuilds history, and Anthropic's API rejects a signature-less
+        # thinking block (HTTP 400 ``thinking.signature: Field required``).
         signature_parts: list[str] = []
         # Per-block-index state for tool_use accumulators. Each
         # ``content_block_start`` for a ``tool_use`` registers
@@ -1696,10 +1689,10 @@ def _dispatch_stream_event(
             # carries the opaque thought-signature in the ``signature``
             # field (mirrors ``thinking_delta`` for body text). The
             # final signature is the concatenation across deltas
-            # (typically a single delta in practice). Required so
-            # downstream wire sends (v2.1-α materializer mode) embed
-            # the signature in the thinking block — Anthropic's API
-            # rejects unsigned thinking with HTTP 400
+            # (typically a single delta in practice). Required so a
+            # downstream wire re-send (session-mode history rebuild)
+            # embeds the signature in the thinking block — Anthropic's
+            # API rejects unsigned thinking with HTTP 400
             # ``thinking.signature: Field required``.
             sig = cast(str, delta.get("signature") or "")
             if sig:

@@ -1104,6 +1104,12 @@ class Agent:
         # to a worker thread so the loop keeps servicing input and the
         # wait stays cancellable.
         await asyncio.to_thread(login_fn)
+        # Reach the owning provider to hot-reload credentials after the
+        # re-login. This is a deliberate private-attribute access, not a
+        # capability probe: every rich provider model carries
+        # ``_provider`` (it is not part of the lean ``Model`` contract,
+        # so there is no public accessor). The ``AuthReloadable`` check
+        # then narrows to providers that actually refresh tokens.
         live_provider = getattr(self.model, "_provider", None)
         if isinstance(live_provider, types.providers.AuthReloadable):
             await live_provider.handle_auth_error()

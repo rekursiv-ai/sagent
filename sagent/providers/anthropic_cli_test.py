@@ -30,6 +30,7 @@ from sagent.providers.anthropic_cli import (
     _extract_retry_after_ms,
     _hash_system,
     _is_event_retryable,
+    _real_home,
     _round_context_tokens,
     _serialize_for_stdin,
     _session_jsonl_path,
@@ -1889,6 +1890,213 @@ def test_interrupt_active_proc_signals_active_subprocess(
 
 
 _ = ToolCall
+
+
+# ----------------------------------------------------------------------
+# Cancel-through-stream(): the mid-turn preempt path.
+#
+# The runtime preempts by cancelling the model-call task, which raises
+# ``CancelledError`` INTO ``model.stream``. The provider must SIGINT the
+# subprocess (``_interrupt_active_proc``) and re-raise so the runtime's
+# cancellation path runs. Earlier tests only exercised the leaf helper;
+# these drive the real ``stream`` branches.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stateless_stream_cancelled_interrupts_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CancelledError`` mid-stream → SIGINT the active proc, respawn, re-raise."""
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    interrupted = False
+    respawn_count = 0
+
+    class _CancelProc:
+        def interrupt(self) -> bool:
+            nonlocal interrupted
+            interrupted = True
+            return True
+
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            raise asyncio.CancelledError
+
+    proc = _CancelProc()
+
+    class _HotSpare:
+        active = cast(Subproc | None, proc)
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, proc)
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawn_count
+            respawn_count += 1
+            return cast(Subproc, proc)
+
+    model._system_hash = _hash_system(None)
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+
+    with pytest.raises(asyncio.CancelledError):
+        await model.stream(request)
+
+    assert interrupted is True, "stream() must SIGINT the active proc on cancel"
+    assert respawn_count == 1, "stream() must respawn after a cancelled turn"
+    assert model._last_sent_index == 0
+
+
+@pytest.mark.asyncio
+async def test_session_persistent_stream_cancelled_interrupts_and_reraises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-mode ``CancelledError`` → SIGINT active proc, close, re-raise."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    provider = AnthropicCLI()
+    sid = "11111111-2222-3333-4444-555555555555"
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    interrupted = False
+    closed = False
+
+    class _CancelProc:
+        def interrupt(self) -> bool:
+            nonlocal interrupted
+            interrupted = True
+            return True
+
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            raise asyncio.CancelledError
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    proc = _CancelProc()
+
+    async def _fake_spawn() -> Subproc:
+        return cast(Subproc, proc)
+
+    monkeypatch.setattr(model, "_spawn_initialized", _fake_spawn)
+    monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
+    monkeypatch.setattr(model, "_sync_tools_bridge", lambda _request: None)
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+
+    with pytest.raises(asyncio.CancelledError):
+        await model.stream(request)
+
+    assert interrupted is True, "session stream must SIGINT the active proc on cancel"
+    assert closed is True, "session stream must close the proc on cancel"
+    assert model._active_proc is None
+
+
+# ----------------------------------------------------------------------
+# Path resolution: CLAUDE_CONFIG_DIR + the session-jsonl encoded path.
+# ----------------------------------------------------------------------
+
+
+def test_real_home_honors_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_real_home`` returns the parent of ``CLAUDE_CONFIG_DIR`` when set.
+
+    claude stores ``projects/`` under ``$CLAUDE_CONFIG_DIR`` (treated as
+    the ``.claude`` dir). ``_real_home`` returns its parent so the shared
+    ``/.claude/projects`` suffix in ``_session_jsonl_path`` resolves to
+    claude's actual projects root.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom/cfg/.claude")
+    assert _real_home() == Path("/custom/cfg")
+
+
+def test_real_home_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without ``CLAUDE_CONFIG_DIR``, ``_real_home`` uses ``$HOME``."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", "/home/operator")
+    assert _real_home() == Path("/home/operator")
+
+
+def test_session_jsonl_path_under_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: with ``CLAUDE_CONFIG_DIR`` the session path lands under it."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom/cfg/.claude")
+    sid = "abc12345-aaaa-bbbb-cccc-dddddddddddd"
+    path = _session_jsonl_path(sid, cwd=Path("/work/repo"), home=_real_home())
+    assert path == Path(
+        "/custom/cfg/.claude/projects/-work-repo/"
+        f"{sid}.jsonl",
+    )
+
+
+# ----------------------------------------------------------------------
+# Multi-turn session lifecycle: turn 1 mints (--session-id), turn 2
+# resumes (--resume). Verifies the _session_initialized flip + that the
+# argv switches accordingly across two real stream() turns.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_persistent_two_turns_mint_then_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turn 1 uses ``--session-id`` (mint); turn 2 uses ``--resume``."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    provider = AnthropicCLI()
+    sid = "22222222-3333-4444-5555-666666666666"
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    resume_existing_seen: list[bool] = []
+
+    class _OkProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            # Minimal terminal result event: one round, clean stop.
+            return {
+                "type": "result",
+                "stop_reason": "end_turn",
+                "modelUsage": {},
+                "session_id": "s",
+            }
+
+        async def close(self) -> None:
+            return
+
+    # Capture the resume_existing flag the argv builder would receive by
+    # intercepting the spawn (which reads model._session_initialized).
+    async def _fake_spawn() -> Subproc:
+        resume_existing_seen.append(model._session_initialized)
+        return cast(Subproc, _OkProc())
+
+    monkeypatch.setattr(model, "_spawn_initialized", _fake_spawn)
+    monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
+    monkeypatch.setattr(model, "_sync_tools_bridge", lambda _request: None)
+
+    # Turn 1: fresh session → mint (_session_initialized False at spawn).
+    await model.stream(ModelRequest(messages=[UserMessage(text="one")]))
+    # Turn 2: same session, one new entry → resume.
+    await model.stream(
+        ModelRequest(
+            messages=[
+                UserMessage(text="one"),
+                AssistantMessage(text="ok"),
+                UserMessage(text="two"),
+            ],
+        ),
+    )
+
+    assert resume_existing_seen == [False, True], (
+        "turn 1 must mint (--session-id), turn 2 must resume (--resume); "
+        f"got {resume_existing_seen}"
+    )
 
 
 if __name__ == "__main__":
