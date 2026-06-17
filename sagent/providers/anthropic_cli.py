@@ -59,6 +59,8 @@ from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
+    from sagent.types.tools import Tool
+
     import sagent.lib.image as image_lib
 else:
     from wrapt import lazy_import
@@ -72,6 +74,13 @@ logger = logging.getLogger(__name__)
 _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 _TURN_RESPAWN_THRESHOLD = 100
 _CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
+# Cap on waiting for the CLI to fetch the MCP catalog (proof the
+# in-process bridge connected) before feeding the first user line. The
+# CLI's MCP connect + catalog fetch is ~2-3s on a cold subprocess
+# locally; this bounds a pathologically slow connect before we give up
+# and proceed. Only paid once, on a cold spawn's first turn -- warm
+# subprocesses keep the connection and skip the wait entirely.
+_MCP_CONNECT_TIMEOUT_SEC = 8.0
 _CREDENTIALS_SCHEMA: JSON = {
     "type": "object",
     "required": ["claudeAiOauth"],
@@ -102,11 +111,12 @@ class AnthropicCLIRetryableError(SubprocessTransportError):
     The ``aborted_streaming`` / ``ede_diagnostic`` shape was originally
     framed as "Anthropic-side stream instability under load." Live
     cross-correlation with peer-message timestamps that evening showed
-    the dominant cause is actually our own SIGINT preempt
-    (``runtime.preempt_in_flight=True``, override #2): when a peer or
-    operator message arrives while a ``claude --print`` subprocess is
-    mid-turn, we ``model.cancel_in_flight()`` to make room for the new
-    inbound. The CLI subprocess dies and emits a final ``result`` event
+    the dominant cause is actually our own SIGINT preempt: when the
+    runtime cancels the in-flight model-call task (a peer or operator
+    message arrives while a ``claude --print`` subprocess is mid-turn),
+    ``CancelledError`` reaches ``stream`` and ``_interrupt_active_proc``
+    SIGINTs the subprocess. The CLI subprocess dies and emits a final
+    ``result`` event
     with ``terminal_reason="aborted_streaming"`` + an ede_diagnostic
     line -- exactly the shape we'd been attributing to upstream
     instability. The smoking gun was the 0-input-token events: an API
@@ -509,6 +519,15 @@ class _AnthropicCLIModel:
         self._active_proc: Subproc | None = None
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
+        # Tools the stateless ``stream`` stashes so ``_spawn_initialized``
+        # can populate the bridge before launching ``claude`` (the CLI
+        # lists tools right after launch). Empty in session mode, which
+        # syncs the bridge before its own spawn.
+        self._pending_tools: list[Tool] = []
+        # Bridge ``list_tools`` count snapshotted at the active spawn; the
+        # turn's first ``_send_entry`` waits for it to increment (proof
+        # this subprocess's MCP client connected). See ``_await_mcp_listed``.
+        self._mcp_listed_baseline: int = 0
         self._sent_history_head: TapeEvent | None = None
         # External MCP servers (stdio or HTTP) merged into the CLI's
         # ``--mcp-config`` at subprocess spawn time. See
@@ -761,6 +780,15 @@ class _AnthropicCLIModel:
                 on_thinking,
             )
         assert self._hot_spare is not None  # stateless path
+        # Stash the request's tools so the spawn factory
+        # (``_spawn_initialized``) can populate the bridge BEFORE it
+        # launches ``claude`` -- the CLI issues ``ListToolsRequest``
+        # right after launch, and an empty registry at that moment makes
+        # the model emit "no tools have been provided" instead of a
+        # ``tool_use`` (live 2026-06-16 ``test_bridge_tool_round_trips``).
+        # The post-acquire ``_sync_tools_bridge`` below still refreshes
+        # the live registry for the already-warm subprocess.
+        self._pending_tools = list(request.tools or [])
         if self._should_respawn(request):
             if _hash_system(request.system) != self._system_hash:
                 await self._hot_spare.discard_spare()
@@ -837,20 +865,33 @@ class _AnthropicCLIModel:
         new_entries = request.messages[self._last_sent_index :]
         # user-like entries only: filter out AssistantMessage / ToolResult
         # (sagent's own history bookkeeping, never written to stdin).
-        # We build the index map below at the same time we'd otherwise
-        # build the list.
-        if not any(
-            not isinstance(e, (AssistantMessage, ToolResult)) for e in new_entries
-        ):
-            # No new input to feed. Return a no-op response: empty
-            # assistant message + zero usage. The runtime treats this
-            # as a finished turn with no output; the next real inbound
-            # will spawn the next subprocess. Cheaper than spawning a
-            # claude --print just to wait for stdin EOF.
+        #
+        # ``_last_sent_index``-advancing entries from the tape come first;
+        # a synthetic detached-tool-result delivery (``rel_idx is None``)
+        # is appended LAST and never advances the cumulative counter (it
+        # is not part of ``request.messages``). The detached delivery is
+        # drained only from an already-running bridge -- if no bridge
+        # exists yet, no detached run can have completed.
+        new_entries_idx: list[tuple[int | None, TapeEvent]] = []
+        for i, entry in enumerate(new_entries):
+            if not isinstance(entry, (AssistantMessage, ToolResult)):
+                new_entries_idx.append((i, entry))
+        detached = self._detached_delivery_entry()
+        if detached is not None:
+            new_entries_idx.append((None, detached))
+
+        if not new_entries_idx:
+            # No new input to feed and no detached results to deliver.
+            # Return a no-op response: empty assistant message + zero
+            # usage. The runtime treats this as a finished turn with no
+            # output; the next real inbound will spawn the next
+            # subprocess. (Don't start the bridge for a no-op turn.)
             return ModelResponse(
                 message=AssistantMessage(text="", tool_calls=()),
                 stop_reason="model_finished",
             )
+        base = self._last_sent_index
+
         # Bridge MUST be populated before the subprocess spawns: the
         # CLI issues ``ListToolsRequest`` against the bridge soon
         # after launch, and if our tool catalog isn't there at that
@@ -859,18 +900,6 @@ class _AnthropicCLIModel:
         # — observed 2026-06-02 23:16 when TL produced
         # "Bash {command: ls -la …}" as text instead of a tool_use
         # block on the first turn after refactor).
-        # Per-entry index map: each user-like entry's position in
-        # ``new_entries`` (which is ``request.messages[base:]``). We
-        # use this to advance ``_last_sent_index`` per-entry as the
-        # writes succeed, so a mid-loop ``SubprocessTransportError``
-        # doesn't lose the entries we already wrote and doesn't force
-        # the next retry to re-send them.
-        new_entries_idx: list[tuple[int, TapeEvent]] = []
-        for i, entry in enumerate(new_entries):
-            if not isinstance(entry, (AssistantMessage, ToolResult)):
-                new_entries_idx.append((i, entry))
-        base = self._last_sent_index
-
         await self._ensure_tools_bridge()
         self._sync_tools_bridge(request)
         proc = await self._spawn_initialized()
@@ -887,6 +916,7 @@ class _AnthropicCLIModel:
                 # on 2026-06-03 around 14:30, when each retry re-wrote
                 # the earliest pending entry AND failed to reach the
                 # later entries that contained TL's STOP directives).
+                assert rel_idx is not None  # only the trailing entry may be synthetic
                 self._last_sent_index = base + rel_idx + 1
                 _ = await self._drain_until_result(
                     proc,
@@ -896,7 +926,11 @@ class _AnthropicCLIModel:
                 )
             last_rel_idx, last_entry = new_entries_idx[-1]
             await self._send_entry(proc, last_entry)
-            self._last_sent_index = base + last_rel_idx + 1
+            # ``rel_idx is None`` for a synthetic detached-result delivery:
+            # it is not part of ``request.messages``, so it must not
+            # advance the cumulative sent counter.
+            if last_rel_idx is not None:
+                self._last_sent_index = base + last_rel_idx + 1
             response = await self._drain_until_result(
                 proc,
                 on_text,
@@ -977,6 +1011,28 @@ class _AnthropicCLIModel:
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
 
+    def _detached_delivery_entry(self) -> UserMessage | None:
+        """Drain the bridge's completed detached tool runs into one entry.
+
+        The bridge runs background tool calls (those the model requested
+        with ``background``/``delay``) as tasks in this Model's loop and
+        hands back finished results here. We fold them into a single
+        user-side message so the next ``claude --print`` turn delivers
+        the results the model was promised. ``None`` when nothing is
+        pending. This is the Model side of the bridge's internal cohort:
+        detached tool results come back as ordinary turn input.
+        """
+        if self._tools_bridge is None:
+            return None
+        results = self._tools_bridge.drain_detached_results()
+        if not results:
+            return None
+        lines = [
+            f"[detached tool result] {r.content}" + (" (error)" if r.is_error else "")
+            for r in results
+        ]
+        return UserMessage(text="\n\n".join(lines))
+
     async def _ensure_tools_bridge(self) -> None:
         """Lazily create the MCP bridge (without spawning the CLI).
 
@@ -1019,7 +1075,14 @@ class _AnthropicCLIModel:
         return await self._drain_until_result(proc, on_text, on_thinking)
 
     async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
-        """Write one history entry to stdin."""
+        """Write one history entry to stdin.
+
+        Gated on the CLI having fetched the bridge catalog (instant after
+        the first fetch): a cold subprocess's first user line must not
+        race ahead of claude's still-connecting MCP client, or the model
+        sees no tools and answers "no tools have been provided".
+        """
+        await self._await_mcp_listed()
         line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
         await proc.write_line(line)
 
@@ -1082,11 +1145,12 @@ class _AnthropicCLIModel:
                     # Classify transient shapes for in-place retry vs
                     # fatal shapes for runtime escalation. The
                     # dominant transient shape in practice is the
-                    # ``aborted_streaming`` event the CLI emits when
-                    # we ``model.cancel_in_flight()`` to preempt a
-                    # mid-turn subprocess for an incoming peer/operator
-                    # message; the retry then re-delivers via
-                    # ``--resume``. See :func:`_is_event_retryable`
+                    # ``aborted_streaming`` event the CLI emits when the
+                    # runtime cancels the model-call task and we SIGINT
+                    # the mid-turn subprocess (``_interrupt_active_proc``)
+                    # for an incoming peer/operator message; the retry
+                    # then re-delivers via ``--resume``. See
+                    # :func:`_is_event_retryable`
                     # for the catalog.
                     if _is_event_retryable(cast(Mapping[str, object], event)):
                         raise AnthropicCLIRetryableError(
@@ -1142,6 +1206,15 @@ class _AnthropicCLIModel:
         if self._tools_bridge is None:
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
+        # Populate the bridge registry BEFORE launching ``claude``: the
+        # CLI issues ``ListToolsRequest`` right after launch, so an empty
+        # registry at this moment makes the model see no tools. The
+        # stateless ``stream`` stashes the turn's tools in
+        # ``_pending_tools`` for exactly this; session mode hoists its
+        # own ``_sync_tools_bridge`` before the spawn, leaving
+        # ``_pending_tools`` empty (a no-op refresh).
+        if self._pending_tools:
+            self._tools_bridge.update_tools(list(self._pending_tools))
         spawn_owned_tmpdir: Path | None
         tmpdir: Path | None
         if self._persistent_tmpdir is not None:
@@ -1209,6 +1282,15 @@ class _AnthropicCLIModel:
             # any single stream-json record while keeping memory bounded.
             stream_limit=16 * 1024 * 1024,
         )
+        # Snapshot the bridge's ``list_tools`` count BEFORE launch so the
+        # turn can later confirm THIS subprocess's MCP client connected
+        # (its fetch bumps the count past the snapshot). Race-free under a
+        # concurrent HotSpare warm: each spawn keeps its own snapshot. A
+        # warm spare connects during background warm-up, so by the time it
+        # is promoted its count already exceeds the snapshot and the wait
+        # in ``_await_mcp_listed`` returns instantly -- only a genuinely
+        # cold first spawn pays the ~3s connect.
+        self._mcp_listed_baseline = self._tools_bridge.listed_snapshot()
         self._warming_proc = proc
         try:
             await proc.start()
@@ -1218,6 +1300,31 @@ class _AnthropicCLIModel:
             raise
         self._warming_proc = None
         return proc
+
+    async def _await_mcp_listed(self) -> None:
+        """Wait (briefly) for the CLI to fetch the bridge's tool catalog.
+
+        The CLI connects to MCP servers asynchronously after launch and
+        does NOT block its first turn on that handshake; a cold
+        subprocess that generates before the ``sagent`` server flips from
+        ``pending`` to ``connected`` sees an empty catalog and answers "no
+        tools have been provided" (live 2026-06-16). Called once, right
+        before the first user line is written, so the connect overlaps no
+        extra latency. No-op when the bridge has no tools or the signal
+        already fired. On timeout, proceed -- better a possibly-toolless
+        turn than a wedged one.
+        """
+        if self._tools_bridge is None or not self._tools_bridge.has_tools:
+            return
+        listed = await self._tools_bridge.wait_listed(
+            self._mcp_listed_baseline, _MCP_CONNECT_TIMEOUT_SEC
+        )
+        if not listed:
+            logger.warning(
+                "AnthropicCLI: MCP bridge catalog not fetched within %.1fs; "
+                "proceeding (model may not see bridge tools this turn)",
+                _MCP_CONNECT_TIMEOUT_SEC,
+            )
 
     def _reset_active_state(self) -> None:
         """Reset active subprocess counters after a respawn boundary."""
@@ -1540,9 +1647,7 @@ def _build_anthropic_argv(
             "--strict-mcp-config",
         ]
     )
-    # ``--tools ""`` historically meant "use the default allowlist" in
-    # stateless mode. In session-persistence mode (``--session-id`` /
-    # ``--resume``) the CLI re-interprets empty-string as "ALLOW NO
+    # Never pass ``--tools ""``: the CLI reads empty-string as "ALLOW NO
     # TOOLS, including MCP ones" -- bisect probe 2026-06-03 found:
     #
     #   --tools ""              → no tool_use; opus replies "I'll run
@@ -1550,10 +1655,12 @@ def _build_anthropic_argv(
     #   (omit --tools entirely) → tool_use(name=Bash) emitted cleanly.
     #   --tools "Bash"          → tool_use(name=Bash) emitted cleanly.
     #
-    # We omit ``--tools`` in session-persistence mode and keep the
-    # empty-string in stateless mode (no observed regressions there).
-    if session_id is None:
-        base.extend(["--tools", ""])
+    # This was originally believed to bite only session-persistence mode,
+    # but the stateless path routes tools through the same MCP bridge, so
+    # ``--tools ""`` silently disabled bridge tools there too -- the model
+    # answered "no tools have been provided" for a bridge-mounted tool
+    # (live 2026-06-16 ``test_bridge_tool_round_trips``). Omit ``--tools``
+    # in BOTH modes so the bridge's MCP catalog is always honored.
     base.extend(
         [
             "--disable-slash-commands",

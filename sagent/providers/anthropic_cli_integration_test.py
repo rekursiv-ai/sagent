@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
 import shutil
 import uuid as _uuid
 
@@ -36,7 +37,11 @@ from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 
 
-pytestmark = pytest.mark.integration
+# ``real_sleep``: these spawn the real CLI + the MCP bridge's uvicorn
+# server, whose startup polls ``asyncio.sleep`` to yield to the serve
+# task. The conftest's autouse ``_fast_sleep`` no-ops ``asyncio.sleep``,
+# which starves uvicorn startup and trips the bridge's 10s deadline.
+pytestmark = [pytest.mark.integration, pytest.mark.real_sleep]
 
 
 def _claude_available() -> bool:
@@ -164,6 +169,78 @@ async def test_bridge_tool_round_trips() -> None:
         await model.close()
     assert "FLAMINGO" in response.message.text.upper(), (
         f"model did not use the tool result; got {response.message.text!r}"
+    )
+
+
+@_requires_claude
+@pytest.mark.asyncio
+async def test_detached_result_delivered_to_model_on_resume() -> None:
+    """A completed detached tool result is delivered to the model on the
+    next ``--resume`` turn and the model can read it.
+
+    Tests the Model side of the bridge's internal cohort -- the live path
+    that ``_detached_delivery_entry`` folds a finished background run into
+    the next turn's input and the resumed CLI surfaces it to the model.
+    Turn 1's detach is staged DIRECTLY through the bridge (``background:
+    true``) rather than via a real ``claude`` turn: whether haiku elects
+    to background a tool is model non-determinism already covered by the
+    unit tests; what needs live verification is that the staged result
+    rides ``--resume`` into the model's context. Keeps the test fast and
+    deterministic.
+    """
+
+    @tool(name="slow_oracle")
+    async def slow_oracle() -> str:
+        """Return the oracle's secret word."""
+        return "PELICAN"
+
+    sid = str(_uuid.uuid4())
+    model = AnthropicCLI.from_credentials().model("claude-haiku-4-5", session_id=sid)
+    try:
+        # Establish the session + bridge with one trivial real turn.
+        await model.stream(
+            ModelRequest(
+                messages=[UserMessage(text="Reply with the word: ready")],
+                tools=[slow_oracle],
+            ),
+        )
+        bridge = model._tools_bridge
+        assert bridge is not None, "first turn must have created the bridge"
+
+        # Stage a detached run directly through the bridge (the same call
+        # the CLI makes when the model passes ``background: true``); wait
+        # for it to finish so a real result is queued for delivery.
+        blocks = await bridge._call_tool("slow_oracle", {"background": True})
+        assert "[detached" in str(blocks[0])
+        for _ in range(100):
+            if not bridge.has_pending_detached():
+                break
+            await asyncio.sleep(0.02)
+        assert not bridge.has_pending_detached(), "detached task never completed"
+
+        # Next turn: ``_detached_delivery_entry`` folds the finished result
+        # into the resumed turn's input, so the model sees PELICAN.
+        response = await model.stream(
+            ModelRequest(
+                messages=[
+                    UserMessage(text="Reply with the word: ready"),
+                    UserMessage(
+                        text=(
+                            "A detached tool result was just delivered to you. "
+                            "What word did it contain? Reply with just that word."
+                        ),
+                    ),
+                ],
+                tools=[slow_oracle],
+            ),
+        )
+    except TimeoutError as exc:
+        _skip_if_bridge_unavailable(exc)
+        raise
+    finally:
+        await model.close()
+    assert "PELICAN" in response.message.text.upper(), (
+        f"model never received the detached result; got {response.message.text!r}"
     )
 
 

@@ -927,37 +927,8 @@ class AgentRuntime:
         tools: list[Tool] | None = None,
         compactor: Compactor | None = None,
         session_id: str = "",
-        preempt_in_flight: bool = False,
-        coalesce_inbox: bool = True,
     ) -> None:
         self.model = model
-        # When True, an urgent mid-stream UserMessage / AgentSendMessage
-        # cancels the in-flight model-call task (``_cancel_model_call``)
-        # before buffering. Cancellation propagates ``CancelledError``
-        # into ``model.stream()``; CLI-driven providers (AnthropicCLI /
-        # GoogleCLI) translate it into a subprocess SIGINT /
-        # ``session/cancel`` so their opaque tool loop stops, while API
-        # providers' awaited stream is torn down by standard
-        # cancellation. Default off: changes user-observable timing (the
-        # in-flight turn resolves as ModelResponseCancelled) and only the
-        # caller knows whether that tradeoff is desired for this agent.
-        self._preempt_in_flight = preempt_in_flight
-        # When True (default — the sagent-design behaviour), consecutive
-        # same-source ``UserMessage`` / ``AgentSendMessage`` items
-        # arriving without an intervening assistant turn are coalesced
-        # into a single history entry (see :meth:`_append_or_coalesce_user`).
-        # This satisfies Anthropic's user/assistant alternation rule when
-        # the model errored or was cancelled mid-turn.
-        #
-        # Set to False for chat-channel use cases where each peer
-        # ``AgentSendMessage`` is a deliberate discrete event that the
-        # recipient should process as a separate turn (e.g. a hard STOP
-        # arriving after a prior delegation message must be visible AS a
-        # distinct inbound, not concatenated to the tail of the prior
-        # one). When False, the coalesce path is replaced by an explicit
-        # synthetic assistant-turn boundary so the API alternation rule
-        # still holds.
-        self._coalesce_inbox = coalesce_inbox
         self.tools_map: dict[str, Tool] = {}
         for t in tools or []:
             if t.name in self.tools_map:
@@ -1517,23 +1488,6 @@ class AgentRuntime:
         self._cached_resolved = None
         for record in records:
             self._index_record(record)
-
-    def _cancel_model_call(self) -> None:
-        """Cancel the in-flight model-call task, if any.
-
-        Cancelling the task propagates ``CancelledError`` into
-        ``model.stream()``. CLI-driven providers translate that into a
-        subprocess SIGINT (``claude``) or a ``session/cancel``
-        notification (``gemini`` ACP) inside their own ``stream``; API
-        providers' awaited SDK/HTTP stream is torn down by the standard
-        cancellation. ``_stream_and_post`` catches ``CancelledError`` and
-        publishes ``ModelResponseCancelled``. No provider-specific cancel
-        method is required -- cancellation is the universal primitive.
-        """
-        if self.model_call is not None:
-            self.model_call.cancel()
-            self.model_call = None
-            self._model_call_generation += 1
 
     def mint_ref(self) -> TapeRef:
         """Mint the next ``TapeRef`` and advance the ordinal counter.
@@ -2101,27 +2055,6 @@ class AgentRuntime:
                                 # the coalesced UserMessage is published --
                                 # at which point the preview drops because the
                                 # buffer is empty. One UI surface at a time.
-                                # If ``preempt_in_flight`` is enabled AND the
-                                # message is flagged ``urgent`` (the historical
-                                # default, preserved for tests/internal
-                                # callers that don't specify), cancel the
-                                # in-flight model-call task so a CLI-driven
-                                # opaque turn aborts immediately rather than
-                                # waiting for natural completion. Cancellation
-                                # propagates ``CancelledError`` into
-                                # ``model.stream()``; CLI-driven providers
-                                # translate it into a subprocess SIGINT /
-                                # ``session/cancel`` in their own ``stream``,
-                                # so no provider-specific cancel method is
-                                # needed. ``urgent=False`` lets ingress layers
-                                # (e.g. plugin web UIs) opt operator messages
-                                # into queue-by-default so back-to-back operator
-                                # typing doesn't waste the recipient's in-flight
-                                # compute on routine follow-ups; see
-                                # AgentSendMessage handler below for the
-                                # symmetric peer case.
-                                if self._preempt_in_flight and item.urgent:
-                                    self._cancel_model_call()
                                 self._mid_stream_queue.append(item)
                             else:
                                 # Mid-cohort or idle: preempt and append.
@@ -2136,31 +2069,6 @@ class AgentRuntime:
 
                         case AgentSendMessage():
                             if self.model_call is not None:
-                                # Cancel the in-flight model-call task for a
-                                # CLI-driven model whose tool loop is opaque
-                                # (no cohort to detach). Cancellation
-                                # propagates ``CancelledError`` into
-                                # ``model.stream()``; CLI-driven providers
-                                # translate it into a subprocess SIGINT /
-                                # ``session/cancel`` in their own ``stream``.
-                                # The buffered message drains on the next gate
-                                # firing.
-                                #
-                                # Peer messages preempt only when the
-                                # sender flagged the message as ``urgent``
-                                # (default False). Routine peer traffic
-                                # (acks, status updates, FYIs) queues
-                                # cleanly without interrupting the
-                                # recipient's current turn; only genuine
-                                # interrupt-class messages (TL STOPs,
-                                # pivot directives) pay the preempt cost.
-                                # Empirically 2026-06-04: ~72% of TL's
-                                # preempts were routine peer messages
-                                # that shouldn't have interrupted at
-                                # all -- this gate eliminates that
-                                # wasted compute.
-                                if self._preempt_in_flight and item.urgent:
-                                    self._cancel_model_call()
                                 self._mid_stream_queue.append(item)
                             else:
                                 self._stop_all_tools(mode="detach")
@@ -2785,34 +2693,10 @@ class AgentRuntime:
         Coalesce semantics: text joins with ``\n\n``; attachments
         concatenate in arrival order. The tail entry's ``id`` is
         preserved so downstream consumers keyed on ids remain stable.
-
-        When the owning :class:`AgentRuntime` was constructed with
-        ``coalesce_inbox=False`` (e.g. chat-channel runtimes where each
-        peer ``AgentSendMessage`` is a deliberate discrete event), the
-        coalesce path is replaced by injecting a synthetic empty
-        :class:`AssistantMessage` between the tail user-side message
-        and the new item, then appending the item as-is. The synthetic
-        assistant turn satisfies the API alternation rule without
-        hiding the new item inside the prior one — important when the
-        new item is e.g. a hard STOP that must be visible to the
-        recipient as a distinct inbound, not concatenated onto a tail
-        that the model has already started reasoning past.
         """
         resolved = self.context()
         messages = resolved.messages
         if not messages or wire_role(messages[-1]) != wire_role(item):
-            self.append_history(item)
-            return item
-        if not self._coalesce_inbox:
-            # Discrete-inbound mode: inject a synthetic empty
-            # assistant turn so each peer message remains a distinct
-            # history entry. The synthetic turn carries an explicit
-            # marker so downstream consumers (UI, audit, retrying
-            # providers) can recognise it as runtime-synthesized
-            # rather than a real model response.
-            self.append_history(
-                AssistantMessage(text="(runtime: discrete-inbound boundary)"),
-            )
             self.append_history(item)
             return item
         tail = messages[-1]

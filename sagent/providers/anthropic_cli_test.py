@@ -37,6 +37,7 @@ from sagent.providers.anthropic_cli import (
     _user_line,
 )
 from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
@@ -322,6 +323,9 @@ def test_argv_default_session_id_none_preserves_stateless_flag() -> None:
     )
     assert "--no-session-persistence" in argv
     assert "--session-id" not in argv
+    # ``--tools ""`` disables the MCP bridge catalog (the CLI reads
+    # empty-string as "allow no tools, MCP included"); never emit it.
+    assert "--tools" not in argv
     assert "--resume" not in argv
 
 
@@ -823,6 +827,156 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     # re-attempt the same drain abort sequence, leaving E3 perpetually
     # stranded.
     assert model._last_sent_index == 7
+
+
+class _FakeBridge:
+    """Minimal ``ToolsBridge`` stand-in exposing the detached-drain surface.
+
+    The provider only touches ``drain_detached_results`` /
+    ``update_tools`` / ``start`` / ``stop`` here, so we stub exactly
+    those rather than binding a real loopback socket.
+    """
+
+    def __init__(self, pending: list[ToolResult]) -> None:
+        self._pending = pending
+        self.url = "http://127.0.0.1:0/mcp"
+        self.server_name = "sagent"
+        self.drain_calls = 0
+
+    def drain_detached_results(self) -> list[ToolResult]:
+        self.drain_calls += 1
+        out, self._pending = self._pending, []
+        return out
+
+    def update_tools(self, tools: object) -> None:
+        del tools
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+def test_detached_delivery_entry_folds_results_into_one_user_message() -> None:
+    """``_detached_delivery_entry`` folds drained detached results into one
+    ``UserMessage``; errors are tagged; ``None`` when nothing is pending.
+    """
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5", session_id="sess-detached-1")
+
+    # No bridge yet -> nothing to deliver.
+    assert model._tools_bridge is None
+    assert model._detached_delivery_entry() is None
+
+    bridge = _FakeBridge(
+        [
+            ToolResult(call_id="", content="websearch: 3 hits"),
+            ToolResult(call_id="", content="paperfetch failed", is_error=True),
+        ]
+    )
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    entry = model._detached_delivery_entry()
+    assert isinstance(entry, UserMessage)
+    assert entry.text == (
+        "[detached tool result] websearch: 3 hits\n\n"
+        "[detached tool result] paperfetch failed (error)"
+    )
+    # Drained exactly once; a second call sees an empty bridge.
+    assert bridge.drain_calls == 1
+    assert model._detached_delivery_entry() is None
+    assert bridge.drain_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_session_persistent_delivers_detached_result_as_trailing_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn with no new tape entries but a pending detached result still
+    spawns: the result is sent as a trailing synthetic entry that does
+    NOT advance ``_last_sent_index`` (it is not part of
+    ``request.messages``).
+
+    This is the Model side of the bridge's internal cohort: a background
+    tool that finished since the last turn is fed back as ordinary turn
+    input via ``--resume``, fulfilling the tool contract without the
+    runtime ever seeing the detached ``ToolCall``.
+    """
+    _write_creds(tmp_path)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sid = "deadbeef-1234-5678-9abc-detached0001"
+    provider = AnthropicCLI.from_credentials()
+    model = provider.model("claude-haiku-4-5", session_id=sid)
+    # A prior turn already established the session; history is fully sent.
+    model._session_initialized = True
+    model._last_sent_index = 1
+
+    # Bridge already exists with one completed detached run pending.
+    bridge = _FakeBridge([ToolResult(call_id="", content="BACKGROUND DONE")])
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    # ``_ensure_tools_bridge`` must not re-create the bridge; spawn/send/drain
+    # are stubbed so no real subprocess starts.
+    async def _ensure() -> None:
+        return None
+
+    monkeypatch.setattr(model, "_ensure_tools_bridge", _ensure)
+    monkeypatch.setattr(model, "_sync_tools_bridge", _noop_sync_tools_bridge)
+
+    fake_proc = MagicMock()
+    fake_proc.close = AsyncMock()
+    monkeypatch.setattr(model, "_spawn_initialized", AsyncMock(return_value=fake_proc))
+
+    sent_entries: list[TapeEvent] = []
+
+    async def _send_entry(proc: object, entry: TapeEvent) -> None:
+        del proc
+        sent_entries.append(entry)
+
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
+
+    async def _drain(
+        proc: object,
+        on_text: object = None,
+        on_thinking: object = None,
+        update_input_tokens: bool = True,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking, update_input_tokens
+        return ModelResponse(
+            message=AssistantMessage(text="ack", tool_calls=()),
+            stop_reason="model_finished",
+        )
+
+    monkeypatch.setattr(model, "_drain_until_result", _drain)
+
+    # ``request.messages`` carries only the already-sent history (no NEW
+    # tape entry), but a detached result is pending.
+    request = ModelRequest(
+        system="x",
+        messages=[UserMessage(text="old turn 1")],
+        tools=[],
+    )
+    response = await model.stream(request, on_text=None, on_thinking=None)
+
+    # The detached result was delivered as the sole trailing entry.
+    assert len(sent_entries) == 1
+    delivered = sent_entries[0]
+    assert isinstance(delivered, UserMessage)
+    assert delivered.text == "[detached tool result] BACKGROUND DONE"
+
+    # It did NOT advance the cumulative counter past the real history
+    # length (the synthetic entry is not part of ``request.messages``).
+    assert model._last_sent_index == len(request.messages)
+    assert response.message.text == "ack"
 
 
 def test_is_event_retryable_classifies_organic_shapes() -> None:

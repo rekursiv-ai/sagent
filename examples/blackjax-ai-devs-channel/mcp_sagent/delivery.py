@@ -159,7 +159,6 @@ def route_send(
     from_role: str,
     to: str,
     content: str,
-    urgent: bool = False,
     suppress_audit: bool = False,
 ) -> tuple[bool, str]:
     """Deliver a peer message via ``serve.py``'s ``/api/post``.
@@ -168,16 +167,12 @@ def route_send(
     ``ToolResult``. ``suppress_audit`` is ignored here — the sentinel
     file is the single source of truth and is checked server-side.
 
-    ``urgent=True`` is forwarded to the recipient's ``AgentSendMessage``
-    so the runtime preempts their in-flight turn (default False:
-    queues cleanly without interrupting).
-
     The HTTP roundtrip is local (127.0.0.1) and small (<1KB typical
     body), so latency is negligible compared to model-call latency.
     """
     ok, body, status = _http_post(
         "/api/post",
-        {"from": from_role, "to": to, "body": content, "urgent": urgent},
+        {"from": from_role, "to": to, "body": content},
     )
     if ok:
         try:

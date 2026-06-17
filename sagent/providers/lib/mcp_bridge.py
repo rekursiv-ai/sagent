@@ -60,12 +60,12 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
-from sagent.agent.background import split_bg_args
+from sagent.agent.background import _BG_FIELDS, split_bg_args
 from sagent.agent.runtime import cli_publish_var
-from sagent.lib.json import json_unfreeze
+from sagent.lib.json import JSON, json_unfreeze
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
-from sagent.types.runtime import ToolLabel
+from sagent.types.runtime import ToolLabel, ToolResult
 from sagent.types.tools import Tool
 
 
@@ -78,15 +78,47 @@ _MCP_PATH = "/mcp"
 _STARTUP_TIMEOUT_SEC = 10.0
 
 
+def _schema_with_bg_fields(directive_schema: JSON) -> dict[str, object]:
+    """Advertise ``background`` / ``delay`` alongside a tool's own params.
+
+    The bridge honors ``background`` / ``delay`` (``_call_tool`` splits
+    them off via ``split_bg_args`` and may detach the run), but the model
+    can only request them if they appear in the advertised input schema.
+    Object-typed schemas with ``additionalProperties: false`` would
+    otherwise reject the keys at the model's own validation step, so the
+    bridge merges the bg fields into ``properties`` here -- mirroring
+    ``BackgroundAwareTool``'s schema injection on the runtime path.
+
+    Non-object schemas (rare for bridge tools) are returned unchanged:
+    there is no ``properties`` map to extend.
+    """
+    schema = cast(dict[str, object], json_unfreeze(directive_schema))
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        return schema
+    raw_props = schema.get("properties")
+    props: dict[str, object] = (
+        dict(cast("dict[str, object]", raw_props))
+        if isinstance(raw_props, dict)
+        else {}
+    )
+    props.update(cast("dict[str, object]", json_unfreeze(_BG_FIELDS)))
+    schema["properties"] = props
+    return schema
+
+
 class ToolsBridge:
     """Provider-scoped MCP server proxying a mutable list of sagent tools.
 
     This is not an AgentTool parity adapter. CLI providers consume MCP
     tool calls inside their own turn, so the runtime does not see
-    per-tool ``ToolCall`` entries and cannot publish labels, schedule
-    detached background work, or splice detached results here. The bridge
-    validates arguments, rejects ``background`` / ``delay``, runs the raw
-    tool, and converts its result to MCP content blocks.
+    per-tool ``ToolCall`` entries and cannot publish labels here. The
+    bridge IS the Model's internal cohort: it advertises
+    ``background`` / ``delay`` on every tool's schema, validates
+    arguments, and either runs the tool inline or detaches it as a
+    tracked task whose result the Model feeds back on a later turn
+    (:meth:`drain_detached_results`). Results convert to MCP content
+    blocks.
 
     Args:
       tools: Initial tool list; subsequent calls to :meth:`update_tools`
@@ -100,6 +132,29 @@ class ToolsBridge:
         self._uvicorn_server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
         self._port: int = 0
+        # Detached background tool calls. The model can request a tool
+        # run in the background (``background``/``delay`` args, parsed by
+        # ``split_bg_args``); the bridge then returns a placeholder
+        # immediately so the CLI turn completes ("comes up for air"),
+        # runs the tool as a tracked task in the Model's loop, and
+        # surfaces the finished result for the Model to feed back on the
+        # next turn. ``_bg_tasks`` holds in-flight runs; ``_bg_done``
+        # holds completed results keyed by a synthetic detach id.
+        self._bg_counter: int = 0
+        self._bg_tasks: dict[str, asyncio.Task[ToolResult]] = {}
+        self._bg_done: dict[str, ToolResult] = {}
+        # Monotonic count of ``list_tools`` fetches by any CLI subprocess.
+        # The CLI connects to MCP servers asynchronously AFTER launch and
+        # does not block its first turn on that handshake -- a cold
+        # subprocess can start generating against a still-``pending``
+        # ``sagent`` server and conclude "no tools have been provided". A
+        # counter (not a single Event) is race-free under concurrent
+        # spawns: the HotSpare warms a spare while the active turn waits,
+        # and each spawn records the count before launch then waits for it
+        # to increment, so the spare's connect can't satisfy the active
+        # turn's wait or vice versa. See ``_AnthropicCLIModel._send_entry``.
+        self._listed_count: int = 0
+        self._listed_cond: asyncio.Condition = asyncio.Condition()
 
     async def start(self) -> None:
         """Bring up the MCP server on a free localhost port.
@@ -144,6 +199,9 @@ class ToolsBridge:
 
     async def stop(self) -> None:
         """Shut down the MCP server and join the serve task."""
+        for task in list(self._bg_tasks.values()):
+            task.cancel()
+        self._bg_tasks.clear()
         server = self._uvicorn_server
         if server is not None:
             server.should_exit = True
@@ -180,13 +238,16 @@ class ToolsBridge:
 
         @server.list_tools()
         async def _list_tools() -> list[mcp_types.Tool]:  # pyright: ignore[reportUnusedFunction]  -- decorator-registered
+            # The CLI fetched the catalog: a ``sagent`` MCP client just
+            # connected. Bump the counter + wake any spawn waiting for it.
+            async with self._listed_cond:
+                self._listed_count += 1
+                self._listed_cond.notify_all()
             return [
                 mcp_types.Tool(
                     name=t.name,
                     description=t.description,
-                    inputSchema=cast(
-                        dict[str, object], json_unfreeze(t.directive_schema)
-                    ),
+                    inputSchema=_schema_with_bg_fields(t.directive_schema),
                 )
                 for t in self._tools.values()
             ]
@@ -210,7 +271,20 @@ class ToolsBridge:
         name: str,
         arguments: dict[str, object],
     ) -> list[mcp_types.ContentBlock]:
-        """Run one tool and convert its result to MCP content blocks."""
+        """Run one tool and convert its result to MCP content blocks.
+
+        Foreground (the default): run the tool inline and return its
+        result, so the model's turn continues with the answer in hand.
+
+        Background (``background``/``delay`` requested): spawn the tool
+        as a tracked task in the Model's loop and return a ``[detached]``
+        placeholder immediately. The CLI turn then completes -- the model
+        "comes up for air" -- and the finished result is fed back by the
+        Model on a subsequent turn via :meth:`drain_detached_results`.
+        This is the Model's internal cohort: detachable in-flight tool
+        runs, invisible to the runtime, fulfilling the same tool contract
+        every other provider does.
+        """
         tool = self._tools.get(name)
         if tool is None:
             return [
@@ -220,16 +294,6 @@ class ToolsBridge:
                 )
             ]
         bg_requested, delay_sec, clean_args = split_bg_args(arguments)
-        if bg_requested or delay_sec > 0:
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=(
-                        "[Error] MCP bridge cannot detach tool calls; "
-                        "retry without background or delay."
-                    ),
-                )
-            ]
         validation_error = validate_tool_input(
             tool.name, tool.directive_schema, clean_args
         )
@@ -255,15 +319,129 @@ class ToolsBridge:
             except (AttributeError, KeyError, TypeError, ValueError):
                 label = tool.name
             publish(ToolLabel(call_id="", text=label))
+
+        if bg_requested or delay_sec > 0:
+            return self._spawn_detached(tool, clean_args, delay_sec)
+        result = await self._run_tool(tool, clean_args)
+        return self._result_blocks(result)
+
+    async def _run_tool(self, tool: Tool, clean_args: dict[str, object]) -> ToolResult:
+        """Run one tool, converting ordinary failures into an error result.
+
+        ``CancelledError`` is NOT caught here: it must reach the MCP
+        server boundary so server shutdown/cancellation propagates
+        cleanly. The background path catches cancellation separately in
+        its task-done callback.
+        """
         try:
-            result = await tool.run(cast(Mapping[str, object], clean_args))
-        except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to MCP error content; server cancellation remains uncaught.
-            return [
-                mcp_types.TextContent(
-                    type="text",
-                    text=f"[Error] {type(exc).__name__}: {exc}",
+            return await tool.run(cast(Mapping[str, object], clean_args))
+        except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to result content; CancelledError propagates.
+            return ToolResult(
+                call_id="",
+                content=f"{type(exc).__name__}: {exc}",
+                is_error=True,
+            )
+
+    def _spawn_detached(
+        self, tool: Tool, clean_args: dict[str, object], delay_sec: float
+    ) -> list[mcp_types.ContentBlock]:
+        """Start a background tool run and return a detached placeholder.
+
+        The task runs in the Model's loop and stores its result in
+        ``_bg_done`` on completion; the Model drains those via
+        :meth:`drain_detached_results` and feeds them back on the next
+        turn. The placeholder mirrors the Agent-tool ``[detached]`` shape
+        so the model knows the result will arrive later.
+        """
+        self._bg_counter += 1
+        detach_id = f"bg-{self._bg_counter}"
+
+        async def _runner() -> ToolResult:
+            if delay_sec > 0:
+                await asyncio.sleep(delay_sec)
+            return await self._run_tool(tool, clean_args)
+
+        task: asyncio.Task[ToolResult] = asyncio.create_task(
+            _runner(), name=f"bridge-detached-{detach_id}"
+        )
+        self._bg_tasks[detach_id] = task
+
+        def _on_done(t: asyncio.Task[ToolResult], _id: str = detach_id) -> None:
+            self._bg_tasks.pop(_id, None)
+            try:
+                self._bg_done[_id] = t.result()
+            except asyncio.CancelledError:
+                self._bg_done[_id] = ToolResult(
+                    call_id="", content="cancelled", is_error=True
                 )
-            ]
+            except Exception as exc:  # noqa: BLE001 -- record any failure as the detached result.
+                self._bg_done[_id] = ToolResult(
+                    call_id="",
+                    content=f"{type(exc).__name__}: {exc}",
+                    is_error=True,
+                )
+
+        task.add_done_callback(_on_done)
+        return [
+            mcp_types.TextContent(
+                type="text",
+                text=(
+                    f"[detached: {tool.name} ({detach_id}) is running; its "
+                    "result will be delivered to you on a later turn]"
+                ),
+            )
+        ]
+
+    def drain_detached_results(self) -> list[ToolResult]:
+        """Return + clear completed detached tool results.
+
+        Called by the Model before a turn: any background tool that
+        finished since the last turn is handed back so the Model can feed
+        it to the CLI (so the model sees the result it was promised).
+        """
+        if not self._bg_done:
+            return []
+        results = list(self._bg_done.values())
+        self._bg_done.clear()
+        return results
+
+    def has_pending_detached(self) -> bool:
+        """True while any detached tool run is still in flight."""
+        return bool(self._bg_tasks)
+
+    @property
+    def has_tools(self) -> bool:
+        """True when the live registry advertises at least one tool."""
+        return bool(self._tools)
+
+    def listed_snapshot(self) -> int:
+        """Capture the current ``list_tools`` count before spawning.
+
+        Pair with :meth:`wait_listed`: a spawn records this immediately
+        before launching its subprocess, then waits for the count to
+        exceed it -- proof THIS subprocess's MCP client connected, immune
+        to a concurrent spare warm-up's own connect.
+        """
+        return self._listed_count
+
+    async def wait_listed(self, since: int, timeout_sec: float) -> bool:
+        """Wait until a ``list_tools`` fetch arrives after ``since``.
+
+        Returns ``True`` once ``_listed_count`` exceeds ``since`` (the
+        subprocess that recorded ``since`` connected), ``False`` on
+        timeout -- the caller proceeds anyway rather than wedging a turn
+        on a never-connecting client.
+        """
+        try:
+            async with asyncio.timeout(timeout_sec):
+                async with self._listed_cond:
+                    await self._listed_cond.wait_for(lambda: self._listed_count > since)
+        except TimeoutError:
+            return False
+        return True
+
+    def _result_blocks(self, result: ToolResult) -> list[mcp_types.ContentBlock]:
+        """Convert a ``ToolResult`` to MCP content blocks (text + images)."""
         text = result.content
         if result.is_error:
             text = f"[Error] {text}" if text else "[Error]"

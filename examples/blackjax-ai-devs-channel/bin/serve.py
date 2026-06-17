@@ -886,21 +886,6 @@ def _build_http_app(agents):
         to = str(payload.get("to", "")).strip()
         body = str(payload.get("body", ""))
         from_role = str(payload.get("from", "user")).strip() or "user"
-        # ``urgent`` flag (default False) applies to BOTH ingress paths:
-        #
-        # * Operator messages (``from='user'``) → ``UserMessage(urgent=…)``:
-        #   default False at the plugin layer means operator typing
-        #   buffers instead of interrupting. Back-to-back operator
-        #   messages don't waste the recipient's in-flight compute on
-        #   routine follow-ups. The web UI exposes an "interrupt"
-        #   toggle / Ctrl+Enter shortcut so the operator can opt into
-        #   immediate preempt when the next message genuinely needs to
-        #   land before the recipient finishes.
-        # * Peer messages (``from=<peer>``) → ``AgentSendMessage(urgent=…)``:
-        #   default False, same rationale. Peers explicitly pass
-        #   ``urgent=True`` via the ``sagent_send`` MCP tool for STOP /
-        #   pivot / same-sender-correction shapes.
-        urgent = bool(payload.get("urgent", False))
         if not to or not body:
             return JSONResponse(
                 {"error": "both 'to' and 'body' are required"}, status_code=400
@@ -923,7 +908,7 @@ def _build_http_app(agents):
             if not suppress:
                 delivery.append_user_message(to_role=to, body=body)
             target.runtime.inbox.push_back(
-                UserMessage(text=body, urgent=urgent),
+                UserMessage(text=body),
             )
         else:
             # Peer routing path called by the MCP server.
@@ -934,7 +919,6 @@ def _build_http_app(agents):
                     AgentSendMessage(
                         source=from_role,
                         text=body,
-                        urgent=urgent,
                     ),
                 )
         return JSONResponse({"ok": True, "to": to, "from": from_role})

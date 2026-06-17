@@ -176,19 +176,6 @@ class Agent:
       effort: Effort hint; passed through when supported.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
       persistent_retry: Enable persistent-mode backoff for 429/529.
-      preempt_in_flight: When True, a ``UserMessage`` or
-          ``AgentSendMessage`` arriving while ``model_call`` is in flight
-          cancels the in-flight model-call task before buffering.
-          Cancellation propagates ``CancelledError`` into
-          ``model.stream()``; CLI-driven providers (``AnthropicCLI``,
-          ``GoogleCLI``) translate it into a subprocess SIGINT /
-          ``session/cancel`` so their opaque tool loop aborts, and API
-          providers' awaited stream is torn down by standard
-          cancellation. The cancelled turn resolves as
-          ``ModelResponseCancelled``; partial assistant text is lost
-          (intentional — caller is preempting precisely because that
-          work is no longer wanted). Defaults False so existing callers
-          see no behaviour change.
 
     Side effects:
       Constructing with a non-``None`` ``model_spec`` (and
@@ -222,8 +209,6 @@ class Agent:
         persistent_retry: bool = False,
         provider_args: Mapping[str, object] | None = None,
         show_thinking: bool = True,
-        preempt_in_flight: bool = False,
-        coalesce_inbox: bool = True,
     ) -> None:
         if max_attempts < 1:
             # ``send_with_retry``'s loop ``break``s on ``attempt >=
@@ -324,8 +309,6 @@ class Agent:
             tools=agent_tools,
             compactor=self._agent_compactor,
             session_id=self._session_id,
-            preempt_in_flight=preempt_in_flight,
-            coalesce_inbox=coalesce_inbox,
         )
 
         self.runtime.before_tool_spawn = self._before_tool_spawn

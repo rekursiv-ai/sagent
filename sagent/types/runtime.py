@@ -192,20 +192,6 @@ class UserMessage(SessionMessage):
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
 
-    urgent: bool = True
-    """If True (default), preempt the recipient's in-flight ``model_call``
-    when the runtime is configured with ``preempt_in_flight=True``.
-
-    The default is True to preserve the historical behaviour of operator
-    messages always interrupting (this is what tests + internal sagent
-    callers expect when constructing ``UserMessage`` without specifying
-    urgency). Plugin layers that wire ``UserMessage`` from an HTTP /
-    UI ingress can pass ``urgent=False`` to opt operator messages into
-    the queue-by-default semantics that ``AgentSendMessage`` uses;
-    e.g. the blackjax-chat plugin's web UI defaults to ``urgent=False``
-    so back-to-back operator typing doesn't repeatedly interrupt and
-    discard the recipient's in-flight work."""
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSendMessage(SessionMessage):
@@ -219,21 +205,6 @@ class AgentSendMessage(SessionMessage):
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
-
-    urgent: bool = False
-    """If True, preempt the recipient's in-flight ``model_call`` (when
-    the runtime is configured with ``preempt_in_flight=True``).
-    Default False: routine peer traffic (status updates, acks, FYIs)
-    queues until the recipient's current turn finishes naturally,
-    avoiding the wasted-compute cost of interrupting them.
-
-    Reserved for messages that must be seen before the recipient
-    takes any further action: STOP / pivot / scope-change directives
-    from a coordinator, or a same-sender correction superseding a
-    previous message before the recipient acts on the stale version.
-    Authority-wise, typical urgent senders are the coordinator (TL)
-    and any peer correcting their own prior message; routine
-    cross-peer traffic should stay non-urgent."""
 
 
 def labeled_agent_send_text(entry: AgentSendMessage) -> str:

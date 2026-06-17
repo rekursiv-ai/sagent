@@ -238,27 +238,41 @@ async def test_call_tool_validates_required_args() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_call_tool_rejects_background_args() -> None:
-    """MCP execution rejects background/delay instead of bypassing the wrapper."""
+async def test_call_tool_detaches_background_args() -> None:
+    """A background request returns a detached placeholder, then runs + drains.
+
+    The bridge runs the tool as a task in the Model's loop ("comes up
+    for air"); the finished result is later available via
+    ``drain_detached_results`` for the Model to feed back.
+    """
     tool = _StrictTool()
     bridge = ToolsBridge([cast(Tool, tool)])
     await bridge.start()
     try:
-        blocks = await bridge._call_tool(
-            "Strict", {"text": "hi", "background": True, "delay": 3}
-        )
+        blocks = await bridge._call_tool("Strict", {"text": "hi", "background": True})
         assert isinstance(blocks[0], TextContent)
-        assert blocks[0].text.startswith("[Error]")
-        assert "cannot detach" in blocks[0].text
-        assert tool.seen_args is None
+        assert "[detached" in blocks[0].text
+        # The detached task runs in this loop; let it complete.
+        for _ in range(50):
+            if not bridge.has_pending_detached():
+                break
+            await asyncio.sleep(0.01)
+        assert tool.seen_args is not None, "detached tool must actually run"
+        results = bridge.drain_detached_results()
+        assert len(results) == 1
+        assert bridge.drain_detached_results() == []  # drained once
     finally:
         await bridge.stop()
 
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_call_tool_rejects_background_before_required_arg_validation() -> None:
-    """MCP detach rejection has priority over wrapper schema validation."""
+async def test_call_tool_validates_args_before_detaching() -> None:
+    """Schema validation runs before a background detach is spawned.
+
+    A background request that fails required-arg validation must error
+    out (no task spawned), not return a detached placeholder.
+    """
     tool = _StrictTool()
     bridge = ToolsBridge([cast(Tool, tool)])
     await bridge.start()
@@ -266,7 +280,7 @@ async def test_call_tool_rejects_background_before_required_arg_validation() -> 
         blocks = await bridge._call_tool("Strict", {"background": True})
         assert isinstance(blocks[0], TextContent)
         assert blocks[0].text.startswith("[Error]")
-        assert "cannot detach" in blocks[0].text
+        assert not bridge.has_pending_detached()
         assert tool.seen_args is None
     finally:
         await bridge.stop()

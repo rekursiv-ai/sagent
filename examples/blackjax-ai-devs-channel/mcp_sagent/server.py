@@ -141,24 +141,8 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "'statistician', 'tech-writer', 'junior-swe', 'user') and "
                 "'content' for the message body. This is the ONLY way to "
                 "deliver a message to a peer — your assistant text is for "
-                "thinking, not for routing.\n\n"
-                "Optional 'urgent' flag: when True, INTERRUPTS the "
-                "recipient's current turn so they see your message "
-                "immediately. Default False: the recipient finishes "
-                "their current turn naturally, then sees your message "
-                "in the next turn. **Use urgent=True only when the "
-                "message MUST be seen before the recipient takes any "
-                "further action** — STOP / pivot / scope-change "
-                "directives, OR when you need to correct or supersede "
-                "your own previous message before the recipient acts "
-                "on a stale version. Most status updates, acks, and "
-                "FYIs should default to non-urgent: interrupting "
-                "discards the recipient's in-flight work, so the bar "
-                "is genuine 'they would do the wrong thing if they "
-                "don't see this first'. Authority-wise, urgent peer "
-                "directives are typical from TL (coordinator) and "
-                "from any peer correcting their own prior message; "
-                "routine cross-peer FYIs should stay non-urgent."
+                "thinking, not for routing. The recipient sees your message "
+                "on their next turn."
             ),
             inputSchema={
                 "type": "object",
@@ -173,16 +157,6 @@ async def list_tools() -> list[mcp_types.Tool]:
                     "content": {
                         "type": "string",
                         "description": "Message body to deliver to the peer.",
-                    },
-                    "urgent": {
-                        "type": "boolean",
-                        "description": (
-                            "Optional, default False. If True, interrupts "
-                            "the recipient's current turn (only effective "
-                            "if the runtime supports preempt). Reserved "
-                            "for STOP / pivot / urgent corrections."
-                        ),
-                        "default": False,
                     },
                 },
                 "required": ["to", "content"],
@@ -277,7 +251,6 @@ async def call_tool(
     if name == "sagent_send":
         to = str(arguments.get("to", "")).strip()
         content = str(arguments.get("content", ""))
-        urgent = bool(arguments.get("urgent", False))
         if not to:
             return _text("[Error] 'to' is required.", is_error=True)
         if not content:
@@ -286,7 +259,6 @@ async def call_tool(
             from_role=sender,
             to=to,
             content=content,
-            urgent=urgent,
             suppress_audit=suppress,
         )
         _debug(f"  route_send -> ok={ok} status={status!r}")

@@ -4,10 +4,6 @@ Conventions:
 
 - All roles use ``AnthropicCLI.from_credentials()`` (Claude subscription,
   no API key consulted).
-- All roles get ``preempt_in_flight=True``: TL corrections, peer
-  pings, and user redirects fire as SIGINT to the in-flight CLI turn
-  (requires the ``feat/AnthropicCLI`` patch on the sagent
-  fork; see ``sagent/README.md``).
 - Peer messaging happens via the plugin's MCP server (``mcp_sagent.server``)
   rather than sagent's bridge-mounted ``AgentSend``. The MCP server's
   ``sagent_send`` tool appears in the CLI's catalog as
@@ -307,9 +303,5 @@ def build_agent(
         session_dir=_session_dir_for(role_name),
         max_tool_call_rounds=max_tool_call_rounds,
         max_budget_usd=max_budget_usd,
-        preempt_in_flight=True,
         compactor=compactor,
-        # Each peer ``sagent_send`` call must remain a distinct
-        # inbound — see README § "Sagent behaviour overrides".
-        coalesce_inbox=False,
     )
