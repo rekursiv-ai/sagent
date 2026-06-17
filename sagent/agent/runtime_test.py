@@ -7307,7 +7307,9 @@ class _CancellableBlockingModel:
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
-async def test_preempt_in_flight_cancels_stream_on_urgent_agent_send_mid_stream() -> None:
+async def test_preempt_in_flight_cancels_stream_on_urgent_agent_send_mid_stream() -> (
+    None
+):
     """``urgent=True`` AgentSendMessage mid-stream cancels the model_call
     task -- propagating ``CancelledError`` into ``model.stream`` -- when
     ``preempt_in_flight=True``.
@@ -7420,8 +7422,7 @@ async def test_preempt_in_flight_does_not_cancel_on_routine_agent_send_mid_strea
     )
 
     assert not model.stream_cancelled, (
-        "routine (urgent=False) AgentSendMessage should NOT cancel the "
-        "model stream"
+        "routine (urgent=False) AgentSendMessage should NOT cancel the model stream"
     )
     # The buffered routine message must still reach history.
     sends = [m for m in agent.context().messages if isinstance(m, AgentSendMessage)]

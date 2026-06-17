@@ -1386,6 +1386,7 @@ async def test_agent_shutdown_closes_active_model_once() -> None:
         close_count: int = 0
         closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
+        @override
         async def close(self) -> None:
             self.close_count += 1
             self.closed_event.set()
@@ -1886,6 +1887,7 @@ async def test_swap_model_noop_does_not_close_active_model() -> None:
     class ClosableStubModel(StubModel):
         closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
+        @override
         async def close(self) -> None:
             self.closed_event.set()
 
@@ -1927,6 +1929,7 @@ async def test_swap_model_schedules_close_on_old_cli_model() -> None:
     class ClosableStubModel(StubModel):
         closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
+        @override
         async def close(self) -> None:
             self.closed_event.set()
 
@@ -1963,6 +1966,7 @@ async def test_swap_model_logs_close_failure_via_log_task_exception(
     class CrashingCloseModel(StubModel):
         closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
+        @override
         async def close(self) -> None:
             try:
                 raise RuntimeError("simulated close failure")

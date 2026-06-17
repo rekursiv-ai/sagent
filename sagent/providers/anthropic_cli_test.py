@@ -53,6 +53,10 @@ from sagent.types.runtime import (
 from sagent.types.tape import TapeEvent
 
 
+def _noop_sync_tools_bridge(request: ModelRequest) -> None:
+    del request
+
+
 _CRED_PAYLOAD: dict[str, object] = {
     "claudeAiOauth": {
         "accessToken": "sk-ant-oat01-test",
@@ -1988,7 +1992,7 @@ async def test_session_persistent_stream_cancelled_interrupts_and_reraises(
 
     monkeypatch.setattr(model, "_spawn_initialized", _fake_spawn)
     monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
-    monkeypatch.setattr(model, "_sync_tools_bridge", lambda _request: None)
+    monkeypatch.setattr(model, "_sync_tools_bridge", _noop_sync_tools_bridge)
     request = ModelRequest(messages=[UserMessage(text="hi")])
 
     with pytest.raises(asyncio.CancelledError):
@@ -2029,8 +2033,7 @@ def test_session_jsonl_path_under_config_dir(monkeypatch: pytest.MonkeyPatch) ->
     sid = "abc12345-aaaa-bbbb-cccc-dddddddddddd"
     path = _session_jsonl_path(sid, cwd=Path("/work/repo"), home=_real_home())
     assert path == Path(
-        "/custom/cfg/.claude/projects/-work-repo/"
-        f"{sid}.jsonl",
+        f"/custom/cfg/.claude/projects/-work-repo/{sid}.jsonl",
     )
 
 
@@ -2078,7 +2081,7 @@ async def test_session_persistent_two_turns_mint_then_resume(
 
     monkeypatch.setattr(model, "_spawn_initialized", _fake_spawn)
     monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
-    monkeypatch.setattr(model, "_sync_tools_bridge", lambda _request: None)
+    monkeypatch.setattr(model, "_sync_tools_bridge", _noop_sync_tools_bridge)
 
     # Turn 1: fresh session → mint (_session_initialized False at spawn).
     await model.stream(ModelRequest(messages=[UserMessage(text="one")]))

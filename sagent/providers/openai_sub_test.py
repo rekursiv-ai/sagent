@@ -619,26 +619,26 @@ def test_subscription_valid_latency_modes_fast() -> None:
 
 @pytest.mark.anyio
 async def test_subscription_close_releases_sdk_and_http_client() -> None:
-    """``close`` tears down BOTH the Responses-API SDK and the inherited
-    httpx client.
+    """``close`` tears down BOTH the provider's SDK and the HTTP client.
 
-    The base ``OpenAICompatModel.close`` only closes the shared HTTP
-    client; the subscription model additionally owns an ``AsyncOpenAI``
-    SDK (``_sdk``), so its override must close both and clear the
-    handles. Regression guard for the partial-teardown leak the
-    ``Model.close`` contract surfaced.
+    The base ``OpenAICompatModel.close`` closes the shared HTTP client;
+    the subscription path additionally has an ``AsyncOpenAI`` SDK owned
+    by the *provider*, so the model's override delegates to
+    ``provider.close_sdk()``. Regression guard for the partial-teardown
+    leak the ``Model.close`` contract surfaced.
     """
-    model = _make_provider().model("gpt-5.5")
+    provider = _make_provider()
+    model = provider.model("gpt-5.5")
     sdk = MagicMock()
     sdk.close = AsyncMock()
-    model._sdk = sdk
-    model._sdk_token = "dummy-token"  # noqa: S105 -- test fixture, not a secret
+    provider._sdk = sdk
+    provider._sdk_token = "dummy-token"  # noqa: S105 -- test fixture, not a secret
 
     await model.close()
 
     sdk.close.assert_awaited_once()
-    assert model._sdk is None
-    assert model._sdk_token is None
+    assert provider._sdk is None
+    assert provider._sdk_token is None
 
 
 def test_subscription_fast_latency_resolves_to_priority_tier() -> None:

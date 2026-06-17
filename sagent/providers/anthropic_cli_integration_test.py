@@ -22,9 +22,7 @@ What they cover (the production-correctness gaps the unit suite leaves):
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
-from typing import override
 
 import shutil
 import uuid as _uuid
@@ -33,9 +31,9 @@ import pytest
 
 from sagent.providers.anthropic_cli import AnthropicCLI
 from sagent.providers.lib.oauth import credentials_path
+from sagent.tools import tool
 from sagent.types.model import ModelRequest
-from sagent.types.runtime import ToolResult, UserMessage
-from sagent.types.tools import Tool
+from sagent.types.runtime import UserMessage
 
 
 pytestmark = pytest.mark.integration
@@ -112,7 +110,9 @@ async def test_session_resume_two_turns() -> None:
                     UserMessage(text="Remember this codeword: BARRACUDA. Reply 'ok'."),
                     # turn-1 assistant reply is on disk; only the new
                     # entry is fed via stdin.
-                    UserMessage(text="What was the codeword? Reply with just the word."),
+                    UserMessage(
+                        text="What was the codeword? Reply with just the word."
+                    ),
                 ],
             ),
         )
@@ -136,17 +136,11 @@ async def test_bridge_tool_round_trips() -> None:
     model incorporates it. Uses a trivial echo-style tool so the model
     has a single obvious action.
     """
-    class _MagicWord(Tool):
-        name = "magic_word"
-        description = "Returns the secret magic word. Call it to learn the word."
 
-        def __init__(self) -> None:
-            self.directive_schema = {"type": "object", "properties": {}}
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            return ToolResult(call_id="", content="FLAMINGO")
+    @tool(name="magic_word")
+    def magic_word() -> str:
+        """Return the secret magic word. Call it to learn the word."""
+        return "FLAMINGO"
 
     model = AnthropicCLI.from_credentials().model("claude-haiku-4-5")
     try:
@@ -160,7 +154,7 @@ async def test_bridge_tool_round_trips() -> None:
                         ),
                     ),
                 ],
-                tools=[_MagicWord()],
+                tools=[magic_word],
             ),
         )
     except TimeoutError as exc:
