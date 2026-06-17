@@ -952,10 +952,41 @@ def test_detached_delivery_entry_folds_results_into_one_user_message() -> None:
         "[detached tool result] websearch: 3 hits\n\n"
         "[detached tool result] paperfetch failed (error)"
     )
-    # Drained exactly once; a second call sees an empty bridge.
+    # Drained from the bridge exactly once.
     assert bridge.drain_calls == 1
+
+
+def test_detached_delivery_entry_holds_buffer_until_turn_succeeds() -> None:
+    """The drained text is held (not re-drained) across calls until the
+    delivering turn clears it.
+
+    ``drain_detached_results`` is destructive, so a failed-then-retried
+    delivery turn must re-present the SAME results rather than losing them
+    (the model was promised them). The buffer survives repeat calls and is
+    only dropped when ``_pending_detached_text`` is reset on turn success.
+    """
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5", session_id="sess-detached-2")
+    bridge = _FakeBridge([ToolResult(call_id="", content="staged")])
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    first = model._detached_delivery_entry()
+    assert isinstance(first, UserMessage)
+    assert first.text == "[detached tool result] staged"
+    assert bridge.drain_calls == 1
+
+    # Simulate a failed delivery turn: the buffer is still held, so a
+    # retry re-presents the same entry WITHOUT re-draining the (now empty)
+    # bridge.
+    second = model._detached_delivery_entry()
+    assert isinstance(second, UserMessage)
+    assert second.text == "[detached tool result] staged"
+    assert bridge.drain_calls == 1  # not re-drained
+
+    # Turn succeeds -> buffer cleared -> nothing pending.
+    model._pending_detached_text = None
     assert model._detached_delivery_entry() is None
-    assert bridge.drain_calls == 2
+    assert bridge.drain_calls == 2  # now consults the (empty) bridge again
 
 
 @pytest.mark.asyncio

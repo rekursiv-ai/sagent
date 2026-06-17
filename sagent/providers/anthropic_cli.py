@@ -529,8 +529,14 @@ class _AnthropicCLIModel:
         # count to exceed that proc's snapshot (proof THIS subprocess's MCP
         # client connected). Per-proc, not a single field, so a concurrent
         # HotSpare spare-warm can't clobber the active turn's baseline.
-        # Entries are pruned on proc close (``_forget_proc_baseline``).
+        # Pruned after the wait succeeds, on spawn failure, and in ``close``.
         self._mcp_baseline_by_proc: dict[int, int] = {}
+        # Folded text of drained detached tool results, held across a
+        # failed-then-retried delivery turn (``drain_detached_results`` is
+        # destructive). Cleared only when the delivering turn succeeds, so
+        # a transport/retryable failure of that turn's final drain does not
+        # lose the results. See ``_detached_delivery_entry``.
+        self._pending_detached_text: str | None = None
         self._sent_history_head: TapeEvent | None = None
         # External MCP servers (stdio or HTTP) merged into the CLI's
         # ``--mcp-config`` at subprocess spawn time. See
@@ -804,6 +810,9 @@ class _AnthropicCLIModel:
             response = await self._exchange_turn(proc, request, on_text, on_thinking)
             self._system_hash = _hash_system(self._pending_system)
             self._last_sent_index = len(request.messages)
+            # Detached results (if any) were delivered + answered; drop the
+            # held buffer so they aren't redelivered next turn.
+            self._pending_detached_text = None
         except asyncio.CancelledError:
             # Runtime cancelled the model-call task (preempt). Translate
             # into a subprocess SIGINT so the opaque CLI tool loop stops,
@@ -967,6 +976,9 @@ class _AnthropicCLIModel:
             # First successful turn established the session on disk;
             # all future spawns use ``--resume``.
             self._session_initialized = True
+            # Detached results were delivered + answered this turn; drop
+            # the held buffer so they aren't redelivered next turn.
+            self._pending_detached_text = None
             await proc.close()
             self._active_proc = None
             self._turn_count += 1
@@ -985,6 +997,7 @@ class _AnthropicCLIModel:
         if self._persistent_tmpdir is not None and self._persistent_tmpdir.exists():
             shutil.rmtree(self._persistent_tmpdir, ignore_errors=True)
             self._persistent_tmpdir = None
+        self._mcp_baseline_by_proc.clear()
 
     def _should_respawn(self, request: ModelRequest) -> bool:
         """Inspect the trigger list (§1.4) for this request."""
@@ -1024,17 +1037,27 @@ class _AnthropicCLIModel:
         the results the model was promised. ``None`` when nothing is
         pending. This is the Model side of the bridge's internal cohort:
         detached tool results come back as ordinary turn input.
+
+        ``drain_detached_results`` is a destructive read, so the folded
+        text is held in ``_pending_detached_text`` until the turn that
+        delivers it completes successfully (cleared in the ``else`` branch
+        of the stream paths). If that turn's final drain fails and
+        ``send_with_retry`` re-invokes ``stream``, this returns the SAME
+        buffered entry rather than ``None`` -- otherwise the results, no
+        longer in ``_bg_done``, would vanish (the model was promised them).
         """
-        if self._tools_bridge is None:
-            return None
-        results = self._tools_bridge.drain_detached_results()
-        if not results:
-            return None
-        lines = [
-            f"[detached tool result] {r.content}" + (" (error)" if r.is_error else "")
-            for r in results
-        ]
-        return UserMessage(text="\n\n".join(lines))
+        if self._pending_detached_text is None:
+            if self._tools_bridge is None:
+                return None
+            results = self._tools_bridge.drain_detached_results()
+            if not results:
+                return None
+            self._pending_detached_text = "\n\n".join(
+                f"[detached tool result] {r.content}"
+                + (" (error)" if r.is_error else "")
+                for r in results
+            )
+        return UserMessage(text=self._pending_detached_text)
 
     async def _ensure_tools_bridge(self) -> None:
         """Lazily create the MCP bridge (without spawning the CLI).
@@ -1305,7 +1328,13 @@ class _AnthropicCLIModel:
         # is promoted its count already exceeds its snapshot and
         # ``_await_mcp_listed`` returns instantly -- only a genuinely cold
         # first spawn pays the ~3s connect.
-        self._mcp_baseline_by_proc[id(proc)] = self._tools_bridge.listed_snapshot()
+        # Only record a baseline when the bridge actually advertises tools
+        # -- ``_await_mcp_listed`` is a no-op otherwise and would never prune
+        # the entry, so a long-lived tool-less session would accrete them.
+        if self._tools_bridge.has_tools:
+            self._mcp_baseline_by_proc[id(proc)] = (
+                self._tools_bridge.listed_snapshot()
+            )
         self._warming_proc = proc
         try:
             await proc.start()
