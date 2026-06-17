@@ -244,6 +244,103 @@ async def test_detached_result_delivered_to_model_on_resume() -> None:
     )
 
 
+@_requires_claude
+@pytest.mark.asyncio
+async def test_real_claude_drives_full_detach_path() -> None:
+    """End-to-end proof that REAL ``claude`` drives the bridge's detach
+    path on its own -- the link the staged test deliberately skips.
+
+    Turn 1: claude is handed the bg-augmented schema and asked to run the
+    tool in the background; it must emit ``background: true``, the bridge
+    returns the ``[detached: ...]`` placeholder, and claude ends the turn
+    on it ("comes up for air") WITHOUT the answer. Turn 2: the finished
+    result rides ``--resume`` and claude reads it.
+
+    Uses sonnet, not haiku: haiku is unreliable at electing to background
+    a tool (observed running it inline or hallucinating it absent),
+    which is a model-capability fact, not a provider defect. This is the
+    committed analogue of the standalone MCP experiment.
+    """
+
+    @tool(name="slow_oracle")
+    async def slow_oracle() -> str:
+        """Return the oracle's secret word. Slow; prefer backgrounding it."""
+        await asyncio.sleep(0.5)
+        return "PELICAN"
+
+    sid = str(_uuid.uuid4())
+    model = AnthropicCLI.from_credentials().model(
+        "claude-sonnet-4-6", session_id=sid
+    )
+    try:
+        # Turn 1: claude must background the tool and end the turn on the
+        # detached placeholder, with no answer yet.
+        turn1 = await model.stream(
+            ModelRequest(
+                messages=[
+                    UserMessage(
+                        text=(
+                            "Call the slow_oracle tool, passing background set "
+                            "to true so it runs without blocking. Do NOT wait "
+                            "for its result. Just confirm you started it."
+                        ),
+                    ),
+                ],
+                tools=[slow_oracle],
+            ),
+        )
+        bridge = model._tools_bridge
+        assert bridge is not None, "turn 1 must have created the bridge"
+        for _ in range(200):
+            if not bridge.has_pending_detached():
+                break
+            await asyncio.sleep(0.05)
+        assert not bridge.has_pending_detached(), "detached task never completed"
+        # Real claude actually drove the detach: a background task ran and
+        # produced a result. If empty, claude declined to background -- the
+        # very behavior this test exists to verify, surfaced clearly.
+        assert bridge._bg_done, (
+            "real claude did not background the tool (ran it inline or "
+            f"skipped it); turn-1 text was {turn1.message.text!r}"
+        )
+        # And it did NOT already have the answer (it came up for air).
+        assert "PELICAN" not in turn1.message.text.upper(), (
+            f"turn 1 should not contain the answer yet; got "
+            f"{turn1.message.text!r}"
+        )
+
+        # Turn 2: the detached result rides --resume; claude reads it.
+        turn2 = await model.stream(
+            ModelRequest(
+                messages=[
+                    UserMessage(
+                        text=(
+                            "Call the slow_oracle tool, passing background set "
+                            "to true so it runs without blocking. Do NOT wait "
+                            "for its result. Just confirm you started it."
+                        ),
+                    ),
+                    UserMessage(
+                        text=(
+                            "What word did the slow_oracle tool return? It was "
+                            "delivered to you as a detached tool result. Reply "
+                            "with just that word."
+                        ),
+                    ),
+                ],
+                tools=[slow_oracle],
+            ),
+        )
+    except TimeoutError as exc:
+        _skip_if_bridge_unavailable(exc)
+        raise
+    finally:
+        await model.close()
+    assert "PELICAN" in turn2.message.text.upper(), (
+        f"model never received the detached result; got {turn2.message.text!r}"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 
