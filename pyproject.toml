@@ -276,30 +276,6 @@ ignore = [
     "S301",    # Pickle usage.
     "SLF001",  # Private member access.
 ]
-"examples/**" = [
-    "ARG001",   # Handler signatures keep unused params for API shape.
-    "ASYNC230", # Example app opens small local files in async handlers.
-    "ASYNC240", # Path ops on local config in async handlers.
-    "B007",     # Loop variable overwrite in display glue.
-    "BLE001",   # Deployment app: broad catches at task boundaries by design.
-    "E402",     # sys.path bootstrap precedes imports in entrypoints.
-    "E741",     # Short names in compact UI/display glue.
-    "INP001",   # Example tree is not an installed package.
-    "PLC0415",  # Deliberate lazy imports (boot ordering / optional deps).
-    "PLW2901",  # Loop-variable reassignment in stream-shaping glue.
-    "PT018",    # Compound asserts acceptable in example tests.
-    "PTH123",   # open() on log/trace files.
-    "PTH211",   # os-level checks in launch glue.
-    "S108",     # Documented /tmp usage in a local deployment example.
-    "S110",     # try/except/pass around best-effort cleanup.
-    "S310",     # localhost-only URL opens (loopback web UI).
-    "S603",     # The example's purpose is spawning the claude CLI.
-    "SIM105",   # Explicit try/except clearer in teaching code.
-    "SIM115",   # Log file handles owned across scope on purpose.
-    "SLF001",   # Example reaches into documented provider internals it ships with.
-    "T201",     # print() is the CLI entrypoint's UX.
-    "TC002",    # Runtime imports kept simple for readability.
-]
 "docs/**" = [
     "INP001",  # Standalone scripts.
     "T201",    # Print found. (CLI tools use print for output.)
