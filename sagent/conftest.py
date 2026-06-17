@@ -7,6 +7,8 @@ from collections.abc import Iterator
 from typing import cast
 from unittest.mock import patch
 
+import os
+
 import pytest
 
 from sagent.agent.state import (
@@ -14,6 +16,11 @@ from sagent.agent.state import (
     fresh_default_tool_state,
 )
 from sagent.tools.agent_spawn import _persistent_tasks
+
+
+# In the OSS export the flattened top-level ``sagent/types`` masks stdlib
+# ``types``, crashing xdist workers.
+os.environ.setdefault("PYTHONSAFEPATH", "1")
 
 
 @pytest.fixture(params=["asyncio"])
