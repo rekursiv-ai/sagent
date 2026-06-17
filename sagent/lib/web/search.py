@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import gzip
@@ -322,10 +322,20 @@ def _refresh_gsa_useragents() -> None:
         "main/src/user-agents.json.gz"
     )
     raw = gzip.decompress(fetch(url, timeout_sec=30))
-    records = json.loads(raw)
+    parsed: object = json.loads(raw)
+    if not isinstance(parsed, list):
+        # TRY004: upstream-shape failure, not a caller type error; matches the
+        # RuntimeError raised below for the same class of contract violation.
+        msg = f"expected JSON array from {url}; upstream shape changed?"
+        raise RuntimeError(msg)  # noqa: TRY004
+    records = cast("list[object]", parsed)
     selected: set[str] = set()
     for record in records:
-        ua = record.get("userAgent", "") if isinstance(record, dict) else ""
+        if not isinstance(record, dict):
+            continue
+        ua = cast("dict[str, object]", record).get("userAgent")
+        if not isinstance(ua, str):
+            continue
         if (
             "Android" in ua
             and "Chrome" in ua
