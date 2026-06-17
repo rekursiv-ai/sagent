@@ -140,6 +140,12 @@ async def test_bridge_tool_round_trips() -> None:
     ``ToolsBridge`` runs the sagent ``Tool`` -> result returns -> the
     model incorporates it. Uses a trivial echo-style tool so the model
     has a single obvious action.
+
+    Uses sonnet, not haiku: haiku is unreliable at electing to use an
+    MCP-mounted tool (observed ~1/3 of cold runs "searching" for it and
+    declaring it absent instead of calling it). That is a model-capability
+    fact, not a bridge defect -- the bridge dispatch is identical either
+    way -- so this test pins the more capable model to stay deterministic.
     """
 
     @tool(name="magic_word")
@@ -147,7 +153,7 @@ async def test_bridge_tool_round_trips() -> None:
         """Return the secret magic word. Call it to learn the word."""
         return "FLAMINGO"
 
-    model = AnthropicCLI.from_credentials().model("claude-haiku-4-5")
+    model = AnthropicCLI.from_credentials().model("claude-sonnet-4-6")
     try:
         response = await model.stream(
             ModelRequest(

@@ -833,15 +833,25 @@ class _FakeBridge:
     """Minimal ``ToolsBridge`` stand-in exposing the detached-drain surface.
 
     The provider only touches ``drain_detached_results`` /
-    ``update_tools`` / ``start`` / ``stop`` here, so we stub exactly
-    those rather than binding a real loopback socket.
+    ``update_tools`` / ``start`` / ``stop`` (and, for the MCP-connect
+    gate, ``has_tools`` / ``listed_snapshot`` / ``wait_listed``) here, so
+    we stub exactly those rather than binding a real loopback socket.
     """
 
-    def __init__(self, pending: list[ToolResult]) -> None:
+    def __init__(
+        self,
+        pending: list[ToolResult],
+        *,
+        has_tools: bool = False,
+        will_list: bool = True,
+    ) -> None:
         self._pending = pending
         self.url = "http://127.0.0.1:0/mcp"
         self.server_name = "sagent"
         self.drain_calls = 0
+        self._has_tools = has_tools
+        self._will_list = will_list
+        self.wait_calls: list[int] = []
 
     def drain_detached_results(self) -> list[ToolResult]:
         self.drain_calls += 1
@@ -851,11 +861,70 @@ class _FakeBridge:
     def update_tools(self, tools: object) -> None:
         del tools
 
+    @property
+    def has_tools(self) -> bool:
+        return self._has_tools
+
+    def listed_snapshot(self) -> int:
+        return 0
+
+    async def wait_listed(self, since: int, timeout_sec: float) -> bool:
+        del timeout_sec
+        self.wait_calls.append(since)
+        return self._will_list
+
     async def start(self) -> None:
         return None
 
     async def stop(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_await_mcp_listed_raises_when_catalog_never_connects() -> None:
+    """When tools are expected but the CLI never fetches the catalog,
+    ``_await_mcp_listed`` raises ``SubprocessTransportError`` so the turn
+    respawns instead of silently running tool-less.
+    """
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    bridge = _FakeBridge([], has_tools=True, will_list=False)
+    model._tools_bridge = cast(ToolsBridge, bridge)
+    proc = cast(Subproc, object())
+    with pytest.raises(SubprocessTransportError, match=r"never.*connected"):
+        await model._await_mcp_listed(proc)
+
+
+@pytest.mark.asyncio
+async def test_await_mcp_listed_noop_without_tools() -> None:
+    """No tools advertised -> no wait, no raise (the gate is opt-in)."""
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    bridge = _FakeBridge([], has_tools=False)
+    model._tools_bridge = cast(ToolsBridge, bridge)
+    proc = cast(Subproc, object())
+    await model._await_mcp_listed(proc)  # must not raise
+    assert bridge.wait_calls == []  # never even waited
+
+
+@pytest.mark.asyncio
+async def test_await_mcp_listed_uses_per_proc_baseline() -> None:
+    """Each proc's wait uses ITS OWN snapshot, not a shared field clobbered
+    by a concurrent spare-warm.
+    """
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    bridge = _FakeBridge([], has_tools=True, will_list=True)
+    model._tools_bridge = cast(ToolsBridge, bridge)
+    proc_a = cast(Subproc, object())
+    proc_b = cast(Subproc, object())
+    # Two procs spawned with different recorded baselines.
+    model._mcp_baseline_by_proc[id(proc_a)] = 5
+    model._mcp_baseline_by_proc[id(proc_b)] = 9
+    await model._await_mcp_listed(proc_a)
+    await model._await_mcp_listed(proc_b)
+    # Each wait used its own proc's baseline, in order.
+    assert bridge.wait_calls == [5, 9]
+    # Consumed baselines are pruned.
+    assert id(proc_a) not in model._mcp_baseline_by_proc
+    assert id(proc_b) not in model._mcp_baseline_by_proc
 
 
 def test_detached_delivery_entry_folds_results_into_one_user_message() -> None:

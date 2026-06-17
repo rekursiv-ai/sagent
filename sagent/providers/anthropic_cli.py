@@ -524,10 +524,13 @@ class _AnthropicCLIModel:
         # lists tools right after launch). Empty in session mode, which
         # syncs the bridge before its own spawn.
         self._pending_tools: list[Tool] = []
-        # Bridge ``list_tools`` count snapshotted at the active spawn; the
-        # turn's first ``_send_entry`` waits for it to increment (proof
-        # this subprocess's MCP client connected). See ``_await_mcp_listed``.
-        self._mcp_listed_baseline: int = 0
+        # Bridge ``list_tools`` count snapshotted per spawned proc (keyed
+        # by ``id(proc)``); the turn's first ``_send_entry`` waits for the
+        # count to exceed that proc's snapshot (proof THIS subprocess's MCP
+        # client connected). Per-proc, not a single field, so a concurrent
+        # HotSpare spare-warm can't clobber the active turn's baseline.
+        # Entries are pruned on proc close (``_forget_proc_baseline``).
+        self._mcp_baseline_by_proc: dict[int, int] = {}
         self._sent_history_head: TapeEvent | None = None
         # External MCP servers (stdio or HTTP) merged into the CLI's
         # ``--mcp-config`` at subprocess spawn time. See
@@ -1086,12 +1089,12 @@ class _AnthropicCLIModel:
     async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
         """Write one history entry to stdin.
 
-        Gated on the CLI having fetched the bridge catalog (instant after
+        Gated on ``proc`` having fetched the bridge catalog (instant after
         the first fetch): a cold subprocess's first user line must not
         race ahead of claude's still-connecting MCP client, or the model
         sees no tools and answers "no tools have been provided".
         """
-        await self._await_mcp_listed()
+        await self._await_mcp_listed(proc)
         line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
         await proc.write_line(line)
 
@@ -1291,49 +1294,67 @@ class _AnthropicCLIModel:
             # any single stream-json record while keeping memory bounded.
             stream_limit=16 * 1024 * 1024,
         )
-        # Snapshot the bridge's ``list_tools`` count BEFORE launch so the
-        # turn can later confirm THIS subprocess's MCP client connected
-        # (its fetch bumps the count past the snapshot). Race-free under a
-        # concurrent HotSpare warm: each spawn keeps its own snapshot. A
+        # Snapshot the bridge's ``list_tools`` count BEFORE launch, keyed
+        # to THIS proc, so the turn can later confirm THIS subprocess's
+        # MCP client connected (its fetch bumps the count past the
+        # snapshot). Keyed per-proc (not a single shared field) so a
+        # concurrent HotSpare spare-warm -- which runs this same factory
+        # and would otherwise clobber a shared baseline -- can't make the
+        # active turn wait for the SPARE's connect instead of its own. A
         # warm spare connects during background warm-up, so by the time it
-        # is promoted its count already exceeds the snapshot and the wait
-        # in ``_await_mcp_listed`` returns instantly -- only a genuinely
-        # cold first spawn pays the ~3s connect.
-        self._mcp_listed_baseline = self._tools_bridge.listed_snapshot()
+        # is promoted its count already exceeds its snapshot and
+        # ``_await_mcp_listed`` returns instantly -- only a genuinely cold
+        # first spawn pays the ~3s connect.
+        self._mcp_baseline_by_proc[id(proc)] = self._tools_bridge.listed_snapshot()
         self._warming_proc = proc
         try:
             await proc.start()
         except BaseException:
+            self._mcp_baseline_by_proc.pop(id(proc), None)
             await proc.close()
             self._warming_proc = None
             raise
         self._warming_proc = None
         return proc
 
-    async def _await_mcp_listed(self) -> None:
-        """Wait (briefly) for the CLI to fetch the bridge's tool catalog.
+    async def _await_mcp_listed(self, proc: Subproc) -> None:
+        """Wait for ``proc`` to fetch the bridge's tool catalog.
 
         The CLI connects to MCP servers asynchronously after launch and
         does NOT block its first turn on that handshake; a cold
         subprocess that generates before the ``sagent`` server flips from
         ``pending`` to ``connected`` sees an empty catalog and answers "no
-        tools have been provided" (live 2026-06-16). Called once, right
-        before the first user line is written, so the connect overlaps no
-        extra latency. No-op when the bridge has no tools or the signal
-        already fired. On timeout, proceed -- better a possibly-toolless
-        turn than a wedged one.
+        tools have been provided" (live 2026-06-16). Called before the
+        first user line is written, so the connect overlaps no extra
+        latency; instant after the first fetch (the per-proc baseline is
+        already exceeded).
+
+        No-op when the bridge has no tools. When tools ARE expected but
+        the catalog is not fetched within ``_MCP_CONNECT_TIMEOUT_SEC``,
+        raise :class:`SubprocessTransportError` rather than silently
+        feeding the turn a tool-less context: a degraded "no tools have
+        been provided" answer is worse than a respawn. The standard
+        transport-failure path (HotSpare respawn in stateless mode,
+        in-place ``--resume`` retry in session mode) then re-attempts the
+        connect on a fresh subprocess.
         """
         if self._tools_bridge is None or not self._tools_bridge.has_tools:
             return
+        baseline = self._mcp_baseline_by_proc.get(id(proc), 0)
         listed = await self._tools_bridge.wait_listed(
-            self._mcp_listed_baseline, _MCP_CONNECT_TIMEOUT_SEC
+            baseline, _MCP_CONNECT_TIMEOUT_SEC
         )
         if not listed:
-            logger.warning(
-                "AnthropicCLI: MCP bridge catalog not fetched within %.1fs; "
-                "proceeding (model may not see bridge tools this turn)",
-                _MCP_CONNECT_TIMEOUT_SEC,
+            raise SubprocessTransportError(
+                "AnthropicCLI: MCP bridge catalog not fetched within "
+                f"{_MCP_CONNECT_TIMEOUT_SEC:.1f}s (CLI MCP client never "
+                "connected); respawning rather than running a tool-less turn",
             )
+        # Consumed: this proc has connected. Drop the baseline so the map
+        # stays bounded; any later ``_send_entry`` for the same proc reads
+        # the ``0`` default and returns instantly (the count already moved
+        # past it). New spawns re-snapshot under their own ``id(proc)``.
+        self._mcp_baseline_by_proc.pop(id(proc), None)
 
     def _reset_active_state(self) -> None:
         """Reset active subprocess counters after a respawn boundary."""
