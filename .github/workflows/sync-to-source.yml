@@ -157,14 +157,15 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
-          uv --quiet --project "target/$COPYBARISTA_TOOL_PROJECT_PATH" run python \
+          uv --quiet run --no-project \
+            --with-requirements "target/$COPYBARISTA_TOOL_PROJECT_PATH/requirements.txt" \
+            python \
             "$TRUSTED_IMPORT_SCRIPT" \
             --public-base public-base \
             --public-head public-head \
             --target-dir target \
             --target-repo "$TARGET_REPO" \
             --project-path "$TARGET_PROJECT_PATH" \
-            --copybarista-project-path "$COPYBARISTA_TOOL_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
             --public-sha "$GITHUB_SHA" \
@@ -184,11 +185,12 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
-          python "$TRUSTED_IMPORT_SCRIPT" \
+          uv --quiet run --no-project \
+            --with-requirements "target/$COPYBARISTA_TOOL_PROJECT_PATH/requirements.txt" \
+            python "$TRUSTED_IMPORT_SCRIPT" \
             --target-dir target \
             --target-repo "$TARGET_REPO" \
             --project-path "$TARGET_PROJECT_PATH" \
-            --copybarista-project-path "$COPYBARISTA_TOOL_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
             --public-sha "$GITHUB_SHA" \

@@ -1087,12 +1087,6 @@ class Agent:
         # to a worker thread so the loop keeps servicing input and the
         # wait stays cancellable.
         await asyncio.to_thread(login_fn)
-        # Reach the owning provider to hot-reload credentials after the
-        # re-login. This is a deliberate private-attribute access, not a
-        # capability probe: every rich provider model carries
-        # ``_provider`` (it is not part of the lean ``Model`` contract,
-        # so there is no public accessor). The ``AuthReloadable`` check
-        # then narrows to providers that actually refresh tokens.
         live_provider = getattr(self.model, "_provider", None)
         if isinstance(live_provider, types.providers.AuthReloadable):
             await live_provider.handle_auth_error()
@@ -2210,20 +2204,25 @@ def _default_model_for(prov_name: str) -> str:
 def _schedule_close(model: types.model.Model) -> None:
     """Fire-and-forget async teardown for a swapped-out model.
 
-    ``Model.close()`` is a required contract method: CLI-style providers
-    (``AnthropicCLI``, ``GoogleCLI``) tear down their subprocess pools;
-    API providers close their SDK/HTTP client; resource-free models
-    no-op. Schedule the teardown on the running loop so the prior
-    subprocess and its warming-spare task don't outlive the swap. No-op
-    when no event loop is running (e.g. ``Agent.resume`` before
+    CLI-style providers (``AnthropicCLI``, ``GoogleCLI``) own subprocess
+    pools via ``HotSpare`` and define ``async def close()``; API-key
+    providers don't. Schedule the teardown on the running loop so the
+    prior subprocess and its warming-spare task don't outlive the swap.
+    No-op when no event loop is running (e.g. ``Agent.resume`` before
     ``serve_forever``): the model hasn't been used yet so there is
     nothing to close.
     """
+    close = getattr(model, "close", None)
+    if not callable(close):
+        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    task = loop.create_task(model.close())
+    coro = close()
+    if not asyncio.iscoroutine(coro):
+        return
+    task = loop.create_task(coro)
     task.add_done_callback(
         types.exceptions.log_task_exception(logger, "swapped-out model close failed"),
     )

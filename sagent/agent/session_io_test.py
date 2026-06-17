@@ -148,9 +148,6 @@ class _NoopModel:
         del request, on_text, on_thinking
         return ModelResponse(message=AssistantMessage(text=""))
 
-    async def close(self) -> None:
-        return
-
 
 def _records_from(entries: list[ModelContextEvent]) -> list[TapeRecord]:
     """Wrap each entry as a ``ReferrableTapeEvent`` with a synthetic ref."""
