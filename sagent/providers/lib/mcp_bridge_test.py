@@ -141,6 +141,18 @@ class _CancelTool(_EchoTool):
         raise asyncio.CancelledError
 
 
+class _SlowTool(_EchoTool):
+    """Tool stub that sleeps long enough to still be running at ``stop``."""
+
+    name = "Slow"
+
+    @override
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        await asyncio.sleep(5.0)
+        return ToolResult(call_id="", content="slow done")
+
+
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_start_then_stop_lifecycle() -> None:
@@ -284,6 +296,35 @@ async def test_call_tool_validates_args_before_detaching() -> None:
         assert tool.seen_args is None
     finally:
         await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_stop_clears_bg_done_and_blocks_late_phantom_result() -> None:
+    """``stop`` drops detached results and a cancelled task's late
+    ``_on_done`` does not resurrect one.
+
+    The bridge outlives HotSpare respawns; a ``"cancelled"`` result
+    written into ``_bg_done`` after shutdown would be drained into an
+    unrelated later turn as a phantom. ``stop`` clears the dict AND sets
+    the guard so the still-pending task's done-callback (which runs after
+    ``stop`` cancels it) is a no-op.
+    """
+    bridge = ToolsBridge([cast(Tool, _SlowTool())])
+    await bridge.start()
+    blocks = await bridge._call_tool("Slow", {"text": "x", "background": True})
+    assert isinstance(blocks[0], TextContent)
+    assert "[detached" in blocks[0].text
+    assert bridge.has_pending_detached()
+
+    # Stop while the slow task is still running.
+    await bridge.stop()
+    # Let the cancelled task's ``_on_done`` callback run on the loop.
+    await asyncio.sleep(0.05)
+
+    # No phantom result survived shutdown.
+    assert bridge.drain_detached_results() == []
+    assert not bridge.has_pending_detached()
 
 
 @pytest.mark.real_sleep

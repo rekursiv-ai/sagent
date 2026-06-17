@@ -979,6 +979,67 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     assert response.message.text == "ack"
 
 
+@pytest.mark.asyncio
+async def test_stateless_exchange_delivers_pending_detached_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The STATELESS path also drains + delivers detached results.
+
+    The bridge advertises ``background``/``delay`` in both modes, so a
+    stateless turn can stage a detached run whose result must be fed back.
+    ``_exchange_turn`` appends the drained result as a trailing synthetic
+    user entry; without this the model's promised delivery never arrives
+    and ``_bg_done`` leaks.
+    """
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    assert model._session_id is None  # stateless
+
+    bridge = _FakeBridge([ToolResult(call_id="", content="BG RESULT")])
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    sent_entries: list[TapeEvent] = []
+
+    async def _send_entry(proc: object, entry: TapeEvent) -> None:
+        del proc
+        sent_entries.append(entry)
+
+    async def _drain(
+        proc: object,
+        on_text: object = None,
+        on_thinking: object = None,
+        update_input_tokens: bool = True,
+    ) -> ModelResponse:
+        del proc, on_text, on_thinking, update_input_tokens
+        return ModelResponse(
+            message=AssistantMessage(text="ack", tool_calls=()),
+            stop_reason="model_finished",
+        )
+
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
+    monkeypatch.setattr(model, "_drain_until_result", _drain)
+
+    # A real user turn plus a pending detached result.
+    request = ModelRequest(
+        system="x",
+        messages=[UserMessage(text="hello")],
+        tools=[],
+    )
+    fake_proc = cast(Subproc, object())
+    response = await model._exchange_turn(
+        fake_proc, request, on_text=None, on_thinking=None
+    )
+
+    # Both the real user entry and the detached delivery were sent, in
+    # order, with the detached result trailing.
+    assert len(sent_entries) == 2
+    assert isinstance(sent_entries[0], UserMessage)
+    assert sent_entries[0].text == "hello"
+    assert isinstance(sent_entries[1], UserMessage)
+    assert sent_entries[1].text == "[detached tool result] BG RESULT"
+    assert response.message.text == "ack"
+
+
 def test_is_event_retryable_classifies_organic_shapes() -> None:
     """Direct unit test of the catalog. Examples are taken from
     actual ``is_error: True`` events captured 2026-06-03/04 from the

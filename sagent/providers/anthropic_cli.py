@@ -1061,9 +1061,18 @@ class _AnthropicCLIModel:
         new_entries = request.messages[self._last_sent_index :]
         if self._last_sent_index == 0 and request.messages:
             self._sent_history_head = request.messages[0]
-        user_like_entries = [
+        user_like_entries: list[TapeEvent] = [
             entry for entry in new_entries if not isinstance(entry, AssistantMessage)
         ]
+        # Deliver any completed detached (background) tool results as a
+        # trailing synthetic user entry, same as the session path -- the
+        # bridge advertises ``background``/``delay`` in BOTH modes, so a
+        # stateless turn can stage a detached run whose result must be fed
+        # back here. Without this the model is promised a later delivery
+        # that never arrives and ``_bg_done`` leaks unboundedly.
+        detached = self._detached_delivery_entry()
+        if detached is not None:
+            user_like_entries.append(detached)
         for entry in user_like_entries[:-1]:
             await self._send_entry(proc, entry)
             _ = await self._drain_until_result(

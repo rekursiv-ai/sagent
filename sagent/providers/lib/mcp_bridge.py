@@ -143,6 +143,13 @@ class ToolsBridge:
         self._bg_counter: int = 0
         self._bg_tasks: dict[str, asyncio.Task[ToolResult]] = {}
         self._bg_done: dict[str, ToolResult] = {}
+        # Set by ``stop()``. ``_on_done`` runs on the loop AFTER ``stop()``
+        # cancels its task, so without this guard a cancelled task's
+        # callback would write a stale ``"cancelled"`` result into
+        # ``_bg_done`` post-shutdown -- which, since the bridge outlives
+        # HotSpare respawns, would later be drained into an unrelated turn
+        # as a phantom ``[detached tool result] cancelled``.
+        self._stopped: bool = False
         # Monotonic count of ``list_tools`` fetches by any CLI subprocess.
         # The CLI connects to MCP servers asynchronously AFTER launch and
         # does not block its first turn on that handshake -- a cold
@@ -199,9 +206,11 @@ class ToolsBridge:
 
     async def stop(self) -> None:
         """Shut down the MCP server and join the serve task."""
+        self._stopped = True
         for task in list(self._bg_tasks.values()):
             task.cancel()
         self._bg_tasks.clear()
+        self._bg_done.clear()
         server = self._uvicorn_server
         if server is not None:
             server.should_exit = True
@@ -368,6 +377,14 @@ class ToolsBridge:
 
         def _on_done(t: asyncio.Task[ToolResult], _id: str = detach_id) -> None:
             self._bg_tasks.pop(_id, None)
+            if self._stopped:
+                # Bridge shut down; don't resurrect a result into
+                # ``_bg_done`` that a later turn would drain as a phantom.
+                # Consume any exception so the task isn't flagged as having
+                # an unretrieved exception.
+                if not t.cancelled():
+                    _ = t.exception()
+                return
             try:
                 self._bg_done[_id] = t.result()
             except asyncio.CancelledError:
