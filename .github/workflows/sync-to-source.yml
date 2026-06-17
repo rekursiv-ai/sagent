@@ -157,9 +157,7 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
-          uv --quiet run --no-project \
-            --with-requirements "target/$COPYBARISTA_TOOL_PROJECT_PATH/requirements.txt" \
-            python \
+          uv --quiet run --no-project python \
             "$TRUSTED_IMPORT_SCRIPT" \
             --public-base public-base \
             --public-head public-head \
@@ -185,9 +183,7 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
-          uv --quiet run --no-project \
-            --with-requirements "target/$COPYBARISTA_TOOL_PROJECT_PATH/requirements.txt" \
-            python "$TRUSTED_IMPORT_SCRIPT" \
+          uv --quiet run --no-project python "$TRUSTED_IMPORT_SCRIPT" \
             --target-dir target \
             --target-repo "$TARGET_REPO" \
             --project-path "$TARGET_PROJECT_PATH" \
