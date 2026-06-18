@@ -145,9 +145,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         if: steps.settings.outputs.enabled == 'true'
 
-      - name: Install system packages
-        if: steps.settings.outputs.enabled == 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Capture trusted import helper
         if: steps.settings.outputs.enabled == 'true'
         run: |
@@ -185,13 +182,6 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
-          # The target checkout uses persist-credentials: false so the import
-          # token never reaches the validation step (which executes imported
-          # public code). The PR step needs git auth to push the import branch,
-          # so configure a token auth header scoped to this target checkout only.
-          auth_header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -C target config http."https://github.com/$TARGET_REPO.git/".extraheader \
-            "AUTHORIZATION: basic $auth_header"
           uv --quiet run --no-project python "$TRUSTED_IMPORT_SCRIPT" \
             --target-dir target \
             --target-repo "$TARGET_REPO" \
