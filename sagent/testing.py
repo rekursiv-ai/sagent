@@ -114,6 +114,14 @@ class MockModelCaps:
     def usage_snapshot(self) -> UsageSnapshot | None:
         return None
 
+    async def close(self) -> None:
+        """No-op teardown -- the mock holds no resources.
+
+        ``close`` is a required ``Model`` contract member; this mock
+        satisfies it by returning immediately.
+        """
+        return
+
 
 class _NullModel:
     """No-op runtime ``Model`` for tests that never hit model dispatch.

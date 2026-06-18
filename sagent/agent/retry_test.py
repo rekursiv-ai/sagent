@@ -271,6 +271,29 @@ def test_extract_retry_after_absolute_epoch_treated_as_timestamp() -> None:
     assert 40.0 <= delay <= 46.0
 
 
+def test_extract_retry_after_structured_ms_attribute() -> None:
+    """A ``retry_after_ms`` attribute (CLI providers with no HTTP response)
+    is honored, converted ms -> sec, ahead of the response path.
+    """
+
+    class _CliRetryableError(Exception):
+        retry_after_ms = 30000.0
+
+    assert extract_retry_after(_CliRetryableError()) == pytest.approx(30.0)
+
+
+def test_extract_retry_after_structured_ms_none_falls_through() -> None:
+    """A ``None`` / absent ``retry_after_ms`` does not short-circuit the
+    response path.
+    """
+
+    class _CliRetryableError(Exception):
+        retry_after_ms = None
+        response = _FakeResponse(429, {"retry-after": "7"})
+
+    assert extract_retry_after(_CliRetryableError()) == pytest.approx(7.0)
+
+
 def test_extract_retry_after_far_future_epoch_does_not_explode() -> None:
     # Regression for the "retrying in 20602d" status-pane bug: a retry-after
     # equal to the current epoch must not become a multi-decade delay.
