@@ -172,7 +172,6 @@ jobs:
             --branch-prefix "$COPYBARISTA_IMPORT_BRANCH_PREFIX" \
             --sync-label "$COPYBARISTA_SYNC_LABEL" \
             --report "$IMPORT_REPORT" \
-            --refresh-public-lockfile \
             --type-check-target . \
             --open-pr false
 
