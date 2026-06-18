@@ -619,16 +619,16 @@ class _AnthropicCLIModel:
             bridge_server_name=self._tools_bridge.server_name,
             extra_mcp_servers=self._extra_mcp_servers,
         )
-        proc = Subproc(
-            argv,
-            env=_anthropic_subprocess_env(tmpdir),
-            tmpdir=tmpdir,
-            **(
-                {"read_timeout_sec": self._read_timeout_sec}
-                if self._read_timeout_sec is not None
-                else {}
-            ),
-        )
+        env = _anthropic_subprocess_env(tmpdir)
+        if self._read_timeout_sec is not None:
+            proc = Subproc(
+                argv,
+                env=env,
+                tmpdir=tmpdir,
+                read_timeout_sec=self._read_timeout_sec,
+            )
+        else:
+            proc = Subproc(argv, env=env, tmpdir=tmpdir)
         self._warming_proc = proc
         try:
             await proc.start()
