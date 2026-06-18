@@ -184,6 +184,7 @@ class AnthropicCLI(Anthropic):
         max_request_tokens: int | None = None,
         *,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
+        subprocess_read_timeout_sec: float | None = None,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
 
@@ -195,6 +196,10 @@ class AnthropicCLI(Anthropic):
             ``--mcp-config`` ``mcpServers`` entry — stdio or http). Lets a
             consumer inject custom tools (e.g. inter-agent messaging) into the
             agent's turn.
+          subprocess_read_timeout_sec: Max idle seconds while waiting for one
+            stdout line from the ``claude`` subprocess (re-exposes the
+            ``Subproc`` knob). ``None`` keeps the transport default; raise it
+            for long agent turns.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -222,6 +227,7 @@ class AnthropicCLI(Anthropic):
                 else profile.max_request_tokens
             ),
             extra_mcp_servers=extra_mcp_servers,
+            subprocess_read_timeout_sec=subprocess_read_timeout_sec,
         )
 
     @override
@@ -259,12 +265,14 @@ class _AnthropicCLIModel:
         profile: ModelProfile,
         max_request_tokens: int,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
+        subprocess_read_timeout_sec: float | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
         self._profile = profile
         self._max_request_tokens = max_request_tokens
         self._extra_mcp_servers = dict(extra_mcp_servers or {})
+        self._read_timeout_sec = subprocess_read_timeout_sec
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -615,6 +623,11 @@ class _AnthropicCLIModel:
             argv,
             env=_anthropic_subprocess_env(tmpdir),
             tmpdir=tmpdir,
+            **(
+                {"read_timeout_sec": self._read_timeout_sec}
+                if self._read_timeout_sec is not None
+                else {}
+            ),
         )
         self._warming_proc = proc
         try:
