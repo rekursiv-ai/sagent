@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v5
-      - name: Install ripgrep and fd-find
+      - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
