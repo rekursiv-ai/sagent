@@ -182,12 +182,19 @@ class AnthropicCLI(Anthropic):
         self,
         model_id: str | None = None,
         max_request_tokens: int | None = None,
+        *,
+        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
 
         Args:
           model_id: Claude model id; ``None`` uses ``DEFAULT_MODEL``.
           max_request_tokens: Override the profile's input cap.
+          extra_mcp_servers: Additional MCP servers to expose to the CLI
+            alongside sagent's own tool bridge, keyed by server name (each an
+            ``--mcp-config`` ``mcpServers`` entry — stdio or http). Lets a
+            consumer inject custom tools (e.g. inter-agent messaging) into the
+            agent's turn.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -214,6 +221,7 @@ class AnthropicCLI(Anthropic):
                 if max_request_tokens is not None
                 else profile.max_request_tokens
             ),
+            extra_mcp_servers=extra_mcp_servers,
         )
 
     @override
@@ -250,11 +258,13 @@ class _AnthropicCLIModel:
         model_id: str,
         profile: ModelProfile,
         max_request_tokens: int,
+        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
         self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self._extra_mcp_servers = dict(extra_mcp_servers or {})
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -599,6 +609,7 @@ class _AnthropicCLIModel:
             system_prompt=self._pending_system,
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,
+            extra_mcp_servers=self._extra_mcp_servers,
         )
         proc = Subproc(
             argv,
@@ -736,15 +747,22 @@ def _build_anthropic_argv(
     system_prompt: str,
     bridge_url: str,
     bridge_server_name: str,
+    extra_mcp_servers: dict[str, dict[str, object]] | None = None,
 ) -> list[str]:
     """Assemble the ``claude --print --input-format stream-json ...`` argv."""
-    mcp_config = json.dumps(
-        {
-            "mcpServers": {
-                bridge_server_name: {"type": "http", "url": bridge_url},
-            }
-        }
-    )
+    mcp_servers: dict[str, object] = {
+        bridge_server_name: {"type": "http", "url": bridge_url},
+    }
+    # Consumer-injected MCP servers (e.g. inter-agent messaging) ride alongside
+    # sagent's own tool bridge in the same --mcp-config. The bridge name is
+    # reserved, so an extra server must not collide with it.
+    for name, entry in (extra_mcp_servers or {}).items():
+        if name == bridge_server_name:
+            raise ValueError(
+                f"extra_mcp_servers name {name!r} collides with the sagent bridge",
+            )
+        mcp_servers[name] = entry
+    mcp_config = json.dumps({"mcpServers": mcp_servers})
     return [
         "claude",
         "--print",
