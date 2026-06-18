@@ -6,7 +6,7 @@ hot-reload-credentials Protocol opt-in for OAuth-backed providers.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from sagent.types.model import Model
 
@@ -22,10 +22,7 @@ class Provider(Protocol):
     """Factory for model backends. ``None`` -> provider's ``DEFAULT_MODEL``."""
 
     def model(
-        self,
-        model_id: str | None = None,
-        max_request_tokens: int | None = None,
-        **provider_options: Any,
+        self, model_id: str | None = None, /, max_request_tokens: int | None = None
     ) -> Model:
         """Build a model backend.
 
@@ -33,13 +30,6 @@ class Provider(Protocol):
           model_id: Provider-specific id; ``None`` selects the
               provider's ``DEFAULT_MODEL``.
           max_request_tokens: Override for the model's input cap.
-          provider_options: Provider-specific construction knobs. Each
-              concrete provider declares these as real, typed keyword
-              args on its own ``model(...)`` (e.g. ``AnthropicCLI``
-              accepts ``extra_mcp_servers`` / ``subprocess_read_timeout_sec``);
-              the protocol acknowledges the nonstandard tail here so the
-              uniform call site holds. A provider rejects keys it does
-              not recognize rather than silently ignoring them.
 
         Returns:
           model: A ``Model`` ready to handle requests.
