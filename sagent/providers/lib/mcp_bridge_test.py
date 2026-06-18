@@ -141,18 +141,6 @@ class _CancelTool(_EchoTool):
         raise asyncio.CancelledError
 
 
-class _SlowTool(_EchoTool):
-    """Tool stub that sleeps long enough to still be running at ``stop``."""
-
-    name = "Slow"
-
-    @override
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        del args
-        await asyncio.sleep(5.0)
-        return ToolResult(call_id="", content="slow done")
-
-
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_start_then_stop_lifecycle() -> None:
@@ -250,49 +238,18 @@ async def test_call_tool_validates_required_args() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_call_tool_detaches_background_args() -> None:
-    """A background request returns a detached placeholder, then runs + drains.
-
-    The bridge runs the tool as a task in the Model's loop ("comes up
-    for air"); the finished result is later available via
-    ``drain_detached_results`` for the Model to feed back.
-    """
+async def test_call_tool_rejects_background_args() -> None:
+    """MCP execution rejects background/delay instead of bypassing the wrapper."""
     tool = _StrictTool()
     bridge = ToolsBridge([cast(Tool, tool)])
     await bridge.start()
     try:
-        blocks = await bridge._call_tool("Strict", {"text": "hi", "background": True})
-        assert isinstance(blocks[0], TextContent)
-        assert "[detached" in blocks[0].text
-        # The detached task runs in this loop; let it complete.
-        for _ in range(50):
-            if not bridge.has_pending_detached():
-                break
-            await asyncio.sleep(0.01)
-        assert tool.seen_args is not None, "detached tool must actually run"
-        results = bridge.drain_detached_results()
-        assert len(results) == 1
-        assert bridge.drain_detached_results() == []  # drained once
-    finally:
-        await bridge.stop()
-
-
-@pytest.mark.real_sleep
-@pytest.mark.asyncio
-async def test_call_tool_validates_args_before_detaching() -> None:
-    """Schema validation runs before a background detach is spawned.
-
-    A background request that fails required-arg validation must error
-    out (no task spawned), not return a detached placeholder.
-    """
-    tool = _StrictTool()
-    bridge = ToolsBridge([cast(Tool, tool)])
-    await bridge.start()
-    try:
-        blocks = await bridge._call_tool("Strict", {"background": True})
+        blocks = await bridge._call_tool(
+            "Strict", {"text": "hi", "background": True, "delay": 3}
+        )
         assert isinstance(blocks[0], TextContent)
         assert blocks[0].text.startswith("[Error]")
-        assert not bridge.has_pending_detached()
+        assert "cannot detach" in blocks[0].text
         assert tool.seen_args is None
     finally:
         await bridge.stop()
@@ -300,31 +257,19 @@ async def test_call_tool_validates_args_before_detaching() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_stop_clears_bg_done_and_blocks_late_phantom_result() -> None:
-    """``stop`` drops detached results and a cancelled task's late
-    ``_on_done`` does not resurrect one.
-
-    The bridge outlives HotSpare respawns; a ``"cancelled"`` result
-    written into ``_bg_done`` after shutdown would be drained into an
-    unrelated later turn as a phantom. ``stop`` clears the dict AND sets
-    the guard so the still-pending task's done-callback (which runs after
-    ``stop`` cancels it) is a no-op.
-    """
-    bridge = ToolsBridge([cast(Tool, _SlowTool())])
+async def test_call_tool_rejects_background_before_required_arg_validation() -> None:
+    """MCP detach rejection has priority over wrapper schema validation."""
+    tool = _StrictTool()
+    bridge = ToolsBridge([cast(Tool, tool)])
     await bridge.start()
-    blocks = await bridge._call_tool("Slow", {"text": "x", "background": True})
-    assert isinstance(blocks[0], TextContent)
-    assert "[detached" in blocks[0].text
-    assert bridge.has_pending_detached()
-
-    # Stop while the slow task is still running.
-    await bridge.stop()
-    # Let the cancelled task's ``_on_done`` callback run on the loop.
-    await asyncio.sleep(0.05)
-
-    # No phantom result survived shutdown.
-    assert bridge.drain_detached_results() == []
-    assert not bridge.has_pending_detached()
+    try:
+        blocks = await bridge._call_tool("Strict", {"background": True})
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text.startswith("[Error]")
+        assert "cannot detach" in blocks[0].text
+        assert tool.seen_args is None
+    finally:
+        await bridge.stop()
 
 
 @pytest.mark.real_sleep

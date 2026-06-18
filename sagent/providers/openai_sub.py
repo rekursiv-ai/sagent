@@ -513,21 +513,6 @@ class OpenAISubscription(OpenAI):
                 await old.close()
             return self._sdk
 
-    async def close_sdk(self) -> None:
-        """Close and clear the shared OAuth SDK client.
-
-        Idempotent: a no-op when no SDK has been created. Called from
-        ``_OpenAISubModel.close`` (the model delegates teardown of the
-        provider-owned SDK).
-        """
-        async with self._lock:
-            if self._sdk is None:
-                return
-            sdk = self._sdk
-            self._sdk = None
-            self._sdk_token = None
-        await sdk.close()
-
     async def _ensure_valid(self) -> str:
         """Return a valid access token, reloading from disk or refreshing.
 
@@ -705,18 +690,6 @@ class _OpenAISubModel(_OpenAIModel):
     """OpenAI Responses API model -- subscription billing."""
 
     _provider: OpenAISubscription  # type: narrowed from OpenAICompat
-
-    @override
-    async def close(self) -> None:
-        """Release the provider's Responses-API SDK and the HTTP client.
-
-        The base ``OpenAICompatModel.close`` tears down the shared
-        ``httpx.AsyncClient``; the subscription path additionally has an
-        ``AsyncOpenAI`` SDK owned by the *provider* (not the model), so
-        delegate to ``provider.close_sdk()`` for that.
-        """
-        await self._provider.close_sdk()
-        await super().close()
 
     @override
     def _is_effort_model(self, model_id: str) -> bool:

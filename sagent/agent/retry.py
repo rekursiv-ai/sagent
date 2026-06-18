@@ -195,22 +195,12 @@ def extract_retry_after(error: Exception) -> float | None:
     that would otherwise wedge persistent retry for days or years.
 
     Args:
-      error: Exception with an attached HTTP response, or carrying a
-          structured ``retry_after_ms`` attribute (e.g. a CLI provider
-          that parses the hint out of a stream-json event rather than an
-          HTTP header).
+      error: Exception with an attached HTTP response.
 
     Returns:
-      delay_sec: Seconds to wait, or None if no hint found.
+      delay_sec: Seconds to wait, or None if no header found.
 
     """
-    # Structured hint on the exception itself, ahead of the HTTP-response
-    # path: CLI-transport providers (no ``.response`` object) surface the
-    # server's retry hint as a ``retry_after_ms`` attribute. Honor it so
-    # the homogeneous retry loop respects it the same as an HTTP header.
-    retry_after_ms = getattr(error, "retry_after_ms", None)
-    if isinstance(retry_after_ms, (int, float)) and retry_after_ms >= 0:
-        return _clamp_retry_after(retry_after_ms / 1000.0)
     response = getattr(error, "response", None)
     if response is None:
         return None
