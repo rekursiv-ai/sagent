@@ -118,6 +118,49 @@ _BG_FIELDS: JSON = json_freeze(
 )
 
 
+def bg_augmented_schema(directive_schema: JSON) -> JSON:
+    """Return ``directive_schema`` with ``background``/``delay`` advertised.
+
+    The single source of truth for background-field injection, shared by
+    the runtime path (:class:`BackgroundAwareTool`) and the CLI MCP bridge
+    (``providers.lib.mcp_bridge``). Both advertise the same two control
+    fields and strip them with :func:`split_bg_args` before dispatch, so
+    the schema they validate against must be produced identically -- a
+    second copy is how the two paths drift.
+
+    Args:
+      directive_schema: A tool's own object-typed (or schemaless) schema.
+
+    Returns:
+      schema: A frozen copy with ``background`` / ``delay`` merged into
+          ``properties``.
+
+    Raises:
+      ValueError: If the schema declares a non-object ``type``; injecting
+          ``properties`` there yields a schema strict validators reject.
+
+    """
+    schema: MutableJSON = cast(MutableJSON, dict(directive_schema))
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        raise ValueError(
+            "bg_augmented_schema requires an object-typed directive_schema"
+            f" (or no ``type``); got type={schema_type!r}",
+        )
+    raw_props = schema.get("properties")
+    # Inject even when the inner schema is schemaless (no ``properties``):
+    # JSON Schema allows ``type: object`` without ``properties``, but
+    # skipping injection there would silently disable backgrounding.
+    props: MutableJSON = (
+        cast(MutableJSON, dict(raw_props))
+        if isinstance(raw_props, Mapping)
+        else cast(MutableJSON, {})
+    )
+    props.update(cast(MutableJSON, dict(_BG_FIELDS)))
+    schema["properties"] = cast(MutableJSONValue, props)
+    return json_freeze(schema)
+
+
 class BackgroundAwareTool:
     """Proxy that injects ``background``/``delay`` into a tool's schema.
 
@@ -148,32 +191,10 @@ class BackgroundAwareTool:
         self.tool_id = tool.tool_id
         self.clearable_results = tool.clearable_results
         self.description = tool.description
-        schema: MutableJSON = cast(MutableJSON, dict(tool.directive_schema))
-        # Only object-typed schemas accept ``properties``. Injecting into
-        # ``type: "string"`` / ``"array"`` / etc. produces a schema that
-        # strict validators reject and that misrepresents the tool to the
-        # model. The schemaless case (no ``type``) is still accepted: JSON
-        # Schema treats omitted ``type`` as "any", and downstream
-        # validation catches malformed inputs at dispatch time.
-        schema_type = schema.get("type")
-        if schema_type is not None and schema_type != "object":
-            raise ValueError(
-                f"BackgroundAwareTool requires an object-typed directive_schema"
-                f" (or no ``type``); tool {tool.name!r} has type={schema_type!r}",
-            )
-        raw_props = schema.get("properties")
-        # Inject ``background`` / ``delay`` even when the inner schema is
-        # schemaless (no ``properties``); JSON Schema allows ``type:
-        # object`` without ``properties``, but a wrapper that skipped
-        # injection in that branch would silently disable backgrounding.
-        props: MutableJSON = (
-            cast(MutableJSON, dict(raw_props))
-            if isinstance(raw_props, Mapping)
-            else cast(MutableJSON, {})
-        )
-        props.update(cast(MutableJSON, dict(_BG_FIELDS)))
-        schema["properties"] = cast(MutableJSONValue, props)
-        self.directive_schema = json_freeze(schema)
+        try:
+            self.directive_schema = bg_augmented_schema(tool.directive_schema)
+        except ValueError as exc:
+            raise ValueError(f"tool {tool.name!r}: {exc}") from exc
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Forward to the wrapped tool's pre-execution label.

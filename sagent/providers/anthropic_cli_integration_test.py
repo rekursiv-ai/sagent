@@ -32,6 +32,7 @@ import pytest
 
 from sagent.providers.anthropic_cli import AnthropicCLI
 from sagent.providers.lib.oauth import credentials_path
+from sagent.providers.lib.subproc import SubprocessTransportError
 from sagent.tools import tool
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
@@ -63,7 +64,13 @@ _BRIDGE_UNAVAILABLE = "MCP bridge could not start in this environment"
 
 def _skip_if_bridge_unavailable(exc: Exception) -> None:
     msg = str(exc)
+    # A loopback-forbidding host surfaces the same root cause two ways:
+    # uvicorn's startup ``TimeoutError`` (bridge never binds) or the
+    # provider's ``SubprocessTransportError`` (the CLI's MCP client never
+    # reaches the bridge). Treat both as an environment skip.
     if isinstance(exc, TimeoutError) and "bridge" in msg.lower():
+        pytest.skip(f"{_BRIDGE_UNAVAILABLE}: {msg}")
+    if isinstance(exc, SubprocessTransportError) and "mcp bridge" in msg.lower():
         pytest.skip(f"{_BRIDGE_UNAVAILABLE}: {msg}")
 
 
@@ -78,7 +85,7 @@ async def test_basic_turn_returns_response() -> None:
                 messages=[UserMessage(text="Reply with exactly the word: pong")],
             ),
         )
-    except TimeoutError as exc:
+    except (TimeoutError, SubprocessTransportError) as exc:
         _skip_if_bridge_unavailable(exc)
         raise
     finally:
@@ -121,7 +128,7 @@ async def test_session_resume_two_turns() -> None:
                 ],
             ),
         )
-    except TimeoutError as exc:
+    except (TimeoutError, SubprocessTransportError) as exc:
         _skip_if_bridge_unavailable(exc)
         raise
     finally:
@@ -168,7 +175,7 @@ async def test_bridge_tool_round_trips() -> None:
                 tools=[magic_word],
             ),
         )
-    except TimeoutError as exc:
+    except (TimeoutError, SubprocessTransportError) as exc:
         _skip_if_bridge_unavailable(exc)
         raise
     finally:
@@ -213,7 +220,7 @@ async def test_second_model_connects_after_first_closes() -> None:
                     tools=[magic_word],
                 ),
             )
-        except TimeoutError as exc:
+        except (TimeoutError, SubprocessTransportError) as exc:
             _skip_if_bridge_unavailable(exc)
             raise
         finally:
@@ -293,7 +300,7 @@ async def test_detached_result_delivered_to_model_on_resume() -> None:
                 tools=[slow_oracle],
             ),
         )
-    except TimeoutError as exc:
+    except (TimeoutError, SubprocessTransportError) as exc:
         _skip_if_bridge_unavailable(exc)
         raise
     finally:
@@ -387,7 +394,7 @@ async def test_real_claude_drives_full_detach_path() -> None:
                 tools=[slow_oracle],
             ),
         )
-    except TimeoutError as exc:
+    except (TimeoutError, SubprocessTransportError) as exc:
         _skip_if_bridge_unavailable(exc)
         raise
     finally:

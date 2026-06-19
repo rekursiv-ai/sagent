@@ -1070,8 +1070,8 @@ class _AnthropicCLIModel:
             if not results:
                 return None
             self._pending_detached_text = "\n\n".join(
-                f"[detached tool result] {r.content}"
-                + (" (error)" if r.is_error else "")
+                f"[detached tool result{f' {r.call_id}' if r.call_id else ''}]"
+                f" {r.content}" + (" (error)" if r.is_error else "")
                 for r in results
             )
         return UserMessage(text=self._pending_detached_text)
