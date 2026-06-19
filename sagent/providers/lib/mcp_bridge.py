@@ -23,12 +23,14 @@ observer pane is v2 work (see ``docs/private/cli_provider.md`` §1.9).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
 import asyncio
 import base64
+import contextlib
+import dataclasses
 import logging
+import uuid
 
 
 if TYPE_CHECKING:
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
         routing as _starlette_routing,
     )
     from starlette.applications import Starlette
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
     import mcp.types as mcp_types
     import uvicorn
@@ -60,8 +63,11 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
-from sagent.agent.background import _BG_FIELDS, split_bg_args
-from sagent.lib.json import JSON, json_unfreeze
+from sagent.agent.background import (
+    bg_augmented_schema,
+    split_bg_args,
+)
+from sagent.lib.json import json_unfreeze
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
 from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult
@@ -77,33 +83,128 @@ _MCP_PATH = "/mcp"
 _STARTUP_TIMEOUT_SEC = 10.0
 
 
-def _schema_with_bg_fields(directive_schema: JSON) -> dict[str, object]:
-    """Advertise ``background`` / ``delay`` alongside a tool's own params.
+class _BridgeServer:
+    """Process-global uvicorn server hosting every ``ToolsBridge``.
 
-    The bridge honors ``background`` / ``delay`` (``_call_tool`` splits
-    them off via ``split_bg_args`` and may detach the run), but the model
-    can only request them if they appear in the advertised input schema.
-    Object-typed schemas with ``additionalProperties: false`` would
-    otherwise reject the keys at the model's own validation step, so the
-    bridge merges the bg fields into ``properties`` here -- mirroring
-    ``BackgroundAwareTool``'s schema injection on the runtime path.
+    One uvicorn server is booted lazily on the first :meth:`register` and
+    runs for the life of the process. Bridges :meth:`register` an MCP
+    ASGI sub-app under a unique path token and :meth:`unregister` it on
+    stop; the server itself is never torn down.
 
-    Non-object schemas (rare for bridge tools) are returned unchanged:
-    there is no ``properties`` map to extend.
+    This is the cure for the live "MCP bridge catalog not fetched" wedge:
+    a per-bridge uvicorn that was started AND stopped drove uvicorn's
+    graceful shutdown, whose ``StreamableHTTPSessionManager`` lifespan
+    teardown corrupted process-global async state so every later
+    ``claude`` subprocess failed its MCP connect (verified 2026-06-18).
+    A server that only ever starts -- bridges come and go as mounted
+    routes -- has no teardown to corrupt anything.
     """
-    schema = cast(dict[str, object], json_unfreeze(directive_schema))
-    schema_type = schema.get("type")
-    if schema_type is not None and schema_type != "object":
-        return schema
-    raw_props = schema.get("properties")
-    props: dict[str, object] = (
-        dict(cast("dict[str, object]", raw_props))
-        if isinstance(raw_props, dict)
-        else {}
-    )
-    props.update(cast("dict[str, object]", json_unfreeze(_BG_FIELDS)))
-    schema["properties"] = props
-    return schema
+
+    def __init__(self) -> None:
+        self._uvicorn_server: uvicorn.Server | None = None
+        self._serve_task: asyncio.Task[None] | None = None
+        self._port: int = 0
+        self._routes: dict[str, _starlette_routing.Mount] = {}
+        self._app: Starlette | None = None
+        self._lock: asyncio.Lock | None = None
+        # The event loop the uvicorn server is bound to. A uvicorn serve
+        # task can only accept connections on the loop it runs in; if the
+        # process ever drives bridges from a DIFFERENT loop (each
+        # ``asyncio.run`` is a fresh loop -- the norm under pytest-asyncio),
+        # the prior server is unreachable and must be rebuilt. Production
+        # uses one loop for the process lifetime, so this rebuild fires
+        # only in tests.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def port(self) -> int:
+        """Bound localhost port; ``0`` before the server has started."""
+        return self._port
+
+    async def register(self, token: str, handle_mcp: ASGIApp) -> None:
+        """Mount ``handle_mcp`` under ``/{token}/mcp`` and ensure serving."""
+        async with self._loop_lock():
+            await self._ensure_started()
+            assert self._app is not None
+            mount = _starlette_routing.Mount(f"/{token}{_MCP_PATH}", app=handle_mcp)
+            self._routes[token] = mount
+            self._app.router.routes.append(mount)
+
+    async def unregister(self, token: str) -> None:
+        """Drop the route mounted for ``token`` (no server teardown)."""
+        async with self._loop_lock():
+            mount = self._routes.pop(token, None)
+            if mount is not None and self._app is not None:
+                with contextlib.suppress(ValueError):
+                    self._app.router.routes.remove(mount)
+
+    def _loop_lock(self) -> asyncio.Lock:
+        """Return the lock, (re)bound to the running loop."""
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._loop is not loop:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    async def _ensure_started(self) -> None:
+        """Boot the uvicorn server, rebuilding it if the loop changed."""
+        loop = asyncio.get_running_loop()
+        if self._uvicorn_server is not None and self._loop is loop:
+            return
+        # Loop changed (or first boot): drop the stale server bound to a
+        # defunct loop and stand a fresh one up on the current loop.
+        self._uvicorn_server = None
+        self._serve_task = None
+        self._routes.clear()
+        self._loop = loop
+        app = _starlette_applications.Starlette(routes=[])
+        self._app = app
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=0,
+            # Quiet uvicorn entirely: the MCP bridge is an internal
+            # transport and its SSE responses surface ``CancelledError``
+            # we drop anyway. Real provider errors flow up through the
+            # agent layer's existing logging.
+            log_level="critical",
+            log_config=None,
+            loop="asyncio",
+            access_log=False,
+            # MCP only needs HTTP; declining WS detection avoids the
+            # ``websockets.legacy`` deprecation warning uvicorn raises
+            # when probing optional WS providers.
+            ws="none",
+        )
+        server = uvicorn.Server(config)
+        self._uvicorn_server = server
+        self._serve_task = asyncio.create_task(server.serve())
+        self._serve_task.add_done_callback(
+            log_task_exception(logger, "MCP bridge uvicorn serve crashed"),
+        )
+        await self._wait_started()
+        self._port = self._extract_port()
+
+    async def _wait_started(self) -> None:
+        """Block until uvicorn reports the listening socket is bound."""
+        deadline = asyncio.get_running_loop().time() + _STARTUP_TIMEOUT_SEC
+        while True:
+            assert self._uvicorn_server is not None
+            if self._uvicorn_server.started:
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                raise TimeoutError("MCP bridge: uvicorn startup timed out")
+            await asyncio.sleep(0.02)
+
+    def _extract_port(self) -> int:
+        """Read the bound port from uvicorn's listening socket."""
+        assert self._uvicorn_server is not None
+        for srv in self._uvicorn_server.servers:
+            for sock in srv.sockets:
+                return cast(int, sock.getsockname()[1])
+        raise RuntimeError("MCP bridge: uvicorn started without sockets")
+
+
+_SHARED_SERVER: _BridgeServer = _BridgeServer()
 
 
 class ToolsBridge:
@@ -111,13 +212,14 @@ class ToolsBridge:
 
     This is not an AgentTool parity adapter. CLI providers consume MCP
     tool calls inside their own turn, so the runtime does not see
-    per-tool ``ToolCall`` entries and cannot publish labels here. The
-    bridge IS the Model's internal cohort: it advertises
-    ``background`` / ``delay`` on every tool's schema, validates
-    arguments, and either runs the tool inline or detaches it as a
-    tracked task whose result the Model feeds back on a later turn
-    (:meth:`drain_detached_results`). Results convert to MCP content
-    blocks.
+    per-tool ``ToolCall`` entries; the bridge surfaces a ``ToolLabel`` to
+    the runtime's publish sink (set per turn via :meth:`set_publish`) so
+    the REPL still announces each call. The bridge IS the Model's internal
+    cohort: it advertises ``background`` / ``delay`` on every tool's
+    schema, validates arguments, and either runs the tool inline or
+    detaches it as a tracked task whose result the Model feeds back on a
+    later turn (:meth:`drain_detached_results`). Results convert to MCP
+    content blocks.
 
     Args:
       tools: Initial tool list; subsequent calls to :meth:`update_tools`
@@ -128,15 +230,18 @@ class ToolsBridge:
     def __init__(self, tools: list[Tool]) -> None:
         self._tools: dict[str, Tool] = {t.name: t for t in tools}
         self._server: Server | None = None
-        self._uvicorn_server: uvicorn.Server | None = None
-        self._serve_task: asyncio.Task[None] | None = None
-        # uvicorn's ``LifespanOn.main`` task. uvicorn creates it inside
-        # ``Server.serve`` but keeps no handle, so a ``stop`` that only
-        # ends the serve task orphans it. ``stop`` cancels it explicitly
-        # (see :meth:`stop`); captured by diffing ``all_tasks`` across
-        # ``start``.
-        self._lifespan_task: asyncio.Task[object] | None = None
-        self._port: int = 0
+        # Unique path token under which this bridge mounts its MCP route
+        # on the process-global :data:`_SHARED_SERVER`. The bridge's URL
+        # is ``http://127.0.0.1:{shared_port}/{token}/mcp``; ``start``
+        # registers the route, ``stop`` unregisters it. No per-bridge
+        # uvicorn lifecycle -- the singleton server is never torn down.
+        self._token: str = uuid.uuid4().hex
+        self._mounted: bool = False
+        # The streamable-http manager whose ``run()`` lifespan must stay
+        # entered while this bridge serves; driven by a dedicated task so
+        # its anyio task-group is scoped to this bridge, not uvicorn's.
+        self._manager_task: asyncio.Task[None] | None = None
+        self._manager_ready: asyncio.Event = asyncio.Event()
         # Runtime event sink for the active ``stream`` call. The bridge
         # outlives a single turn (it survives HotSpare respawns), so the
         # owning ``_AnthropicCLIModel`` sets this per ``stream`` and
@@ -176,90 +281,74 @@ class ToolsBridge:
         self._listed_cond: asyncio.Condition = asyncio.Condition()
 
     async def start(self) -> None:
-        """Bring up the MCP server on a free localhost port.
+        """Register this bridge's MCP route on the shared server.
+
+        Boots the process-global :data:`_SHARED_SERVER` on first use and
+        mounts this bridge under a unique path token. Re-arms ``_stopped``
+        so a reused instance delivers detached results again.
 
         Raises:
-          TimeoutError: If uvicorn does not finish startup within
-              ``_STARTUP_TIMEOUT_SEC``.
+          TimeoutError: If the shared uvicorn server does not finish
+              startup within ``_STARTUP_TIMEOUT_SEC``.
 
         """
+        self._stopped = False
         self._server = _mcp_server_lowlevel.Server("sagent-cli-bridge")
         manager = _mcp_streamable_http_manager.StreamableHTTPSessionManager(
             app=self._server, stateless=True
         )
         self._register_handlers(self._server)
-        app = self._build_app(manager)
-        config = uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=0,
-            # Quiet uvicorn entirely: the MCP bridge is an internal
-            # transport and shutdown surfaces ``CancelledError`` from
-            # the streamable-http lifespan + SSE responses that we drop
-            # anyway. Real provider errors flow up through the agent
-            # layer's existing logging.
-            log_level="critical",
-            log_config=None,
-            loop="asyncio",
-            access_log=False,
-            # MCP only needs HTTP; declining WS detection avoids the
-            # ``websockets.legacy`` deprecation warning that uvicorn
-            # raises when probing optional WS providers.
-            ws="none",
+
+        async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
+            await manager.handle_request(scope, receive, send)
+
+        # Enter the streamable-http manager's lifespan in a dedicated task
+        # scoped to THIS bridge. ``stop`` cancels it; because it is not
+        # driven by uvicorn's shutdown, its anyio task-group unwinds in
+        # isolation and cannot corrupt the shared server's loop state.
+        self._manager_ready.clear()
+        self._manager_task = asyncio.create_task(self._run_manager(manager))
+        self._manager_task.add_done_callback(
+            log_task_exception(logger, "MCP bridge manager lifespan crashed"),
         )
-        server = uvicorn.Server(config)
-        self._uvicorn_server = server
-        tasks_before = asyncio.all_tasks()
-        self._serve_task = asyncio.create_task(server.serve())
-        self._serve_task.add_done_callback(
-            log_task_exception(logger, "MCP bridge uvicorn serve crashed"),
-        )
-        await self._wait_started()
-        self._port = self._extract_port()
-        # ``Server.serve`` -> ``startup`` spawns uvicorn's ``LifespanOn.main``
-        # task without retaining a handle. Capture it (the one new task that
-        # is neither the serve task nor a pre-existing task) so ``stop`` can
-        # cancel it directly rather than orphan it.
-        self._lifespan_task = next(
-            (
-                t
-                for t in asyncio.all_tasks() - tasks_before
-                if t is not self._serve_task
-            ),
-            None,
-        )
+        await self._manager_ready.wait()
+        await _SHARED_SERVER.register(self._token, handle_mcp)
+        self._mounted = True
+
+    async def _run_manager(self, manager: StreamableHTTPSessionManager) -> None:
+        """Hold the manager's lifespan open until cancelled."""
+        async with manager.run():
+            self._manager_ready.set()
+            # Park until ``stop`` cancels this task.
+            await asyncio.Event().wait()
 
     async def stop(self) -> None:
-        """Shut down the MCP server by cancelling its serve + lifespan tasks.
+        """Unregister this bridge's route and release its per-turn state.
 
-        NOT uvicorn's graceful ``should_exit`` shutdown: that path drives
-        the ``StreamableHTTPSessionManager`` lifespan teardown, which
-        corrupts process-global async state so every later ``claude``
-        subprocess fails its MCP connect -- the live 8s "MCP bridge catalog
-        not fetched" wedge that bit every tool-using model built after the
-        first in a process (verified 2026-06-18). Cancelling the serve task
-        and the (otherwise orphaned) ``LifespanOn`` task ends both cleanly:
-        no wedge, and no leaked loop task.
+        Does NOT touch the shared uvicorn server -- only this bridge's
+        mounted route and its manager lifespan task. Cancelling the
+        manager task (rather than driving uvicorn's graceful shutdown)
+        keeps the wedge-class corruption from ever arising: there is no
+        server teardown to drive a lifespan teardown that poisons the
+        loop. Idempotent.
         """
         self._stopped = True
+        if self._mounted:
+            await _SHARED_SERVER.unregister(self._token)
+            self._mounted = False
         for task in list(self._bg_tasks.values()):
             task.cancel()
         self._bg_tasks.clear()
         self._bg_done.clear()
-        for task in (self._serve_task, self._lifespan_task):
-            if task is None or task.done():
-                continue
+        self._publish = None
+        task = self._manager_task
+        self._manager_task = None
+        if task is not None and not task.done():
             _ = task.cancel()
             try:
                 await task
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- shutdown must not raise
-                logger.debug("MCP bridge stop: task raised on cancel: %s", exc)
-        # Close the listening sockets so the bound port is released
-        # promptly (cancelling ``serve`` skips uvicorn's own socket close).
-        server = self._uvicorn_server
-        if server is not None:
-            for listening in server.servers:
-                listening.close()
+                logger.debug("MCP bridge stop: manager raised on cancel: %s", exc)
 
     def update_tools(self, tools: list[Tool]) -> None:
         """Replace the live tool registry.
@@ -286,8 +375,14 @@ class ToolsBridge:
 
     @property
     def url(self) -> str:
-        """Streamable-http endpoint to hand to the CLI's MCP config."""
-        return f"http://127.0.0.1:{self._port}{_MCP_PATH}"
+        """Streamable-http endpoint to hand to the CLI's MCP config.
+
+        Valid only after :meth:`start` has mounted this bridge on the
+        shared server; raises otherwise rather than returning a port-0 URL.
+        """
+        if not self._mounted:
+            raise RuntimeError("ToolsBridge.url read before start()")
+        return f"http://127.0.0.1:{_SHARED_SERVER.port}/{self._token}{_MCP_PATH}"
 
     @property
     def server_name(self) -> str:
@@ -308,23 +403,20 @@ class ToolsBridge:
                 mcp_types.Tool(
                     name=t.name,
                     description=t.description,
-                    inputSchema=_schema_with_bg_fields(t.directive_schema),
+                    inputSchema=cast(
+                        "dict[str, object]",
+                        json_unfreeze(bg_augmented_schema(t.directive_schema)),
+                    ),
                 )
                 for t in self._tools.values()
             ]
 
         @server.call_tool()
-        async def _call_tool(  # pyright: ignore[reportUnusedFunction]  -- decorator-registered
+        async def _on_call_tool(  # pyright: ignore[reportUnusedFunction]  -- decorator-registered
             name: str, arguments: dict[str, object]
         ) -> list[mcp_types.ContentBlock]:
-            tool = self._tools.get(name)
-            if tool is None:
-                return [
-                    mcp_types.TextContent(
-                        type="text",
-                        text=f"[Error] unknown tool: {name!r}",
-                    )
-                ]
+            # Dispatch owns the unknown-tool path (``_call_tool``); no
+            # duplicate guard here.
             return await self._call_tool(name, arguments)
 
     async def _call_tool(
@@ -354,9 +446,13 @@ class ToolsBridge:
                     text=f"[Error] unknown tool: {name!r}",
                 )
             ]
-        bg_requested, delay_sec, clean_args = split_bg_args(arguments)
+        # Validate the RAW arguments against the bg-augmented schema --
+        # the exact schema advertised to the model -- BEFORE splitting off
+        # the control fields. Validating the stripped args instead would
+        # let a malformed ``delay`` (e.g. ``"soon"``, ``-5``, ``1.5``)
+        # slip past the schema and be silently coerced by ``split_bg_args``.
         validation_error = validate_tool_input(
-            tool.name, tool.directive_schema, clean_args
+            tool.name, bg_augmented_schema(tool.directive_schema), arguments
         )
         if validation_error is not None:
             return [
@@ -365,6 +461,7 @@ class ToolsBridge:
                     text=f"[Error] {validation_error}",
                 )
             ]
+        bg_requested, delay_sec, clean_args = split_bg_args(arguments)
         # Surface a ``ToolLabel`` so the REPL renderer announces the
         # call even though the CLI's subprocess (not the sagent runtime)
         # drives the tool loop. ``_publish`` is the runtime sink the
@@ -374,11 +471,12 @@ class ToolsBridge:
         if self._publish is not None:
             try:
                 label = tool.summary(clean_args)
-            except (AttributeError, KeyError, TypeError, ValueError):
+            except Exception:  # noqa: BLE001 -- best-effort label; any summary failure falls back to the tool name (CancelledError, a BaseException, still propagates).
                 label = tool.name
             self._publish(ToolLabel(call_id="", text=label))
 
-        if bg_requested or delay_sec > 0:
+        # ``split_bg_args`` already folds ``delay > 0`` into ``bg_requested``.
+        if bg_requested:
             return self._spawn_detached(tool, clean_args, delay_sec)
         result = await self._run_tool(tool, clean_args)
         return self._result_blocks(result)
@@ -434,15 +532,17 @@ class ToolsBridge:
                 if not t.cancelled():
                     _ = t.exception()
                 return
+            # Stamp the detach id into ``call_id`` so a drained result is
+            # correlatable to the ``bg-N`` placeholder the model was shown.
             try:
-                self._bg_done[_id] = t.result()
+                self._bg_done[_id] = dataclasses.replace(t.result(), call_id=_id)
             except asyncio.CancelledError:
                 self._bg_done[_id] = ToolResult(
-                    call_id="", content="cancelled", is_error=True
+                    call_id=_id, content="cancelled", is_error=True
                 )
             except Exception as exc:  # noqa: BLE001 -- record any failure as the detached result.
                 self._bg_done[_id] = ToolResult(
-                    call_id="",
+                    call_id=_id,
                     content=f"{type(exc).__name__}: {exc}",
                     is_error=True,
                 )
@@ -524,42 +624,3 @@ class ToolsBridge:
             if att.descriptor.startswith("image/")
         )
         return blocks
-
-    def _build_app(self, manager: StreamableHTTPSessionManager) -> Starlette:
-        """Build the Starlette ASGI app embedding the streamable-http manager."""
-
-        async def handle_mcp(scope: object, receive: object, send: object) -> None:
-            await manager.handle_request(
-                cast("dict[str, object]", scope),
-                receive,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- asgi callable
-                send,  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- asgi callable
-            )
-
-        @asynccontextmanager
-        async def lifespan(_app: Starlette):
-            async with manager.run():
-                yield
-
-        return _starlette_applications.Starlette(
-            routes=[_starlette_routing.Mount(_MCP_PATH, app=handle_mcp)],
-            lifespan=lifespan,
-        )
-
-    async def _wait_started(self) -> None:
-        """Block until uvicorn reports the listening socket is bound."""
-        deadline = asyncio.get_running_loop().time() + _STARTUP_TIMEOUT_SEC
-        while True:
-            assert self._uvicorn_server is not None
-            if self._uvicorn_server.started:
-                return
-            if asyncio.get_running_loop().time() > deadline:
-                raise TimeoutError("MCP bridge: uvicorn startup timed out")
-            await asyncio.sleep(0.02)
-
-    def _extract_port(self) -> int:
-        """Read the bound port from uvicorn's listening socket."""
-        assert self._uvicorn_server is not None
-        for srv in self._uvicorn_server.servers:
-            for sock in srv.sockets:
-                return cast(int, sock.getsockname()[1])
-        raise RuntimeError("MCP bridge: uvicorn started without sockets")

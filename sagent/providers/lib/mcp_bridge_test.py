@@ -11,6 +11,8 @@ import json
 import urllib.error
 import urllib.request
 
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import ImageContent, TextContent
 
 import pytest
@@ -278,6 +280,66 @@ async def test_call_tool_detaches_background_args() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
+async def test_registered_handler_routes_call_over_http() -> None:
+    """A real MCP client over HTTP reaches the decorator-registered handler.
+
+    The other unit tests call ``bridge._call_tool`` (the method) directly;
+    only this one exercises the ``@server.call_tool()`` wiring through the
+    live streamable-http transport, so a regression in ``_register_handlers``
+    (registering the wrong callable) is caught by the unit suite.
+    """
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
+    await bridge.start()
+    try:
+        async with (
+            streamable_http_client(bridge.url) as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            listed = await session.list_tools()
+            assert "Echo" in {t.name for t in listed.tools}
+            result = await session.call_tool("Echo", {"text": "hi"})
+            block = result.content[0]
+            assert isinstance(block, TextContent)
+            assert block.text == "echo: hi"
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_detached_result_carries_detach_id() -> None:
+    """A drained detached result is correlatable to its ``bg-N`` placeholder.
+
+    ``_spawn_detached`` advertises ``[detached: ... (bg-N) ...]`` to the
+    model; the finished result must carry that same ``bg-N`` in its
+    ``call_id`` so the promised id and the delivered result can be matched.
+    """
+    tool = _StrictTool()
+    bridge = ToolsBridge([cast(Tool, tool)])
+    await bridge.start()
+    try:
+        blocks = await bridge._call_tool("Strict", {"text": "hi", "background": True})
+        assert isinstance(blocks[0], TextContent)
+        # Capture the advertised detach id from the placeholder text.
+        assert "(bg-" in blocks[0].text
+        detach_id = blocks[0].text.split("(", 1)[1].split(")", 1)[0]
+        for _ in range(100):
+            if not bridge.has_pending_detached():
+                break
+            await asyncio.sleep(0.01)
+        results = bridge.drain_detached_results()
+        assert len(results) == 1
+        assert results[0].call_id == detach_id, (
+            f"detached result lost its id; advertised {detach_id!r}, "
+            f"got call_id={results[0].call_id!r}"
+        )
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
 async def test_call_tool_validates_args_before_detaching() -> None:
     """Schema validation runs before a background detach is spawned.
 
@@ -447,30 +509,154 @@ async def test_call_tool_marks_empty_error_result() -> None:
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stop_leaks_no_asyncio_tasks() -> None:
-    """Repeated ``start``/``stop`` cycles leave no orphaned loop tasks.
+    """Repeated ``start``/``stop`` cycles do not accrete loop tasks.
 
-    ``start`` launches uvicorn's ``Server.serve`` AND uvicorn's
-    ``LifespanOn.main`` task (the latter not retained by uvicorn). A
-    ``stop`` that only ends the serve task orphans the lifespan task,
-    which both leaks and -- because the lifespan drives the
-    ``StreamableHTTPSessionManager`` anyio task-group teardown -- can
-    poison the loop's subprocess-connect machinery for every later
-    ``claude`` spawn (the live 8s "MCP bridge catalog not fetched" wedge).
-    Pin both: after each cycle the live-task count must return to its
-    pre-cycle baseline.
+    Each ``start`` enters this bridge's ``StreamableHTTPSessionManager``
+    lifespan in a per-bridge task; ``stop`` must cancel it (a ``stop``
+    that orphaned it would leak one task per cycle AND -- because the
+    lifespan teardown corrupts loop state -- reproduce the live 8s "MCP
+    bridge catalog not fetched" wedge). The shared uvicorn server boots
+    once on the first ``start`` and stays up by design, so baseline AFTER
+    that first cycle; from there the live-task count must not grow.
     """
 
     def live_count() -> int:
         return len([t for t in asyncio.all_tasks() if not t.done()])
 
+    # First cycle boots the persistent shared server; baseline after it.
+    first = ToolsBridge([])
+    await first.start()
+    await first.stop()
+    await asyncio.sleep(0.05)
     baseline = live_count()
     for _ in range(4):
         bridge = ToolsBridge([])
         await bridge.start()
         await bridge.stop()
-        # Let any teardown callbacks settle before counting.
         await asyncio.sleep(0.05)
         assert live_count() == baseline, "ToolsBridge.stop leaked a loop task"
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_one_uvicorn_server_shared_across_bridges() -> None:
+    """All bridges share ONE process-global uvicorn server (single port).
+
+    The disease behind the live wedge was per-bridge uvicorn churn: each
+    ``start``/``stop`` booted+tore down a server, and the graceful
+    teardown corrupted the loop. The cure boots uvicorn once per process
+    and never stops it; bridges register a route and unregister on stop.
+    Distinct bridges therefore expose distinct URLs on the SAME host:port.
+    """
+    a = ToolsBridge([cast(Tool, _EchoTool())])
+    b = ToolsBridge([cast(Tool, _StrictTool())])
+    await a.start()
+    await b.start()
+    try:
+
+        def host_port(url: str) -> str:
+            return url.split("://", 1)[1].split("/", 1)[0]
+
+        assert host_port(a.url) == host_port(b.url), "bridges must share one port"
+        assert a.url != b.url, "each bridge needs a distinct route"
+    finally:
+        await a.stop()
+        await b.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_bridge_serves_http_after_another_bridge_stops() -> None:
+    """A live bridge keeps serving after a sibling bridge is stopped.
+
+    Direct unit-level guard for the wedge class: stopping one bridge must
+    not poison HTTP connectivity for any other bridge in the process.
+    """
+    victim = ToolsBridge([cast(Tool, _EchoTool())])
+    survivor = ToolsBridge([cast(Tool, _EchoTool())])
+    await victim.start()
+    await survivor.start()
+    try:
+        await victim.stop()
+
+        def probe(url: str) -> int:
+            try:
+                urllib.request.urlopen(url, timeout=2)  # noqa: S310 -- local probe
+            except urllib.error.HTTPError as exc:
+                try:
+                    return exc.code
+                finally:
+                    exc.close()
+            return 0
+
+        # 406/400-class HTTP response proves the socket still accepts +
+        # answers; a wedge would hang until the 2s timeout (-> URLError).
+        code = await asyncio.to_thread(probe, survivor.url)
+        assert code != 0, "survivor bridge stopped serving after sibling stop"
+    finally:
+        await survivor.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_restart_resets_stopped_and_delivers_detached() -> None:
+    """``start`` after ``stop`` re-arms the bridge; detached results flow.
+
+    ``_stopped`` latched true by ``stop`` must reset on ``start`` so a
+    reused bridge does not silently swallow every detached completion in
+    ``_on_done``.
+    """
+    bridge = ToolsBridge([cast(Tool, _StrictTool())])
+    await bridge.start()
+    await bridge.stop()
+    await bridge.start()
+    try:
+        await bridge._call_tool("Strict", {"text": "hi", "background": True})
+        for _ in range(100):
+            if not bridge.has_pending_detached():
+                break
+            await asyncio.sleep(0.01)
+        results = bridge.drain_detached_results()
+        assert [r.content for r in results] == ["hi"], (
+            "restart left _stopped latched; detached result was swallowed"
+        )
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_stop_clears_publish_sink() -> None:
+    """``stop`` releases the runtime publish closure pinned for the turn."""
+    bridge = ToolsBridge([cast(Tool, _EchoTool())])
+    await bridge.start()
+    bridge.set_publish(lambda _event: None)
+    await bridge.stop()
+    assert bridge._publish is None, "stop left the runtime publish sink pinned"
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_delay_value_is_schema_validated() -> None:
+    """A malformed ``delay`` is rejected, not silently coerced.
+
+    ``delay`` / ``background`` are advertised on every tool's schema, so
+    the bridge must validate the RAW arguments against the bg-augmented
+    schema before ``split_bg_args`` strips + coerces them. A non-integer
+    ``delay`` must surface a validation error, never run the tool.
+    """
+    tool = _StrictTool()
+    bridge = ToolsBridge([cast(Tool, tool)])
+    await bridge.start()
+    try:
+        blocks = await bridge._call_tool("Strict", {"text": "hi", "delay": "soon"})
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text.startswith("[Error]"), (
+            f"invalid delay was not rejected; got {blocks[0].text!r}"
+        )
+        assert tool.seen_args is None, "tool ran despite invalid delay"
+    finally:
+        await bridge.stop()
 
 
 def test_tools_bridge_docstring_documents_provider_scoped_subset() -> None:
@@ -479,6 +665,9 @@ def test_tools_bridge_docstring_documents_provider_scoped_subset() -> None:
     assert "provider-scoped" in text
     assert "not an agenttool parity adapter" in text
     assert "background" in text
+    # Docstring must not claim the bridge cannot publish labels: it does,
+    # via ``_publish`` / ``ToolLabel`` (MCP-BRIDGE-003 regression).
+    assert "cannot publish" not in text
 
 
 def test_json_encoded_url_round_trip() -> None:
@@ -493,10 +682,6 @@ def test_json_encoded_url_round_trip() -> None:
     }
     raw = json.dumps(config)
     assert json.loads(raw) == config
-
-
-# Quiet basedpyright import-tracking on ``asyncio`` if no test consumes it.
-_ = asyncio
 
 
 if __name__ == "__main__":
