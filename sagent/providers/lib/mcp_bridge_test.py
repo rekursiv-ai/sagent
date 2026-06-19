@@ -444,6 +444,35 @@ async def test_call_tool_marks_empty_error_result() -> None:
         await bridge.stop()
 
 
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_stop_leaks_no_asyncio_tasks() -> None:
+    """Repeated ``start``/``stop`` cycles leave no orphaned loop tasks.
+
+    ``start`` launches uvicorn's ``Server.serve`` AND uvicorn's
+    ``LifespanOn.main`` task (the latter not retained by uvicorn). A
+    ``stop`` that only ends the serve task orphans the lifespan task,
+    which both leaks and -- because the lifespan drives the
+    ``StreamableHTTPSessionManager`` anyio task-group teardown -- can
+    poison the loop's subprocess-connect machinery for every later
+    ``claude`` spawn (the live 8s "MCP bridge catalog not fetched" wedge).
+    Pin both: after each cycle the live-task count must return to its
+    pre-cycle baseline.
+    """
+
+    def live_count() -> int:
+        return len([t for t in asyncio.all_tasks() if not t.done()])
+
+    baseline = live_count()
+    for _ in range(4):
+        bridge = ToolsBridge([])
+        await bridge.start()
+        await bridge.stop()
+        # Let any teardown callbacks settle before counting.
+        await asyncio.sleep(0.05)
+        assert live_count() == baseline, "ToolsBridge.stop leaked a loop task"
+
+
 def test_tools_bridge_docstring_documents_provider_scoped_subset() -> None:
     assert ToolsBridge.__doc__ is not None
     text = ToolsBridge.__doc__.lower()
