@@ -52,6 +52,10 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
+    ToolLabel,
     ToolResult,
     UserMessage,
 )
@@ -191,7 +195,7 @@ def _is_event_retryable(event: Mapping[str, object]) -> bool:
         return False
     errors = event.get("errors", [])
     if isinstance(errors, list):
-        for err in errors:
+        for err in cast(list[object], errors):
             if "ede_diagnostic" in str(err):
                 return True
     return False
@@ -754,13 +758,12 @@ class _AnthropicCLIModel:
           response: Translated model response.
 
         """
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, None)
 
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Drive one user turn through the ``claude`` subprocess.
 
@@ -770,8 +773,11 @@ class _AnthropicCLIModel:
 
         Args:
           request: Conversation + tools + system prompt for the turn.
-          on_text: Per-chunk text callback; ``None`` disables live text.
-          on_thinking: Per-chunk thinking callback; ``None`` disables it.
+          publish: Runtime event sink. Text chunks are emitted as
+              ``ModelResponsePartial``, thinking as
+              ``ModelResponseThinking``; tool calls routed through the
+              in-process MCP bridge surface as ``ToolLabel``. ``None``
+              disables streaming output.
 
         Returns:
           response: Parsed model response with usage and cost filled in.
@@ -782,58 +788,63 @@ class _AnthropicCLIModel:
 
         """
         self._pending_system = request.system or ""
-        if self._session_id is not None:
-            return await self._stream_session_persistent(
-                request,
-                on_text,
-                on_thinking,
-            )
-        assert self._hot_spare is not None  # stateless path
-        # Stash the request's tools so the spawn factory
-        # (``_spawn_initialized``) can populate the bridge BEFORE it
-        # launches ``claude`` -- the CLI issues ``ListToolsRequest``
-        # right after launch, and an empty registry at that moment makes
-        # the model emit "no tools have been provided" instead of a
-        # ``tool_use`` (live 2026-06-16 ``test_bridge_tool_round_trips``).
-        # The post-acquire ``_sync_tools_bridge`` below still refreshes
-        # the live registry for the already-warm subprocess.
-        self._pending_tools = list(request.tools or [])
-        if self._should_respawn(request):
-            if _hash_system(request.system) != self._system_hash:
-                await self._hot_spare.discard_spare()
-            await self._hot_spare.respawn()
-            self._reset_active_state()
-        proc = await self._hot_spare.acquire()
-        self._sync_tools_bridge(request)
-
+        # Clear the bridge sink when the turn ends (any exit) so a
+        # stale runtime publisher never lingers on the long-lived bridge
+        # -- e.g. a detached background ``call_tool`` firing between
+        # turns must not label against a finished turn's publisher.
         try:
-            response = await self._exchange_turn(proc, request, on_text, on_thinking)
-            self._system_hash = _hash_system(self._pending_system)
-            self._last_sent_index = len(request.messages)
-            # Detached results (if any) were delivered + answered; drop the
-            # held buffer so they aren't redelivered next turn.
-            self._pending_detached_text = None
-        except asyncio.CancelledError:
-            # Runtime cancelled the model-call task (preempt). Translate
-            # into a subprocess SIGINT so the opaque CLI tool loop stops,
-            # then re-raise so the runtime's cancellation path runs.
-            self._interrupt_active_proc()
-            self._reset_active_state()
-            await self._hot_spare.respawn_after_transport_failure()
-            raise
-        except SubprocessTransportError:
-            self._reset_active_state()
-            await self._hot_spare.respawn_after_transport_failure()
-            raise
-        self._hot_spare.record_success()
-        self._turn_count += 1
-        return response
+            if self._session_id is not None:
+                return await self._stream_session_persistent(request, publish)
+            assert self._hot_spare is not None  # stateless path
+            # Stash the request's tools so the spawn factory
+            # (``_spawn_initialized``) can populate the bridge BEFORE it
+            # launches ``claude`` -- the CLI issues ``ListToolsRequest``
+            # right after launch, and an empty registry at that moment
+            # makes the model emit "no tools have been provided" instead
+            # of a ``tool_use`` (live 2026-06-16
+            # ``test_bridge_tool_round_trips``). The post-acquire
+            # ``_sync_tools_bridge`` below still refreshes the live
+            # registry for the already-warm subprocess.
+            self._pending_tools = list(request.tools or [])
+            if self._should_respawn(request):
+                if _hash_system(request.system) != self._system_hash:
+                    await self._hot_spare.discard_spare()
+                await self._hot_spare.respawn()
+                self._reset_active_state()
+            proc = await self._hot_spare.acquire()
+            self._sync_tools_bridge(request, publish)
+
+            try:
+                response = await self._exchange_turn(proc, request, publish)
+                self._system_hash = _hash_system(self._pending_system)
+                self._last_sent_index = len(request.messages)
+                # Detached results (if any) were delivered + answered; drop
+                # the held buffer so they aren't redelivered next turn.
+                self._pending_detached_text = None
+            except asyncio.CancelledError:
+                # Runtime cancelled the model-call task (preempt). Translate
+                # into a subprocess SIGINT so the opaque CLI tool loop
+                # stops, then re-raise so the runtime's cancellation path
+                # runs.
+                self._interrupt_active_proc()
+                self._reset_active_state()
+                await self._hot_spare.respawn_after_transport_failure()
+                raise
+            except SubprocessTransportError:
+                self._reset_active_state()
+                await self._hot_spare.respawn_after_transport_failure()
+                raise
+            self._hot_spare.record_success()
+            self._turn_count += 1
+            return response
+        finally:
+            if self._tools_bridge is not None:
+                self._tools_bridge.set_publish(None)
 
     async def _stream_session_persistent(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
         """Drive one turn through a ``--session-id`` / ``--resume`` subprocess.
 
@@ -913,7 +924,7 @@ class _AnthropicCLIModel:
         # "Bash {command: ls -la …}" as text instead of a tool_use
         # block on the first turn after refactor).
         await self._ensure_tools_bridge()
-        self._sync_tools_bridge(request)
+        self._sync_tools_bridge(request, publish)
         proc = await self._spawn_initialized()
         self._active_proc = proc
         try:
@@ -932,8 +943,7 @@ class _AnthropicCLIModel:
                 self._last_sent_index = base + rel_idx + 1
                 _ = await self._drain_until_result(
                     proc,
-                    on_text=None,
-                    on_thinking=None,
+                    publish=None,
                     update_input_tokens=False,
                 )
             last_rel_idx, last_entry = new_entries_idx[-1]
@@ -943,11 +953,7 @@ class _AnthropicCLIModel:
             # advance the cumulative sent counter.
             if last_rel_idx is not None:
                 self._last_sent_index = base + last_rel_idx + 1
-            response = await self._drain_until_result(
-                proc,
-                on_text,
-                on_thinking,
-            )
+            response = await self._drain_until_result(proc, publish)
         except asyncio.CancelledError:
             # Runtime cancelled the model-call task (preempt). SIGINT the
             # subprocess so the opaque CLI tool loop stops, then re-raise
@@ -1022,10 +1028,21 @@ class _AnthropicCLIModel:
             > self._max_request_tokens * _CONTEXT_FRACTION_RESPAWN_THRESHOLD
         )
 
-    def _sync_tools_bridge(self, request: ModelRequest) -> None:
-        """Refresh the MCP bridge's tool registry to match the request."""
+    def _sync_tools_bridge(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> None:
+        """Refresh the MCP bridge's tool registry and runtime event sink.
+
+        ``publish`` is the runtime sink for this turn; the bridge emits a
+        ``ToolLabel`` through it for each tool call routed through the
+        subprocess. Passed afresh every turn so a stale runtime publisher
+        never lingers on the long-lived bridge.
+        """
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
+            self._tools_bridge.set_publish(publish)
 
     def _detached_delivery_entry(self) -> UserMessage | None:
         """Drain the bridge's completed detached tool runs into one entry.
@@ -1080,8 +1097,7 @@ class _AnthropicCLIModel:
         self,
         proc: Subproc,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
         """Replay prior entries quietly, then return the current turn result."""
         new_entries = request.messages[self._last_sent_index :]
@@ -1102,12 +1118,12 @@ class _AnthropicCLIModel:
         for entry in user_like_entries[:-1]:
             await self._send_entry(proc, entry)
             _ = await self._drain_until_result(
-                proc, on_text=None, on_thinking=None, update_input_tokens=False
+                proc, publish=None, update_input_tokens=False
             )
         if not user_like_entries:
-            return await self._drain_until_result(proc, on_text, on_thinking)
+            return await self._drain_until_result(proc, publish)
         await self._send_entry(proc, user_like_entries[-1])
-        return await self._drain_until_result(proc, on_text, on_thinking)
+        return await self._drain_until_result(proc, publish)
 
     async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
         """Write one history entry to stdin.
@@ -1124,8 +1140,7 @@ class _AnthropicCLIModel:
     async def _drain_until_result(
         self,
         proc: Subproc,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
         *,
         update_input_tokens: bool = True,
     ) -> ModelResponse:
@@ -1212,8 +1227,7 @@ class _AnthropicCLIModel:
                     thinking_parts,
                     signature_parts,
                     tool_use_blocks,
-                    on_text,
-                    on_thinking,
+                    publish,
                 )
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
@@ -1796,22 +1810,22 @@ def _dispatch_stream_event(
     thinking_parts: list[str],
     signature_parts: list[str],
     tool_use_blocks: dict[int, dict[str, object]],
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None,
+    publish: Callable[[RuntimeEvent], None] | None,
 ) -> None:
-    """Route one stream_event payload to ``on_text`` / ``on_thinking``.
+    """Route one stream_event payload to the runtime ``publish`` sink.
 
-    Also accumulates ``tool_use`` content blocks across their start /
-    streamed ``input_json_delta`` chunks / stop events, and emits one
-    ``ToolLabel`` per tool call at block-stop with ``name`` plus a
-    short rendering of the JSON args (e.g. ``Bash ls -la`` or
-    ``Read foo.py``). Published via :data:`cli_publish_var` so the
-    trace panel surfaces what tools the model is invoking. Covers
-    both bridge-mounted tools (Bash, Read, ...) and external-MCP
-    tools (``mcp__sagent_chat__sagent_send``, ...) uniformly --
-    in stateless mode the bridge ALSO publishes labels for its own
-    tools, so bridge-mounted tools get logged twice; the trace
-    renderer treats each ToolLabel as a separate event.
+    Text deltas publish ``ModelResponsePartial``; thinking deltas
+    publish ``ModelResponseThinking``. Also accumulates ``tool_use``
+    content blocks across their start / streamed ``input_json_delta``
+    chunks / stop events, and emits one ``ToolLabel`` per tool call at
+    block-stop with ``name`` plus a short rendering of the JSON args
+    (e.g. ``Bash ls -la`` or ``Read foo.py``) so the trace panel
+    surfaces what tools the model is invoking. Covers both
+    bridge-mounted tools (Bash, Read, ...) and external-MCP tools
+    (``mcp__sagent_chat__sagent_send``, ...) uniformly -- in stateless
+    mode the bridge ALSO publishes labels for its own tools, so
+    bridge-mounted tools get logged twice; the trace renderer treats
+    each ToolLabel as a separate event.
     """
     event_type = event.get("type")
     if event_type == "content_block_start":
@@ -1838,15 +1852,15 @@ def _dispatch_stream_event(
             text = cast(str, delta.get("text") or "")
             if text:
                 text_parts.append(text)
-                if on_text is not None:
-                    on_text(text)
+                if publish is not None:
+                    publish(ModelResponsePartial(text))
             return
         if delta_type == "thinking_delta":
             text = cast(str, delta.get("thinking") or "")
             if text:
                 thinking_parts.append(text)
-                if on_thinking is not None:
-                    on_thinking(text)
+                if publish is not None:
+                    publish(ModelResponseThinking(text))
             return
         if delta_type == "signature_delta":
             # Per Anthropic's stream-json spec, ``signature_delta``
@@ -1873,17 +1887,13 @@ def _dispatch_stream_event(
         json_parts = cast(list[str], state["json_parts"])
         args_summary = _render_tool_args(tool_name, "".join(json_parts))
         label_text = f"{tool_name} {args_summary}".rstrip()
-        try:
-            # Lazy: a module-level import would cycle (agent.runtime
-            # transitively imports the providers package).
-            from sagent.agent.runtime import cli_publish_var  # noqa: PLC0415
-            from sagent.types.runtime import ToolLabel  # noqa: PLC0415
-
-            publish = cli_publish_var.get()
-            if publish is not None:
+        if publish is not None:
+            try:
                 publish(ToolLabel(call_id=tool_id, text=label_text))
-        except Exception:  # noqa: BLE001 -- never let a label publish break the stream
-            logger.debug("failed to publish ToolLabel for %r", tool_name, exc_info=True)
+            except Exception:  # noqa: BLE001 -- never let a label publish break the stream
+                logger.debug(
+                    "failed to publish ToolLabel for %r", tool_name, exc_info=True
+                )
         return
 
 
@@ -1906,14 +1916,15 @@ def _render_tool_args(name: str, raw_json: str) -> str:
         return f"({snippet}…)" if len(raw_json) > 80 else f"({snippet})"
     if not isinstance(args, dict):
         return str(args)[:80]
+    arg_map = cast(dict[object, object], args)
     for key in ("command", "file_path", "path", "pattern", "query", "to"):
-        if key in args and isinstance(args[key], str):
-            val = args[key]
+        val = arg_map.get(key)
+        if isinstance(val, str):
             return val if len(val) <= 120 else val[:120] + "…"
-    if "content" in args and isinstance(args["content"], str):
-        val = args["content"]
-        return val if len(val) <= 120 else val[:120] + "…"
-    rendered = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(args.items())[:3])
+    content = arg_map.get("content")
+    if isinstance(content, str):
+        return content if len(content) <= 120 else content[:120] + "…"
+    rendered = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
     return rendered[:120]
 
 

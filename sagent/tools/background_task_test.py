@@ -59,10 +59,9 @@ class _StubModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         return ModelResponse(message=AssistantMessage(text="ok"))
 
 

@@ -59,6 +59,9 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     UserMessage,
 )
@@ -426,20 +429,18 @@ class _GeminiModel:
           ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, None)
 
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Stream via ``:streamGenerateContent`` (``alt=sse``).
 
         Args:
           request: Fully-built model request.
-          on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Called per thinking chunk; ``None`` disables thinking streaming.
+          publish: Called per streamed event; ``None`` disables streaming.
 
         Returns:
           response: Parsed ``ModelResponse`` with usage and cost filled in.
@@ -476,8 +477,7 @@ class _GeminiModel:
             r.raise_for_status()
             return await _consume_gemini_stream(
                 r,
-                on_text=on_text,
-                on_thinking=on_thinking,
+                publish=publish,
                 pricing=self._profile.pricing,
             )
 
@@ -684,8 +684,7 @@ def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -
 async def _consume_gemini_stream(
     r: httpx.Response,
     *,
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None = None,
+    publish: Callable[[RuntimeEvent], None] | None = None,
     pricing: Pricing,
     chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
@@ -693,7 +692,8 @@ async def _consume_gemini_stream(
 
     Each ``data:`` line is a full GenerateContentResponse JSON object
     with partial content; we accumulate text and tool calls across
-    events.
+    events. ``publish`` receives a ``RuntimeEvent`` per chunk; ``None``
+    disables streaming.
     """
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
@@ -740,12 +740,12 @@ async def _consume_gemini_stream(
                     chunk = part.get("text")
                     if isinstance(chunk, str) and part.get("thought") is True:
                         thinking_chunks.append(chunk)
-                        if on_thinking is not None:
-                            on_thinking(chunk)
+                        if publish is not None:
+                            publish(ModelResponseThinking(chunk))
                     elif isinstance(chunk, str):
                         text_chunks.append(chunk)
-                        if on_text is not None:
-                            on_text(chunk)
+                        if publish is not None:
+                            publish(ModelResponsePartial(chunk))
                 elif "functionCall" in part:
                     fc = cast(MutableJSON, part["functionCall"])
                     fc_name = fc.get("name") or ""

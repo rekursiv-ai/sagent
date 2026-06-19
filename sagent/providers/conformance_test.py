@@ -160,12 +160,17 @@ def _is_getattr_str_literal(node: ast.AST) -> bool:
 
 def _getattr_string_literals(tree: ast.AST) -> list[tuple[int, str]]:
     """Return ``(lineno, name)`` for every ``getattr(obj, "<name>", ...)``."""
-    return [
-        (node.lineno, node.args[1].value)
-        for node in ast.walk(tree)
-        if _is_getattr_str_literal(node)
-        and isinstance(node, ast.Call)  # narrow for the type checker
-    ]
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not _is_getattr_str_literal(node):
+            continue
+        assert isinstance(node, ast.Call)  # narrowed by guard above
+        name = node.args[1]
+        assert isinstance(name, ast.Constant)  # guard checked Constant[str]
+        value = name.value
+        assert isinstance(value, str)
+        out.append((node.lineno, value))
+    return out
 
 
 @pytest.mark.parametrize("rel", _GUARDED_FILES)

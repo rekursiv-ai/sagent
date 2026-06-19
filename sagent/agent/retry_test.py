@@ -36,7 +36,11 @@ from sagent.types.model import (
     ModelResponse,
     StreamInterruptedError,
 )
-from sagent.types.runtime import AssistantMessage
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelResponsePartial,
+    RuntimeEvent,
+)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -64,22 +68,21 @@ class _ScriptedModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del request, on_thinking
+        del request
         self.stream_calls += 1
         item = self.stream_responses[self._stream_idx]
         self._stream_idx += 1
         if isinstance(item, BaseException):
             raise item
-        if on_text is not None and item.message.text:
+        if publish is not None and item.message.text:
             for ch in item.message.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
         return item
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, publish=None)
 
 
 def _request() -> ModelRequest:
@@ -90,8 +93,18 @@ def _resp(text: str = "ok") -> ModelResponse:
     return ModelResponse(message=AssistantMessage(text=text))
 
 
-def _silent(_text: str) -> None:
+def _silent(_arg: object) -> None:
     return None
+
+
+def _collect_text(chunks: list[str]) -> Callable[[RuntimeEvent], None]:
+    """Build a ``publish`` sink that appends streamed text to ``chunks``."""
+
+    def _sink(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelResponsePartial):
+            chunks.append(event.text)
+
+    return _sink
 
 
 class _FakeResponse:
@@ -548,7 +561,7 @@ async def test_send_with_retry_streaming_first_try() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=chunks.append,
+        publish=_collect_text(chunks),
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -565,7 +578,7 @@ async def test_send_with_retry_no_on_text_still_streams() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=None,
+        publish=None,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -582,7 +595,7 @@ async def test_send_with_retry_retries_on_retryable_error() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,
@@ -600,7 +613,7 @@ async def test_send_with_retry_raises_on_fatal_error() -> None:
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=3,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -615,7 +628,7 @@ async def test_send_with_retry_context_overflow_propagates() -> None:
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=3,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -630,7 +643,7 @@ async def test_send_with_retry_retries_exhausted() -> None:
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=2,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -656,7 +669,7 @@ async def test_send_with_retry_429_long_reset_halts_when_not_persistent(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=3,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -682,7 +695,7 @@ async def test_send_with_retry_429_short_retry_after_retries_to_success(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -711,7 +724,7 @@ async def test_send_with_retry_exhaustion_skips_final_backoff_sleep(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=2,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -742,7 +755,7 @@ async def test_send_with_retry_in_band_rate_limit_outlasts_attempt_cap(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,
@@ -777,7 +790,7 @@ async def test_send_with_retry_in_band_rate_limit_halts_as_rate_limit(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=5,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -808,7 +821,7 @@ async def test_send_with_retry_rate_limit_backstop_survives_frozen_clock(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=5,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -843,7 +856,7 @@ async def test_send_with_retry_interactive_halts_on_long_server_delay(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=3,
             persistent_retry=False,
             publish_recoverable=_silent,
@@ -873,7 +886,7 @@ async def test_send_with_retry_in_band_warning_retries_to_success() -> None:
     response = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -904,7 +917,7 @@ async def test_send_with_retry_429_with_unread_streaming_body_still_classified(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -930,7 +943,7 @@ async def test_send_with_retry_persistent_loops_on_429() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -958,7 +971,7 @@ async def test_send_with_retry_persistent_loops_on_in_band_rate_limit(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -987,7 +1000,7 @@ async def test_send_with_retry_persistent_loops_on_in_band_overload(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -1014,7 +1027,7 @@ async def test_send_with_retry_persistent_sleeps_through_long_server_delay(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -1048,7 +1061,7 @@ async def test_send_with_retry_persistent_loops_through_remote_protocol_error(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -1080,7 +1093,7 @@ async def test_send_with_retry_persistent_attempts_capped(
         _ = await send_with_retry(
             model,
             _request(),
-            on_text=_silent,
+            publish=_silent,
             max_attempts=1_000,
             persistent_retry=True,
             publish_recoverable=_silent,
@@ -1111,7 +1124,7 @@ async def test_send_with_retry_service_suspension_callback_replaces_banner(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=chunks.append,
+        publish=_collect_text(chunks),
         max_attempts=3,
         persistent_retry=True,
         publish_recoverable=_silent,
@@ -1145,7 +1158,7 @@ async def test_send_with_retry_stream_interruption_retries() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,
@@ -1164,7 +1177,7 @@ async def test_send_with_retry_stream_interruption_retries_count_attempts() -> N
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,
@@ -1183,17 +1196,16 @@ async def test_send_with_retry_corrects_divergent_retry_output() -> None:
         async def stream(
             self,
             request: ModelRequest,
-            on_text: Callable[[str], None] | None = None,
-            on_thinking: Callable[[str], None] | None = None,
+            publish: Callable[[RuntimeEvent], None] | None = None,
         ) -> ModelResponse:
-            del request, on_thinking
+            del request
             self.stream_calls += 1
             if self.stream_calls == 1:
-                if on_text is not None:
-                    on_text("abc")
+                if publish is not None:
+                    publish(ModelResponsePartial("abc"))
                 raise StreamInterruptedError(_resp("abc"))
-            if on_text is not None:
-                on_text("xyz")
+            if publish is not None:
+                publish(ModelResponsePartial("xyz"))
             return _resp("xyz")
 
     chunks: list[str] = []
@@ -1202,7 +1214,7 @@ async def test_send_with_retry_corrects_divergent_retry_output() -> None:
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=chunks.append,
+        publish=_collect_text(chunks),
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1222,7 +1234,7 @@ async def test_send_with_retry_stream_interruption_returns_partial_after_cap() -
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=5,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1243,7 +1255,7 @@ async def test_send_with_retry_stream_interrupt_on_discarded_response_called() -
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1372,7 +1384,7 @@ async def test_send_with_retry_honors_resume_retry_at(
     response = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1406,7 +1418,7 @@ async def test_send_with_retry_resume_retry_at_over_ceiling_does_not_wedge(
     response = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1436,7 +1448,7 @@ async def test_send_with_retry_resume_retry_at_under_ceiling_still_sleeps(
     response = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1477,7 +1489,7 @@ async def test_send_with_retry_does_not_emit_banner_into_on_text(
     _ = await send_with_retry(
         model,
         _request(),
-        on_text=chunks.append,
+        publish=_collect_text(chunks),
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=_silent,
@@ -1520,7 +1532,7 @@ async def test_send_with_retry_silent_on_short_transient_retry(
     resp = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,
@@ -1540,7 +1552,7 @@ async def test_publish_recoverable_includes_diagnostics_on_retry() -> None:
     _ = await send_with_retry(
         model,
         _request(),
-        on_text=_silent,
+        publish=_silent,
         max_attempts=3,
         persistent_retry=False,
         publish_recoverable=notes.append,

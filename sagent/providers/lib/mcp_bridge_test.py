@@ -15,7 +15,6 @@ from mcp.types import ImageContent, TextContent
 
 import pytest
 
-from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import JSON
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.types.runtime import (
@@ -389,8 +388,8 @@ async def test_call_tool_keeps_provider_scoped_empty_result_contract() -> None:
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_call_tool_publishes_tool_label_when_cli_publish_var_is_set() -> None:
-    """When ``cli_publish_var`` is wired the bridge fires a ``ToolLabel``.
+async def test_call_tool_publishes_tool_label_when_publish_is_set() -> None:
+    """When ``set_publish`` is wired the bridge fires a ``ToolLabel``.
 
     CLI providers don't surface tool calls through the runtime's
     cohort path; the renderer would never see ``ToolLabel`` for an
@@ -400,11 +399,8 @@ async def test_call_tool_publishes_tool_label_when_cli_publish_var_is_set() -> N
     await bridge.start()
     try:
         events: list[RuntimeEvent] = []
-        token = cli_publish_var.set(events.append)
-        try:
-            blocks = await bridge._call_tool("Echo", {"text": "hi"})
-        finally:
-            cli_publish_var.reset(token)
+        bridge.set_publish(events.append)
+        blocks = await bridge._call_tool("Echo", {"text": "hi"})
         assert any(isinstance(e, ToolLabel) for e in events), (
             f"expected a ``ToolLabel`` from the bridge; got {events!r}"
         )
@@ -417,14 +413,15 @@ async def test_call_tool_publishes_tool_label_when_cli_publish_var_is_set() -> N
 
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
-async def test_call_tool_silent_when_cli_publish_var_unset() -> None:
-    """Without ``cli_publish_var`` set, the bridge doesn't reach for one.
+async def test_call_tool_silent_when_publish_unset() -> None:
+    """Without ``set_publish`` wired, the bridge doesn't reach for one.
 
     Guarantees the publish path is opt-in -- a headless or non-REPL
     caller (no runtime publisher) doesn't see surprise mutations.
     """
     bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
+    bridge.set_publish(None)
     try:
         blocks = await bridge._call_tool("Echo", {"text": "hi"})
         assert isinstance(blocks[0], TextContent)
@@ -458,7 +455,12 @@ def test_tools_bridge_docstring_documents_provider_scoped_subset() -> None:
 def test_json_encoded_url_round_trip() -> None:
     """``json.dumps`` of an MCP config containing the bridge URL stays well-formed."""
     config = {
-        "mcpServers": {"sagent": {"type": "http", "url": "http://127.0.0.1:42/mcp"}}
+        "mcpServers": {
+            "sagent": {
+                "type": "http",
+                "url": "http://127.0.0.1:42/mcp",
+            }
+        }
     }
     raw = json.dumps(config)
     assert json.loads(raw) == config

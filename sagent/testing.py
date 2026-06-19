@@ -136,10 +136,9 @@ class _NullModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_text, on_thinking
+        del history, publish
         return AssistantMessage(text="")
 
 

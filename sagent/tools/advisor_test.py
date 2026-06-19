@@ -15,7 +15,12 @@ from sagent.tools.advisor import (
     _AdvisorModel,
 )
 from sagent.types.model import ModelRequest, ModelResponse, Pricing
-from sagent.types.runtime import AssistantMessage, ToolResult
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelResponsePartial,
+    RuntimeEvent,
+    ToolResult,
+)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -38,10 +43,9 @@ class StubProviderModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del on_text, on_thinking
+        del publish
         self.received.append(request)
         return ModelResponse(message=AssistantMessage(text=self.text))
 
@@ -104,17 +108,11 @@ async def test_advisor_model_bridge_forwards_history_and_system() -> None:
     bridge = _AdvisorModel(inner, system="be brief")
     captured_text: list[str] = []
 
-    def on_text(t: str) -> None:
-        captured_text.append(t)
+    def publish(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelResponsePartial):
+            captured_text.append(event.text)
 
-    def on_thinking(t: str) -> None:
-        del t
-
-    msg = await bridge.stream(
-        history=[],
-        on_text=on_text,
-        on_thinking=on_thinking,
-    )
+    msg = await bridge.stream(history=[], publish=publish)
     assert msg.text == "bridged"
     assert inner.received[0].system == "be brief"
 
@@ -123,11 +121,7 @@ async def test_advisor_model_bridge_forwards_history_and_system() -> None:
 async def test_advisor_model_bridge_blank_system_is_none() -> None:
     inner = StubProviderModel(text="ok")
     bridge = _AdvisorModel(inner, system="")
-    _ = await bridge.stream(
-        history=[],
-        on_text=lambda _t: None,
-        on_thinking=lambda _t: None,
-    )
+    _ = await bridge.stream(history=[], publish=lambda _event: None)
     # Blank system collapses to None at the request level.
     assert inner.received[0].system is None
 

@@ -28,6 +28,7 @@ from sagent.types.runtime import (
     Clear,
     Compact,
     Recompact,
+    RuntimeEvent,
 )
 
 
@@ -51,10 +52,9 @@ class StubProviderModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         idx = self._idx
         self._idx += 1
         msg = (

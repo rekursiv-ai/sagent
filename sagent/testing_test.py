@@ -120,13 +120,9 @@ async def test_fake_agent_null_model_stream_returns_empty() -> None:
     """The internal ``_NullModel`` wired into the default runtime is callable."""
     a = FakeAgent()
 
-    def _on_text(_t: str) -> None:
-        return None
-
     msg = await a.runtime.model.stream(
         a.runtime.context().messages,
-        _on_text,
-        _on_text,
+        lambda _ev: None,
     )
     assert msg.text == ""
 
@@ -278,19 +274,17 @@ async def test_null_model_satisfies_runtime_model_protocol() -> None:
     """The default fake runtime's model accepts the runtime ``stream`` shape.
 
     Guards against regressions that swap the runtime ``Model`` Protocol
-    (lean ``stream(history, on_text, on_thinking) ->
-    AssistantMessage``) for the rich provider ``types.model.Model``
-    surface and leave ``_NullModel`` stranded. The runtime calls
-    ``model.stream`` with exactly these three positional args; this
-    test invokes the same shape end-to-end.
+    (lean ``stream(history, publish) -> AssistantMessage``) for the rich
+    provider ``types.model.Model`` surface and leave ``_NullModel``
+    stranded. The runtime calls ``model.stream`` with exactly these two
+    positional args; this test invokes the same shape end-to-end.
     """
     a = FakeAgent()
     ctx = a.runtime.context()
 
     msg = await a.runtime.model.stream(
         ctx.messages,
-        lambda _t: None,
-        lambda _t: None,
+        lambda _ev: None,
     )
     assert isinstance(msg, AssistantMessage)
     assert msg.text == ""

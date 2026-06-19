@@ -23,6 +23,7 @@ from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -42,10 +43,9 @@ class _NoopModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_text, on_thinking
+        del history, publish
         return AssistantMessage(text="")
 
 

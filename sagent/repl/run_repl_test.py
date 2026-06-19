@@ -59,6 +59,7 @@ from sagent.types.runtime import (
     ModelIdle,
     ModelResponseComplete,
     ModelResponseError,
+    ModelResponsePartial,
     Quit,
     RuntimeEvent,
     ToolCall,
@@ -1262,12 +1263,11 @@ class _TextOnlyModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_thinking
+        del history
         for ch in self.text:
-            on_text(ch)
+            publish(ModelResponsePartial(ch))
         return AssistantMessage(text=self.text)
 
 
@@ -1281,13 +1281,12 @@ class _ScriptedModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_thinking
+        del history
         message = self.messages[min(self._index, len(self.messages) - 1)]
         self._index += 1
-        on_text(message.text)
+        publish(ModelResponsePartial(message.text))
         return message
 
 
@@ -1344,13 +1343,12 @@ class _GatedModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_thinking
+        del history
         self.started.set()
         await self.release.wait()
-        on_text(self.text)
+        publish(ModelResponsePartial(self.text))
         return AssistantMessage(text=self.text)
 
 
@@ -1960,10 +1958,8 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -1975,7 +1971,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
             # Round 2 (commit fire): respond to the staged message.
             msg = AssistantMessage(text="redirected")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     tool = _BlockingTool()

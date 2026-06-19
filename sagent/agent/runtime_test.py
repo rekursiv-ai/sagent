@@ -177,10 +177,9 @@ class ScriptedModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_thinking
+        del history
         idx = self._call_idx
         self._call_idx += 1
         if self.fail_on_call is not None and idx == self.fail_on_call:
@@ -192,7 +191,7 @@ class ScriptedModel:
         msg = self.responses[idx]
         if msg.text:
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
         return msg
 
 
@@ -625,10 +624,9 @@ async def test_halt_cancels_model_waits_for_user() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_thinking
+            del history
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -641,7 +639,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
             )
             if msg.text:
                 for ch in msg.text:
-                    on_text(ch)
+                    publish(ModelResponsePartial(ch))
             return msg
 
     model = BlockingModel(
@@ -689,10 +687,9 @@ async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_thinking
+            del history
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -701,7 +698,7 @@ async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -
             msg = self.responses[idx]
             if msg.text:
                 for ch in msg.text:
-                    on_text(ch)
+                    publish(ModelResponsePartial(ch))
             return msg
 
     model = BlockingModel(
@@ -781,10 +778,9 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             model_started.set()
             await asyncio.sleep(10.0)
             return AssistantMessage(text="unreachable")
@@ -1842,10 +1838,9 @@ async def test_user_facing_error_logged_without_traceback(
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             raise AuthRefreshError("session expired. Run /login.")
 
     agent = agent_runtime.AgentRuntime(model=AuthFailingModel())
@@ -1894,10 +1889,9 @@ async def test_plain_exception_logged_with_traceback(
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             raise RuntimeError("unexpected")
 
     agent = agent_runtime.AgentRuntime(model=BoomModel())
@@ -1977,10 +1971,9 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -2097,10 +2090,9 @@ async def test_run_cancellation_removes_observer_and_stops_driver() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             model_started.set()
             await release_model.wait()
             return AssistantMessage(text="too late")
@@ -2734,10 +2726,9 @@ async def test_no_cohort_complete_on_halt() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_thinking
+            del history
             idx = self._i
             self._i += 1
             msg = (
@@ -2747,7 +2738,7 @@ async def test_no_cohort_complete_on_halt() -> None:
             )
             if msg.text:
                 for ch in msg.text:
-                    on_text(ch)
+                    publish(ModelResponsePartial(ch))
             return msg
 
     agent = agent_runtime.AgentRuntime(
@@ -3577,10 +3568,9 @@ async def test_compact_cancels_running_model_call() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             idx = self._i
             self._i += 1
             if idx == 0:
@@ -3742,18 +3732,17 @@ async def test_quit_cancels_active_compaction_and_running_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_thinking_chunk_published() -> None:
-    """The on_thinking callback path publishes ModelResponseThinking."""
+    """A published ``ModelResponseThinking`` reaches observers."""
 
     @dataclass(kw_only=True, slots=True)
     class _ThinkingModel:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text
-            on_thinking("step 1")
+            del history
+            publish(ModelResponseThinking("step 1"))
             return AssistantMessage(text="ok")
 
     agent = agent_runtime.AgentRuntime(model=_ThinkingModel())
@@ -3973,10 +3962,8 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -3987,7 +3974,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
             else:
                 msg = AssistantMessage(text="answer to hey")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = MidStreamModel()
@@ -4048,10 +4035,9 @@ class _LifecycleModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_text, on_thinking
+        del history, publish
         idx = self._i
         self._i += 1
         if idx == 0:
@@ -4433,10 +4419,9 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_text, on_thinking
+            del publish
             self.call_histories.append(list(history))
             return AssistantMessage(text="ok")
 
@@ -4513,10 +4498,8 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4527,7 +4510,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
             else:
                 msg = AssistantMessage(text="answer to coalesced")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = MidStreamModel()
@@ -4620,10 +4603,8 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4635,7 +4616,7 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
                 )
             msg = AssistantMessage(text="answer to hey")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = MidStreamModel()
@@ -4711,10 +4692,8 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4725,7 +4704,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
             else:
                 msg = AssistantMessage(text="answer to queued")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = MidStreamModel()
@@ -4810,10 +4789,8 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4823,7 +4800,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
                 )
             msg = AssistantMessage(text=f"round{idx + 1}")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = ThreeRoundModel()
@@ -4897,10 +4874,8 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             idx = self._i
             self._i += 1
@@ -4914,7 +4889,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
                 second_started.set()
                 msg = AssistantMessage(text="answer to second")
             for ch in msg.text:
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return msg
 
     model = HaltableModel()
@@ -4967,10 +4942,8 @@ async def test_halt_then_queued_message_fires_followup_round() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del on_thinking
             self.call_histories.append(list(history))
             if len(self.call_histories) == 1:
                 stream_started.set()
@@ -4978,7 +4951,7 @@ async def test_halt_then_queued_message_fires_followup_round() -> None:
                 return AssistantMessage(text="never-shown")
             second_started.set()
             for ch in "answer to queued":
-                on_text(ch)
+                publish(ModelResponsePartial(ch))
             return AssistantMessage(text="answer to queued")
 
     model = HaltableModel()
@@ -5530,10 +5503,9 @@ async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_text, on_thinking
+            del history, publish
             model_started.set()
             await release_model.wait()
             return AssistantMessage(text="never delivered")
@@ -5598,18 +5570,17 @@ async def test_agent_idle_suppressed_while_mid_stream_queue_nonempty() -> None:
         async def stream(
             self,
             history: list[ModelContextEvent],
-            on_text: Callable[[str], None],
-            on_thinking: Callable[[str], None],
+            publish: Callable[[RuntimeEvent], None],
         ) -> AssistantMessage:
-            del history, on_thinking
+            del history
             idx = self.call_idx
             self.call_idx += 1
             if idx == 0:
                 model_started.set()
                 await release_model.wait()
-                on_text("first response")
+                publish(ModelResponsePartial("first response"))
                 return AssistantMessage(text="first response")
-            on_text("second response")
+            publish(ModelResponsePartial("second response"))
             return AssistantMessage(text="second response")
 
     agent = agent_runtime.AgentRuntime(model=_SlowFirstModel(), tools=[])
