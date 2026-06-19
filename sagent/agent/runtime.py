@@ -324,18 +324,6 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
-# ``cli_publish_var`` is set by ``_AgentModel.stream`` before invoking
-# a CLI provider whose tool loop happens inside its subprocess. The
-# MCP bridge (``providers.lib.mcp_bridge``) reads this var when it
-# receives a ``call_tool`` request and synthesises a ``ToolLabel``
-# event so the REPL renderer surfaces CLI tool calls the same way it
-# does API-driven ones. API providers don't read the var; the bridge
-# only exists for CLI transports. Default ``None`` makes the lookup
-# safe in non-CLI code paths.
-cli_publish_var: contextvars.ContextVar[Callable[[RuntimeEvent], None] | None] = (
-    contextvars.ContextVar("cli_publish", default=None)
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -830,25 +818,28 @@ class Tool(Protocol):
 class Model(Protocol):
     """Minimal model interface for the runtime.
 
-    The runtime hands the model only ``history`` and the streaming
-    callbacks. ``system`` and ``tools`` were historical args every
-    production wrapper either discarded or recomputed against its own
-    state, so the runtime no longer forwards them; consumers that need
-    a system prompt or tool list must capture them at construction.
+    The runtime hands the model only ``history`` and a single
+    ``publish`` sink for every streamed ``RuntimeEvent`` (text chunks,
+    thinking chunks, and CLI tool labels alike). ``system`` and
+    ``tools`` were historical args every production wrapper either
+    discarded or recomputed against its own state, so the runtime no
+    longer forwards them; consumers that need a system prompt or tool
+    list must capture them at construction.
     """
 
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
         """Stream a model response.
 
         Args:
           history: Conversation history.
-          on_text: Callback for each streamed text chunk.
-          on_thinking: Callback for each streamed thinking chunk.
+          publish: Sink for every streamed ``RuntimeEvent`` -- text
+              chunks (``ModelResponsePartial``), thinking chunks
+              (``ModelResponseThinking``), and, for CLI transports,
+              ``ToolLabel`` items emitted from inside the subprocess.
 
         Returns:
           message: Complete assistant response.
@@ -2983,19 +2974,16 @@ class AgentRuntime:
         """Stream a model response, posting chunks and the final message."""
         chars = 0
 
-        def on_text(text: str) -> None:
+        def publish(event: RuntimeEvent) -> None:
             nonlocal chars
-            chars += len(text)
-            self.inbox.push_back(ModelResponsePartial(text))
-
-        def on_thinking(text: str) -> None:
-            self.inbox.push_back(ModelResponseThinking(text))
+            if isinstance(event, ModelResponsePartial):
+                chars += len(event.text)
+            self.inbox.push_back(event)
 
         try:
             response = await self.model.stream(
                 self.context().messages,
-                on_text,
-                on_thinking,
+                publish,
             )
             self.inbox.push_back(
                 ModelResponseComplete(message=response, generation=generation),

@@ -410,8 +410,8 @@ async def send_with_retry(
     model: Model,
     request: ModelRequest,
     *,
-    on_text: Callable[[str], None] | None = None,
-    on_thinking: Callable[[str], None] | None = None,
+    publish: Callable[[runtime_types.RuntimeEvent], None] | None = None,
+    show_thinking: bool = True,
     max_attempts: int,
     persistent_retry: bool,
     publish_recoverable: Callable[[str], None],
@@ -429,13 +429,17 @@ async def send_with_retry(
     Args:
       model: Model to send the request to.
       request: Fully-built model request.
-      on_text: Streaming callback for live text chunks. ``None``
-          discards chunks; the request still streams under the hood
-          (buffered transports are unreliable at large prompt sizes).
-      on_thinking: Streaming callback for live thinking chunks.
-          Only fires on the first attempt; on retry we read thinking
-          from the final response so the renderer never sees the same
-          content twice.
+      publish: Runtime event sink for streamed events
+          (``ModelResponsePartial`` text chunks,
+          ``ModelResponseThinking`` chunks, and ``ToolLabel`` items from
+          CLI transports). ``None`` discards stream events; the request
+          still streams under the hood (buffered transports are
+          unreliable at large prompt sizes). Live text is tracked across
+          a failed first attempt so the prefix is skipped on retry;
+          thinking only fires on the first attempt (on retry it is read
+          from the final response so the renderer never repeats it).
+      show_thinking: When ``False``, ``ModelResponseThinking`` events are
+          dropped before reaching ``publish``.
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       publish_recoverable: Callback for transient errors that recovered;
@@ -489,30 +493,29 @@ async def send_with_retry(
         attempt += 1
         if attempt >= max_attempts:
             break
-        live = on_text if attempt == 0 and not prior_emitted else None
-        live_thinking = on_thinking if attempt == 0 and not prior_emitted else None
+        live = attempt == 0 and not prior_emitted
         chunks: list[str] = []
-        capture = _make_stream_callback(chunks, live)
+        sink = _make_stream_sink(chunks, publish if live else None, show_thinking)
         stream_attempt += 1
         try:
-            resp = await model.stream(
-                request=request,
-                on_text=capture,
-                on_thinking=live_thinking,
-            )
+            resp = await model.stream(request=request, publish=sink)
             full = "".join(chunks)
-            if on_text is not None and live is None and full != prior_emitted:
+            if publish is not None and not live and full != prior_emitted:
                 if full.startswith(prior_emitted):
                     suffix = full.removeprefix(prior_emitted)
                     if suffix:
-                        on_text(suffix)
+                        publish(runtime_types.ModelResponsePartial(suffix))
                 else:
-                    on_text("\n[retry response diverged; final response follows]\n")
-                    on_text(full)
+                    publish(
+                        runtime_types.ModelResponsePartial(
+                            "\n[retry response diverged; final response follows]\n"
+                        )
+                    )
+                    publish(runtime_types.ModelResponsePartial(full))
             return resp
         except StreamInterruptedError as e:
             stream_interrupts += 1
-            prior_emitted = "".join(chunks) if live is not None else prior_emitted
+            prior_emitted = "".join(chunks) if live else prior_emitted
             publish_recoverable(
                 f"stream interrupted (attempt {stream_attempt},"
                 f" {stream_interrupts} interrupts so far): {e}"
@@ -540,7 +543,7 @@ async def send_with_retry(
             if not is_retryable(e, model):
                 raise
             last_error = e
-            if live is not None:
+            if live:
                 prior_emitted = "".join(chunks)
             status = error_status(e)
             # ``httpx.RemoteProtocolError`` ("peer closed connection without
@@ -708,20 +711,29 @@ def _error_status(error: Exception, depth: int) -> int | None:
     return None
 
 
-def _make_stream_callback(
+def _make_stream_sink(
     chunks: list[str],
-    live: Callable[[str], None] | None,
-) -> Callable[[str], None]:
-    """Build a stream callback that captures chunks and forwards live ones."""
-    if live is None:
-        return chunks.append
-    live_fn = live
+    live: Callable[[runtime_types.RuntimeEvent], None] | None,
+    show_thinking: bool,
+) -> Callable[[runtime_types.RuntimeEvent], None]:
+    """Build the ``publish`` sink handed to ``model.stream``.
 
-    def _cb(c: str) -> None:
-        chunks.append(c)
-        live_fn(c)
+    Always captures text chunks into ``chunks`` for cross-attempt
+    retry-dedup. When ``live`` is set (first attempt, nothing emitted
+    yet) it also forwards events to the runtime sink: text and labels
+    unconditionally, thinking only when ``show_thinking``.
+    """
 
-    return _cb
+    def _sink(event: runtime_types.RuntimeEvent) -> None:
+        if isinstance(event, runtime_types.ModelResponsePartial):
+            chunks.append(event.text)
+        if live is None:
+            return
+        if isinstance(event, runtime_types.ModelResponseThinking) and not show_thinking:
+            return
+        live(event)
+
+    return _sink
 
 
 _BODY_EXCERPT_CHARS = 500

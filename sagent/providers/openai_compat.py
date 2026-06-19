@@ -75,6 +75,9 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     UserMessage,
 )
@@ -544,13 +547,12 @@ class OpenAICompatModel:
           PromptTooLongError: Server reports context overflow.
 
         """
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, None)
 
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Stream a chat-completions SSE response.
 
@@ -561,8 +563,8 @@ class OpenAICompatModel:
 
         Args:
           request: Fully-built model request.
-          on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Called per reasoning chunk when the provider exposes one.
+          publish: Called per streamed ``RuntimeEvent``; ``None`` disables
+              live streaming.
 
         Returns:
           response: Parsed ``ModelResponse``.
@@ -588,8 +590,7 @@ class OpenAICompatModel:
             self._last_usage = openai_usage(r.headers)
             return await consume_stream(
                 r,
-                on_text=on_text,
-                on_thinking=on_thinking,
+                publish=publish,
                 pricing=self._profile.pricing,
                 reasoning_field=self._reasoning_field,
             )
@@ -854,8 +855,7 @@ def parse_response(
 async def consume_stream(
     r: httpx.Response,
     *,
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None,
+    publish: Callable[[RuntimeEvent], None] | None,
     pricing: Pricing,
     reasoning_field: str | None,
 ) -> ModelResponse:
@@ -867,8 +867,8 @@ async def consume_stream(
 
     Args:
       r: Open streaming response from the provider.
-      on_text: Called per text chunk; ``None`` disables text streaming.
-      on_thinking: Called per reasoning chunk; ``None`` disables live thinking.
+      publish: Called per streamed ``RuntimeEvent``; ``None`` disables
+          live streaming.
       pricing: Per-token price schedule for cost computation.
       reasoning_field: Provider-specific reasoning-text field name,
           or ``None`` when the provider does not surface reasoning.
@@ -919,14 +919,14 @@ async def consume_stream(
             content_chunk = delta.get("content")
             if isinstance(content_chunk, str) and content_chunk:
                 text_parts.append(content_chunk)
-                if on_text is not None:
-                    on_text(content_chunk)
+                if publish is not None:
+                    publish(ModelResponsePartial(content_chunk))
             if reasoning_field:
                 think_chunk = delta.get(reasoning_field)
                 if isinstance(think_chunk, str) and think_chunk:
                     thinking_parts.append(think_chunk)
-                    if on_thinking is not None:
-                        on_thinking(think_chunk)
+                    if publish is not None:
+                        publish(ModelResponseThinking(think_chunk))
             for tc in cast(list[MutableJSON], delta.get("tool_calls") or []):
                 idx_raw = tc.get("index")
                 idx = idx_raw if isinstance(idx_raw, int) else 0

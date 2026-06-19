@@ -22,7 +22,7 @@ observer pane is v2 work (see ``docs/private/cli_provider.md`` §1.9).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, cast
 
@@ -61,11 +61,10 @@ else:
     uvicorn = lazy_import("uvicorn")
 
 from sagent.agent.background import _BG_FIELDS, split_bg_args
-from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import JSON, json_unfreeze
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
-from sagent.types.runtime import ToolLabel, ToolResult
+from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult
 from sagent.types.tools import Tool
 
 
@@ -132,6 +131,13 @@ class ToolsBridge:
         self._uvicorn_server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
         self._port: int = 0
+        # Runtime event sink for the active ``stream`` call. The bridge
+        # outlives a single turn (it survives HotSpare respawns), so the
+        # owning ``_AnthropicCLIModel`` sets this per ``stream`` and
+        # clears it after. When set, ``call_tool`` emits a ``ToolLabel``
+        # so the REPL renderer announces a CLI-driven tool call even
+        # though the subprocess (not the runtime) drives the loop.
+        self._publish: Callable[[RuntimeEvent], None] | None = None
         # Detached background tool calls. The model can request a tool
         # run in the background (``background``/``delay`` args, parsed by
         # ``split_bg_args``); the bridge then returns a placeholder
@@ -232,6 +238,20 @@ class ToolsBridge:
         """
         self._tools = {t.name: t for t in tools}
 
+    def set_publish(self, publish: Callable[[RuntimeEvent], None] | None) -> None:
+        """Set (or clear) the runtime event sink for the active turn.
+
+        The owning ``_AnthropicCLIModel`` calls this at the start of each
+        ``stream`` with the runtime's ``publish`` and clears it
+        (``None``) when the turn ends, so a tool call routed through the
+        bridge surfaces a ``ToolLabel`` to the REPL renderer.
+
+        Args:
+          publish: Runtime event sink, or ``None`` to disable labels.
+
+        """
+        self._publish = publish
+
     @property
     def url(self) -> str:
         """Streamable-http endpoint to hand to the CLI's MCP config."""
@@ -315,19 +335,16 @@ class ToolsBridge:
             ]
         # Surface a ``ToolLabel`` so the REPL renderer announces the
         # call even though the CLI's subprocess (not the sagent runtime)
-        # drives the tool loop. The runtime's ``cli_publish_var`` is
-        # set by ``_AgentModel.stream`` for the lifetime of one
-        # provider call; reading it here gives the bridge a publisher
-        # without threading a callback through the model API. ``call_id``
-        # is left empty: the renderer ignores it and the bridge has no
-        # access to the upstream provider's tool-call id anyway.
-        publish = cli_publish_var.get()
-        if publish is not None:
+        # drives the tool loop. ``_publish`` is the runtime sink the
+        # owning Model handed down for this turn. ``call_id`` is left
+        # empty: the renderer ignores it and the bridge has no access to
+        # the upstream provider's tool-call id anyway.
+        if self._publish is not None:
             try:
                 label = tool.summary(clean_args)
             except (AttributeError, KeyError, TypeError, ValueError):
                 label = tool.name
-            publish(ToolLabel(call_id="", text=label))
+            self._publish(ToolLabel(call_id="", text=label))
 
         if bg_requested or delay_sec > 0:
             return self._spawn_detached(tool, clean_args, delay_sec)

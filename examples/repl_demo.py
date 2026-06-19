@@ -30,7 +30,12 @@ from sagent.providers import build_provider
 from sagent.repl import run_repl
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest, ModelResponse, TokenCount
-from sagent.types.runtime import AssistantMessage, UserMessage
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelResponsePartial,
+    RuntimeEvent,
+    UserMessage,
+)
 
 
 class _OfflineEcho(MockModelCaps):
@@ -63,24 +68,22 @@ class _OfflineEcho(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        """Echo the last user message, streaming words to ``on_text``.
+        """Echo the last user message, streaming words to ``publish``.
 
         Args:
           request: Model request containing the conversation history.
-          on_text: Optional callback invoked once per whitespace token.
-          on_thinking: Optional thinking callback (ignored).
+          publish: Optional runtime event sink; each whitespace token is
+              published as a ``ModelResponsePartial``.
 
         Returns:
           response: Echo of the most recent user text.
 
         """
-        del on_thinking
-        if on_text is not None:
+        if publish is not None:
             for word in self._last_user(request).split():
-                on_text(word + " ")
+                publish(ModelResponsePartial(word + " "))
         return await self._echo(request)
 
     @staticmethod

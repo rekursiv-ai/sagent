@@ -50,6 +50,7 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     ModelServiceSuspended,
     NoticeMessage,
+    RuntimeEvent,
     SaveSession,
     ServiceErrorSnapshot,
     ToolCall,
@@ -76,10 +77,9 @@ class StubProviderModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         idx = self._idx
         self._idx += 1
         msg = (
@@ -354,14 +354,13 @@ async def test_non_persistent_child_has_single_registry_label() -> None:
         async def stream(
             self,
             request: ModelRequest,
-            on_text: Callable[[str], None] | None = None,
-            on_thinking: Callable[[str], None] | None = None,
+            publish: Callable[[RuntimeEvent], None] | None = None,
         ) -> ModelResponse:
             child = current_agent_var.get()
             self.label_count = sum(
                 1 for agent in agent_registry.values() if agent is child
             )
-            return await StubProviderModel.stream(self, request, on_text, on_thinking)
+            return await StubProviderModel.stream(self, request, publish)
 
     parent_model = _RegistryInspectingModel(
         responses=[AssistantMessage(text="child-said")]
@@ -384,10 +383,9 @@ async def test_run_child_model_error_returns_tool_error() -> None:
         async def stream(
             self,
             request: ModelRequest,
-            on_text: Callable[[str], None] | None = None,
-            on_thinking: Callable[[str], None] | None = None,
+            publish: Callable[[RuntimeEvent], None] | None = None,
         ) -> ModelResponse:
-            del request, on_text, on_thinking
+            del request, publish
             raise RuntimeError("invalid child credentials")
 
     parent = _make_parent(_FailingModel())

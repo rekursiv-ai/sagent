@@ -24,6 +24,7 @@ from sagent.types.model import Model, ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
+    RuntimeEvent,
     ToolResult,
     UserMessage,
 )
@@ -76,22 +77,20 @@ class _AdvisorModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
         """Stream a provider response and adapt it to the runtime ``Model`` protocol.
 
         Args:
           history: Conversation history for the advisor consult.
-          on_text: Callback for each streamed text chunk.
-          on_thinking: Callback for each streamed thinking chunk.
+          publish: Runtime event sink for streamed events.
 
         Returns:
           message: Final ``AssistantMessage`` from the inner provider.
 
         """
         request = ModelRequest(messages=history, system=self._system or None)
-        response = await self._inner.stream(request, on_text, on_thinking)
+        response = await self._inner.stream(request, publish)
         return response.message
 
 
