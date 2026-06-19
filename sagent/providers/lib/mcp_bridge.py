@@ -130,6 +130,12 @@ class ToolsBridge:
         self._server: Server | None = None
         self._uvicorn_server: uvicorn.Server | None = None
         self._serve_task: asyncio.Task[None] | None = None
+        # uvicorn's ``LifespanOn.main`` task. uvicorn creates it inside
+        # ``Server.serve`` but keeps no handle, so a ``stop`` that only
+        # ends the serve task orphans it. ``stop`` cancels it explicitly
+        # (see :meth:`stop`); captured by diffing ``all_tasks`` across
+        # ``start``.
+        self._lifespan_task: asyncio.Task[object] | None = None
         self._port: int = 0
         # Runtime event sink for the active ``stream`` call. The bridge
         # outlives a single turn (it survives HotSpare respawns), so the
@@ -203,31 +209,57 @@ class ToolsBridge:
         )
         server = uvicorn.Server(config)
         self._uvicorn_server = server
+        tasks_before = asyncio.all_tasks()
         self._serve_task = asyncio.create_task(server.serve())
         self._serve_task.add_done_callback(
             log_task_exception(logger, "MCP bridge uvicorn serve crashed"),
         )
         await self._wait_started()
         self._port = self._extract_port()
+        # ``Server.serve`` -> ``startup`` spawns uvicorn's ``LifespanOn.main``
+        # task without retaining a handle. Capture it (the one new task that
+        # is neither the serve task nor a pre-existing task) so ``stop`` can
+        # cancel it directly rather than orphan it.
+        self._lifespan_task = next(
+            (
+                t
+                for t in asyncio.all_tasks() - tasks_before
+                if t is not self._serve_task
+            ),
+            None,
+        )
 
     async def stop(self) -> None:
-        """Shut down the MCP server and join the serve task."""
+        """Shut down the MCP server by cancelling its serve + lifespan tasks.
+
+        NOT uvicorn's graceful ``should_exit`` shutdown: that path drives
+        the ``StreamableHTTPSessionManager`` lifespan teardown, which
+        corrupts process-global async state so every later ``claude``
+        subprocess fails its MCP connect -- the live 8s "MCP bridge catalog
+        not fetched" wedge that bit every tool-using model built after the
+        first in a process (verified 2026-06-18). Cancelling the serve task
+        and the (otherwise orphaned) ``LifespanOn`` task ends both cleanly:
+        no wedge, and no leaked loop task.
+        """
         self._stopped = True
         for task in list(self._bg_tasks.values()):
             task.cancel()
         self._bg_tasks.clear()
         self._bg_done.clear()
+        for task in (self._serve_task, self._lifespan_task):
+            if task is None or task.done():
+                continue
+            _ = task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- shutdown must not raise
+                logger.debug("MCP bridge stop: task raised on cancel: %s", exc)
+        # Close the listening sockets so the bound port is released
+        # promptly (cancelling ``serve`` skips uvicorn's own socket close).
         server = self._uvicorn_server
         if server is not None:
-            server.should_exit = True
-        task = self._serve_task
-        if task is not None:
-            try:
-                _ = await asyncio.wait_for(task, _STARTUP_TIMEOUT_SEC)
-            except TimeoutError:
-                _ = task.cancel()
-            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- shutdown must not raise
-                logger.debug("MCP bridge stop: serve task raised: %s", exc)
+            for listening in server.servers:
+                listening.close()
 
     def update_tools(self, tools: list[Tool]) -> None:
         """Replace the live tool registry.

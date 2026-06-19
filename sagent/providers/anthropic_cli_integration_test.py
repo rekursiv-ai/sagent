@@ -180,6 +180,59 @@ async def test_bridge_tool_round_trips() -> None:
 
 @_requires_claude
 @pytest.mark.asyncio
+async def test_second_model_connects_after_first_closes() -> None:
+    """Two tool-using models, in sequence, each connect their MCP bridge.
+
+    Regression: the first model's ``close()`` tore down its ``ToolsBridge``
+    via uvicorn's graceful shutdown, whose lifespan teardown corrupted
+    process-global async state so EVERY later ``claude`` subprocess failed
+    its MCP connect -- the second model wedged at the 8s connect gate with
+    "MCP bridge catalog not fetched". Permanent for the process (a 40s gate
+    did not heal it), so it bit AgentSpawn multi-child workflows and the
+    integration suite by test-ordering. Each model must connect on its own.
+    """
+
+    @tool(name="magic_word")
+    def magic_word() -> str:
+        """Return the secret magic word. Call it to learn the word."""
+        return "FLAMINGO"
+
+    async def one_tool_turn() -> str:
+        model = AnthropicCLI.from_credentials().model("claude-sonnet-4-6")
+        try:
+            response = await model.stream(
+                ModelRequest(
+                    messages=[
+                        UserMessage(
+                            text=(
+                                "Call the magic_word tool, then reply with "
+                                "just the word it returns."
+                            ),
+                        ),
+                    ],
+                    tools=[magic_word],
+                ),
+            )
+        except TimeoutError as exc:
+            _skip_if_bridge_unavailable(exc)
+            raise
+        finally:
+            await model.close()
+        return response.message.text.upper()
+
+    first = await one_tool_turn()
+    assert "FLAMINGO" in first, f"first model failed; got {first!r}"
+    # The load-bearing assertion: a SECOND model, built + connected after
+    # the first was fully closed, must still reach its bridge.
+    second = await one_tool_turn()
+    assert "FLAMINGO" in second, (
+        f"second model never connected its bridge after the first closed; "
+        f"got {second!r}"
+    )
+
+
+@_requires_claude
+@pytest.mark.asyncio
 async def test_detached_result_delivered_to_model_on_resume() -> None:
     """A completed detached tool result is delivered to the model on the
     next ``--resume`` turn and the model can read it.
