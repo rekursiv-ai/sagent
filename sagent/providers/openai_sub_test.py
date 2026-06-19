@@ -45,6 +45,8 @@ from sagent.types.model import ModelRequest, StreamInterruptedError
 from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -1051,8 +1053,7 @@ class TestStreamIdleTimeout:
                 _consume_stream(
                     stream,
                     pricing=Pricing(),
-                    on_text=None,
-                    on_thinking=None,
+                    publish=None,
                 ),
                 timeout=0.2,
             )
@@ -1084,8 +1085,7 @@ class TestStreamIdleTimeout:
             _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             ),
             timeout=0.2,
         )
@@ -1107,8 +1107,7 @@ class TestStreamIdleTimeout:
             await _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             )
 
         assert raised.value.response.message.text == "partial"
@@ -1128,8 +1127,7 @@ class TestStreamIdleTimeout:
             await _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             )
 
         msg = str(raised.value)
@@ -1151,8 +1149,7 @@ class TestStreamIdleTimeout:
             await _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             )
 
         msg = str(raised.value)
@@ -1175,8 +1172,7 @@ class TestStreamIdleTimeout:
             await _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             )
 
         msg = str(raised.value)
@@ -1205,6 +1201,11 @@ class TestStreamIdleTimeout:
             _CompletedEvent,
         )
         thinking_chunks: list[str] = []
+
+        def _sink(ev: RuntimeEvent) -> None:
+            if isinstance(ev, ModelResponseThinking):
+                thinking_chunks.append(ev.text)
+
         stream = _DelayedStream(
             [
                 _ReasoningDeltaEvent("think "),
@@ -1218,8 +1219,7 @@ class TestStreamIdleTimeout:
         response = await _consume_stream(
             stream,
             pricing=Pricing(),
-            on_text=None,
-            on_thinking=thinking_chunks.append,
+            publish=_sink,
         )
 
         assert thinking_chunks == ["think ", "more"]
@@ -1235,8 +1235,7 @@ class TestStreamIdleTimeout:
             _consume_stream(
                 stream,
                 pricing=Pricing(),
-                on_text=None,
-                on_thinking=None,
+                publish=None,
             ),
         )
         await asyncio.wait_for(stream.entered.wait(), timeout=0.2)

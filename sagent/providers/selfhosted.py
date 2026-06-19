@@ -53,6 +53,8 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    RuntimeEvent,
     ToolCall,
     UserMessage,
 )
@@ -497,7 +499,7 @@ class SelfHostedModel:
         """Return whether streaming is supported."""
         # Naive streaming would tokenize then emit one token at a time.
         # Not implemented for the first cut; ``stream`` falls back to
-        # buffering and calling ``on_text`` once.
+        # buffering and publishing once.
         return False
 
     @property
@@ -714,14 +716,12 @@ class SelfHostedModel:
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        """Buffer the response then emit text in one shot."""
-        del on_thinking  # buffered decode; no per-chunk thinking
+        """Buffer the response then publish text in one shot."""
         resp = await self.buffer(request)
-        if on_text is not None and resp.message.text:
-            on_text(resp.message.text)
+        if publish is not None and resp.message.text:
+            publish(ModelResponsePartial(resp.message.text))
         return resp
 
     def _render(self, request: ModelRequest) -> Tensor:

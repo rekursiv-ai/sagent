@@ -19,6 +19,8 @@ from sagent.types.model import (
 )
 from sagent.types.runtime import (
     AssistantMessage,
+    ModelResponsePartial,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -143,24 +145,22 @@ class ScriptedModel:
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Return the buffered response and optionally emit final text.
 
         Args:
           request: Model request containing the conversation history.
-          on_text: Optional callback invoked with the final response text.
-          on_thinking: Optional thinking callback (ignored).
+          publish: Optional runtime event sink; the final response text
+              is published as a ``ModelResponsePartial``.
 
         Returns:
           response: Buffered response identical to :meth:`buffer`.
 
         """
-        del on_thinking
         response = await self.buffer(request)
-        if on_text is not None and response.message.text:
-            on_text(response.message.text)
+        if publish is not None and response.message.text:
+            publish(ModelResponsePartial(response.message.text))
         return response
 
     async def close(self) -> None:

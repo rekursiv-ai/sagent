@@ -2254,8 +2254,7 @@ class _AgentModel:
     async def stream(
         self,
         history: list[types.runtime.ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[types.runtime.RuntimeEvent], None],
     ) -> types.runtime.AssistantMessage:
         """Stream a response with retry + context-overflow recovery.
 
@@ -2269,8 +2268,8 @@ class _AgentModel:
 
         Args:
           history: Conversation history (resolved view passed by runtime).
-          on_text: Callback for each streamed text chunk.
-          on_thinking: Callback for each streamed thinking chunk.
+          publish: Runtime event sink for every streamed event (text,
+              thinking, and CLI tool labels).
 
         Returns:
           message: Final ``types.runtime.AssistantMessage`` from the provider.
@@ -2347,59 +2346,47 @@ class _AgentModel:
             )
             resume_retry_at = self._agent.runtime.resume_retry_at
             self._agent.runtime.resume_retry_at = None
-            # Expose the runtime's publisher to the CLI MCP bridge so
-            # tool calls executed inside a vendor subprocess still
-            # surface ``ToolLabel`` events for the REPL renderer.
-            # API providers ignore the var; only the bridge reads it.
-            cli_publish_token = agent_runtime.cli_publish_var.set(
-                self._agent.runtime.publish
-            )
             try:
-                try:
-                    response = await send_with_retry(
-                        self._inner,
-                        request,
-                        on_text=on_text,
-                        on_thinking=on_thinking if self._agent.show_thinking else None,
-                        max_attempts=self._agent.max_attempts,
-                        persistent_retry=self._agent.persistent_retry,
-                        publish_recoverable=lambda text: logger.info(
-                            "recoverable: %s", text
-                        ),
-                        on_discarded_response=self._agent.record_response,
-                        on_service_suspended=self._agent.publish_service_suspended,
-                        resume_retry_at=resume_retry_at,
-                    )
-                except Exception as exc:
-                    # Catch any exception the provider classifies as
-                    # context overflow, not just ``PromptTooLongError``.
-                    # Provider-side normalization can slip (e.g. unusual
-                    # HTTP status carrying overflow body text); the
-                    # canonical signal is ``is_context_overflow``.
-                    if not self._inner.is_context_overflow(exc):
-                        raise
-                    if attempt >= MAX_OVERFLOW_RECOVERY:
-                        raise _context_overflow_error(attempts=attempt) from exc
-                    logger.info("Context overflow recovery attempt %d", attempt)
-                    # Short-circuit when compaction itself failed -- looping
-                    # to retry the model on unchanged (or slightly longer)
-                    # history burns the retry budget on the same 400 (the
-                    # BUGS34 regression: three identical "Compaction failed"
-                    # lines followed by a cryptic RuntimeError).
-                    if not await self._agent.compact_now():
-                        last_err = self._agent.last_compact_error
-                        assert (
-                            last_err is not None
-                        )  # compact_now sets this on every False return
-                        raise _compact_failure_error(
-                            last_err, self._inner
-                        ) from last_err
-                    # Refetch resolved view: ``compact_now`` appended a
-                    # barrier override.
-                    history = self._agent.runtime.context().messages
-                    continue
-            finally:
-                agent_runtime.cli_publish_var.reset(cli_publish_token)
+                response = await send_with_retry(
+                    self._inner,
+                    request,
+                    publish=publish,
+                    show_thinking=self._agent.show_thinking,
+                    max_attempts=self._agent.max_attempts,
+                    persistent_retry=self._agent.persistent_retry,
+                    publish_recoverable=lambda text: logger.info(
+                        "recoverable: %s", text
+                    ),
+                    on_discarded_response=self._agent.record_response,
+                    on_service_suspended=self._agent.publish_service_suspended,
+                    resume_retry_at=resume_retry_at,
+                )
+            except Exception as exc:
+                # Catch any exception the provider classifies as
+                # context overflow, not just ``PromptTooLongError``.
+                # Provider-side normalization can slip (e.g. unusual
+                # HTTP status carrying overflow body text); the
+                # canonical signal is ``is_context_overflow``.
+                if not self._inner.is_context_overflow(exc):
+                    raise
+                if attempt >= MAX_OVERFLOW_RECOVERY:
+                    raise _context_overflow_error(attempts=attempt) from exc
+                logger.info("Context overflow recovery attempt %d", attempt)
+                # Short-circuit when compaction itself failed -- looping
+                # to retry the model on unchanged (or slightly longer)
+                # history burns the retry budget on the same 400 (the
+                # BUGS34 regression: three identical "Compaction failed"
+                # lines followed by a cryptic RuntimeError).
+                if not await self._agent.compact_now():
+                    last_err = self._agent.last_compact_error
+                    assert (
+                        last_err is not None
+                    )  # compact_now sets this on every False return
+                    raise _compact_failure_error(last_err, self._inner) from last_err
+                # Refetch resolved view: ``compact_now`` appended a
+                # barrier override.
+                history = self._agent.runtime.context().messages
+                continue
             # Record cost out-of-band; the runtime's
             # types.runtime.ModelResponseComplete event has tokens=0 by
             # design (the runtime can't see tokens). Returning inside

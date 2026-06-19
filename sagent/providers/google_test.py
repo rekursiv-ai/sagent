@@ -26,6 +26,8 @@ from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AssistantMessage,
     ModelContextEvent,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -210,6 +212,10 @@ async def test_google_stream_routes_thought_parts_to_thinking() -> None:
     )
     thinking_chunks: list[str] = []
 
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponseThinking):
+            thinking_chunks.append(ev.text)
+
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -223,7 +229,7 @@ async def test_google_stream_routes_thought_parts_to_thinking() -> None:
     m._client = httpx.AsyncClient(transport=transport)
     resp = await m.stream(
         ModelRequest(messages=[UserMessage(text="x")]),
-        on_thinking=thinking_chunks.append,
+        publish=_sink,
     )
     assert thinking_chunks == ["thinking"]
     assert resp.message.text == "answer"

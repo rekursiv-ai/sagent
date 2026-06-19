@@ -62,6 +62,9 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolResult,
     UserMessage,
 )
@@ -421,20 +424,18 @@ class _GoogleCLIModel:
           response: Translated model response.
 
         """
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, None)
 
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Drive one user turn through the ``gemini`` ACP subprocess.
 
         Args:
           request: Conversation + tools + system prompt for the turn.
-          on_text: Per-chunk text callback; ``None`` disables live text.
-          on_thinking: Per-chunk thinking callback; ``None`` disables it.
+          publish: Per-chunk event sink; ``None`` disables live streaming.
 
         Returns:
           response: Parsed model response with cost estimated from pricing.
@@ -457,7 +458,7 @@ class _GoogleCLIModel:
         self._sync_tools_bridge(request)
 
         try:
-            response = await self._exchange_turn(proc, request, on_text, on_thinking)
+            response = await self._exchange_turn(proc, request, publish)
             self._last_sent_index = len(request.messages)
         except SubprocessTransportError:
             self._reset_active_state()
@@ -531,8 +532,7 @@ class _GoogleCLIModel:
         self,
         proc: Subproc,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
         """Send each new entry as ``session/prompt`` and assemble the reply."""
         new_entries = request.messages[self._last_sent_index :]
@@ -549,7 +549,6 @@ class _GoogleCLIModel:
                 [],
                 [],
                 None,
-                None,
             )
         text_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -561,8 +560,7 @@ class _GoogleCLIModel:
                 blocks,
                 text_parts,
                 thinking_parts,
-                on_text,
-                on_thinking,
+                publish,
             )
         return self._build_response(text_parts, thinking_parts, stop_reason, request)
 
@@ -572,8 +570,7 @@ class _GoogleCLIModel:
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
         """Issue one ``session/prompt`` RPC and drain until its response."""
         request_id = self._allocate_rpc_id()
@@ -601,8 +598,7 @@ class _GoogleCLIModel:
                     cast(MutableJSON, msg.get("params") or {}),
                     text_parts,
                     thinking_parts,
-                    on_text,
-                    on_thinking,
+                    publish,
                 )
 
     def _build_response(
@@ -1030,8 +1026,7 @@ def _dispatch_session_update(
     params: MutableJSON,
     text_parts: list[str],
     thinking_parts: list[str],
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None,
+    publish: Callable[[RuntimeEvent], None] | None,
 ) -> None:
     """Route one ``session/update`` notification payload."""
     update = cast(MutableJSON, params.get("update") or {})
@@ -1042,13 +1037,13 @@ def _dispatch_session_update(
         )
         if text:
             text_parts.append(text)
-            if on_text is not None:
-                on_text(text)
+            if publish is not None:
+                publish(ModelResponsePartial(text))
     elif kind == "agent_thought_chunk":
         text = cast(
             str, cast(MutableJSON, update.get("content") or {}).get("text") or ""
         )
         if text:
             thinking_parts.append(text)
-            if on_thinking is not None:
-                on_thinking(text)
+            if publish is not None:
+                publish(ModelResponseThinking(text))

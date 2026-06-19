@@ -28,6 +28,9 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -292,11 +295,15 @@ async def test_consume_stream_text_and_usage() -> None:
         },
     ]
     text_acc: list[str] = []
+
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponsePartial):
+            text_acc.append(ev.text)
+
     r = _sse_response(events)
     resp = await consume_stream(
         r,
-        on_text=text_acc.append,
-        on_thinking=None,
+        publish=_sink,
         pricing=Pricing(),
         reasoning_field=None,
     )
@@ -354,8 +361,7 @@ async def test_consume_stream_tool_call_accumulates() -> None:
     ]
     resp = await consume_stream(
         _sse_response(events),
-        on_text=None,
-        on_thinking=None,
+        publish=None,
         pricing=Pricing(),
         reasoning_field=None,
     )
@@ -388,10 +394,14 @@ async def test_consume_stream_reasoning_captured() -> None:
         },
     ]
     thinking_chunks: list[str] = []
+
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponseThinking):
+            thinking_chunks.append(ev.text)
+
     resp = await consume_stream(
         _sse_response(events),
-        on_text=None,
-        on_thinking=thinking_chunks.append,
+        publish=_sink,
         pricing=Pricing(),
         reasoning_field="reasoning_content",
     )
@@ -410,8 +420,7 @@ async def test_consume_stream_skips_malformed_data() -> None:
     )
     resp = await consume_stream(
         _sse_response_body(body),
-        on_text=None,
-        on_thinking=None,
+        publish=None,
         pricing=Pricing(),
         reasoning_field=None,
     )
@@ -428,8 +437,7 @@ async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
     with pytest.raises(StreamInterruptedError) as exc_info:
         await consume_stream(
             _sse_response_body(body),
-            on_text=None,
-            on_thinking=None,
+            publish=None,
             pricing=Pricing(request=1.0, response=2.0),
             reasoning_field=None,
         )
@@ -646,9 +654,14 @@ async def test_stream_parses_sse_via_mock_transport() -> None:
     transport = httpx.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     chunks: list[str] = []
+
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponsePartial):
+            chunks.append(ev.text)
+
     resp = await model.stream(
         ModelRequest(messages=[UserMessage(text="p")]),
-        on_text=chunks.append,
+        publish=_sink,
     )
     assert resp.message.text == "hi"
     assert chunks == ["hi"]

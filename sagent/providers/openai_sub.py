@@ -129,6 +129,9 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     BytesMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -795,21 +798,19 @@ class _OpenAISubModel(_OpenAIModel):
           response: Translated model response.
 
         """
-        return await self.stream(request, on_text=None)
+        return await self.stream(request, None)
 
     @override
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
         """Stream a request via the OpenAI Responses API.
 
         Args:
           request: Model request to send.
-          on_text: Callback invoked with each text chunk as it arrives.
-          on_thinking: Callback invoked with each reasoning chunk as it arrives.
+          publish: Callback invoked with each runtime event as it arrives.
 
         Returns:
           response: Assembled model response after the stream closes.
@@ -876,8 +877,7 @@ class _OpenAISubModel(_OpenAIModel):
             return await _consume_stream(
                 event_stream,
                 pricing=self._profile.pricing,
-                on_text=on_text,
-                on_thinking=on_thinking,
+                publish=publish,
             )
         except Exception as exc:
             not_read = find_response_not_read(exc)
@@ -1039,8 +1039,7 @@ async def _consume_stream(
     stream: AsyncIterable[object],
     *,
     pricing: Pricing,
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None,
+    publish: Callable[[RuntimeEvent], None] | None,
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
     text_parts: list[str] = []
@@ -1062,8 +1061,8 @@ async def _consume_stream(
                 watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
                 if isinstance(event, oai_responses.ResponseTextDeltaEvent):
                     text_parts.append(event.delta)
-                    if on_text is not None:
-                        on_text(event.delta)
+                    if publish is not None:
+                        publish(ModelResponsePartial(event.delta))
                 elif isinstance(
                     event,
                     (
@@ -1072,8 +1071,8 @@ async def _consume_stream(
                     ),
                 ):
                     thinking_parts.append(event.delta)
-                    if on_thinking is not None:
-                        on_thinking(event.delta)
+                    if publish is not None:
+                        publish(ModelResponseThinking(event.delta))
                 elif isinstance(
                     event,
                     oai_responses.ResponseFunctionCallArgumentsDeltaEvent,

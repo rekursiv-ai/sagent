@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
+    RuntimeEvent,
 )
 
 
@@ -340,10 +341,10 @@ class Model(Protocol):
     """Provider-side model interface.
 
     The Agent layer's ``_AgentModel`` wrapper bridges this richer
-    interface to the runtime's lean ``stream(history, system,
-    tools, on_text, on_thinking) -> AssistantMessage`` form. Cost is
-    recorded out-of-band via ``Agent.record_response``, which writes
-    through to the root ``CostTracker``.
+    interface to the runtime's lean ``stream(history, publish) ->
+    AssistantMessage`` form. Cost is recorded out-of-band via
+    ``Agent.record_response``, which writes through to the root
+    ``CostTracker``.
     """
 
     @property
@@ -559,11 +560,11 @@ class Model(Protocol):
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Send a request and return the complete response.
 
-        Semantically equivalent to ``stream(request, None, None)``:
-        both return the same parsed ``ModelResponse``. Providers
-        implement whichever transport is native to their SDK and
-        delegate the other; callers pick ``buffer`` when they have no
-        use for streaming callbacks.
+        Semantically equivalent to ``stream(request, None)``: both
+        return the same parsed ``ModelResponse``. Providers implement
+        whichever transport is native to their SDK and delegate the
+        other; callers pick ``buffer`` when they have no use for the
+        streaming sink.
 
         Args:
           request: Fully-built model request.
@@ -577,15 +578,18 @@ class Model(Protocol):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        """Send a request and stream tokens through the callbacks.
+        """Send a request and stream events through ``publish``.
 
         Args:
           request: Fully-built model request.
-          on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Called per thinking chunk; ``None`` disables it.
+          publish: Sink for every streamed ``RuntimeEvent`` -- text
+              chunks (``ModelResponsePartial``), thinking chunks
+              (``ModelResponseThinking``), and, for CLI transports,
+              ``ToolLabel`` items emitted from inside the subprocess.
+              ``None`` disables streaming (the response is still parsed
+              and returned).
 
         Returns:
           response: Completed ``ModelResponse``.

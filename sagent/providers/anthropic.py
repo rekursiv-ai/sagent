@@ -75,6 +75,9 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -87,7 +90,7 @@ logger = logging.getLogger(__name__)
 # Carries the latest streamed response's headers from ``_raw_message_stream``
 # (which holds the raw HTTP response) out to ``_AnthropicModel.stream`` (which
 # owns ``_last_usage``). A ContextVar keeps the module-level stream helpers
-# free of model state, mirroring ``runtime.cli_publish_var``.
+# free of model state.
 _response_headers_var: contextvars.ContextVar[Mapping[str, str] | None] = (
     contextvars.ContextVar("anthropic_response_headers", default=None)
 )
@@ -1178,20 +1181,19 @@ class _AnthropicModel:
           PromptTooLongError: Server reports context overflow.
 
         """
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, None)
 
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        """Stream a request, calling ``on_text`` / ``on_thinking`` per chunk.
+        """Stream a request, calling ``publish`` per chunk event.
 
         Args:
           request: Fully-built model request.
-          on_text: Called per text chunk; ``None`` disables text streaming.
-          on_thinking: Called per thinking chunk; ``None`` disables it.
+          publish: Called with a ``RuntimeEvent`` per chunk; ``None`` disables
+            streaming.
 
         Returns:
           response: Parsed ``ModelResponse`` with usage and cost filled in.
@@ -1217,14 +1219,14 @@ class _AnthropicModel:
             fast_beta=_FAST_MODE_BETA in extra_headers.get("anthropic-beta", ""),
         )
         try:
-            raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
+            raw = await _stream_impl(sdk, kwargs, publish)
         except anthropic.AuthenticationError:
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
                 request.system, messages, cache_ttl=request.cache_ttl
             )
-            raw = await _stream_impl(sdk, kwargs, on_text, on_thinking)
+            raw = await _stream_impl(sdk, kwargs, publish)
         except anthropic.APIStatusError as e:
             # Do NOT wrap a status-bearing error as StreamingResponseNotReadError
             # even when it chains a ResponseNotRead: that would turn a
@@ -1277,13 +1279,12 @@ class _AnthropicModel:
 async def _stream_impl(
     sdk: anthropic.AsyncAnthropic,
     kwargs: dict[str, object],
-    on_text: Callable[[str], None] | None,
-    on_thinking: Callable[[str], None] | None = None,
+    publish: Callable[[RuntimeEvent], None] | None,
 ) -> anthropic.types.Message:
     """Run the streaming call and return the final message.
 
-    Routes ``text_delta`` events to ``on_text`` and ``thinking_delta``
-    events to ``on_thinking`` as they arrive.
+    Routes ``text_delta`` events to ``publish`` as ``ModelResponsePartial``
+    and ``thinking_delta`` events as ``ModelResponseThinking`` as they arrive.
     """
     stream = await _raw_message_stream(sdk, kwargs)
     async with AsyncMessageStream(stream, output_format=anthropic.NOT_GIVEN) as s:
@@ -1298,10 +1299,10 @@ async def _stream_impl(
                 if delta is None:
                     continue
                 delta_type = getattr(delta, "type", "")
-                if delta_type == "text_delta" and on_text is not None:
-                    on_text(delta.text)
-                elif delta_type == "thinking_delta" and on_thinking is not None:
-                    on_thinking(delta.thinking)
+                if delta_type == "text_delta" and publish is not None:
+                    publish(ModelResponsePartial(delta.text))
+                elif delta_type == "thinking_delta" and publish is not None:
+                    publish(ModelResponseThinking(delta.thinking))
             return await s.get_final_message()
 
 

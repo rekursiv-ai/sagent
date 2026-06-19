@@ -35,6 +35,9 @@ from sagent.providers.lib.subproc import (
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolResult,
     UserMessage,
 )
@@ -264,6 +267,12 @@ def test_dispatch_session_update_routes_text_and_thinking() -> None:
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
 
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponsePartial):
+            text_chunks.append(ev.text)
+        elif isinstance(ev, ModelResponseThinking):
+            thinking_chunks.append(ev.text)
+
     _dispatch_session_update(
         cast(
             MutableJSON,
@@ -276,8 +285,7 @@ def test_dispatch_session_update_routes_text_and_thinking() -> None:
         ),
         text_parts,
         thinking_parts,
-        on_text=text_chunks.append,
-        on_thinking=thinking_chunks.append,
+        _sink,
     )
     _dispatch_session_update(
         cast(
@@ -291,8 +299,7 @@ def test_dispatch_session_update_routes_text_and_thinking() -> None:
         ),
         text_parts,
         thinking_parts,
-        on_text=text_chunks.append,
-        on_thinking=thinking_chunks.append,
+        _sink,
     )
     assert text_parts == ["hello"]
     assert thinking_parts == ["thinking..."]
@@ -311,8 +318,7 @@ def test_dispatch_session_update_ignores_unknown_kinds() -> None:
         ),
         text_parts,
         thinking_parts,
-        on_text=None,
-        on_thinking=None,
+        None,
     )
     assert text_parts == []
     assert thinking_parts == []
@@ -552,10 +558,9 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del proc, prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        del proc, prompt_blocks, text_parts, thinking_parts, publish
         used_systems.append(model._system_hash)
         return "STOP"
 
@@ -610,10 +615,9 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id() -> None:
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        del prompt_blocks, text_parts, thinking_parts, publish
         cast(_DummyProc, proc).session_ids.append(model._session_id)
         return "STOP"
 
@@ -640,10 +644,9 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del proc, text_parts, thinking_parts, on_text, on_thinking
+        del proc, text_parts, thinking_parts, publish
         prompts.append(prompt_blocks)
         return "STOP"
 
@@ -657,8 +660,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
                 UserMessage(text="second"),
             ]
         ),
-        on_text=None,
-        on_thinking=None,
+        publish=None,
     )
 
     assert [[block["text"] for block in prompt] for prompt in prompts] == [
@@ -695,10 +697,9 @@ async def test_stream_writeback_failure_returns_response(
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del proc, prompt_blocks, thinking_parts, on_text, on_thinking
+        del proc, prompt_blocks, thinking_parts, publish
         text_parts.append("ok")
         return "STOP"
 
@@ -750,10 +751,9 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del proc, prompt_blocks, text_parts, thinking_parts, on_text, on_thinking
+        del proc, prompt_blocks, text_parts, thinking_parts, publish
         return "STOP"
 
     model._system_hash = _hash_system(None)
@@ -782,22 +782,24 @@ async def test_exchange_turn_returns_current_output_only() -> None:
         prompt_blocks: list[MutableJSON],
         text_parts: list[str],
         thinking_parts: list[str],
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
-        del proc, thinking_parts, on_thinking
+        del proc, thinking_parts
         text = cast(str, prompt_blocks[0]["text"])
         text_parts.append(text)
-        if on_text is not None:
-            on_text(text)
+        if publish is not None:
+            publish(ModelResponsePartial(text))
         return "STOP"
+
+    def _sink(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponsePartial):
+            text_callbacks.append(ev.text)
 
     model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
     response = await model._exchange_turn(
         cast(Subproc, object()),
         ModelRequest(messages=[UserMessage(text="first"), UserMessage(text="current")]),
-        on_text=text_callbacks.append,
-        on_thinking=None,
+        publish=_sink,
     )
 
     assert response.message.text == "current"

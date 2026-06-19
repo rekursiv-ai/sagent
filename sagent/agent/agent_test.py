@@ -171,10 +171,9 @@ class StubModel:
     async def stream(
         self,
         request: types.model.ModelRequest,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
     ) -> types.model.ModelResponse:
-        del on_text, on_thinking
+        del publish
         self.received.append(request)
         msg = (
             self.responses.pop(0)
@@ -304,7 +303,6 @@ async def test_agent_model_stream_materializes_request() -> None:
     )
     _ = await agent._agent_model.stream(
         agent.runtime.context().messages,
-        lambda _: None,
         lambda _: None,
     )
     result = model.received[-1].messages[2]
@@ -653,10 +651,9 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
         async def stream(
             self,
             request: types.model.ModelRequest,
-            on_text: object = None,
-            on_thinking: object = None,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
         ) -> types.model.ModelResponse:
-            del on_text, on_thinking
+            del publish
             self.received.append(request)
             self._calls += 1
             if self._calls == 1:
@@ -1019,10 +1016,9 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
         async def stream(
             self,
             request: types.model.ModelRequest,
-            on_text: object = None,
-            on_thinking: object = None,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
         ) -> types.model.ModelResponse:
-            del request, on_text, on_thinking
+            del request, publish
             blocked.set()
             await asyncio.Event().wait()  # never returns
             raise AssertionError("unreachable")
@@ -4437,10 +4433,9 @@ class _OverflowModel:
     async def stream(
         self,
         request: types.model.ModelRequest,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
     ) -> types.model.ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
@@ -4523,10 +4518,9 @@ class _RawOverflowModel:
     async def stream(
         self,
         request: types.model.ModelRequest,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
     ) -> types.model.ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
@@ -4713,10 +4707,9 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         async def stream(
             self,
             request: types.model.ModelRequest,
-            on_text: object = None,
-            on_thinking: object = None,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
         ) -> types.model.ModelResponse:
-            del request, on_text, on_thinking
+            del request, publish
             self.order_log.append("stream")
             return types.model.ModelResponse(
                 message=types.runtime.AssistantMessage(text="ok"),
@@ -5037,8 +5030,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     with pytest.raises(RuntimeError, match="compaction disconnected"):
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="hi")],
-            on_text=lambda _t: None,
-            on_thinking=lambda _t: None,
+            publish=lambda _ev: None,
         )
 
     assert compactor.calls == 1
@@ -5098,8 +5090,7 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="hi")],
-            on_text=lambda _t: None,
-            on_thinking=lambda _t: None,
+            publish=lambda _ev: None,
         )
     msg = str(ei.value)
     assert "/clear" in msg
@@ -5160,8 +5151,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
     with pytest.raises(types.exceptions.ContextOverflowError) as ei:
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="x")],
-            on_text=lambda _t: None,
-            on_thinking=lambda _t: None,
+            publish=lambda _ev: None,
         )
     msg = str(ei.value)
     assert "/clear" in msg
@@ -5234,8 +5224,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     with pytest.raises(RuntimeError, match="compaction blew up"):
         await a._agent_model.stream(
             history=[types.runtime.UserMessage(text="x")],
-            on_text=lambda _t: None,
-            on_thinking=lambda _t: None,
+            publish=lambda _ev: None,
         )
     # Model was hit once (first attempt), compactor once (the failed
     # recovery). No further retries.
@@ -5852,85 +5841,57 @@ async def test_stream_rebuilds_system_per_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_sets_cli_publish_var_to_runtime_publish() -> None:
-    """``_AgentModel.stream`` exposes ``runtime.publish`` via ``cli_publish_var``.
+async def test_stream_forwards_publish_sink_to_inner_model() -> None:
+    """``_AgentModel.stream`` forwards a ``publish`` sink to the inner model.
 
-    The CLI MCP bridge reads this var to surface ``ToolLabel`` for
-    subprocess-driven tool calls. The agent layer is the seam that
-    wires the publisher; without the ``ContextVar.set`` around
-    ``send_with_retry``, the bridge silently no-ops and the REPL never
-    announces CLI tool calls.
+    The CLI MCP bridge surfaces ``ToolLabel`` for subprocess-driven tool
+    calls by publishing through the sink the model layer is handed. The
+    agent layer is the seam that wires that sink to ``runtime.publish``;
+    without it, the bridge silently no-ops and the REPL never announces
+    CLI tool calls.
 
-    Asserts the visible behavior: invoking the captured publisher
-    delivers the event to the runtime's observer list, just as
-    calling ``runtime.publish`` would. ``is``-comparison fails for
-    bound methods (each ``.publish`` access mints a fresh wrapper),
-    so we verify via fan-out instead.
+    Asserts the visible behavior: a ``ToolLabel`` the inner provider model
+    publishes during its ``stream`` reaches the runtime's observer list,
+    just as calling ``runtime.publish`` directly would.
     """
 
     @dataclass(slots=True, kw_only=True)
-    class _RecordingModel(StubModel):
-        seen: list[Callable[[types.runtime.RuntimeEvent], None] | None] = field(
-            default_factory=list
-        )
-
+    class _PublishingModel(StubModel):
         @override
         async def stream(
             self,
             request: types.model.ModelRequest,
-            on_text: object = None,
-            on_thinking: object = None,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
         ) -> types.model.ModelResponse:
-            self.seen.append(agent_runtime.cli_publish_var.get())
-            return await super().stream(request, on_text, on_thinking)
+            if publish is not None:
+                publish(types.runtime.ToolLabel(call_id="probe", text="probe"))
+                publish(types.runtime.ModelResponsePartial(text="hello"))
+            # Zero-arg ``super()`` breaks under ``@dataclass(slots=True)`` on
+            # Python <3.13 (CPython gh-90562): slots rebuilds the class, so the
+            # ``__class__`` cell points at the pre-slots class and the
+            # ``isinstance`` guard fails. Call the base explicitly.
+            return await StubModel.stream(self, request, publish)
 
-    model = _RecordingModel()
+    model = _PublishingModel()
     a = _build_agent(model=model)
-    observed: list[types.runtime.RuntimeEvent] = []
-    a.runtime.observers.append(observed.append)
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
-        pass
-
-    assert model.seen, "model.stream was never invoked"
-    publish = model.seen[0]
-    assert publish is not None, (
-        "cli_publish_var was unset during the model call; the agent layer"
-        " must ``set`` it before invoking ``send_with_retry``"
-    )
-    sentinel = types.runtime.ToolLabel(call_id="probe", text="probe")
-    publish(sentinel)
-    assert sentinel in observed, (
-        "captured publisher did not fan out to the runtime's observers;"
-        " the var must hold ``runtime.publish`` (or an equivalent that"
-        " reaches the same observer list), not an arbitrary callable"
+    delivered: list[types.runtime.RuntimeEvent] = []
+    _ = await a._agent_model.stream(
+        [types.runtime.UserMessage(text="hi")],
+        delivered.append,
     )
 
-
-@pytest.mark.asyncio
-async def test_stream_resets_cli_publish_var_after_request() -> None:
-    """``_AgentModel.stream`` restores ``cli_publish_var`` to its prior value.
-
-    Without the ``finally`` reset, the publisher leaks to whatever
-    coroutine the agent layer hands control to next (another model
-    call, a compaction, a subagent), routing its bridge-driven tool
-    labels to the wrong runtime.
-    """
-
-    def sentinel(_ev: types.runtime.RuntimeEvent) -> None:
-        return None
-
-    token = agent_runtime.cli_publish_var.set(sentinel)
-    try:
-        model = StubModel()
-        a = _build_agent(model=model)
-        async for _ in a.run(types.runtime.UserMessage(text="hi")):
-            pass
-        assert agent_runtime.cli_publish_var.get() is sentinel, (
-            "cli_publish_var leaked past the model call; the agent layer"
-            " must reset to the pre-call value in a finally block"
-        )
-    finally:
-        agent_runtime.cli_publish_var.reset(token)
+    assert any(
+        isinstance(e, types.runtime.ToolLabel) and e.call_id == "probe"
+        for e in delivered
+    ), (
+        "inner-model-published ToolLabel did not reach the runtime publisher;"
+        " ``_AgentModel.stream`` must forward a ``publish`` sink into"
+        " ``send_with_retry`` so the CLI bridge's labels fan out"
+    )
+    assert any(
+        isinstance(e, types.runtime.ModelResponsePartial) and e.text == "hello"
+        for e in delivered
+    ), "inner-model-published text chunk did not reach the runtime publisher"
 
 
 def test_subagent_inherits_root_cost_tracker() -> None:
@@ -6033,10 +5994,9 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
         async def stream(
             self,
             request: types.model.ModelRequest,
-            on_text: object = None,
-            on_thinking: object = None,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
         ) -> types.model.ModelResponse:
-            del on_text, on_thinking
+            del publish
             self.received.append(request)
             stream_entered.set()
             await gate.wait()

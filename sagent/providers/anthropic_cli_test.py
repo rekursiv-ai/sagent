@@ -15,7 +15,6 @@ import re
 
 import pytest
 
-from sagent.agent.runtime import cli_publish_var
 from sagent.lib.json import MutableJSON
 from sagent.providers import anthropic_cli
 from sagent.providers.anthropic import Anthropic
@@ -46,6 +45,9 @@ from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    RuntimeEvent,
     ToolCall,
     ToolLabel,
     ToolResult,
@@ -54,8 +56,10 @@ from sagent.types.runtime import (
 from sagent.types.tape import TapeEvent
 
 
-def _noop_sync_tools_bridge(request: ModelRequest) -> None:
-    del request
+def _noop_sync_tools_bridge(
+    request: ModelRequest, publish: Callable[[RuntimeEvent], None] | None = None
+) -> None:
+    del request, publish
 
 
 _CRED_PAYLOAD: dict[str, object] = {
@@ -590,9 +594,7 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
 
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
-    response = await model._drain_until_result(
-        cast(Subproc, _Proc()), on_text=None, on_thinking=None
-    )
+    response = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
     # Input side = round 2's context footprint, not the 146k sum.
     assert response.tokens.input_tokens == 3
     assert response.tokens.cache_read_tokens == 96_000
@@ -642,7 +644,8 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
 
     def _which_claude(name: str) -> str | None:
@@ -678,11 +681,7 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
         messages=[],
         tools=[],
     )
-    response = await model.stream(
-        request,
-        on_text=None,
-        on_thinking=None,
-    )
+    response = await model.stream(request, publish=None)
 
     # The response is a no-op (empty assistant text, no tools, zero
     # cost) so the runtime gets a clean "model said nothing" turn.
@@ -723,7 +722,8 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli.shutil.which",
@@ -753,7 +753,9 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
         bridge_calls.append("ensure")
 
     model._ensure_tools_bridge = _ensure  # ty: ignore[invalid-assignment]
-    model._sync_tools_bridge = lambda r: bridge_calls.append(("sync", r))  # ty: ignore[invalid-assignment]
+    model._sync_tools_bridge = lambda request, publish=None: bridge_calls.append(  # ty: ignore[invalid-assignment]
+        ("sync", request, publish)
+    )
 
     fake_proc = MagicMock()
     fake_proc.close = AsyncMock()
@@ -769,11 +771,10 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
 
     async def _drain(
         proc: object,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: object = None,
         update_input_tokens: bool = True,
     ):
-        del proc, on_text, on_thinking, update_input_tokens
+        del proc, publish, update_input_tokens
         nonlocal drain_calls
         drain_calls += 1
         if drain_calls == 1:
@@ -813,7 +814,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     )
 
     with pytest.raises(SubprocessTransportError):
-        await model.stream(request, on_text=None, on_thinking=None)
+        await model.stream(request, publish=None)
 
     # Both E1 and E2 were written to stdin before the drain raised on
     # E2's model_call. E3 was NOT written -- the loop short-circuited.
@@ -860,6 +861,9 @@ class _FakeBridge:
 
     def update_tools(self, tools: object) -> None:
         del tools
+
+    def set_publish(self, publish: object) -> None:
+        del publish
 
     @property
     def has_tools(self) -> bool:
@@ -1009,7 +1013,8 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -1046,11 +1051,10 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
 
     async def _drain(
         proc: object,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: object = None,
         update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking, update_input_tokens
+        del proc, publish, update_input_tokens
         return ModelResponse(
             message=AssistantMessage(text="ack", tool_calls=()),
             stop_reason="model_finished",
@@ -1065,7 +1069,7 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
         messages=[UserMessage(text="old turn 1")],
         tools=[],
     )
-    response = await model.stream(request, on_text=None, on_thinking=None)
+    response = await model.stream(request, publish=None)
 
     # The detached result was delivered as the sole trailing entry.
     assert len(sent_entries) == 1
@@ -1106,11 +1110,10 @@ async def test_stateless_exchange_delivers_pending_detached_result(
 
     async def _drain(
         proc: object,
-        on_text: object = None,
-        on_thinking: object = None,
+        publish: object = None,
         update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking, update_input_tokens
+        del proc, publish, update_input_tokens
         return ModelResponse(
             message=AssistantMessage(text="ack", tool_calls=()),
             stop_reason="model_finished",
@@ -1126,9 +1129,7 @@ async def test_stateless_exchange_delivers_pending_detached_result(
         tools=[],
     )
     fake_proc = cast(Subproc, object())
-    response = await model._exchange_turn(
-        fake_proc, request, on_text=None, on_thinking=None
-    )
+    response = await model._exchange_turn(fake_proc, request, publish=None)
 
     # Both the real user entry and the detached delivery were sent, in
     # order, with the detached result trailing.
@@ -1182,7 +1183,11 @@ def test_is_event_retryable_classifies_organic_shapes() -> None:
 
     # 4. Empty errors list, no special terminal_reason -- not retryable
     #    by default.
-    unknown_error = {"is_error": True, "errors": [], "stop_reason": "end_turn"}
+    unknown_error: dict[str, object] = {
+        "is_error": True,
+        "errors": [],
+        "stop_reason": "end_turn",
+    }
     assert _is_event_retryable(unknown_error) is False
 
 
@@ -1216,7 +1221,8 @@ def test_is_retryable_provider_error_session_persistent_only(
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
 
@@ -1265,6 +1271,13 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
+
+    def publish(ev: RuntimeEvent) -> None:
+        if isinstance(ev, ModelResponsePartial):
+            text_chunks.append(ev.text)
+        elif isinstance(ev, ModelResponseThinking):
+            thinking_chunks.append(ev.text)
+
     text_event = cast(
         MutableJSON,
         {
@@ -1285,8 +1298,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         thinking_parts,
         signature_parts,
         tool_use_blocks,
-        on_text=text_chunks.append,
-        on_thinking=thinking_chunks.append,
+        publish,
     )
     _dispatch_stream_event(
         thinking_event,
@@ -1294,8 +1306,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         thinking_parts,
         signature_parts,
         tool_use_blocks,
-        on_text=text_chunks.append,
-        on_thinking=thinking_chunks.append,
+        publish,
     )
     assert text_parts == ["hello"]
     assert thinking_parts == ["reflecting"]
@@ -1334,8 +1345,7 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
         thinking_parts,
         signature_parts,
         tool_use_blocks,
-        on_text=None,
-        on_thinking=None,
+        None,
     )
     assert signature_parts == ["abc123"]
     assert text_parts == []
@@ -1346,70 +1356,63 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     """tool_use is published at content_block_stop with name + arg
     summary, after the streamed input_json_delta has been accumulated.
     """
-    published: list[object] = []
-    token = cli_publish_var.set(published.append)
-    try:
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        signature_parts: list[str] = []
-        tool_use_blocks: dict[int, dict[str, object]] = {}
-        # 1) start: registers tool_use at index 0 -- NO label published yet
+    published: list[RuntimeEvent] = []
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    signature_parts: list[str] = []
+    tool_use_blocks: dict[int, dict[str, object]] = {}
+    # 1) start: registers tool_use at index 0 -- NO label published yet
+    _dispatch_stream_event(
+        cast(
+            MutableJSON,
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_abc123",
+                    "name": "Bash",
+                    "input": {},
+                },
+            },
+        ),
+        text_parts,
+        thinking_parts,
+        signature_parts,
+        tool_use_blocks,
+        published.append,
+    )
+    assert published == []  # nothing yet -- we wait for args
+    # 2) deltas: stream the JSON in two chunks
+    for partial in ('{"command":"ls', ' -la"}'):
         _dispatch_stream_event(
             cast(
                 MutableJSON,
                 {
-                    "type": "content_block_start",
+                    "type": "content_block_delta",
                     "index": 0,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": "toolu_abc123",
-                        "name": "Bash",
-                        "input": {},
-                    },
+                    "delta": {"type": "input_json_delta", "partial_json": partial},
                 },
             ),
             text_parts,
             thinking_parts,
             signature_parts,
             tool_use_blocks,
-            on_text=None,
-            on_thinking=None,
+            published.append,
         )
-        assert published == []  # nothing yet -- we wait for args
-        # 2) deltas: stream the JSON in two chunks
-        for partial in ('{"command":"ls', ' -la"}'):
-            _dispatch_stream_event(
-                cast(
-                    MutableJSON,
-                    {
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": {"type": "input_json_delta", "partial_json": partial},
-                    },
-                ),
-                text_parts,
-                thinking_parts,
-                signature_parts,
-                tool_use_blocks,
-                on_text=None,
-                on_thinking=None,
-            )
-        assert published == []  # still nothing
-        # 3) stop: now we publish the rich label
-        _dispatch_stream_event(
-            cast(
-                MutableJSON,
-                {"type": "content_block_stop", "index": 0},
-            ),
-            text_parts,
-            thinking_parts,
-            signature_parts,
-            tool_use_blocks,
-            on_text=None,
-            on_thinking=None,
-        )
-    finally:
-        cli_publish_var.reset(token)
+    assert published == []  # still nothing
+    # 3) stop: now we publish the rich label
+    _dispatch_stream_event(
+        cast(
+            MutableJSON,
+            {"type": "content_block_stop", "index": 0},
+        ),
+        text_parts,
+        thinking_parts,
+        signature_parts,
+        tool_use_blocks,
+        published.append,
+    )
     assert len(published) == 1
     label = published[0]
     assert isinstance(label, ToolLabel)
@@ -1420,38 +1423,32 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
 
 def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
     """``content_block_start`` for ``text`` does NOT publish a ToolLabel."""
-    published: list[object] = []
-    token = cli_publish_var.set(published.append)
-    try:
-        tool_use_blocks: dict[int, dict[str, object]] = {}
-        _dispatch_stream_event(
-            cast(
-                MutableJSON,
-                {
-                    "type": "content_block_start",
-                    "index": 1,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            ),
-            [],
-            [],
-            [],
-            tool_use_blocks,
-            on_text=None,
-            on_thinking=None,
-        )
-        # And a content_block_stop on the text block: no label.
-        _dispatch_stream_event(
-            cast(MutableJSON, {"type": "content_block_stop", "index": 1}),
-            [],
-            [],
-            [],
-            tool_use_blocks,
-            on_text=None,
-            on_thinking=None,
-        )
-    finally:
-        cli_publish_var.reset(token)
+    published: list[RuntimeEvent] = []
+    tool_use_blocks: dict[int, dict[str, object]] = {}
+    _dispatch_stream_event(
+        cast(
+            MutableJSON,
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "text", "text": ""},
+            },
+        ),
+        [],
+        [],
+        [],
+        tool_use_blocks,
+        published.append,
+    )
+    # And a content_block_stop on the text block: no label.
+    _dispatch_stream_event(
+        cast(MutableJSON, {"type": "content_block_stop", "index": 1}),
+        [],
+        [],
+        [],
+        tool_use_blocks,
+        published.append,
+    )
     assert published == []
 
 
@@ -1482,8 +1479,7 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
         thinking_parts,
         signature_parts,
         tool_use_blocks,
-        on_text=None,
-        on_thinking=None,
+        None,
     )
     assert text_parts == []
     assert thinking_parts == []
@@ -1758,10 +1754,9 @@ async def test_stream_application_error_does_not_respawn(
 
     async def _drain_until_result(
         proc: Subproc,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking
+        del proc, publish
         raise AssertionError("unreachable")
 
     model._system_hash = _hash_system(None)
@@ -1812,10 +1807,9 @@ async def test_stream_failed_turn_keeps_proven_system_hash(
     async def _exchange_turn(
         proc: Subproc,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        del proc, request, on_text, on_thinking
+        del proc, request, publish
         raise SubprocessTransportError("boom")
 
     model._system_hash = _hash_system("proven system")
@@ -1868,10 +1862,9 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
 
     async def _drain_until_result(
         proc: Subproc,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking
+        del proc, publish
         return ModelResponse(message=AssistantMessage(text="ok"))
 
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
@@ -1914,12 +1907,11 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
 
     async def drain_until_result(
         proc: Subproc,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
         *,
         update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking, update_input_tokens
+        del proc, publish, update_input_tokens
         return ModelResponse(message=AssistantMessage(text="ok"))
 
     model._hot_spare = HotSpare(spawn_initialized)
@@ -1958,8 +1950,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
                 UserMessage(text="second"),
             ]
         ),
-        on_text=None,
-        on_thinking=None,
+        publish=None,
     )
 
     payloads = [json.loads(line) for line in lines]
@@ -1998,10 +1989,9 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
 
     async def _drain_until_result(
         proc: Subproc,
-        on_text: Callable[[str], None] | None,
-        on_thinking: Callable[[str], None] | None,
+        publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        del proc, on_text, on_thinking
+        del proc, publish
         return response
 
     model._system_hash = _hash_system(None)
@@ -2112,8 +2102,7 @@ async def test_exchange_turn_drains_each_user_like_entry() -> None:
                 UserMessage(text="current"),
             ]
         ),
-        on_text=None,
-        on_thinking=None,
+        publish=None,
     )
 
     assert proc.pending is False
@@ -2152,8 +2141,7 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
             ModelRequest(
                 messages=[UserMessage(text="replay"), UserMessage(text="current")]
             ),
-            on_text=None,
-            on_thinking=None,
+            publish=None,
         )
 
     assert model._last_input_tokens == 7
@@ -2172,7 +2160,8 @@ def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-opus-4-7")
@@ -2189,7 +2178,8 @@ def test_interrupt_active_proc_signals_active_subprocess(
     creds = _write_creds(tmp_path)
     monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which", _which_claude_stub
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
     )
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-opus-4-7")

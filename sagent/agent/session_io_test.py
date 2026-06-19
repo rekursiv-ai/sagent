@@ -55,6 +55,7 @@ from sagent.types.runtime import (
     ModelContextEvent,
     ModelServiceSuspended,
     NoticeMessage,
+    RuntimeEvent,
     SaveSession,
     ServiceErrorSnapshot,
     ToolCall,
@@ -75,10 +76,9 @@ class _RuntimeModel:
     async def stream(
         self,
         history: list[ModelContextEvent],
-        on_text: Callable[[str], None],
-        on_thinking: Callable[[str], None],
+        publish: Callable[[RuntimeEvent], None],
     ) -> AssistantMessage:
-        del history, on_text, on_thinking
+        del history, publish
         return AssistantMessage(text="")
 
 
@@ -142,10 +142,9 @@ class _NoopModel:
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del request, on_text, on_thinking
+        del request, publish
         return ModelResponse(message=AssistantMessage(text=""))
 
     async def close(self) -> None:

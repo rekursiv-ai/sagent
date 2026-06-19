@@ -34,6 +34,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
     ModelContextEvent,
+    RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -126,10 +127,9 @@ class _ScriptedModel(MockModelCaps):
     async def stream(
         self,
         request: ModelRequest,
-        on_text: Callable[[str], None] | None = None,
-        on_thinking: Callable[[str], None] | None = None,
+        publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        del on_text, on_thinking
+        del publish
         self.received.append(request)
         self.stream_calls += 1
         item = self.stream_responses[self._stream_idx]
@@ -139,7 +139,7 @@ class _ScriptedModel(MockModelCaps):
         return item
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request, on_text=None, on_thinking=None)
+        return await self.stream(request, publish=None)
 
 
 def _summary_resp(body: str) -> ModelResponse:
