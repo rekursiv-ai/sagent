@@ -350,7 +350,11 @@ class PaperSearch:
                 "query": {
                     "type": "string",
                     "description": (
-                        "Free-form text: title words, author names, or venue fragments."
+                        "Free-form text. The default Semantic Scholar backend "
+                        "matches title/abstract text, NOT author names -- an "
+                        "author surname in the query can yield zero hits. To "
+                        'search by author, use source="fused" (OpenAlex '
+                        "indexes authors) or the PaperAuthor tool."
                     ),
                 },
                 "source": {
@@ -503,6 +507,17 @@ class PaperSearch:
         hits, total = result
 
         text = _render_search_results(hits, total, limit, cap)
+        if not hits and src == "s2":
+            # S2 ranks against title/abstract tokens, NOT author names, so an
+            # author surname in the query (e.g. "Andrews Capturing Sparks...")
+            # silently sinks the real paper to zero hits while OpenAlex, which
+            # indexes authors, finds it. Nudge the agent to the fused backend
+            # instead of letting it accept the empty result (live 2026-06-19).
+            text += (
+                "\nNote: Semantic Scholar matches title/abstract text, not "
+                "author names. If your query included an author surname, retry "
+                'with source="fused" (adds OpenAlex, which indexes authors).'
+            )
         _cache[cache_key] = text
         return ToolResult(call_id="", content=text)
 

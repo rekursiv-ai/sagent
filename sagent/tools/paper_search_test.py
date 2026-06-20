@@ -223,7 +223,49 @@ def test_run_no_results() -> None:
     payload = json.dumps({"total": 0, "data": []}).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
         result = asyncio.run(PaperSearch().run({"query": "nothing"}))
+    assert result.content.startswith("(no results)")
+
+
+def test_run_no_results_s2_appends_author_hint() -> None:
+    # S2 (default) returning nothing must nudge toward the fused backend:
+    # an author-surname query silently zero-hits on S2 but resolves via
+    # OpenAlex (live 2026-06-19 ARC-AGI survey reference walk).
+    payload = json.dumps({"total": 0, "data": []}).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        result = asyncio.run(PaperSearch().run({"query": "Andrews Sparks"}))
+    assert "(no results)" in result.content
+    assert 'source="fused"' in result.content
+    assert "author" in result.content.lower()
+
+
+def test_run_no_results_fused_no_hint() -> None:
+    # Fused already includes OpenAlex; suggesting "retry with fused" would be
+    # circular, so an empty fused result stays bare.
+    s2_empty = json.dumps({"total": 0, "data": []}).encode()
+    oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
+
+    def fake(**kw: object) -> bytes:
+        url = str(kw.get("url", ""))
+        return oa_empty if "openalex" in url else s2_empty
+
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=fake),
+        patch("sagent.tools.paper_search.fetch", side_effect=fake),
+    ):
+        result = asyncio.run(
+            PaperSearch().run({"query": "nothing here", "source": "fused"})
+        )
     assert result.content == "(no results)"
+
+
+def test_run_hits_no_author_hint() -> None:
+    # The hint is for empty results only; a populated result stays clean.
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        return_value=_s2_search_payload(),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "transformers"}))
+    assert 'source="fused"' not in result.content
 
 
 def test_run_openalex_path() -> None:

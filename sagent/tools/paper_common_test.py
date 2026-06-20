@@ -641,6 +641,58 @@ def test_parse_optional_ids_rejects_non_string_scalar() -> None:
     assert result.is_error
 
 
+def test_parse_optional_ids_recovers_json_array_string() -> None:
+    # The wire coerces a union-typed `ids` array to a STRING; recover it.
+    arg = '["arXiv:2509.04439", "arXiv:2507.12821", "10.1/x"]'
+    assert parse_optional_ids({"ids": arg}) == [
+        "arXiv:2509.04439",
+        "arXiv:2507.12821",
+        "10.1/x",
+    ]
+
+
+def test_parse_optional_ids_recovers_json_array_no_spaces() -> None:
+    arg = '["arXiv:2509.04439","arXiv:2507.12821"]'
+    assert parse_optional_ids({"ids": arg}) == [
+        "arXiv:2509.04439",
+        "arXiv:2507.12821",
+    ]
+
+
+def test_parse_optional_ids_recovers_comma_joined_bundle() -> None:
+    arg = "arXiv:2509.04439,arXiv:2507.12821,10.34190/icair.5.1.4311"
+    assert parse_optional_ids({"ids": arg}) == [
+        "arXiv:2509.04439",
+        "arXiv:2507.12821",
+        "10.34190/icair.5.1.4311",
+    ]
+
+
+def test_parse_optional_ids_recovers_newline_bundle() -> None:
+    arg = "arXiv:2509.04439\narXiv:2507.12821"
+    assert parse_optional_ids({"ids": arg}) == [
+        "arXiv:2509.04439",
+        "arXiv:2507.12821",
+    ]
+
+
+def test_parse_optional_ids_single_doi_with_comma_not_split() -> None:
+    # A lone DOI containing a comma must NOT be split: the second token is
+    # not a valid id, so the ambiguous split is rejected and the id is kept
+    # whole (passed through for normalize_id to judge).
+    assert parse_optional_ids({"ids": "10.1234/foo,bar"}) == ["10.1234/foo,bar"]
+
+
+def test_parse_optional_ids_malformed_json_array_kept_whole() -> None:
+    # Looks array-ish but isn't valid JSON: don't silently drop it, keep it
+    # as one token so the caller surfaces a clear shape error.
+    assert parse_optional_ids({"ids": "[not json"}) == ["[not json"]
+
+
+def test_parse_optional_ids_single_id_unchanged() -> None:
+    assert parse_optional_ids({"ids": "arXiv:2509.04439"}) == ["arXiv:2509.04439"]
+
+
 def test_resolve_id_args_coerces_bare_string() -> None:
     assert resolve_id_args({"ids": "10.1/x"}) == ["10.1/x"]
 
