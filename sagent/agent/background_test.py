@@ -15,7 +15,7 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
     split_bg_args,
 )
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.types.runtime import ToolResult
 
 

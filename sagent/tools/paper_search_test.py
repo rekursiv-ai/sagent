@@ -7,7 +7,7 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.paper_common import PaperRecord
 from sagent.tools.paper_search import (

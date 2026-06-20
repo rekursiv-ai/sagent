@@ -94,7 +94,7 @@ else:
 
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import MutableJSON, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,

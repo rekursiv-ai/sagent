@@ -35,7 +35,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import token_count
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
     int_val,

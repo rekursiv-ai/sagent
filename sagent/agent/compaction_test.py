@@ -16,7 +16,7 @@ from sagent.agent.compaction import (
     inject_background_status,
     post_compact_enrich,
 )
-from sagent.lib.json import JSON
+from sagent.lib.custom_json import JSON
 from sagent.tools.core import ToolState
 from sagent.types.model import ContextBudget
 from sagent.types.runtime import (

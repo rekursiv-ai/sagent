@@ -23,7 +23,7 @@ from typing import cast
 
 import cachetools
 
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     JSON,
     MutableJSON,
     MutableJSONValue,

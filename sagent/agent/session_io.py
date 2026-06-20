@@ -40,7 +40,7 @@ from wrapt import lazy_import
 
 from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
-from sagent.lib.json import float_val, int_val
+from sagent.lib.custom_json import float_val, int_val
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,

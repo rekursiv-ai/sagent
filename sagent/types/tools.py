@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
-from sagent.lib.json import JSON
+from sagent.lib.custom_json import JSON
 from sagent.types.runtime import ToolResult
 
 

@@ -26,7 +26,7 @@ from typing import Any, Literal, cast
 import asyncio
 import dataclasses
 
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     JSON,
     MutableJSON,
     MutableJSONValue,

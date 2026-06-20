@@ -81,7 +81,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack

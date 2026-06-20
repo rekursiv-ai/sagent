@@ -49,7 +49,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log, token_count
-from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,

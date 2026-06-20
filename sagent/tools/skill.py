@@ -23,8 +23,8 @@ import dataclasses
 import logging
 import re
 
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
-from sagent.lib.json import JSON, json_freeze
 from sagent.tools.core import (
     ToolState,
     get_tool_state,

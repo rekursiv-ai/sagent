@@ -37,7 +37,7 @@ import os
 import re
 import time
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.lib.ratelimit import FileStore, SystemClock, TokenBucketRateLimiter
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.types.runtime import ToolResult

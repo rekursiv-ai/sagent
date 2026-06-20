@@ -35,7 +35,7 @@ import sys
 import time
 import uuid
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 
 
 logger = logging.getLogger(__name__)

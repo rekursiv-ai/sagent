@@ -7,7 +7,7 @@ from typing import cast, get_args
 
 import asyncio
 
-from sagent.lib.json import JSON, JSONValue, json_freeze
+from sagent.lib.custom_json import JSON, JSONValue, json_freeze
 from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
 from sagent.lib.web.search import CaptchaError, SearchError
 from sagent.tools.core import (

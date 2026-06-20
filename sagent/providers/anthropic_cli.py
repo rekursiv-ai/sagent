@@ -29,7 +29,7 @@ import shutil
 import tempfile
 
 from sagent.lib import token_count
-from sagent.lib.json import JSON, MutableJSON, int_val, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.hotspare import HotSpare

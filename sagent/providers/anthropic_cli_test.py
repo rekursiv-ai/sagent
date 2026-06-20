@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers import anthropic_cli
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.anthropic_cli import (

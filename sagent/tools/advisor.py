@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping
 
 from sagent.agent import runtime as agent_runtime
 from sagent.lib import debug_log
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.types.model import Model, ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,

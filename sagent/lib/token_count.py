@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 import json
 import logging
 
-from sagent.lib.json import json_unfreeze
+from sagent.lib.custom_json import json_unfreeze
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,

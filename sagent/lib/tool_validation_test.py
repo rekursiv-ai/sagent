@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.lib.tool_validation import validate_tool_input
 
 

@@ -37,7 +37,7 @@ import json
 import logging
 import sys
 
-from sagent.lib.json import int_val
+from sagent.lib.custom_json import int_val
 
 
 logger = logging.getLogger(__name__)

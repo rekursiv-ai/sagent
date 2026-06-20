@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.openai_compat import (
     OpenAICompat,

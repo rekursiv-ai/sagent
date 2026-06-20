@@ -98,7 +98,7 @@ Use it as a library:
 ```python
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.providers import Google
 
 agent = Agent(
@@ -209,7 +209,7 @@ import asyncio
 
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.providers import Anthropic
 
 

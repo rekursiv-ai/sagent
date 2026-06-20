@@ -17,7 +17,7 @@ from mcp.types import ImageContent, TextContent
 
 import pytest
 
-from sagent.lib.json import JSON
+from sagent.lib.custom_json import JSON
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.types.runtime import (
     BytesMessage,

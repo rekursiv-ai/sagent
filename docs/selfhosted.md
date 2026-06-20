@@ -31,7 +31,7 @@ Run it from Python:
 
 ```python
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.providers import SelfHosted, SelfHostedModel
 
 provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")

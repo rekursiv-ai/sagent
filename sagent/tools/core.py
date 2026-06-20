@@ -45,7 +45,7 @@ from sagent.agent.state import (
     tool_state_context,
     tool_state_var,
 )
-from sagent.lib.json import JSON, int_val, json_freeze
+from sagent.lib.custom_json import JSON, int_val, json_freeze
 from sagent.types.runtime import ToolResult
 
 

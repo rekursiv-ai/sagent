@@ -19,7 +19,7 @@ import re
 
 import cachetools
 
-from sagent.lib.json import JSON, MutableJSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import JSON, MutableJSON, bool_val, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (

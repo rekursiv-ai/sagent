@@ -11,7 +11,7 @@ from sagent.lib.token_count import approx_request_tokens
 
 if TYPE_CHECKING:
     import pytest
-from sagent.lib.json import JSON
+from sagent.lib.custom_json import JSON
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
