@@ -73,6 +73,7 @@ from sagent.agent.session_io import (
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.custom_json import MutableJSON, json_unfreeze
+from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
     PROVIDER_NAMES,
@@ -932,7 +933,7 @@ def _install_repl_logging(
         return
     log_file = os.environ.get("SAGENT_LOG_FILE")
     if log_file is None:
-        base = Path(session_dir) if session_dir is not None else Path.home() / ".sagent"
+        base = Path(session_dir) if session_dir is not None else data_dir("sagent")
         log_path = base / "repl.log"
     else:
         log_path = Path(log_file)
@@ -1166,6 +1167,10 @@ def main() -> None:
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
     _configure_logging(args.log_level)
+    # Copy a pre-convention sagent home (a real ``~/.sagent`` or, for users who
+    # symlinked it, the ``~/.claude`` squat) into the XDG home, before any
+    # sagent path (sessions, caches) is read below.
+    sessions.migrate_legacy_home()
     if args.recipe is not None:
         set_recipe(args.recipe)
     session_dir = None if args.ephemeral else _resolve_session_dir(args)

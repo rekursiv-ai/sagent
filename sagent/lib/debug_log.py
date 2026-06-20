@@ -24,9 +24,10 @@ import os
 import time
 
 from sagent.lib.env import env_truthy
+from sagent.lib.userdirs import data_dir
 
 
-_DEFAULT_PATH = Path.home() / ".sagent" / "debug.log"
+_DEFAULT_PATH = data_dir("sagent") / "debug.log"
 _MAX_PREVIEW = 200
 
 

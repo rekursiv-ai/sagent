@@ -1,9 +1,13 @@
 """PaperSearch tool - text search across Semantic Scholar and OpenAlex.
 
-Default backend is Semantic Scholar (``source="s2"``). ``source="fused"``
-queries both backends in parallel and fuses: dedup by DOI (fallback:
-normalized title), S2 results keep their native ranking, OpenAlex-only hits
-appended at their own rank. ``source="openalex"`` pins to OpenAlex alone.
+Default (``source="fused"``) queries both backends in parallel and
+reciprocal-rank-fuses them: each backend contributes ``weight / (offset + rank)``
+to a paper's score (S2 weighted above OpenAlex, since its relevance ranking is
+more precise), so cross-backend agreement outranks either backend's lone top
+hit. Dedup by DOI (fallback: normalized title); the ``sources`` tag shows which
+backend(s) found each paper. Because both run in parallel and degrade
+independently, a throttled S2 still yields OpenAlex-ranked results -- the agent
+gets something every time. ``source="s2"`` / ``source="openalex"`` pin to one.
 """
 
 from __future__ import annotations
@@ -145,21 +149,61 @@ async def _search_openalex(
     year_to: int | None,
     open_access_only: bool,
 ) -> tuple[list[PaperRecord], int] | ToolResult:
-    """Query OpenAlex and return (records, total) or an error."""
-    params: dict[str, str | int] = {
-        "search": query,
-        "select": _OPENALEX_SELECT,
-    }
-    if limit is not None:
-        # OpenAlex rejects per-page above its own documented max.
-        params["per-page"] = min(limit, _OPENALEX_PER_PAGE_MAX)
-    flt = _openalex_filter(
+    """Query OpenAlex via the ``title_and_abstract.search`` filter only.
+
+    Deliberately NOT the broad ``search=`` / ``fulltext.search`` param: its
+    ``relevance_score`` is dominated by a citation-count weighting term, so a
+    full-text query floats high-citation off-topic reviews above the genuinely
+    relevant paper (live 2026-06-20: a 1318-cite DNN review outranked a 1-cite
+    on-topic paper for an ARC query). ``title_and_abstract.search`` scores far
+    less citation-skewed and matches title/abstract rather than body mentions,
+    so its ordering is meaningfully relevant. The cost is recall: it requires
+    every term, so a long multi-concept query can return nothing. That is the
+    correct tradeoff here -- the fused default still covers such queries via
+    S2, and a clean empty beats a citation-swamped dump we would have to
+    second-guess.
+    """
+    base_filter = _openalex_filter(
         year_from=year_from,
         year_to=year_to,
         open_access_only=open_access_only,
     )
-    if flt is not None:
-        params["filter"] = flt
+    per_page = min(limit, _OPENALEX_PER_PAGE_MAX) if limit is not None else None
+    # Sanitize the query into the unquoted ``title_and_abstract.search`` value.
+    #
+    # TWO load-bearing constraints, learned the hard way (live 2026-06-20):
+    #
+    # 1. The value must stay UNQUOTED. OpenAlex reads unquoted terms as an
+    #    AND-of-terms match (the recall we want: papers containing every term).
+    #    Wrapping the value in double quotes silently switches it to an exact
+    #    PHRASE match -- a multi-word query then matches only papers containing
+    #    that literal phrase, collapsing recall to ~zero. (A prior "fix" quoted
+    #    the value to handle commas and zeroed out normal multi-word searches.)
+    #
+    # 2. A bare comma is OpenAlex's FILTER separator, so a query containing one
+    #    (e.g. "deep learning, attention") becomes a malformed two-filter
+    #    expression -> HTTP 400. We therefore replace the filter metacharacters
+    #    (comma, and the pipe used for OR) with spaces rather than quoting --
+    #    they are not meaningful search operators, and spacing preserves the
+    #    AND-of-terms semantics from constraint 1.
+    sanitized = query.replace(",", " ").replace("|", " ")
+    terms = f"title_and_abstract.search:{sanitized}"
+    flt = f"{base_filter},{terms}" if base_filter else terms
+    return await _openalex_request({"filter": flt}, per_page)
+
+
+async def _openalex_request(
+    extra_params: dict[str, str | int], per_page: int | None
+) -> tuple[list[PaperRecord], int] | ToolResult:
+    """Issue one OpenAlex /works request and parse it, or return an error."""
+    params: dict[str, str | int] = {"select": _OPENALEX_SELECT, **extra_params}
+    if per_page is not None:
+        params["per-page"] = per_page
+    # A premium key raises the daily credit budget far above the anonymous
+    # ~1000/day; send it when configured so the user's key actually takes effect.
+    api_key = os.environ.get("OPENALEX_API_KEY", "")
+    if api_key:
+        params["api_key"] = api_key
     try:
         raw = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty can't narrow to_thread through overloads
             bytes,
@@ -173,11 +217,17 @@ async def _search_openalex(
         )
     except FetchError as e:
         if e.status == 429:
+            # OpenAlex's 429 is usually daily-credit-budget exhaustion (free
+            # tier ~1000 credits/day, list search = 10 each), resetting at
+            # midnight UTC -- not a per-second throttle. Surface its own message
+            # (it states the real cause + reset) rather than guessing.
+            detail = e.body[:200].decode(errors="replace")
             return ToolResult(
                 call_id="",
                 content=(
-                    "OpenAlex rate limit hit. Set OPENALEX_EMAIL to enter the "
-                    "polite pool (10 req/s), or retry shortly."
+                    "OpenAlex rate limit / daily credit budget exhausted. Set "
+                    "OPENALEX_API_KEY for a higher budget, or retry after the "
+                    f"reset (midnight UTC). {detail}"
                 ),
                 is_error=True,
             )
@@ -320,35 +370,65 @@ def _fuse(
     s2_hits: list[PaperRecord],
     oa_hits: list[PaperRecord],
 ) -> list[PaperRecord]:
-    """S2-first ordering: S2 hits in rank order, then OpenAlex-unique hits.
+    """Reciprocal-rank-fuse S2 and OpenAlex hits into one ranked list.
 
-    Overlapping papers (same DOI or normalized title) keep S2's rank and
-    are merged with OpenAlex data (for missing fields and the sources tag).
+    Each backend contributes ``weight / (offset + rank)`` to a paper's score,
+    summed across backends. A paper both backends rank well floats above either
+    backend's lone top hit; an OpenAlex-only paper still scores by its single
+    rank, so a throttled S2 degrades to OpenAlex-ranked results rather than
+    nothing. Duplicates (same DOI or normalized title) are merged for fields and
+    the ``sources`` tag, which surfaces the agreement to the agent.
+
+    Args:
+      s2_hits: Semantic Scholar results in rank order (best first).
+      oa_hits: OpenAlex results in rank order (best first).
+
+    Returns:
+      fused: Papers ordered by descending fused score.
+
+    References:
+      https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf
+        Cormack, Clarke, Büttcher. "Reciprocal Rank Fusion Outperforms
+        Condorcet and Individual Rank Learning Methods." SIGIR 2009.
+
     """
+    # RRF rank offset: the term is ``weight / (offset + rank)``, so the offset
+    # adds that many phantom rank-slots before the real ones -- the half-life of
+    # rank influence (a hit's score halves around ``rank == offset``). The
+    # canonical 60 (Cormack et al.) is tuned for many engines over long lists;
+    # with only two backends it over-flattens -- ``1/(60+rank)`` barely varies,
+    # the per-engine weights go inert, and ALL of S2's top ~27 outrank an
+    # OpenAlex-only #1, burying the cross-pollinated hits fusion exists to
+    # surface. At 10, a strong single-backend hit interleaves into the other's
+    # top (OpenAlex #1 just below S2 #5), respecting S2's lead while staying
+    # visible.
+    offset = 10.0
+    # Per-engine weights: S2's relevance ranking is more precise than OpenAlex's
+    # broad text match, so an S2 rank counts for more -- equal-rank single-backend
+    # papers break in S2's favor, while an OpenAlex-only paper still scores.
+    weights = ((s2_hits, 1.0), (oa_hits, 0.7))
+
     by_key: dict[str, PaperRecord] = {}
-    order: list[str] = []
-    for rec in s2_hits:
-        key = _dedup_key(rec)
-        if key in by_key:
-            by_key[key] = _merge(by_key[key], rec)
-        else:
-            by_key[key] = rec
-            order.append(key)
-    for rec in oa_hits:
-        key = _dedup_key(rec)
-        if key in by_key:
-            by_key[key] = _merge(by_key[key], rec)
-        else:
-            by_key[key] = rec
-            order.append(key)
-    return [by_key[k] for k in order]
+    score: dict[str, float] = {}
+    for hits, weight in weights:
+        for rank, rec in enumerate(hits, start=1):
+            key = _dedup_key(rec)
+            score[key] = score.get(key, 0.0) + weight / (offset + rank)
+            by_key[key] = _merge(by_key[key], rec) if key in by_key else rec
+    # Stable sort by descending score over dict keys in insertion order. A
+    # genuine score tie (distinct papers whose RRF sums coincide) thus keeps
+    # insertion order, and the S2 loop runs first so its keys are inserted
+    # first. (Same-rank single-backend papers are NOT tied -- the S2/OpenAlex
+    # weight asymmetry separates them; this only governs coincidental ties.)
+    ordered = sorted(by_key, key=lambda k: score[k], reverse=True)
+    return [by_key[k] for k in ordered]
 
 
 class PaperSearch:
     """Text search over scholarly literature.
 
-    Default backend is Semantic Scholar; ``source="openalex"`` or
-    ``source="fused"`` for comparison.
+    Default reciprocal-rank-fuses Semantic Scholar and OpenAlex
+    (``source="fused"``); ``source="s2"`` / ``source="openalex"`` pin to one.
     """
 
     name: str = "PaperSearch"
@@ -373,9 +453,11 @@ class PaperSearch:
                     "type": "string",
                     "enum": list(_VALID_SOURCES),
                     "description": (
-                        "'s2' (default, Semantic Scholar), 'openalex' "
-                        "(OpenAlex only), or 'fused' (both, dedup by DOI - "
-                        "use when you want to compare coverage)."
+                        "'fused' (default): reciprocal-rank-fuse Semantic "
+                        "Scholar + OpenAlex, resilient to either being down. "
+                        "'s2': Semantic Scholar only (precise ranking, but "
+                        "rate-limited and no author-name matching). 'openalex': "
+                        "OpenAlex only (no key, broad coverage, author search)."
                     ),
                 },
                 "limit": {
@@ -426,9 +508,9 @@ class PaperSearch:
         query = str(args.get("query", "")).strip()
         if len(query) > 50:
             query = query[:47] + "..."
-        source = str(args.get("source", "") or "s2")
+        source = str(args.get("source", "") or "fused")
         label = f"PaperSearch {query!r}" if query else "PaperSearch"
-        if source != "s2":
+        if source != "fused":
             label += f" ({source})"
         return label
 
@@ -470,7 +552,7 @@ class PaperSearch:
 
         """
         query = str(args.get("query", ""))
-        source = str(args.get("source", "s2") or "s2")
+        source = str(args.get("source", "fused") or "fused")
         limit = validate_limit(opt_int(args, "limit"))
         if isinstance(limit, ToolResult):
             return limit
@@ -517,9 +599,24 @@ class PaperSearch:
         )
         if isinstance(result, ToolResult):
             return result
-        hits, total = result
+        hits, total, complete = result
 
         text = _render_search_results(hits, total, limit, cap)
+        if not hits and len(q.split()) > 1:
+            # Both backends AND every query term against title/abstract (the
+            # uniform contract -- boolean operators aren't portable across S2
+            # relevance search and OpenAlex, so we don't expose them). A
+            # multi-term query thus zeroes out when one rare/specific term has
+            # no co-occurring paper. Dropping terms is the only cross-backend
+            # way to broaden, so tell the agent to do that (live 2026-06-20:
+            # "object-centric slot attention abstract reasoning ARC" -> 0 only
+            # because no paper's title/abstract contains "slot").
+            text += (
+                "\nNote: every query term must appear in a paper's "
+                "title/abstract (terms are AND-ed). A zero result usually means "
+                "one specific term has no match -- drop the most specific term "
+                "and retry to broaden."
+            )
         if not hits and src == "s2":
             # S2 ranks against title/abstract tokens, NOT author names, so an
             # author surname in the query (e.g. "Andrews Capturing Sparks...")
@@ -531,7 +628,11 @@ class PaperSearch:
                 "author names. If your query included an author surname, retry "
                 'with source="fused" (adds OpenAlex, which indexes authors).'
             )
-        _cache[cache_key] = text
+        # Cache only a complete result. A fused partial (one backend errored)
+        # must be retried next time, not pinned -- mirrors s2_batch_blocks, which
+        # caches only when every id resolved.
+        if complete:
+            _cache[cache_key] = text
         return ToolResult(call_id="", content=text)
 
     async def _dispatch_search(
@@ -543,24 +644,25 @@ class PaperSearch:
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
-    ) -> tuple[list[PaperRecord], int] | ToolResult:
-        """Route to the appropriate search backend."""
-        if src == "s2":
-            return await _search_s2(
+    ) -> tuple[list[PaperRecord], int, bool] | ToolResult:
+        """Route to the appropriate backend; return (hits, total, complete).
+
+        ``complete`` is False only when fused mode lost a backend to an error
+        (a partial result that must not be cached). A single-backend search
+        either errors outright (``ToolResult``) or is complete.
+        """
+        if src in ("s2", "openalex"):
+            backend = _search_s2 if src == "s2" else _search_openalex
+            result = await backend(
                 q,
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
                 open_access_only=open_access_only,
             )
-        if src == "openalex":
-            return await _search_openalex(
-                q,
-                limit=limit,
-                year_from=year_from,
-                year_to=year_to,
-                open_access_only=open_access_only,
-            )
+            if isinstance(result, ToolResult):
+                return result
+            return result[0], result[1], True
         return await self._fused_search(
             q,
             limit=limit,
@@ -577,8 +679,14 @@ class PaperSearch:
         year_from: int | None,
         year_to: int | None,
         open_access_only: bool,
-    ) -> tuple[list[PaperRecord], int] | ToolResult:
-        """Run S2 and OpenAlex concurrently; degrade gracefully on one failure."""
+    ) -> tuple[list[PaperRecord], int, bool] | ToolResult:
+        """Run S2 and OpenAlex concurrently; degrade gracefully on one failure.
+
+        Returns ``(fused_hits, total, complete)``. ``complete`` is False when a
+        backend errored (a partial result), so the caller can decline to cache
+        it -- otherwise a transient throttle on one backend would pin a degraded
+        result for the cache's lifetime.
+        """
         tasks = [
             _search_s2(
                 q,
@@ -602,6 +710,7 @@ class PaperSearch:
         oa_hits: list[PaperRecord] = []
         s2_total = oa_total = 0
         errors: list[str] = []
+        answered = 0  # backends that returned cleanly (even with zero hits)
 
         if isinstance(s2_res, BaseException):
             errors.append(f"S2: {type(s2_res).__name__}: {s2_res}")
@@ -609,20 +718,27 @@ class PaperSearch:
             errors.append(s2_res.content)
         else:
             s2_hits, s2_total = s2_res
+            answered += 1
         if isinstance(oa_res, BaseException):
             errors.append(f"OpenAlex: {type(oa_res).__name__}: {oa_res}")
         elif isinstance(oa_res, ToolResult):
             errors.append(oa_res.content)
         else:
             oa_hits, oa_total = oa_res
+            answered += 1
 
-        if errors and not s2_hits and not oa_hits:
+        # Only a TOTAL failure (no backend answered) is an error. If at least
+        # one backend answered -- even with zero hits -- this is a real (empty)
+        # result, not an error: returning the error here would hide a genuine
+        # AND-narrowing empty behind a sibling's transient throttle and rob the
+        # caller of the "drop a term" guidance the empty path adds.
+        if not answered:
             return ToolResult(call_id="", content="; ".join(errors), is_error=True)
         if errors:
             logger.warning("PaperSearch partial failure: %s", "; ".join(errors))
 
         fused = _fuse(s2_hits, oa_hits)
-        return fused, max(s2_total, oa_total)
+        return fused, max(s2_total, oa_total), not errors
 
 
 def _render_search_results(

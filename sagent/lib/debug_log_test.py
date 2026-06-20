@@ -14,6 +14,7 @@ from sagent.lib.debug_log import (
     trace,
     trace_error,
 )
+from sagent.lib.userdirs import data_dir
 
 
 if TYPE_CHECKING:
@@ -30,7 +31,7 @@ def test_log_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SAGENT_DEBUG_LOG", raising=False)
     p = log_path()
     assert p.name == "debug.log"
-    assert p.parent.name == ".sagent"
+    assert p.parent == data_dir("sagent")
 
 
 def test_log_path_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
