@@ -588,7 +588,15 @@ def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
     if raw_ids is None:
         return []
     if isinstance(raw_ids, str):
-        raw_ids = [raw_ids]
+        # Models routinely emit a multi-id ``ids`` as a STRING rather than a
+        # JSON array -- either a JSON-encoded array (``'["a","b"]'``) or a
+        # comma/newline-joined bundle (``'a,b'``). The Anthropic tool-call
+        # wire coerces the union-typed (``["array","string"]``) ``ids`` schema
+        # to a string, so a syntactically correct array never arrives as a
+        # ``list`` (live 2026-06-19: every batched ``PaperDetails`` call this
+        # way died "Unrecognized identifier shape", forcing one-id-per-call).
+        # Recover the list here so batching works regardless of wire shape.
+        raw_ids = _split_id_bundle(raw_ids)
     if not isinstance(raw_ids, list):
         return ToolResult(
             call_id="",
@@ -596,6 +604,37 @@ def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
             is_error=True,
         )
     return [str(x).strip() for x in cast(list[object], raw_ids) if str(x).strip()]
+
+
+def _split_id_bundle(raw: str) -> list[str]:
+    """Recover a list of ids from a single string argument.
+
+    Handles the two shapes a model emits when it means a batch but the wire
+    delivers a scalar string:
+
+    1. A JSON-encoded array of strings (``'["a", "b"]'``) -> its elements.
+    2. A comma- or newline-joined bundle (``'a, b'``) -> split, but ONLY when
+       every token then parses as a valid id. A lone DOI can legitimately
+       contain a comma, so an ambiguous split that yields any non-id token is
+       rejected and the original string is returned untouched (one id).
+
+    A plain single id (no separators) returns ``[raw]`` -- the common case,
+    unchanged.
+    """
+    s = raw.strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            parsed = json.loads(s)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(x) for x in cast(list[object], parsed)]
+    tokens = [t.strip() for t in re.split(r"[,\n]+", s) if t.strip()]
+    if len(tokens) > 1 and all(
+        not isinstance(normalize_id(t), ToolResult) for t in tokens
+    ):
+        return tokens
+    return [raw]
 
 
 def validate_limit(limit: int | None) -> int | None | ToolResult:
