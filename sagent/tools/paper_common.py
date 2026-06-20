@@ -38,7 +38,13 @@ import re
 import time
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.ratelimit import FileStore, SystemClock, TokenBucketRateLimiter
+from sagent.lib.ratelimit import (
+    CooldownGate,
+    FileStore,
+    SystemClock,
+    TokenBucketRateLimiter,
+)
+from sagent.lib.userdirs import data_dir
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.types.runtime import ToolResult
 
@@ -197,10 +203,10 @@ def papers_cache_dir() -> Path:
     """Return the default on-disk cache directory for downloaded PDFs.
 
     Returns:
-      path: ``~/.sagent/papers/``.
+      path: the ``papers`` subdir of sagent's per-user data directory.
 
     """
-    return Path.home() / ".sagent" / "papers"
+    return data_dir("sagent") / "papers"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -537,10 +543,21 @@ S2_PAPER_FIELDS: tuple[str, ...] = (
 )
 S2_PAPER_FIELDS_STR = ",".join(S2_PAPER_FIELDS)
 
-# S2 now *requires* exponential backoff on 429 (API release notes); retry
-# a throttled request a few times before surfacing the error to the agent.
-_S2_MAX_RETRIES = 4
+# S2 requires exponential backoff on 429 (API release notes), but this is an
+# interactive tool: a hard-throttled key must surface the error in seconds, not
+# burn a long backoff budget. Two retries (backoff 1s then 2s = 3s total before
+# giving up) honors the backoff requirement while staying interactive. The
+# shared cooldown (a ``CooldownGate``) carries the throttle across requesters so
+# a short per-request budget doesn't mean each re-hammers S2.
+_S2_MAX_RETRIES = 2
 _S2_BACKOFF_BASE = 1.0
+
+# Sibling lockfiles backing the cross-process S2 gates, under sagent's data dir.
+# ``data_dir`` is pure (no directory creation), so resolving the paths at import
+# has no filesystem side effect; tests swap the ``_s2_gate`` / ``_s2_cooldown``
+# factories rather than these paths.
+_S2_RATELIMIT_LOCK = data_dir("sagent") / "s2_ratelimit.lock"
+_S2_COOLDOWN_LOCK = data_dir("sagent") / "s2_cooldown.lock"
 
 
 def _s2_headers() -> dict[str, str]:
@@ -916,13 +933,20 @@ async def _s2_attempt(do_fetch: Callable[[], bytes]) -> bytes | FetchError:
         ``status`` and ``body`` intact for the caller to render).
 
     """
+    cooldown = _s2_cooldown()
     for attempt in range(_S2_MAX_RETRIES + 1):
+        # Single wait point: honor any active shared cooldown (a throttle this
+        # or another requester already hit) before firing. A 429 below records
+        # the next backoff into that same cooldown, so the next iteration's
+        # wait here IS the backoff -- no separate per-request sleep, and
+        # concurrent requesters share one window instead of each compounding.
+        await cooldown.wait_async()
         await _s2_gate().acquire_async()
         try:
             return await asyncio.to_thread(do_fetch)
         except FetchError as e:
             if e.status == 429 and attempt < _S2_MAX_RETRIES:
-                await asyncio.sleep(_S2_BACKOFF_BASE * 2**attempt)
+                cooldown.trigger(_S2_BACKOFF_BASE * 2**attempt)
                 continue
             return e
         except (TimeoutError, OSError) as e:
@@ -1157,7 +1181,30 @@ def _s2_gate() -> TokenBucketRateLimiter:
         max_calls=1,
         per_seconds=float(os.environ.get("S2_MIN_INTERVAL", "1.0")),
         clock=SystemClock(source=time.time),
-        store=FileStore(Path.home() / ".sagent" / "s2_ratelimit.lock"),
+        store=FileStore(_S2_RATELIMIT_LOCK),
+    )
+
+
+def _s2_cooldown() -> CooldownGate:
+    """Build the shared S2 throttle cooldown handle (the injection seam).
+
+    A 429 from S2 is a shared "back off" signal: the rate gate paces grants but
+    cannot express a server throttle, so without a shared cooldown each
+    requester rediscovers the 429 independently and they amplify it by all
+    retrying at once. The :class:`CooldownGate` records it in a lockfile
+    (sibling to the rate gate's) so a 429 in any sagent process throttles every
+    other holder of the key, not just the coroutine that discovered it.
+
+    Exists as a function, not an inline construction, for the same reason as
+    :func:`_s2_gate`: it is the single seam where tests inject a deterministic
+    clock and a per-test lockfile, so ``_s2_attempt``'s back-off timing is
+    asserted without wall-clock waits or writes to the real ``~/.sagent``. The
+    gate itself is stateless -- its window lives in the lockfile -- so a fresh
+    handle per call still shares one deadline across coroutines and processes.
+    """
+    return CooldownGate(
+        store=FileStore(_S2_COOLDOWN_LOCK),
+        clock=SystemClock(source=time.time),
     )
 
 

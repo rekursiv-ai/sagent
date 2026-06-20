@@ -445,6 +445,268 @@ def test_latest_session_avoids_full_peek_sort(tmp_path: Path) -> None:
     assert calls["n"] == 1
 
 
+def _setup_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Point module globals at temp claude/xdg homes; return (claude, sagent).
+
+    ``_LEGACY_SAGENT_HOME`` is pointed at a nonexistent temp path so the
+    migration takes the ``~/.claude`` squat branch (and never the host's real
+    ``~/.sagent``). Tests of the real-``~/.sagent`` branch set it explicitly.
+    """
+    claude = tmp_path / "claude"
+    sagent = tmp_path / "xdg" / "sagent"
+    monkeypatch.setattr(
+        sessions, "_LEGACY_SAGENT_HOME", tmp_path / "nonexistent-sagent"
+    )
+    monkeypatch.setattr(sessions, "_LEGACY_CLAUDE_HOME", claude)
+    monkeypatch.setattr(sessions, "_SAGENT_HOME", sagent)
+    monkeypatch.setattr(sessions, "_PROJECTS_DIR", sagent / "projects")
+    return claude, sagent
+
+
+def test_migrate_copies_sagent_sessions_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    proj = claude / "projects" / "-home-u-proj"
+    _write_session(proj / "deadbeef0001", session_id="S1")
+
+    sessions.migrate_legacy_home()
+
+    migrated = sagent / "projects" / "-home-u-proj" / "deadbeef0001" / "session.jsonl"
+    assert migrated.exists()
+    # Source left intact (copy, not move).
+    assert (proj / "deadbeef0001" / "session.jsonl").exists()
+
+
+def test_migrate_skips_claude_own_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project dir with only bare ``<uuid>.jsonl`` (Claude CLI) is not copied."""
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    proj = claude / "projects" / "-home-u-claudeonly"
+    proj.mkdir(parents=True)
+    (proj / "11111111-2222-3333-4444-555555555555.jsonl").write_text("{}\n")
+
+    sessions.migrate_legacy_home()
+
+    assert not (sagent / "projects" / "-home-u-claudeonly").exists()
+
+
+def test_migrate_copies_memory_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    proj = claude / "projects" / "-home-u-proj"
+    _write_session(proj / "deadbeef0001", session_id="S1")
+    (proj / "memory").mkdir()
+    (proj / "memory" / "MEMORY.md").write_text("- note\n")
+
+    sessions.migrate_legacy_home()
+
+    assert (sagent / "projects" / "-home-u-proj" / "memory" / "MEMORY.md").exists()
+
+
+def test_migrate_copies_papers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    (claude / "papers").mkdir(parents=True)
+    (claude / "papers" / "arxiv_1.pdf").write_bytes(b"%PDF-1.4")
+
+    sessions.migrate_legacy_home()
+
+    assert (sagent / "papers" / "arxiv_1.pdf").read_bytes() == b"%PDF-1.4"
+
+
+def test_migrate_is_idempotent_and_nondestructive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    proj = claude / "projects" / "-home-u-proj"
+    _write_session(proj / "deadbeef0001", session_id="S1")
+
+    sessions.migrate_legacy_home()
+    migrated = sagent / "projects" / "-home-u-proj" / "deadbeef0001" / "session.jsonl"
+    sentinel = migrated.read_text()
+    migrated.write_text(sentinel + "// local edit\n")
+
+    # Second run must not clobber the already-migrated (locally edited) copy.
+    sessions.migrate_legacy_home()
+    assert migrated.read_text().endswith("// local edit\n")
+
+
+def test_migrate_noop_without_claude_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    sessions.migrate_legacy_home()
+    assert not (sagent / "projects").exists()
+
+
+def test_copy_tree_merge_does_not_follow_dir_symlink(tmp_path: Path) -> None:
+    # A directory symlink (incl. a cycle) must not be followed: no recursion,
+    # no fat duplication of the target. SES-001.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("ok")
+    (src / "cycle").symlink_to(src, target_is_directory=True)
+    dst = tmp_path / "dst"
+    sessions._copy_tree_merge(src, dst)  # must not RecursionError
+    assert (dst / "a.txt").read_text() == "ok"
+    # The link is preserved as a symlink, not dereferenced into a fat copy.
+    assert (dst / "cycle").is_symlink()
+
+
+def test_migrate_real_sagent_home_rejects_descendant_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # XDG home a child of the legacy home (e.g. XDG_DATA_HOME=~/.sagent): copying
+    # legacy->child would walk the dst it just created and recurse. Must skip.
+    legacy = tmp_path / "dot-sagent"
+    (legacy / "projects").mkdir(parents=True)
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", legacy)
+    monkeypatch.setattr(sessions, "_LEGACY_CLAUDE_HOME", tmp_path / "missing")
+    monkeypatch.setattr(sessions, "_SAGENT_HOME", legacy / "xdg" / "sagent")
+    monkeypatch.setattr(
+        sessions, "_PROJECTS_DIR", legacy / "xdg" / "sagent" / "projects"
+    )
+    sessions.migrate_legacy_home()
+    assert not (legacy / "xdg" / "sagent" / "xdg").exists()
+
+
+def test_migrate_real_sagent_home_common_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The common pre-convention layout: a REAL ~/.sagent directory (no Claude
+    # symlink). Its contents copy verbatim into the XDG home. This is the case
+    # the Claude-only migration silently dropped.
+    _claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    legacy = tmp_path / "real-dot-sagent"
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", legacy)
+    _write_session(
+        legacy / "projects" / "_home_u_proj" / "deadbeef0001", session_id="S1"
+    )
+    (legacy / "papers").mkdir(parents=True)
+    (legacy / "papers" / "arxiv_1.pdf").write_bytes(b"%PDF-1.4")
+
+    sessions.migrate_legacy_home()
+
+    assert (
+        sagent / "projects" / "_home_u_proj" / "deadbeef0001" / "session.jsonl"
+    ).exists()
+    assert (sagent / "papers" / "arxiv_1.pdf").read_bytes() == b"%PDF-1.4"
+    # Copy, not move: legacy left intact.
+    assert (legacy / "papers" / "arxiv_1.pdf").exists()
+
+
+def test_migrate_prefers_real_sagent_over_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When a real ~/.sagent exists, it is the home; the ~/.claude squat branch
+    # is NOT taken (that path is only for the symlink case).
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    legacy = tmp_path / "real-dot-sagent"
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", legacy)
+    _write_session(
+        legacy / "projects" / "_home_u_real" / "deadbeef0001", session_id="R"
+    )
+    # A Claude tree also present -- must be ignored when real ~/.sagent exists.
+    _write_session(
+        claude / "projects" / "-home-u-claude" / "deadbeef0002", session_id="C"
+    )
+
+    sessions.migrate_legacy_home()
+
+    assert (sagent / "projects" / "_home_u_real").exists()
+    assert not (sagent / "projects" / "-home-u-claude").exists()
+
+
+def test_migrate_symlinked_sagent_takes_claude_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The squat case: ~/.sagent is a SYMLINK (to ~/.claude), not a real dir, so
+    # the Claude-extraction branch runs.
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    claude.mkdir(parents=True)
+    link = tmp_path / "linked-dot-sagent"
+    link.symlink_to(claude, target_is_directory=True)
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", link)
+    _write_session(
+        claude / "projects" / "-home-u-proj" / "deadbeef0001", session_id="S1"
+    )
+
+    sessions.migrate_legacy_home()
+
+    assert (sagent / "projects" / "-home-u-proj" / "deadbeef0001").exists()
+
+
+def test_bridge_skills_symlink_when_claude_has_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    (claude / "skills").mkdir(parents=True)
+    (claude / "skills" / "demo.md").write_text("skill\n")
+
+    sessions.migrate_legacy_home()
+
+    link = sagent / "skills"
+    assert link.is_symlink()
+    assert (link / "demo.md").read_text() == "skill\n"
+
+
+def test_bridge_skills_absent_when_claude_lacks_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    (claude / "papers").mkdir(parents=True)  # claude exists, but no skills/
+    sessions.migrate_legacy_home()
+    assert not (sagent / "skills").exists()
+    assert not (sagent / "skills").is_symlink()
+
+
+def test_project_dir_resolves_legacy_dash_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When only a migrated ``-``-slug dir exists, project_dir returns it."""
+    _claude, _sagent = _setup_homes(tmp_path, monkeypatch)
+    projects = tmp_path / "projects"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    legacy = projects / sessions._legacy_cwd_slug(cwd)
+    _write_session(legacy / "deadbeef0001", session_id="S1")
+
+    resolved = project_dir(cwd, projects_dir=projects)
+    assert resolved == legacy
+    assert latest_session(cwd, projects_dir=projects) is not None
+
+
+def test_new_session_writes_current_slug_even_when_legacy_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # SAG-XDG-002: resume READS the legacy ``-``-slug, but a NEW session must
+    # establish the current ``_``-slug -- never keep writing into the legacy dir.
+    _claude, _sagent = _setup_homes(tmp_path, monkeypatch)
+    projects = tmp_path / "projects"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    legacy = projects / sessions._legacy_cwd_slug(cwd)
+    _write_session(legacy / "deadbeef0001", session_id="S1")
+
+    created = new_session_dir(cwd, projects_dir=projects)
+    assert created.parent == projects / cwd_slug(cwd)
+    assert created.parent != legacy
+
+
+def test_project_dir_prefers_current_slug_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _claude, _sagent = _setup_homes(tmp_path, monkeypatch)
+    projects = tmp_path / "projects"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    current = projects / cwd_slug(cwd)
+    current.mkdir(parents=True)
+    assert project_dir(cwd, projects_dir=projects) == current
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 

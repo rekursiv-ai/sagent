@@ -17,7 +17,6 @@ two writes racing on different provider keys would clobber each other.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import cast
 
 import fcntl
@@ -26,11 +25,12 @@ import logging
 import os
 
 from sagent.lib.atomic_file import atomic_write_bytes
+from sagent.lib.userdirs import data_dir
 
 
 logger = logging.getLogger(__name__)
 
-_PATH = Path.home() / ".sagent" / "last-models.json"
+_PATH = data_dir("sagent") / "last-models.json"
 
 
 def load() -> dict[str, str]:
