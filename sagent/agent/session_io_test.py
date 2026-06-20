@@ -1883,7 +1883,8 @@ def test_persisted_refs_warns_on_unreadable_file(
 
 def test_thought_signature_round_trips(tmp_path: Path) -> None:
     """Gemini 3.x thought signatures must survive a session save/reload, else a
-    resumed tape breaks the signature chain (400 on the next turn)."""
+    resumed tape breaks the signature chain (400 on the next turn).
+    """
     assistant = AssistantMessage(
         text="answer",
         thought_signature="sig-text-abc",

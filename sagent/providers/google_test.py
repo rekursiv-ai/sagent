@@ -637,7 +637,8 @@ def test_build_request_tools_strip_additional_properties() -> None:
 
 def test_build_request_echoes_thought_signature() -> None:
     """Gemini 3.x requires the model's thought signature echoed back on its
-    parts; the text part and each functionCall part carry their own."""
+    parts; the text part and each functionCall part carry their own.
+    """
     asst = AssistantMessage(
         text="answer",
         thought_signature="sig-text",
