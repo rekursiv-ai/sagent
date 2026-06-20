@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.dashscope import DashScope, _DashScopeModel
 from sagent.types.model import ModelRequest
 

@@ -50,7 +50,7 @@ import zlib
 import brotli
 import zstandard
 
-from sagent.lib.json import JSONValue
+from sagent.lib.custom_json import JSONValue
 
 
 __all__ = [

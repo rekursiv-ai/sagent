@@ -18,7 +18,7 @@ import httpx
 import openai
 import pytest
 
-from sagent.lib.json import JSONValue
+from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI, openai_sub
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.errors import (

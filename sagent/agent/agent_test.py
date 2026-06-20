@@ -49,7 +49,7 @@ from sagent.agent.state import (
 )
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import Google
 from sagent.tools.read import Read
 from sagent.types.compactor import CompactRestorable

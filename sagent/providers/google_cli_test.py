@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers import google_cli
 from sagent.providers.google import Google
 from sagent.providers.google_cli import (

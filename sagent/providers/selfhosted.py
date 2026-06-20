@@ -39,7 +39,7 @@ import time
 import uuid
 
 from sagent.lib import token_count
-from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.thinking import ThinkingCapability, valid_thinking_states

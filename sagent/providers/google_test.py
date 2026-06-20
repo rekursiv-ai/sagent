@@ -9,7 +9,7 @@ import logging
 import httpx
 import pytest
 
-from sagent.lib.json import MutableJSON, MutableJSONValue
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue
 from sagent.providers.google import (
     Google,
     _build_request,

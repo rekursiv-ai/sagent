@@ -17,7 +17,7 @@ import asyncio
 import logging
 
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import JSON, MutableJSON, json_freeze
+from sagent.lib.custom_json import JSON, MutableJSON, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (

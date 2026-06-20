@@ -34,7 +34,7 @@ import tempfile
 
 from sagent.lib import token_count
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import JSON, MutableJSON, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, validate_json_schema
 from sagent.providers.google import Google
 from sagent.providers.lib.cost import (
     ModelProfile,

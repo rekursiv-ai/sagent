@@ -42,7 +42,7 @@ Use a class when the tool needs state, custom schema, a prompt section, custom s
 
 ```python
 from sagent.custom_types import Message, TextMessage
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.lib.message import get_directive
 
 

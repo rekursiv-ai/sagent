@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.anthropic import (
     Anthropic,
     _assistant_blocks,

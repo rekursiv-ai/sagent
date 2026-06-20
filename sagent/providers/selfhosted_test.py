@@ -11,7 +11,7 @@ from typing import cast
 
 import json
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.selfhosted import (
     SelfHostedModel,
     _attention_mask,

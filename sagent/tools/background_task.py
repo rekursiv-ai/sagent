@@ -27,7 +27,7 @@ from wrapt import lazy_import
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import append_persistent_agent_lifecycle
 from sagent.agent.state import agent_registry
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import current_agent_var, load_tool_description
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,

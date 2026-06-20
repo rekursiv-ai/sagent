@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from sagent.lib.json import JSON, validate_json_schema
+from sagent.lib.custom_json import JSON, validate_json_schema
 
 
 _INPUT_VALIDATION_PREFIX = "InputValidationError:"
@@ -15,7 +15,7 @@ _TOOL_INPUT_RECOVERY_HINT = (
     "Either retry this tool with the required fields, choose a different tool "
     "that fits the task, or explain why the required value is unavailable."
 )
-# String prefix produced by ``sagent.lib.json.validate_json_schema`` when
+# String prefix produced by ``sagent.lib.custom_json.validate_json_schema`` when
 # ``additionalProperties: false`` rejects a key. We branch on the literal
 # because the upstream function returns plain strings; changes to that prefix
 # must be reflected here.

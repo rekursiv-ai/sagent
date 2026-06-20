@@ -24,7 +24,7 @@ import logging
 import shutil
 import signal
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.types.exceptions import log_task_exception
 
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import ClassVar, override
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import (
     OpenAICompat,

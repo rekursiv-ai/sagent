@@ -49,7 +49,7 @@ else:
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
 from sagent.lib import debug_log, token_count
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
     int_val,

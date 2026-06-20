@@ -12,7 +12,7 @@ The CLI exposes agent events through `--output-format stream-json`.
 ```python
 import asyncio
 
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 
 
 events: asyncio.Queue = asyncio.Queue()

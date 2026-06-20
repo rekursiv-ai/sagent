@@ -20,7 +20,7 @@ import cachetools
 import defusedxml.common
 import defusedxml.ElementTree
 
-from sagent.lib.json import JSON, JSONValue, json_freeze, json_unfreeze
+from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,

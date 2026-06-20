@@ -12,7 +12,7 @@ import json
 import cachetools
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.lib.ratelimit import FileStore, TokenBucketRateLimiter
 from sagent.lib.web.fetch import FetchError
 from sagent.tools import paper_common
