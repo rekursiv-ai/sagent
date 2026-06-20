@@ -25,7 +25,7 @@ and :mod:`.paper_fetch`, grouped by concern:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -513,7 +513,12 @@ def truncation_notice(shown: int, total: int) -> str:
 
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
-S2_TIMEOUT = 60.0
+# Healthy S2 latency is sub-second to a few seconds even for a 100-item
+# reference page; 10s clears the slow tail (batch POST, deep pagination) with
+# wide margin. A larger value only prolongs a silent hang when S2 is wedged,
+# blocking an interactive agent turn (live 2026-06-19: a stalled fetch sat
+# idle ~60s against the old ceiling before the user interrupted it).
+S2_TIMEOUT = 10.0
 
 # The S2 paper fields every Paper* tool requests. Shared so the set stays in
 # sync across tools; ``s2_paper_to_record`` consumes exactly these. Nested
@@ -565,7 +570,16 @@ def summary_ids(args: Mapping[str, object]) -> str:
     return head if len(ids) == 1 else f"{head} (+{len(ids) - 1} more)"
 
 
-def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
+def _is_paper_id(token: str) -> bool:
+    """Whether ``token`` parses as a DOI or arXiv id (the default id shape)."""
+    return not isinstance(normalize_id(token), ToolResult)
+
+
+def parse_optional_ids(
+    args: Mapping[str, object],
+    *,
+    looks_like_id: Callable[[str], bool] = _is_paper_id,
+) -> list[str] | ToolResult:
     """Parse and validate the ``ids`` argument, allowing its absence.
 
     Shared shape-checker so every id-taking Paper* tool accepts ``ids``
@@ -577,6 +591,9 @@ def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
 
     Args:
       args: Tool arguments.
+      looks_like_id: Predicate deciding whether a comma/newline bundle should
+        be split (every token must satisfy it). Defaults to the DOI/arXiv
+        shape; PaperAuthor passes ``str.isdigit`` for opaque author ids.
 
     Returns:
       ids: Stripped, non-empty identifier strings (possibly ``[]`` when
@@ -587,26 +604,39 @@ def parse_optional_ids(args: Mapping[str, object]) -> list[str] | ToolResult:
     raw_ids = args.get("ids")
     if raw_ids is None:
         return []
-    if isinstance(raw_ids, str):
-        # Models routinely emit a multi-id ``ids`` as a STRING rather than a
-        # JSON array -- either a JSON-encoded array (``'["a","b"]'``) or a
-        # comma/newline-joined bundle (``'a,b'``). The Anthropic tool-call
-        # wire coerces the union-typed (``["array","string"]``) ``ids`` schema
-        # to a string, so a syntactically correct array never arrives as a
-        # ``list`` (live 2026-06-19: every batched ``PaperDetails`` call this
-        # way died "Unrecognized identifier shape", forcing one-id-per-call).
-        # Recover the list here so batching works regardless of wire shape.
-        raw_ids = _split_id_bundle(raw_ids)
-    if not isinstance(raw_ids, list):
+    # Normalize to a list, then expand every string ELEMENT through bundle
+    # recovery. Models emit a multi-id ``ids`` as a string when the wire
+    # coerces the union-typed (``["array","string"]``) schema -- and that
+    # string can arrive either bare (``"a,b"``) OR wrapped in a one-element
+    # list (``["a,b"]``, live 2026-06-19: PaperAuthor hit ``/author/a,b`` as a
+    # single id). Recovering per-element handles both shapes; a genuine
+    # multi-element list is untouched because ``_split_id_bundle`` returns a
+    # non-bundle element unchanged.
+    items = [raw_ids] if isinstance(raw_ids, str) else raw_ids
+    if not isinstance(items, list):
         return ToolResult(
             call_id="",
             content="'ids' must be a list of strings or a single string.",
             is_error=True,
         )
-    return [str(x).strip() for x in cast(list[object], raw_ids) if str(x).strip()]
+    expanded: list[str] = []
+    for item in cast(list[object], items):
+        if not isinstance(item, str):
+            # Symmetric with the bare-scalar reject above: a non-string element
+            # is a shape error, not something to silently ``str()``-coerce into
+            # a bogus id (``7`` -> ``"7"``).
+            return ToolResult(
+                call_id="",
+                content="'ids' must be a list of strings or a single string.",
+                is_error=True,
+            )
+        expanded.extend(_split_id_bundle(item, looks_like_id=looks_like_id))
+    return [x.strip() for x in expanded if x.strip()]
 
 
-def _split_id_bundle(raw: str) -> list[str]:
+def _split_id_bundle(
+    raw: str, *, looks_like_id: Callable[[str], bool] = _is_paper_id
+) -> list[str]:
     """Recover a list of ids from a single string argument.
 
     Handles the two shapes a model emits when it means a batch but the wire
@@ -614,9 +644,14 @@ def _split_id_bundle(raw: str) -> list[str]:
 
     1. A JSON-encoded array of strings (``'["a", "b"]'``) -> its elements.
     2. A comma- or newline-joined bundle (``'a, b'``) -> split, but ONLY when
-       every token then parses as a valid id. A lone DOI can legitimately
+       every token satisfies ``looks_like_id``. A lone DOI can legitimately
        contain a comma, so an ambiguous split that yields any non-id token is
        rejected and the original string is returned untouched (one id).
+
+    ``looks_like_id`` is injected because the validity test is namespace
+    specific: paper tools accept DOI/arXiv shapes, but PaperAuthor's opaque
+    integer author ids would be rejected by the paper-id check, leaving their
+    comma bundles unrecovered. Each tool passes the predicate for its ids.
 
     A plain single id (no separators) returns ``[raw]`` -- the common case,
     unchanged.
@@ -630,9 +665,7 @@ def _split_id_bundle(raw: str) -> list[str]:
         if isinstance(parsed, list):
             return [str(x) for x in cast(list[object], parsed)]
     tokens = [t.strip() for t in re.split(r"[,\n]+", s) if t.strip()]
-    if len(tokens) > 1 and all(
-        not isinstance(normalize_id(t), ToolResult) for t in tokens
-    ):
+    if len(tokens) > 1 and all(looks_like_id(t) for t in tokens):
         return tokens
     return [raw]
 
@@ -659,13 +692,44 @@ def validate_limit(limit: int | None) -> int | None | ToolResult:
     return limit
 
 
-def resolve_id_args(args: Mapping[str, object]) -> list[str] | ToolResult:
+def validate_abstract_chars(cap: int | None) -> int | None | ToolResult:
+    """Reject a non-positive ``abstract_chars``; pass ``None`` and positives.
+
+    The schema declares ``minimum: 1``, but the directive layer does not
+    enforce minimums, so a ``0`` would otherwise reach :func:`_trim_abstract`
+    and be silently read as "no truncation" -- contradicting the schema and
+    diverging from :func:`validate_limit`. One validator per positive-int tool
+    arg keeps the contract uniform.
+
+    Args:
+      cap: Caller-supplied abstract cap (``None`` when omitted).
+
+    Returns:
+      cap: The value unchanged, or a ``ToolResult`` error when ``< 1``.
+
+    """
+    if cap is not None and cap < 1:
+        return ToolResult(
+            call_id="",
+            content="'abstract_chars' must be a positive integer.",
+            is_error=True,
+        )
+    return cap
+
+
+def resolve_id_args(
+    args: Mapping[str, object],
+    *,
+    looks_like_id: Callable[[str], bool] = _is_paper_id,
+) -> list[str] | ToolResult:
     """Resolve a required, non-empty ``ids`` list.
 
     Wraps :func:`parse_optional_ids` for tools where ``ids`` is mandatory.
 
     Args:
       args: Tool arguments. ``ids`` is a list of one or more identifiers.
+      looks_like_id: Bundle-split predicate forwarded to
+        :func:`parse_optional_ids`.
 
     Returns:
       ids: Stripped, non-empty identifier strings, or a ``ToolResult``
@@ -674,7 +738,7 @@ def resolve_id_args(args: Mapping[str, object]) -> list[str] | ToolResult:
     """
     if "ids" not in args:
         return ToolResult(call_id="", content="'ids' is required.", is_error=True)
-    ids = parse_optional_ids(args)
+    ids = parse_optional_ids(args, looks_like_id=looks_like_id)
     if isinstance(ids, ToolResult):
         return ids
     if not ids:
@@ -753,6 +817,64 @@ async def s2_batch(
     return [cast(MutableJSON, p) if isinstance(p, dict) else None for p in result]
 
 
+async def s2_batch_blocks(
+    ids: list[str],
+    *,
+    fields: str,
+    endpoint: Literal["paper", "author"],
+    to_block: Callable[[MutableJSON], str],
+    cache: MutableMapping[tuple[object, ...], str],
+    cache_tag: tuple[object, ...],
+    labels: list[str] | None = None,
+) -> ToolResult:
+    """Batch-fetch ``ids`` and render one block per id, cached when complete.
+
+    The single batch path shared by PaperDetails and PaperAuthor metadata
+    lookups. Each tool injects its wire ids, field set, endpoint, and a
+    ``to_block`` renderer; the fetch, the per-id miss handling, and the
+    process cache live here exactly once.
+
+    Misses render as ``"<label>: not found"``. ``labels`` defaults to ``ids``,
+    but a tool whose ``ids`` are internal wire forms (PaperDetails resolves
+    ``10.x/y`` to ``DOI:10.x/y``) passes the user-facing spellings so the miss
+    message never leaks wire syntax. The result is cached only when every id
+    resolved: a transient miss -- a just-published paper, S2 indexing lag --
+    must not pin a ``not found`` for the process lifetime, since the cache is
+    capacity-bounded with no staleness window.
+
+    Args:
+      ids: S2 wire ids (paper or author, matching ``endpoint``).
+      fields: Comma-separated S2 field selector.
+      endpoint: Which batch endpoint to hit.
+      to_block: Render one resolved record into its text block.
+      cache: The calling tool's process cache.
+      cache_tag: Key prefix distinguishing this batch shape (e.g. abstract
+        cap) from other entries in the same cache.
+      labels: Per-id display labels for miss lines; defaults to ``ids``.
+
+    Returns:
+      result: Blocks in input order, or an error ``ToolResult``.
+
+    """
+    assert ids, "s2_batch_blocks requires a non-empty id list"
+    miss_labels = labels if labels is not None else ids
+    key = (*cache_tag, tuple(ids))
+    cached = cache.get(key)
+    if cached is not None:
+        return ToolResult(call_id="", content=cached)
+    records = await s2_batch(ids, fields, endpoint=endpoint)
+    if isinstance(records, ToolResult):
+        return records
+    blocks = [
+        to_block(data) if data is not None else f"{label}: not found"
+        for label, data in zip(miss_labels, records, strict=True)
+    ]
+    content = "\n\n".join(blocks)
+    if all(r is not None for r in records):
+        cache[key] = content
+    return ToolResult(call_id="", content=content)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Page:
     """A paginated, filtered slice of an S2 list endpoint.
@@ -803,6 +925,14 @@ async def _s2_attempt(do_fetch: Callable[[], bytes]) -> bytes | FetchError:
                 await asyncio.sleep(_S2_BACKOFF_BASE * 2**attempt)
                 continue
             return e
+        except (TimeoutError, OSError) as e:
+            # fetch re-raises these on socket timeout / connection failure
+            # (fetch.py exhausts its own retries first). Funnel them into the
+            # same FetchError-rendered path as any HTTP error -- status 0 marks
+            # "no response" -- so a timeout surfaces as a structured ToolResult
+            # rather than a bare exception. This matters more since S2_TIMEOUT
+            # was lowered to 10s: the condition now fires far more often.
+            return FetchError(url="", status=0, headers={}, body=str(e).encode())
     raise AssertionError("_s2_attempt retry loop exited without returning")
 
 
@@ -820,6 +950,15 @@ def _s2_error_result(e: FetchError, what: str) -> ToolResult:
       result: An error ``ToolResult``.
 
     """
+    if e.status == 0:
+        return ToolResult(
+            call_id="",
+            content=(
+                f"Semantic Scholar request failed for {what} "
+                "(timeout or connection error). Retry shortly."
+            ),
+            is_error=True,
+        )
     if e.status == 404:
         return ToolResult(call_id="", content=f"Not found: {what}", is_error=True)
     if e.status == 429:
@@ -922,7 +1061,7 @@ async def s2_paginate(
             # with the shared, consistent message.
             if data.status == 400 and kept:
                 return Page(entries=_cap(kept, limit), complete=False)
-            return _s2_error_result(data, f"paginating {path}")
+            return _s2_error_result(data, _paginate_label(path))
         rows = cast(list[MutableJSON], data.get("data") or [])
         kept.extend(e for e in rows if keep(e))
         nxt = data.get("next")
@@ -941,6 +1080,25 @@ async def s2_paginate(
 def _cap(entries: list[MutableJSON], limit: int | None) -> list[MutableJSON]:
     """Trim ``entries`` to ``limit`` (no-op when ``limit`` is ``None``)."""
     return entries if limit is None else entries[:limit]
+
+
+def _paginate_label(path: str) -> str:
+    """Human label for a paginated path's error message.
+
+    A 404 on a per-entity listing -- ``/paper/<id>/references``,
+    ``/paper/<id>/citations``, or ``/author/<id>/papers`` -- means the ENTITY
+    is unindexed, so render ``"<listing> for <id>"`` rather than the literal
+    ``"paginating /paper/<id>/references"``, which reads as if pagination
+    itself were missing. Other paths fall back to the literal form.
+    """
+    parts = path.strip("/").split("/")
+    listings = {
+        "paper": ("citations", "references"),
+        "author": ("papers",),
+    }
+    if len(parts) == 3 and parts[2] in listings.get(parts[0], ()):
+        return f"{parts[2]} for {parts[1]}"
+    return f"paginating {path}"
 
 
 async def _s2_request(
