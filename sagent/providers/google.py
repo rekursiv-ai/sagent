@@ -550,19 +550,23 @@ def _build_request(
             _flush_tool_parts(contents, pending_tool_parts)
             model_parts: list[MutableJSON] = []
             if entry.text:
-                model_parts.append({"text": entry.text})
-            model_parts.extend(
-                cast(
-                    MutableJSON,
-                    {
-                        "functionCall": {
-                            "name": tc.name,
-                            "args": dict(tc.args),
-                        },
+                text_part: MutableJSON = {"text": entry.text}
+                # Gemini 3.x requires the model's thought signature echoed back
+                # on its parts in subsequent requests, else the API rejects the
+                # continuation. Omitted when empty (older models / no thinking).
+                if entry.thought_signature:
+                    text_part["thoughtSignature"] = entry.thought_signature
+                model_parts.append(text_part)
+            for tc in entry.tool_calls:
+                fc_part: MutableJSON = {
+                    "functionCall": {
+                        "name": tc.name,
+                        "args": dict(tc.args),
                     },
-                )
-                for tc in entry.tool_calls
-            )
+                }
+                if tc.thought_signature:
+                    fc_part["thoughtSignature"] = tc.thought_signature
+                model_parts.append(fc_part)
             if model_parts:
                 contents.append(
                     cast(MutableJSON, {"role": "model", "parts": model_parts})
@@ -696,6 +700,7 @@ async def _consume_gemini_stream(
     disables streaming.
     """
     text_chunks: list[str] = []
+    text_signature: str = ""
     thinking_chunks: list[str] = []
     tool_calls: list[ToolCall] = []
     usage: MutableJSON = {}
@@ -737,6 +742,10 @@ async def _consume_gemini_stream(
             parts = cast(list[MutableJSON], content.get("parts") or [])
             for part in parts:
                 if "text" in part:
+                    # Gemini 3.x attaches the model's thought signature to its
+                    # answer part; capture it so it can be echoed back next turn.
+                    if "thoughtSignature" in part:
+                        text_signature = cast(str, part["thoughtSignature"])
                     chunk = part.get("text")
                     if isinstance(chunk, str) and part.get("thought") is True:
                         thinking_chunks.append(chunk)
@@ -757,6 +766,9 @@ async def _consume_gemini_stream(
                                 id=tc_id,
                                 name=fc_name,
                                 args=cast(Mapping[str, object], fc_args),
+                                thought_signature=cast(
+                                    str, part.get("thoughtSignature", "")
+                                ),
                             )
                         )
 
@@ -765,6 +777,7 @@ async def _consume_gemini_stream(
 
     response = _build_response(
         text="".join(text_chunks),
+        text_signature=text_signature,
         thinking="".join(thinking_chunks),
         tool_calls=tool_calls,
         usage=usage,
@@ -779,6 +792,7 @@ async def _consume_gemini_stream(
 def _build_response(
     *,
     text: str,
+    text_signature: str = "",
     thinking: str = "",
     tool_calls: list[ToolCall],
     usage: MutableJSON,
@@ -800,6 +814,7 @@ def _build_response(
     return ModelResponse(
         message=AssistantMessage(
             text=text,
+            thought_signature=text_signature,
             thinking_blocks=({"type": "thinking", "thinking": thinking},)
             if thinking
             else (),

@@ -249,9 +249,15 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
         return {
             "type": "assistant",
             "text": entry.text,
+            "thought_signature": entry.thought_signature,
             "thinking_blocks": _thinking_to_json(entry.thinking_blocks),
             "tool_calls": [
-                {"id": tc.id, "name": tc.name, "args": dict(tc.args)}
+                {
+                    "id": tc.id,
+                    "name": tc.name,
+                    "args": dict(tc.args),
+                    "thought_signature": tc.thought_signature,
+                }
                 for tc in entry.tool_calls
             ],
             "id": entry.id,
@@ -601,10 +607,12 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
                         id=str(tcd.get("id") or ""),
                         name=str(tcd.get("name") or ""),
                         args=args,
+                        thought_signature=str(tcd.get("thought_signature") or ""),
                     ),
                 )
         return AssistantMessage(
             text=str(d.get("text") or ""),
+            thought_signature=str(d.get("thought_signature") or ""),
             thinking_blocks=_thinking_from_json(d.get("thinking_blocks")),
             tool_calls=tuple(tcs),
             id=entry_id,

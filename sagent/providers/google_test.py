@@ -635,6 +635,41 @@ def test_build_request_tools_strip_additional_properties() -> None:
     assert "additionalProperties" not in schema
 
 
+def test_build_request_echoes_thought_signature() -> None:
+    """Gemini 3.x requires the model's thought signature echoed back on its
+    parts; the text part and each functionCall part carry their own."""
+    asst = AssistantMessage(
+        text="answer",
+        thought_signature="sig-text",
+        tool_calls=(
+            ToolCall(
+                id="ext-1", name="Bash", args={"cmd": "ls"},
+                thought_signature="sig-fc",
+            ),
+        ),
+    )
+    body = _build_request(_make_request([asst]))
+    parts = cast(
+        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+    )
+    assert parts[0] == {"text": "answer", "thoughtSignature": "sig-text"}
+    assert parts[1]["thoughtSignature"] == "sig-fc"
+
+
+def test_build_request_omits_empty_thought_signature() -> None:
+    """No signature (older models / thinking off) -> no thoughtSignature key."""
+    asst = AssistantMessage(
+        text="hi",
+        tool_calls=(ToolCall(id="e", name="Bash", args={}),),
+    )
+    body = _build_request(_make_request([asst]))
+    parts = cast(
+        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+    )
+    assert parts[0] == {"text": "hi"}
+    assert "thoughtSignature" not in parts[1]
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 
