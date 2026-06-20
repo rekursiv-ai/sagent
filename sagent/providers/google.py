@@ -550,7 +550,7 @@ def _build_request(
             _flush_tool_parts(contents, pending_tool_parts)
             model_parts: list[MutableJSON] = []
             if entry.text:
-                text_part: MutableJSON = {"text": entry.text}
+                text_part = cast(MutableJSON, {"text": entry.text})
                 # Gemini 3.x requires the model's thought signature echoed back
                 # on its parts in subsequent requests, else the API rejects the
                 # continuation. Omitted when empty (older models / no thinking).
@@ -558,12 +558,15 @@ def _build_request(
                     text_part["thoughtSignature"] = entry.thought_signature
                 model_parts.append(text_part)
             for tc in entry.tool_calls:
-                fc_part: MutableJSON = {
-                    "functionCall": {
-                        "name": tc.name,
-                        "args": dict(tc.args),
+                fc_part = cast(
+                    MutableJSON,
+                    {
+                        "functionCall": {
+                            "name": tc.name,
+                            "args": dict(tc.args),
+                        },
                     },
-                }
+                )
                 if tc.thought_signature:
                     fc_part["thoughtSignature"] = tc.thought_signature
                 model_parts.append(fc_part)
