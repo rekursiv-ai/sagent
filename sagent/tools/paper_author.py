@@ -38,19 +38,18 @@ from sagent.tools.paper_common import (
     format_author_line,
     format_record,
     parse_optional_ids,
-    s2_batch,
+    s2_batch_blocks,
     s2_get,
     s2_paginate,
     s2_paper_to_record,
     summary_ids,
     truncation_notice,
+    validate_abstract_chars,
     validate_limit,
     year_in_range,
 )
 from sagent.types.runtime import ToolResult
 
-
-_CACHE_TTL_SEC = 15 * 60
 
 _AUTHOR_FIELDS_STR = ",".join(
     (
@@ -66,10 +65,10 @@ _AUTHOR_FIELDS_STR = ",".join(
 )
 
 
-_cache = cachetools.TTLCache[tuple[object, ...], str](
-    maxsize=256,
-    ttl=_CACHE_TTL_SEC,
-)
+# Author metadata is effectively immutable on an agent's timescale; the cache
+# collapses duplicate lookups within a process (sparing the shared S2 gate),
+# bounded by capacity rather than a staleness window.
+_cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
 
 
 def _s2_author_to_record(data: MutableJSON) -> AuthorRecord:
@@ -291,11 +290,15 @@ class PaperAuthor:
             return limit
         year_from = opt_int(args, "year_from")
         year_to = opt_int(args, "year_to")
-        abstract_chars = opt_int(args, "abstract_chars")
+        cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
+        if isinstance(cap, ToolResult):
+            return cap
         q = query.strip()
         op = operation.strip().lower()
 
-        ids = parse_optional_ids(args)
+        # S2 author ids are opaque integer strings, so a comma-joined bundle
+        # splits on ``str.isdigit`` rather than the default DOI/arXiv check.
+        ids = parse_optional_ids(args, looks_like_id=str.isdigit)
         if isinstance(ids, ToolResult):
             return ids
 
@@ -309,7 +312,6 @@ class PaperAuthor:
         if err is not None:
             return err
 
-        cap = int(abstract_chars) if abstract_chars is not None else None
         if not q and not op and len(ids) > 1:
             return await self._author_batch(ids)
         return await self._dispatch_author(
@@ -332,16 +334,14 @@ class PaperAuthor:
           result: Author blocks in input order, or an error.
 
         """
-        authors = await s2_batch(author_ids, _AUTHOR_FIELDS_STR, endpoint="author")
-        if isinstance(authors, ToolResult):
-            return authors
-        blocks: list[str] = []
-        for raw, data in zip(author_ids, authors, strict=True):
-            if data is None:
-                blocks.append(f"{raw}: not found")
-                continue
-            blocks.append(format_author_block(_s2_author_to_record(data)))
-        return ToolResult(call_id="", content="\n\n".join(blocks))
+        return await s2_batch_blocks(
+            author_ids,
+            fields=_AUTHOR_FIELDS_STR,
+            endpoint="author",
+            to_block=lambda data: format_author_block(_s2_author_to_record(data)),
+            cache=_cache,
+            cache_tag=("author_batch",),
+        )
 
     async def _dispatch_author(
         self,

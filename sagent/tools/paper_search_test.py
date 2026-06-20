@@ -268,6 +268,49 @@ def test_run_hits_no_author_hint() -> None:
     assert 'source="fused"' not in result.content
 
 
+def test_openalex_uses_interactive_timeout() -> None:
+    # The fused backend queries OpenAlex alongside S2; its timeout must be
+    # bounded too, or one leg can silently hang an interactive turn even after
+    # the other returned (live 2026-06-19 idle-hang regression guard).
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b'{"meta": {"count": 0}, "results": []}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperSearch().run({"query": "timeout_probe", "source": "openalex"})
+        )
+    timeout = captured["timeout_sec"]
+    assert isinstance(timeout, float)
+    assert timeout <= 15.0
+
+
+def test_default_source_is_s2_only() -> None:
+    # The module docstring and behavior must agree: default queries S2 ALONE,
+    # not the fused both-backends path.
+    with (
+        patch(
+            "sagent.tools.paper_common.fetch",
+            return_value=_s2_search_payload(),
+        ) as s2_fetch,
+        patch("sagent.tools.paper_search.fetch") as oa_fetch,
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "default_source_probe"}))
+    assert not result.is_error
+    assert s2_fetch.call_count == 1
+    assert oa_fetch.call_count == 0
+
+
+def test_run_rejects_zero_abstract_chars() -> None:
+    # Schema declares minimum 1; 0 must be rejected, not silently treated as
+    # "no truncation" (matches validate_limit's reject-0 contract).
+    result = asyncio.run(PaperSearch().run({"query": "x", "abstract_chars": 0}))
+    assert result.is_error
+    assert "abstract_chars" in result.content
+
+
 def test_run_openalex_path() -> None:
     payload = json.dumps(
         {
@@ -282,6 +325,28 @@ def test_run_openalex_path() -> None:
             PaperSearch().run({"query": "openalex_path_query", "source": "openalex"}),
         )
     assert "OA Hit" in result.content
+
+
+def test_run_openalex_timeout_returns_error() -> None:
+    # OpenAlex shares the same fetch path as S2: a socket timeout raises
+    # TimeoutError/OSError (not FetchError). With the lowered timeout it must
+    # render as a ToolResult, not escape (parity with the S2 fix).
+    with patch(
+        "sagent.tools.paper_search.fetch",
+        side_effect=TimeoutError("slow"),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "x", "source": "openalex"}))
+    assert result.is_error
+    assert "OpenAlex" in result.content
+
+
+def test_run_openalex_connection_error_returns_error() -> None:
+    with patch(
+        "sagent.tools.paper_search.fetch",
+        side_effect=OSError("refused"),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "x", "source": "openalex"}))
+    assert result.is_error
 
 
 def test_run_openalex_rate_limit_returns_error() -> None:

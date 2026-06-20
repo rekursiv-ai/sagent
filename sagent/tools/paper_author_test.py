@@ -327,6 +327,61 @@ def test_run_ids_batches_author_metadata() -> None:
     assert "Third" in result.content
 
 
+def test_run_ids_batch_caches_author_metadata() -> None:
+    # B1: the author batch path must cache like the single-author path; a
+    # repeated all-resolved batch hits the cache, not the network.
+    payload = json.dumps(
+        [
+            {"authorId": "11", "name": "First", "hIndex": 10},
+            {"authorId": "22", "name": "Second", "hIndex": 20},
+        ]
+    ).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload) as mock_fetch:
+        _ = asyncio.run(PaperAuthor().run({"ids": ["11", "22"]}))
+        _ = asyncio.run(PaperAuthor().run({"ids": ["11", "22"]}))
+    assert mock_fetch.call_count == 1
+
+
+def test_run_ids_batch_author_miss_not_cached() -> None:
+    # D1: a batch with an unresolved author id must not cache; repeat re-fetches.
+    payload = json.dumps(
+        [{"authorId": "33", "name": "Only", "hIndex": 5}, None]
+    ).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload) as mock_fetch:
+        ids = ["33", "44"]
+        _ = asyncio.run(PaperAuthor().run({"ids": ids}))
+        _ = asyncio.run(PaperAuthor().run({"ids": ids}))
+    assert mock_fetch.call_count == 2
+
+
+def test_run_recovers_comma_joined_author_ids() -> None:
+    # B2: a comma-joined author-id STRING (the string-array wire shape) must be
+    # recovered into a batch, even though opaque author ids fail normalize_id.
+    payload = json.dumps(
+        [
+            {"authorId": "1741101", "name": "A", "hIndex": 1},
+            {"authorId": "2064160", "name": "B", "hIndex": 2},
+        ]
+    ).encode()
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return payload
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        result = asyncio.run(PaperAuthor().run({"ids": "1741101,2064160"}))
+    assert not result.is_error
+    assert captured["method"] == "POST"
+    assert captured["json"] == {"ids": ["1741101", "2064160"]}
+
+
+def test_run_rejects_zero_abstract_chars() -> None:
+    result = asyncio.run(PaperAuthor().run({"ids": ["1"], "abstract_chars": 0}))
+    assert result.is_error
+    assert "abstract_chars" in result.content
+
+
 def test_run_bare_string_id_coerced() -> None:
     # A single id may be passed as a bare string (coerced to a one-element
     # list), consistent with PaperDetails / PaperFetch. One id -> single GET.
