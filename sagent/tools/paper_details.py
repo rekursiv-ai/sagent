@@ -28,19 +28,18 @@ from sagent.tools.paper_common import (
     format_record,
     normalize_id,
     resolve_id_args,
-    s2_batch,
+    s2_batch_blocks,
     s2_get,
     s2_paginate,
     s2_paper_to_record,
     s2_wire_id,
     summary_ids,
+    validate_abstract_chars,
     validate_limit,
     year_in_range,
 )
 from sagent.types.runtime import ToolResult
 
-
-_CACHE_TTL_SEC = 15 * 60
 
 _REF_FIELDS_STR = ",".join(
     ("isInfluential", *(f"citedPaper.{f}" for f in S2_PAPER_FIELDS)),
@@ -50,10 +49,12 @@ _CIT_FIELDS_STR = ",".join(
 )
 
 
-_cache = cachetools.TTLCache[tuple[object, ...], str](
-    maxsize=256,
-    ttl=_CACHE_TTL_SEC,
-)
+# Paper metadata is effectively immutable on any timescale an agent cares
+# about, so the cache exists to collapse duplicate lookups within a process
+# (sparing the shared 1 req/s S2 gate), not for freshness. Bound by capacity,
+# not time: an LRU evicts the coldest entry, no staleness window to reason
+# about.
+_cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
 
 
 def _validate_details_args(
@@ -229,8 +230,9 @@ class PaperDetails:
         limit = validate_limit(opt_int(args, "limit"))
         if isinstance(limit, ToolResult):
             return limit
-        abstract_chars = opt_int(args, "abstract_chars")
-        cap = int(abstract_chars) if abstract_chars is not None else None
+        cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
+        if isinstance(cap, ToolResult):
+            return cap
 
         id_list = resolve_id_args(args)
         if isinstance(id_list, ToolResult):
@@ -321,17 +323,17 @@ class PaperDetails:
             if isinstance(parsed, ToolResult):
                 return parsed
             wire_ids.append(s2_wire_id(*parsed))
-        papers = await s2_batch(wire_ids, S2_PAPER_FIELDS_STR)
-        if isinstance(papers, ToolResult):
-            return papers
-        blocks: list[str] = []
-        for raw, data in zip(raw_ids, papers, strict=True):
-            if data is None:
-                blocks.append(f"{raw}: not found")
-                continue
-            rec = s2_paper_to_record(data)
-            blocks.append(format_block(rec, abstract_chars=abstract_chars))
-        return ToolResult(call_id="", content="\n\n".join(blocks))
+        return await s2_batch_blocks(
+            wire_ids,
+            fields=S2_PAPER_FIELDS_STR,
+            endpoint="paper",
+            to_block=lambda data: format_block(
+                s2_paper_to_record(data), abstract_chars=abstract_chars
+            ),
+            cache=_cache,
+            cache_tag=("batch", abstract_chars),
+            labels=raw_ids,
+        )
 
     async def _references(
         self,

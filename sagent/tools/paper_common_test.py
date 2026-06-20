@@ -9,6 +9,7 @@ from unittest.mock import patch
 import asyncio
 import json
 
+import cachetools
 import pytest
 
 from sagent.lib.json import MutableJSON
@@ -30,6 +31,7 @@ from sagent.tools.paper_common import (
     parse_optional_ids,
     resolve_id_args,
     s2_batch,
+    s2_batch_blocks,
     s2_get,
     s2_paginate,
     s2_paper_to_record,
@@ -37,6 +39,7 @@ from sagent.tools.paper_common import (
     short_id,
     summary_ids,
     truncation_notice,
+    validate_abstract_chars,
     validate_limit,
     year_in_range,
 )
@@ -396,6 +399,47 @@ def test_s2_get_success() -> None:
     assert isinstance(inner, list)
 
 
+def test_s2_get_uses_interactive_timeout() -> None:
+    # A wedged S2 fetch must not sit idle for a minute on an interactive turn:
+    # the request timeout is bounded well under the old 60s ceiling
+    # (live 2026-06-19 idle-hang regression guard).
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b"{}"
+
+    with patch("sagent.tools.paper_common.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(s2_get("/p", {}))
+    timeout = captured["timeout_sec"]
+    assert isinstance(timeout, float)
+    assert timeout <= 15.0
+
+
+def test_s2_get_timeout_returns_tool_result() -> None:
+    # fetch re-raises TimeoutError/OSError on a socket timeout (not FetchError);
+    # the lowered S2_TIMEOUT makes this fire often, so it must render as a clean
+    # ToolResult, not escape to the runtime's generic catch-all.
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        side_effect=TimeoutError("socket timed out"),
+    ):
+        result = asyncio.run(s2_get("/p", {}))
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "timeout" in result.content.lower() or "connection" in result.content.lower()
+
+
+def test_s2_get_connection_error_returns_tool_result() -> None:
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        side_effect=OSError("connection refused"),
+    ):
+        result = asyncio.run(s2_get("/p", {}))
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
 def test_s2_get_404_returns_tool_result() -> None:
     err = FetchError(
         url=f"{S2_BASE}/paper/x",
@@ -450,6 +494,22 @@ def test_s2_batch_aligns_results_with_input_ids() -> None:
 def test_s2_batch_empty_returns_empty_list() -> None:
     out = asyncio.run(s2_batch([], "title"))
     assert out == []
+
+
+def test_s2_batch_blocks_empty_ids_raises() -> None:
+    # Empty ids is an impossible case (tools gate len>1 upstream); the invariant
+    # is an assert, not a silently-cached empty result (STYLE.md:91).
+    with pytest.raises(AssertionError, match="non-empty"):
+        asyncio.run(
+            s2_batch_blocks(
+                [],
+                fields="title",
+                endpoint="paper",
+                to_block=lambda _d: "x",
+                cache=cachetools.LRUCache(maxsize=8),
+                cache_tag=("k",),
+            )
+        )
 
 
 def test_s2_batch_posts_json_body() -> None:
@@ -564,6 +624,35 @@ def test_s2_paginate_deep_page_error_stops_gracefully() -> None:
     assert not page.complete  # S2 said no more; honest partial
 
 
+def test_s2_paginate_404_names_paper_not_pagination() -> None:
+    # A 404 on a citations/references walk means the PAPER is unindexed; the
+    # message must say "citations for <id>", not the confusing "paginating
+    # /paper/<id>/citations" which reads as if pagination itself was not found
+    # (live: S2 lacks arXiv:2510.04871, surfaced as the latter).
+    err = FetchError(url="u", status=404, headers={}, body=b"")
+    with patch("sagent.tools.paper_common.fetch", side_effect=err):
+        result = asyncio.run(
+            s2_paginate("/paper/ARXIV:2510.04871/citations", {}, limit=10)
+        )
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "citations for ARXIV:2510.04871" in result.content
+    assert "paginating" not in result.content
+
+
+def test_s2_paginate_404_author_papers_named() -> None:
+    # The author papers walk (/author/<id>/papers) deserves the same clear
+    # 404 wording as paper citations/references -- "papers for <id>", not
+    # "paginating /author/<id>/papers".
+    err = FetchError(url="u", status=404, headers={}, body=b"")
+    with patch("sagent.tools.paper_common.fetch", side_effect=err):
+        result = asyncio.run(s2_paginate("/author/9999/papers", {}, limit=10))
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "papers for 9999" in result.content
+    assert "paginating" not in result.content
+
+
 def test_s2_paginate_404_message_matches_s2_get() -> None:
     # D1: one shared error renderer -> s2_get and s2_paginate report a 404
     # with the same "Not found" wording, not divergent messages.
@@ -641,6 +730,15 @@ def test_parse_optional_ids_rejects_non_string_scalar() -> None:
     assert result.is_error
 
 
+def test_parse_optional_ids_rejects_non_string_list_element() -> None:
+    # A bare non-string scalar errors; a non-string LIST element must too,
+    # rather than silently str()-coercing (7 -> "7") into a bogus id. The
+    # contract is symmetric.
+    result = parse_optional_ids({"ids": [7, "10.1/x"]})
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+
+
 def test_parse_optional_ids_recovers_json_array_string() -> None:
     # The wire coerces a union-typed `ids` array to a STRING; recover it.
     arg = '["arXiv:2509.04439", "arXiv:2507.12821", "10.1/x"]'
@@ -693,6 +791,30 @@ def test_parse_optional_ids_single_id_unchanged() -> None:
     assert parse_optional_ids({"ids": "arXiv:2509.04439"}) == ["arXiv:2509.04439"]
 
 
+def test_parse_optional_ids_list_wrapped_bundle_recovered() -> None:
+    # The wire can deliver a bundle as a single LIST ELEMENT, not just a bare
+    # string (live 2026-06-19: PaperAuthor got ids=["1741101,2064160"] and hit
+    # /author/<both> as one id). Recover per-element too.
+    assert parse_optional_ids(
+        {"ids": ["1741101,2064160"]}, looks_like_id=str.isdigit
+    ) == ["1741101", "2064160"]
+
+
+def test_parse_optional_ids_list_wrapped_json_array_recovered() -> None:
+    assert parse_optional_ids(
+        {"ids": ['["arXiv:2509.04439", "arXiv:2507.12821"]']}
+    ) == [
+        "arXiv:2509.04439",
+        "arXiv:2507.12821",
+    ]
+
+
+def test_parse_optional_ids_normal_list_elements_unsplit() -> None:
+    # A genuine multi-element list must pass through untouched: each element is
+    # already one id, not a bundle to re-split.
+    assert parse_optional_ids({"ids": ["10.1/a", "10.1/b"]}) == ["10.1/a", "10.1/b"]
+
+
 def test_resolve_id_args_coerces_bare_string() -> None:
     assert resolve_id_args({"ids": "10.1/x"}) == ["10.1/x"]
 
@@ -722,6 +844,16 @@ def test_validate_limit_rejects_non_positive() -> None:
 def test_validate_limit_passes_none_and_positive() -> None:
     assert validate_limit(None) is None
     assert validate_limit(5) == 5
+
+
+def test_validate_abstract_chars_rejects_non_positive() -> None:
+    assert isinstance(validate_abstract_chars(0), ToolResult)
+    assert isinstance(validate_abstract_chars(-1), ToolResult)
+
+
+def test_validate_abstract_chars_passes_none_and_positive() -> None:
+    assert validate_abstract_chars(None) is None
+    assert validate_abstract_chars(200) == 200
 
 
 def test_year_in_range() -> None:

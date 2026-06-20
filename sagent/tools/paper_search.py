@@ -1,9 +1,9 @@
 """PaperSearch tool - text search across Semantic Scholar and OpenAlex.
 
-Default behavior: query both backends in parallel and fuse. Dedup by
-DOI (fallback: normalized title). S2 results keep their native ranking;
-OpenAlex-only hits are appended at their own rank. Callers can pin to
-a single backend via ``source="s2"`` or ``source="openalex"``.
+Default backend is Semantic Scholar (``source="s2"``). ``source="fused"``
+queries both backends in parallel and fuses: dedup by DOI (fallback:
+normalized title), S2 results keep their native ranking, OpenAlex-only hits
+appended at their own rank. ``source="openalex"`` pins to OpenAlex alone.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from sagent.tools.paper_common import (
     s2_get,
     s2_paper_to_record,
     truncation_notice,
+    validate_abstract_chars,
     validate_limit,
 )
 from sagent.types.runtime import ToolResult
@@ -38,8 +39,9 @@ from sagent.types.runtime import ToolResult
 logger = logging.getLogger(__name__)
 
 _OPENALEX_BASE = "https://api.openalex.org"
-_HTTP_TIMEOUT = 60.0
-_CACHE_TTL_SEC = 15 * 60
+# Match S2_TIMEOUT: the fused backend queries both, so a 60s OpenAlex ceiling
+# would let one leg silently hang an interactive turn even after S2 returned.
+_HTTP_TIMEOUT = 10.0
 
 _OPENALEX_PER_PAGE_MAX = 200
 
@@ -64,10 +66,10 @@ _OPENALEX_SELECT = ",".join(
 
 _VALID_SOURCES = ("s2", "openalex", "fused")
 
-_cache = cachetools.TTLCache[tuple[object, ...], str](
-    maxsize=256,
-    ttl=_CACHE_TTL_SEC,
-)
+# Search results are stable on an agent's timescale; the cache collapses
+# duplicate queries within a process (sparing the shared S2 gate), bounded by
+# capacity rather than a staleness window.
+_cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
 
 
 def _s2_year_param(year_from: int | None, year_to: int | None) -> str | None:
@@ -184,6 +186,16 @@ async def _search_openalex(
             content=(
                 f"OpenAlex HTTP {e.status}: {e.body[:200].decode(errors='replace')}"
             ),
+            is_error=True,
+        )
+    except (TimeoutError, OSError) as e:
+        # fetch re-raises these on socket timeout / connection failure (not as
+        # FetchError); render them cleanly rather than letting a bare exception
+        # escape -- parity with the S2 path, and load-bearing since the lowered
+        # _HTTP_TIMEOUT makes timeouts more frequent.
+        return ToolResult(
+            call_id="",
+            content=f"OpenAlex request failed (timeout or connection error): {e}",
             is_error=True,
         )
     try:
@@ -465,7 +477,9 @@ class PaperSearch:
         year_from = opt_int(args, "year_from")
         year_to = opt_int(args, "year_to")
         open_access_only = bool_val(args.get("open_access_only"), False)
-        abstract_chars = opt_int(args, "abstract_chars")
+        cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
+        if isinstance(cap, ToolResult):
+            return cap
         q = query.strip()
         if not q:
             return ToolResult(call_id="", content="'query' is required.", is_error=True)
@@ -478,7 +492,6 @@ class PaperSearch:
                 ),
                 is_error=True,
             )
-        cap = int(abstract_chars) if abstract_chars is not None else None
 
         cache_key = (
             "search",

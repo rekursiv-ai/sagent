@@ -310,8 +310,69 @@ def test_run_ids_batches_one_request() -> None:
     assert mock_fetch.call_count == 1  # one batched call, not three
     assert not result.is_error
     assert "title: First" in result.content
+    # Miss label must echo the USER's id, not the internal S2 wire id.
     assert "10.1234/b: not found" in result.content
+    assert "DOI:10.1234/b: not found" not in result.content
     assert "title: Third" in result.content
+
+
+def test_run_rejects_zero_abstract_chars() -> None:
+    result = asyncio.run(
+        PaperDetails().run({"ids": ["10.1234/x"], "abstract_chars": 0})
+    )
+    assert result.is_error
+    assert "abstract_chars" in result.content
+
+
+def test_run_ids_batch_caches() -> None:
+    # The batch path is the costliest shape; a repeated identical batch where
+    # every id resolved must hit the cache, not re-issue the S2 request.
+    payload = json.dumps(
+        [
+            {"title": "X", "externalIds": {"DOI": "10.1234/batch_cache_x"}},
+            {"title": "Y", "externalIds": {"DOI": "10.1234/batch_cache_y"}},
+            {"title": "Z", "externalIds": {"DOI": "10.1234/batch_cache_z"}},
+        ]
+    ).encode()
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        return_value=payload,
+    ) as mock_fetch:
+        ids = [
+            "10.1234/batch_cache_x",
+            "10.1234/batch_cache_y",
+            "10.1234/batch_cache_z",
+        ]
+        _ = asyncio.run(PaperDetails().run({"ids": ids}))
+        _ = asyncio.run(PaperDetails().run({"ids": ids}))
+    assert mock_fetch.call_count == 1
+
+
+def test_run_ids_batch_with_miss_not_cached() -> None:
+    # A batch containing an unresolved id (just-published / indexing lag) must
+    # NOT be cached: with no TTL, a cached "not found" would pin the miss for
+    # the whole process. The repeat call must re-fetch.
+    with patch(
+        "sagent.tools.paper_common.fetch",
+        return_value=_batch_payload(),  # middle entry is None (a miss)
+    ) as mock_fetch:
+        ids = ["10.1234/miss_a", "10.1234/miss_b", "10.1234/miss_c"]
+        first = asyncio.run(PaperDetails().run({"ids": ids}))
+        _ = asyncio.run(PaperDetails().run({"ids": ids}))
+    assert "not found" in first.content
+    assert mock_fetch.call_count == 2  # re-fetched, miss not pinned
+
+
+def test_run_ids_batch_cache_keys_on_canonical_id() -> None:
+    # Equivalent id spellings (arXiv: prefix vs bare) resolve to the same wire
+    # id, so they share one cache entry -- the second call is a hit.
+    payload = json.dumps([{"title": "P"}, {"title": "Q"}]).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload) as mock_fetch:
+        _ = asyncio.run(
+            PaperDetails().run({"ids": ["arXiv:2401.00001", "arXiv:2401.00002"]})
+        )
+        _ = asyncio.run(PaperDetails().run({"ids": ["2401.00001", "2401.00002"]}))
+    assert mock_fetch.call_count == 1
 
 
 def test_run_ids_posts_batch_endpoint() -> None:
