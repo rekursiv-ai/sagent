@@ -1890,7 +1890,9 @@ def test_thought_signature_round_trips(tmp_path: Path) -> None:
         thought_signature="sig-text-abc",
         tool_calls=(
             ToolCall(
-                id="toolu_1", name="Bash", args={"cmd": "ls"},
+                id="toolu_1",
+                name="Bash",
+                args={"cmd": "ls"},
                 thought_signature="sig-fc-xyz",
             ),
         ),

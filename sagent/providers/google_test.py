@@ -644,7 +644,9 @@ def test_build_request_echoes_thought_signature() -> None:
         thought_signature="sig-text",
         tool_calls=(
             ToolCall(
-                id="ext-1", name="Bash", args={"cmd": "ls"},
+                id="ext-1",
+                name="Bash",
+                args={"cmd": "ls"},
                 thought_signature="sig-fc",
             ),
         ),
