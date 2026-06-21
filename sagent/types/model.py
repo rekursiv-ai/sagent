@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -36,6 +37,7 @@ __all__ = [
     "ModelTerminationError",
     "Pricing",
     "PromptTooLongError",
+    "RequestTooLargeError",
     "StreamInterruptedError",
     "TokenCount",
     "UsageSnapshot",
@@ -307,6 +309,19 @@ class PromptTooLongError(Exception):
         return None
 
 
+class RequestTooLargeError(UserFacingError):
+    """Raised when a request exceeds the provider's byte wire-limit.
+
+    Distinct from :class:`PromptTooLongError`: the prompt may fit the
+    token context window yet exceed the fixed byte ceiling on the HTTP
+    request (Anthropic's ~32 MB ``request_too_large``), driven by image /
+    PDF attachment bytes that contribute few tokens. Switching to a
+    larger-context model does not help -- the byte ceiling is the same --
+    so recovery must shed attachment bytes (compaction) rather than widen
+    the window.
+    """
+
+
 class StreamInterruptedError(Exception):
     """Stream indicated tool use but delivered no tool blocks."""
 
@@ -454,7 +469,25 @@ class Model(Protocol):
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size (bytes) accepted by the API."""
+        """Maximum size (bytes) of a SINGLE image after resize.
+
+        Per-image limit the provider serializer resizes each attachment
+        down to. Distinct from :attr:`max_request_bytes`, the ceiling on
+        the WHOLE request body.
+        """
+        ...
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum size (bytes) of the entire request body the API accepts.
+
+        The HTTP wire ceiling -- distinct from both the token window
+        (:attr:`max_request_tokens`) and the per-image cap
+        (:attr:`max_image_bytes`). Driven mostly by attachment bytes, it
+        is not relieved by a larger context window. The byte-aware
+        compaction gate triggers on estimated request bytes against this
+        value, and the read tool bounds rendered bytes below it.
+        """
         ...
 
     def approx_text_tokens(self, text: str) -> int:

@@ -213,6 +213,24 @@ def test_subscription_profile_keeps_small_limits() -> None:
     assert clamped.max_response_tokens == 10_000
 
 
+def test_subscription_profile_inherits_size_caps_from_parent() -> None:
+    # Only the token windows are subscription-specific; the image/wire byte
+    # caps are a property of the underlying model and must flow through
+    # unchanged, not be overwritten by a stale local constant. A divergent
+    # parent profile proves inheritance rather than a hardcoded match.
+    p = ModelProfile(
+        max_request_tokens=1_000_000,
+        max_response_tokens=1_000_000,
+        max_image_dim=4096,
+        max_image_bytes=7_000_000,
+        max_request_bytes=33_000_000,
+    )
+    clamped = _subscription_profile(p)
+    assert clamped.max_image_dim == 4096
+    assert clamped.max_image_bytes == 7_000_000
+    assert clamped.max_request_bytes == 33_000_000
+
+
 def test_build_tool_shape() -> None:
     out = _build_tool(_StubTool())
     assert out["type"] == "function"
@@ -651,11 +669,45 @@ def test_subscription_fast_latency_resolves_to_priority_tier() -> None:
     assert tier == "priority"
 
 
+class _StatusError(Exception):
+    """Error carrying a typed ``status_code`` (what ``error_status_code`` reads)."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def test_subscription_context_overflow_detection() -> None:
     m = _make_provider().model("gpt-5.5")
     assert m.is_context_overflow(RuntimeError("context_length_exceeded")) is True
     assert m.is_context_overflow(RuntimeError("exceeds the context window")) is True
     assert m.is_context_overflow(RuntimeError("other failure")) is False
+
+
+def test_subscription_byte_limit_not_context_overflow() -> None:
+    """A 413 byte limit must not classify as token-context overflow.
+
+    Uniform with the compat/google models: byte overflow routes to
+    byte-overflow recovery (shed attachment bytes), never to the
+    ``/model`` larger-window remediation.
+    """
+    m = _make_provider().model("gpt-5.5")
+    err = _StatusError("Request entity too large", 413)
+    assert m.is_context_overflow(err) is False
+
+
+def test_subscription_byte_413_with_window_phrase_is_not_context_overflow() -> None:
+    """A 413 whose body also names the context window stays byte overflow.
+
+    Discriminating case: the subscription classifier must consult the shared
+    ``is_request_too_large`` guard (status 413 -> byte) rather than its own
+    substring list, so it matches the compat/google siblings. Without the
+    guard, the bare ``"exceeds the context window"`` substring would
+    mis-route a 413 byte limit to token-overflow recovery.
+    """
+    m = _make_provider().model("gpt-5.5")
+    err = _StatusError("413: request entity too large; exceeds the context window", 413)
+    assert m.is_context_overflow(err) is False
 
 
 def test_subscription_retryable_provider_error() -> None:

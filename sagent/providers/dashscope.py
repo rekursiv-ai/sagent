@@ -71,6 +71,17 @@ class _DashScopeModel(OpenAICompatModel):
         return body
 
 
+# DashScope/Qwen-VL preprocesses images server-side (Qwen resizes via
+# min_pixels/max_pixels; object localization is robust 480-2560 px) and
+# publishes no hard per-image pixel/byte reject the client must preempt, nor a
+# request-body byte ceiling. Use the 0=unlimited sentinel rather than borrowing
+# OpenAI's caps (verified Jun 2026;
+# https://www.alibabacloud.com/help/en/model-studio/vision).
+_IMAGE_DIM = 0
+_IMAGE_BYTES = 0
+_REQUEST_BYTES = 0
+
+
 class DashScope(OpenAICompat):
     """DashScope (Alibaba) provider."""
 
@@ -93,6 +104,9 @@ class DashScope(OpenAICompat):
                 request=1.60,
                 response=6.40,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3.6-plus": ModelProfile(
             max_request_tokens=1_000_000,
@@ -101,6 +115,9 @@ class DashScope(OpenAICompat):
                 request=0.50,
                 response=3.00,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3.6-flash": ModelProfile(
             max_request_tokens=1_000_000,
@@ -109,6 +126,9 @@ class DashScope(OpenAICompat):
                 request=0.05,
                 response=0.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3-235b-a22b-instruct-2507": ModelProfile(
             max_request_tokens=262_144,
@@ -117,6 +137,9 @@ class DashScope(OpenAICompat):
                 request=0.70,
                 response=2.80,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3-235b-a22b-thinking-2507": ModelProfile(
             max_request_tokens=262_144,
@@ -125,6 +148,9 @@ class DashScope(OpenAICompat):
                 request=0.70,
                 response=8.40,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3-30b-a3b-instruct-2507": ModelProfile(
             max_request_tokens=262_144,
@@ -133,6 +159,9 @@ class DashScope(OpenAICompat):
                 request=0.20,
                 response=0.80,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3-32b": ModelProfile(
             max_request_tokens=262_144,
@@ -141,6 +170,9 @@ class DashScope(OpenAICompat):
                 request=0.40,
                 response=1.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen3-coder-480b-a35b-instruct": ModelProfile(
             max_request_tokens=262_144,
@@ -149,6 +181,9 @@ class DashScope(OpenAICompat):
                 request=1.00,
                 response=5.00,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen-plus": ModelProfile(
             max_request_tokens=1_000_000,
@@ -157,6 +192,9 @@ class DashScope(OpenAICompat):
                 request=0.40,
                 response=1.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen-max": ModelProfile(
             max_request_tokens=262_144,
@@ -165,6 +203,9 @@ class DashScope(OpenAICompat):
                 request=1.60,
                 response=6.40,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "qwen-turbo": ModelProfile(
             max_request_tokens=1_000_000,
@@ -173,6 +214,9 @@ class DashScope(OpenAICompat):
                 request=0.05,
                 response=0.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

@@ -37,16 +37,27 @@ class LlamaCpp(OpenAICompat):
             max_request_tokens=16_384,
             max_response_tokens=1_024,
             pricing=Pricing(),
+            # Local llama-server: no provider-imposed image/wire caps.
+            # 0 = unlimited (consistent with SelfHosted), not OpenAI's 20 MB.
+            max_image_dim=0,
+            max_image_bytes=0,
+            max_request_bytes=0,
         ),
         "qwen3.6-27b-mtp-64k": ModelProfile(
             max_request_tokens=65_536,
             max_response_tokens=4_096,
             pricing=Pricing(),
+            max_image_dim=0,
+            max_image_bytes=0,
+            max_request_bytes=0,
         ),
         "local": ModelProfile(
             max_request_tokens=32_768,
             max_response_tokens=4_096,
             pricing=Pricing(),
+            max_image_dim=0,
+            max_image_bytes=0,
+            max_request_bytes=0,
         ),
     }
 

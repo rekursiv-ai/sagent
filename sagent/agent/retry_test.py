@@ -34,6 +34,7 @@ from sagent.testing import MockModelCaps
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
+    RequestTooLargeError,
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
@@ -190,6 +191,31 @@ def test_is_retryable_status_429() -> None:
 
 def test_is_retryable_status_400_is_fatal() -> None:
     err = _HTTPError(_FakeResponse(400))
+    assert is_retryable(err, _ScriptedModel()) is False
+
+
+def test_is_retryable_request_too_large_is_fatal() -> None:
+    """A 413 byte-overflow must NOT retry transiently.
+
+    It is handled by the agent's overflow-recovery loop (compaction),
+    not by the transient-retry path; retrying the identical oversized
+    request would just burn the retry budget on the same 413.
+    """
+    err = RequestTooLargeError("Request exceeds the maximum size")
+    err.__cause__ = _HTTPError(_FakeResponse(413))
+    assert is_retryable(err, _ScriptedModel()) is False
+
+
+def test_is_retryable_request_too_large_fatal_even_with_5xx_cause() -> None:
+    """``RequestTooLargeError`` is fatal regardless of its cause's status.
+
+    The byte ceiling is not relieved by retrying. A CDN/front-end can wrap
+    the byte rejection in a 5xx; the classifier must treat the typed error
+    as fatal by TYPE, not walk the cause chain and flip retryable on the
+    5xx (which would burn the retry budget on an unfixable request).
+    """
+    err = RequestTooLargeError("request entity too large")
+    err.__cause__ = _HTTPError(_FakeResponse(503))
     assert is_retryable(err, _ScriptedModel()) is False
 
 

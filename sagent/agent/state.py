@@ -438,6 +438,17 @@ class AgentLike(Protocol):
     and liveness inspection."""
 
     @property
+    def max_request_bytes(self) -> int:
+        """The active model's request-body byte ceiling.
+
+        Tools that produce attachment bytes (e.g. ``Read`` rasterizing a
+        PDF) consult this -- via ``current_agent_var`` -- to bound their
+        output to the ACTIVE provider's wire limit, which varies widely
+        across models. ``0`` means no fixed ceiling.
+        """
+        ...
+
+    @property
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
         """Return a read view of all backgrounded jobs (merged).
 

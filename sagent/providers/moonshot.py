@@ -33,6 +33,15 @@ class _MoonshotModel(OpenAICompatModel):
     _reasoning_field: ClassVar[str | None] = "reasoning_content"
 
 
+# Moonshot/Kimi (OpenAI-compatible) publishes no per-image pixel or byte limit
+# and no request-body byte ceiling; images are preprocessed server-side. Use the
+# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
+# https://platform.kimi.ai/docs/guide/use-kimi-vision-model).
+_IMAGE_DIM = 0
+_IMAGE_BYTES = 0
+_REQUEST_BYTES = 0
+
+
 class Moonshot(OpenAICompat):
     """Moonshot AI provider."""
 
@@ -54,6 +63,9 @@ class Moonshot(OpenAICompat):
                 response=4.00,
                 cache_read=0.16,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "kimi-k2.5": ModelProfile(
             max_request_tokens=256_000,
@@ -63,6 +75,9 @@ class Moonshot(OpenAICompat):
                 response=3.00,
                 cache_read=0.10,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "kimi-k2-0905-preview": ModelProfile(
             max_request_tokens=256_000,
@@ -72,6 +87,9 @@ class Moonshot(OpenAICompat):
                 response=2.50,
                 cache_read=0.15,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "kimi-k2-0711-preview": ModelProfile(
             max_request_tokens=131_072,
@@ -81,6 +99,9 @@ class Moonshot(OpenAICompat):
                 response=2.50,
                 cache_read=0.15,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "kimi-k2-turbo-preview": ModelProfile(
             max_request_tokens=256_000,
@@ -90,6 +111,9 @@ class Moonshot(OpenAICompat):
                 response=5.00,
                 cache_read=0.30,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "moonshot-v1-8k": ModelProfile(
             max_request_tokens=8_000,
@@ -98,6 +122,9 @@ class Moonshot(OpenAICompat):
                 request=0.20,
                 response=2.00,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "moonshot-v1-32k": ModelProfile(
             max_request_tokens=32_000,
@@ -106,6 +133,9 @@ class Moonshot(OpenAICompat):
                 request=0.40,
                 response=4.00,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "moonshot-v1-128k": ModelProfile(
             max_request_tokens=128_000,
@@ -114,6 +144,9 @@ class Moonshot(OpenAICompat):
                 request=0.60,
                 response=6.00,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

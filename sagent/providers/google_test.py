@@ -20,6 +20,7 @@ from sagent.types.model import (
     ModelRequest,
     Pricing,
     PromptTooLongError,
+    RequestTooLargeError,
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
@@ -400,8 +401,11 @@ def test_google_model_properties() -> None:
     assert m.supports_thinking is True
     assert m.supports_effort is True
     assert m.supports_cache_control is False
-    assert m.max_image_dim == 3072
-    assert m.max_image_bytes == 20 * 1024 * 1024
+    # Gemini publishes no per-image pixel or byte cap (images are tiled
+    # server-side); the only documented limit is the 20 MB total request size.
+    assert m.max_image_dim == 0
+    assert m.max_image_bytes == 0
+    assert m.max_request_bytes == 20 * 1024 * 1024
 
 
 def test_legacy_gemini_models_do_not_support_thinking() -> None:
@@ -512,8 +516,13 @@ def test_google_model_text_token_estimate_floor_division() -> None:
 
 
 @pytest.mark.asyncio
-async def test_google_stream_413_too_large_raises_prompt_too_long() -> None:
-    """Status code is not the signal: any 4xx with overflow body normalizes."""
+async def test_google_stream_413_token_body_raises_prompt_too_long() -> None:
+    """A 413 whose body names the context window is token overflow, not bytes.
+
+    Gemini reuses 413 for token-context overflow; the body ("model
+    context") disambiguates, so it stays ``PromptTooLongError`` (a larger
+    window helps) rather than routing to byte-overflow recovery.
+    """
 
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(413, text="Input too large for model context.")
@@ -523,6 +532,25 @@ async def test_google_stream_413_too_large_raises_prompt_too_long() -> None:
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
+        await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
+    """A 413 with a byte-limit body raises ``RequestTooLargeError``.
+
+    The byte ceiling is fixed across models, so it must route to
+    byte-overflow recovery (shed attachment bytes), not token-overflow.
+    """
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, text="Request entity too large.")
+
+    transport = httpx.MockTransport(handle)
+    p = Google.from_key("k")
+    m = p.model("gemini-2.5-flash")
+    m._client = httpx.AsyncClient(transport=transport)
+    with pytest.raises(RequestTooLargeError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 

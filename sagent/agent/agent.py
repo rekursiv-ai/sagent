@@ -347,6 +347,11 @@ class Agent:
         return self._budget
 
     @property
+    def max_request_bytes(self) -> int:
+        """The active model's request-body byte ceiling (wire limit)."""
+        return self.model.max_request_bytes
+
+    @property
     def max_request_tokens(self) -> int:
         """Active per-request input token budget."""
         return self._budget.max_request_tokens
@@ -1835,6 +1840,7 @@ class Agent:
         self,
         history: list[types.runtime.ModelContextEvent],
         model: types.model.Model,
+        byte_compact_trigger: float = 0.8,
     ) -> bool:
         """Proactively compact when the compactor says headroom is gone.
 
@@ -1856,6 +1862,18 @@ class Agent:
           model: Rich model whose tokenizer seeds the first-request
               fallback estimate and whose ``max_request_tokens`` caps the
               budget.
+          byte_compact_trigger: Fraction of the model's
+              ``max_request_bytes`` at which the proactive gate fires on
+              byte pressure. The headroom below 1.0 reserves margin for the
+              request bytes ``_compactable_wire_bytes`` does NOT count
+              (system prompt, tool schemas, message text, JSON framing), so
+              compaction lands before the full request body crosses the wire
+              limit. A per-call default-valued kwarg (self-documenting and
+              overridable) parallel to the compactor's token-side
+              ``utilization_trigger``; must be in ``(0, 1]``.
+
+        Raises:
+          ValueError: If ``byte_compact_trigger`` is not in ``(0, 1]``.
 
         Returns:
           progressed: ``True`` when no compaction was needed, or when
@@ -1865,6 +1883,10 @@ class Agent:
               proactive vs reactive path.
 
         """
+        if not 0.0 < byte_compact_trigger <= 1.0:
+            raise ValueError(
+                f"byte_compact_trigger must be in (0, 1], got {byte_compact_trigger!r}"
+            )
         if self._agent_compactor is None:
             return True
         used = self._last_input_tokens
@@ -1892,11 +1914,23 @@ class Agent:
             # about to be sent, not the previous one; without it the
             # proactive gate lags one turn behind the growing context.
             used += self._tokens_appended_since_last_response(history, model)
-        if not self._agent_compactor.should_compact(
+        token_gate = self._agent_compactor.should_compact(
             current_tokens=used,
             max_request_tokens=self.max_request_tokens,
             system_tokens=model.approx_text_tokens(self.system_prompt()),
-        ):
+        )
+        # Byte gate: request *bytes* are a budget the token gate cannot see.
+        # Attachment bytes can approach the wire ceiling
+        # (``Model.max_request_bytes``) while the token estimate stays well
+        # under the window. Fire compaction (which sheds history attachment
+        # bytes) when the estimated request byte payload crosses the trigger
+        # fraction -- independent of, and OR'd with, the token gate. A
+        # non-positive ``max_request_bytes`` means "no wire limit" (offline /
+        # self-hosted), disabling the byte gate.
+        byte_gate = model.max_request_bytes > 0 and self._compactable_wire_bytes(
+            history, model
+        ) >= int(model.max_request_bytes * byte_compact_trigger)
+        if not token_gate and not byte_gate:
             self.compaction_state.compact_failures = 0
             return True
         # Circuit breaker: after N consecutive auto-compact failures, stop
@@ -1934,14 +1968,7 @@ class Agent:
         system/tools (already in the anchor), so the proactive gate sees
         the full request about to be sent rather than the previous one.
         """
-        last_assistant = next(
-            (
-                idx
-                for idx in range(len(history) - 1, -1, -1)
-                if isinstance(history[idx], types.runtime.AssistantMessage)
-            ),
-            None,
-        )
+        last_assistant = _last_assistant_index(history)
         if last_assistant is None:
             return 0
         since = history[last_assistant + 1 :]
@@ -1952,6 +1979,39 @@ class Agent:
                 types.model.ModelRequest(messages=list(since)),
                 tool_result_budget_chars=self.budget.message_budget_chars,
             )
+        )
+
+    def _compactable_wire_bytes(
+        self,
+        history: Sequence[types.runtime.ModelContextEvent],
+        model: types.model.Model,
+    ) -> int:
+        """Wire bytes of attachments compaction can shed, as they will ship.
+
+        Counts only the prefix up to and including the last
+        ``AssistantMessage`` -- the already-sent history compaction can
+        summarize. Bytes appended *since* that response are this turn's own
+        input (the user's fresh message, this turn's tool results);
+        ``_strip_attachments`` would destroy them before the model sees them,
+        so gating on them is both useless (nothing prior to shed) and harmful
+        (strips the user's request). A single fresh read is instead bounded at
+        the source by the read tool's rendered-byte cap.
+
+        Measured over the materialized prefix so attachments on tool results
+        that ``materialize_request`` drops are not counted, and via
+        :func:`_wire_attachment_bytes` so the estimate matches the base64,
+        post-resize payload that actually ships.
+        """
+        last_assistant = _last_assistant_index(history)
+        if last_assistant is None:
+            return 0
+        prefix = history[: last_assistant + 1]
+        materialized = materialize_request(
+            types.model.ModelRequest(messages=list(prefix)),
+            tool_result_budget_chars=self.budget.message_budget_chars,
+        )
+        return _wire_attachment_bytes(
+            materialized.messages, max_image_bytes=model.max_image_bytes
         )
 
     async def compact_now(self) -> bool:
@@ -2077,6 +2137,73 @@ def _context_overflow_error(
         attempts=attempts,
         final_tokens=final_tokens,
     )
+
+
+def _last_assistant_index(
+    history: Sequence[types.runtime.ModelContextEvent],
+) -> int | None:
+    """Index of the last ``AssistantMessage`` in ``history``, or ``None``.
+
+    The boundary between already-sent history (compactable) and this turn's
+    fresh, un-sheddable entries: both the token-delta estimate and the byte
+    gate split history here.
+    """
+    return next(
+        (
+            idx
+            for idx in range(len(history) - 1, -1, -1)
+            if isinstance(history[idx], types.runtime.AssistantMessage)
+        ),
+        None,
+    )
+
+
+def _wire_attachment_bytes(
+    messages: Sequence[types.runtime.ModelContextEvent],
+    *,
+    max_image_bytes: int,
+) -> int:
+    """Estimate the on-the-wire byte size of all attachments in ``messages``.
+
+    The wire carries base64 (``ceil(4/3)`` expansion), and the provider
+    serializer resizes images to ``max_image_bytes`` before encoding while
+    leaving PDFs/documents un-resized (see ``providers/*._attachment_block``
+    and ``sagent.lib.image.resize``). So per attachment the wire cost is:
+
+    - image: ``4/3 * min(len(data), max_image_bytes)``
+    - PDF/other: ``4/3 * len(data)``
+
+    Counting raw bytes (as the first cut did) both under-counts (ignores
+    base64) and over-counts (ignores resize); this mirrors what actually
+    ships so the byte gate compares wire-bytes to a wire-byte ceiling.
+    """
+    total = 0
+    for entry in messages:
+        if not isinstance(
+            entry,
+            (
+                types.runtime.UserMessage,
+                types.runtime.AgentSendMessage,
+                types.runtime.ToolResult,
+            ),
+        ):
+            continue
+        for att in entry.attachments:
+            raw = len(att.data)
+            # Images are resized to ``max_image_bytes`` before encoding, so
+            # clamp -- but ``max_image_bytes <= 0`` is the "no cap" sentinel
+            # (0 = unlimited everywhere: ModelProfile, image_lib.resize, the
+            # byte gate). ``min(raw, 0)`` would zero every image, so guard it.
+            effective = (
+                min(raw, max_image_bytes)
+                if att.descriptor.startswith("image/") and max_image_bytes > 0
+                else raw
+            )
+            # Exact base64 wire size is ``4 * ceil(n / 3)``, not the floored
+            # ``n * 4 // 3`` -- the floor under-counts non-multiple-of-3
+            # payloads, biasing the gate to fire one turn late.
+            total += 4 * ((effective + 2) // 3)
+    return total
 
 
 def _budget_for_model_ratio(
@@ -2302,6 +2429,30 @@ class _AgentModel:
         # resolved view so subsequent attempts in this call see it.
         history = self._agent.runtime.context().messages
 
+        # Pre-send byte guard: compaction has now shed every attachment it
+        # can (the summarized region). If the request STILL exceeds the
+        # provider's byte ceiling, the overage is in un-sheddable bytes --
+        # this turn's own fresh attachment (e.g. a user-pasted oversize PDF
+        # that bypasses the read tool's rendered-byte bound). Sending it
+        # would burn ``MAX_OVERFLOW_RECOVERY + 1`` full round-trips before
+        # the identical byte-overflow exhaustion. Reject up front with the
+        # typed error so the user gets immediate, actionable feedback.
+        # ``_wire_attachment_bytes`` under-counts (attachments only, no
+        # system/tools/text), so this never false-rejects a request the
+        # provider would accept; a genuine miss still hits the reactive 413.
+        max_request_bytes = self._inner.max_request_bytes
+        if max_request_bytes > 0:
+            wire_bytes = _wire_attachment_bytes(
+                history, max_image_bytes=self._inner.max_image_bytes
+            )
+            if wire_bytes > max_request_bytes:
+                raise types.model.RequestTooLargeError(
+                    f"Request attachment payload ({wire_bytes:,} bytes) exceeds the "
+                    f"provider limit ({max_request_bytes:,} bytes) and cannot be "
+                    "compacted away (it is this turn's own input). Attach a smaller "
+                    "file, or read large PDFs/images in smaller page ranges."
+                )
+
         # Wrap every rich tool with ``BackgroundAwareTool`` so the
         # provider-visible schema advertises the ``background`` /
         # ``delay`` properties without polluting the raw tool's
@@ -2362,16 +2513,39 @@ class _AgentModel:
                     resume_retry_at=resume_retry_at,
                 )
             except Exception as exc:
-                # Catch any exception the provider classifies as
-                # context overflow, not just ``PromptTooLongError``.
-                # Provider-side normalization can slip (e.g. unusual
-                # HTTP status carrying overflow body text); the
-                # canonical signal is ``is_context_overflow``.
-                if not self._inner.is_context_overflow(exc):
+                # Two distinct overflow conditions route to the same
+                # recovery action (compaction sheds history tokens AND
+                # attachment bytes), but carry different exhaustion
+                # remediation:
+                #   - token-context overflow (``is_context_overflow``):
+                #     a larger-window model helps.
+                #   - byte wire-limit (``RequestTooLargeError``, the ~32MB
+                #     ceiling driven by attachment bytes): a larger window
+                #     does NOT help -- the byte ceiling is the same. Keyed
+                #     on the typed error the provider raises rather than a
+                #     Model-protocol method, so it stays provider-agnostic.
+                # Provider-side normalization can slip (e.g. unusual HTTP
+                # status carrying overflow body text), so the canonical
+                # signal for the token case is ``is_context_overflow``.
+                byte_overflow = isinstance(exc, types.model.RequestTooLargeError)
+                if not byte_overflow and not self._inner.is_context_overflow(exc):
                     raise
                 if attempt >= MAX_OVERFLOW_RECOVERY:
+                    if byte_overflow:
+                        # No ``/model`` advice: the byte ceiling is fixed
+                        # across models, so a wider window cannot relieve it.
+                        raise types.model.RequestTooLargeError(
+                            "Request exceeds the provider byte limit even after"
+                            " auto-compaction. Use /clear to wipe history, or"
+                            " re-read large PDFs/images in smaller page ranges"
+                            " so fewer attachment bytes ship at once."
+                        ) from exc
                     raise _context_overflow_error(attempts=attempt) from exc
-                logger.info("Context overflow recovery attempt %d", attempt)
+                logger.info(
+                    "%s recovery attempt %d",
+                    "byte-overflow" if byte_overflow else "context-overflow",
+                    attempt,
+                )
                 # Short-circuit when compaction itself failed -- looping
                 # to retry the model on unchanged (or slightly longer)
                 # history burns the retry budget on the same 400 (the

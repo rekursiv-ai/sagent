@@ -25,6 +25,7 @@ from sagent import (
 )
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import (
+    MAX_OVERFLOW_RECOVERY,
     ActivityTracker,
     Agent,
     SystemPromptArg,
@@ -33,6 +34,7 @@ from sagent.agent.agent import (
     _repair_compact_payload,
     _resolve_target_spec,
     _should_cancel_background,
+    _wire_attachment_bytes,
 )
 from sagent.agent.background import (
     BackgroundAwareTool,
@@ -117,6 +119,7 @@ class StubModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
     responses: list[types.runtime.AssistantMessage] = field(default_factory=list)
     received: list[types.model.ModelRequest] = field(default_factory=list)
     usage: types.model.UsageSnapshot | None = None
@@ -3317,6 +3320,282 @@ async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
     assert progressed is True
 
 
+def test_wire_attachment_bytes_pdf_base64_no_resize() -> None:
+    """PDF wire bytes = exact base64 length ``4 * ceil(n/3)`` (no resize)."""
+    raw = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
+    msgs = [
+        types.runtime.ToolResult(
+            call_id="c",
+            content="pdf",
+            attachments=(types.runtime.BytesMessage(raw, "application/pdf"),),
+        )
+    ]
+    got = _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024)
+    assert got == 4 * ((len(raw) + 2) // 3)
+
+
+def test_wire_attachment_bytes_image_clamped_then_base64() -> None:
+    """Image wire bytes = ceil(4/3) * min(raw, max_image_bytes)."""
+    raw = b"\xff\xd8" + b"\x00" * (30 * 1024 * 1024)
+    cap = 5 * 1024 * 1024
+    msgs = [
+        types.runtime.UserMessage(
+            text="",
+            attachments=(types.runtime.BytesMessage(raw, "image/jpeg"),),
+        )
+    ]
+    got = _wire_attachment_bytes(msgs, max_image_bytes=cap)
+    assert got == 4 * ((cap + 2) // 3)  # clamped to cap, not 30 MB
+
+
+def test_wire_attachment_bytes_ignores_non_bytes_and_empty() -> None:
+    """Entries without attachments contribute zero."""
+    msgs = [
+        types.runtime.AssistantMessage(text="no attachments"),
+        types.runtime.UserMessage(text="also none"),
+    ]
+    assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == 0
+
+
+def test_wire_attachment_bytes_zero_image_cap_means_unlimited() -> None:
+    """``max_image_bytes=0`` is the unlimited sentinel -- no clamp, full count.
+
+    ``min(raw, 0)`` would zero every image, silently disabling the byte gate
+    and pre-send guard for any model that declares ``max_image_bytes=0``
+    (the 0=unlimited contract used everywhere else: ModelProfile defaults,
+    image_lib.resize, the byte gate's ``> 0`` guard).
+    """
+    msgs = [
+        types.runtime.UserMessage(
+            text="",
+            attachments=(types.runtime.BytesMessage(b"abcd", "image/png"),),
+        )
+    ]
+    # 4 raw bytes, no clamp -> base64 wire size 4*ceil(4/3) = 8, NOT 0.
+    assert _wire_attachment_bytes(msgs, max_image_bytes=0) == 8
+
+
+def test_wire_attachment_bytes_positive_image_cap_still_clamps() -> None:
+    """A positive cap still clamps (the 0-sentinel fix must not break this)."""
+    msgs = [
+        types.runtime.UserMessage(
+            text="",
+            attachments=(types.runtime.BytesMessage(b"abcdefghij", "image/png"),),
+        )
+    ]
+    # 10 raw bytes clamped to 5 -> base64 4*ceil(5/3) = 8.
+    assert _wire_attachment_bytes(msgs, max_image_bytes=5) == 8
+
+
+@pytest.mark.parametrize(
+    ("raw_len", "expected"),
+    [(1, 4), (2, 4), (3, 4), (4, 8), (5, 8), (6, 8)],
+)
+def test_wire_attachment_bytes_exact_base64_length(raw_len: int, expected: int) -> None:
+    """Base64 wire size is ``4 * ceil(n/3)``, not the floored ``n * 4 // 3``.
+
+    Floor-dividing under-counts non-multiple-of-3 attachments by up to 3
+    bytes, biasing the gate to fire one turn late.
+    """
+    msgs = [
+        types.runtime.ToolResult(
+            call_id="c",
+            content="pdf",
+            attachments=(
+                types.runtime.BytesMessage(b"x" * raw_len, "application/pdf"),
+            ),
+        )
+    ]
+    assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == expected
+
+
+@dataclass(slots=True, kw_only=True)
+class _TokenIdleByteTightModel(StubModel):
+    """Token gate never fires; only the byte gate can trigger compaction."""
+
+    max_request_bytes: int = 4 * 1024 * 1024
+    max_image_bytes: int = 4 * 1024 * 1024
+
+    @override
+    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        del request
+        return 1  # trivially under any token threshold
+
+
+def _sent_turn(
+    attachment: types.runtime.BytesMessage,
+) -> list[types.runtime.ModelContextEvent]:
+    """A compactable (already-sent) turn: AM tool_call + its ToolResult.
+
+    The byte gate only counts attachments in the prefix up to and including
+    the last ``AssistantMessage`` -- the bytes that rode in a prior request
+    and can be shed. A bare trailing ToolResult is this-turn's fresh input
+    and is NOT compactable, so it must be wrapped behind an AssistantMessage
+    plus a following AssistantMessage to land in the compactable prefix.
+    """
+    return [
+        types.runtime.AssistantMessage(
+            tool_calls=(types.runtime.ToolCall(id="c", name="Read", args={}),)
+        ),
+        types.runtime.ToolResult(
+            call_id="c", content="[PDF: big.pdf]", attachments=(attachment,)
+        ),
+        # A later assistant turn makes the ToolResult above part of the
+        # already-sent, compactable prefix (not this turn's fresh tail).
+        types.runtime.AssistantMessage(text="ok"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_fires_on_byte_pressure_even_when_token_gate_idle() -> (
+    None
+):
+    """Byte bloat in already-sent history triggers proactive compaction.
+
+    Request *bytes* and request *tokens* are distinct budgets. A compactable
+    history whose wire byte payload approaches ``Model.max_request_bytes``
+    must trigger compaction even when the token gate reports headroom.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000, max_response_tokens=128_000
+        ),
+        tools=[],
+        compactor=rec,
+    )
+    # PDF (not resized at the wire): 3 MB raw -> ~4 MB base64 >= 0.8 * 4 MB.
+    big = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
+    history = _sent_turn(types.runtime.BytesMessage(big, "application/pdf"))
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is True
+    assert rec.compacted is True, "byte pressure must trigger proactive compaction"
+
+
+@pytest.mark.asyncio
+async def test_compact_if_needed_byte_trigger_is_overridable_kwarg() -> None:
+    """The byte-compaction trigger fraction is a default-valued kwarg.
+
+    A self-documenting, per-call-overridable knob (mirroring the compactor's
+    ``utilization_trigger``), not an opaque module global. The same payload
+    that stays under the default trigger fires under a lower one.
+    """
+    # ~2 MB raw PDF -> ~2.8 MB base64. Ceiling 4 MB: 0.8*4=3.2MB (no fire),
+    # 0.5*4=2.0MB (fire).
+    big = b"%PDF-" + b"\x00" * (2 * 1024 * 1024)
+    history = _sent_turn(types.runtime.BytesMessage(big, "application/pdf"))
+
+    default_rec = _ThresholdCompactor()
+    a_default = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000, max_response_tokens=128_000
+        ),
+        tools=[],
+        compactor=default_rec,
+    )
+    assert await a_default.compact_if_needed(history, a_default.model) is True
+    assert default_rec.compacted is False, "under default 0.8 trigger: no compaction"
+
+    low_rec = _ThresholdCompactor()
+    a_low = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000, max_response_tokens=128_000
+        ),
+        tools=[],
+        compactor=low_rec,
+    )
+    await a_low.compact_if_needed(history, a_low.model, byte_compact_trigger=0.5)
+    assert low_rec.compacted is True, "lower trigger fires on the same payload"
+
+
+@pytest.mark.asyncio
+async def test_byte_gate_does_not_strip_fresh_turn_user_attachment() -> None:
+    """A first-turn user attachment must NOT trip the byte gate.
+
+    Bytes appended since the last assistant response are this turn's own
+    input -- compaction would strip them (``_strip_attachments``) before the
+    model ever sees them, destroying the user's request. The byte gate counts
+    only the compactable prefix, so a lone fresh user attachment never fires
+    it, even when its bytes exceed the ceiling.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000, max_response_tokens=128_000
+        ),
+        tools=[],
+        compactor=rec,
+    )
+    # 5 MB user attachment, well over the 4 MB ceiling, but it is THIS turn's
+    # input (no prior assistant response) -> not compactable -> gate idle.
+    huge = b"%PDF-" + b"\x00" * (5 * 1024 * 1024)
+    history: list[types.runtime.ModelContextEvent] = [
+        types.runtime.UserMessage(
+            text="describe this",
+            attachments=(types.runtime.BytesMessage(huge, "application/pdf"),),
+        ),
+    ]
+    progressed = await a.compact_if_needed(history, a.model)
+    assert progressed is True
+    assert rec.compacted is False, (
+        "byte gate must not strip the user's own fresh attachment"
+    )
+
+
+@pytest.mark.asyncio
+async def test_byte_gate_counts_base64_wire_expansion() -> None:
+    """The gate measures base64-expanded wire bytes, not raw bytes.
+
+    The wire ships base64 (x4/3). A raw payload just under 0.8 * ceiling can
+    already exceed the wire ceiling after expansion, so the gate must fire on
+    the base64 size, not the raw size.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            max_request_bytes=20 * 1024 * 1024,
+            max_image_bytes=20 * 1024 * 1024,
+        ),
+        tools=[],
+        compactor=rec,
+    )
+    # 13 MB raw PDF: below 0.8 * 20 MB = 16 MB raw, but base64 ~= 17.3 MB,
+    # which is over the 16 MB trigger. Must fire on the expanded size.
+    raw = b"%PDF-" + b"\x00" * (13 * 1024 * 1024)
+    history = _sent_turn(types.runtime.BytesMessage(raw, "application/pdf"))
+    await a.compact_if_needed(history, a.model)
+    assert rec.compacted is True, "gate must count base64-expanded wire bytes"
+
+
+@pytest.mark.asyncio
+async def test_byte_gate_clamps_image_to_max_image_bytes() -> None:
+    """Image bytes are clamped to ``max_image_bytes`` (the resize ceiling).
+
+    Images are resized to ``max_image_bytes`` before base64 at serialization,
+    so a 30 MB raw JPEG ships at most ``4/3 * max_image_bytes`` -- the gate
+    must not over-count it as 30 MB.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=_TokenIdleByteTightModel(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            max_request_bytes=32 * 1024 * 1024,
+            max_image_bytes=5 * 1024 * 1024,
+        ),
+        tools=[],
+        compactor=rec,
+    )
+    # 30 MB raw JPEG clamps to 5 MB post-resize -> ~6.7 MB wire, far under
+    # 0.8 * 32 MB = 25.6 MB. Must NOT fire (no over-count of the raw size).
+    raw = b"\xff\xd8\xff\xe0" + b"\x00" * (30 * 1024 * 1024)
+    history = _sent_turn(types.runtime.BytesMessage(raw, "image/jpeg"))
+    await a.compact_if_needed(history, a.model)
+    assert rec.compacted is False, "image bytes must clamp to max_image_bytes"
+
+
 @pytest.mark.asyncio
 async def test_compact_if_needed_returns_true_when_should_compact_false() -> None:
     """When the compactor decides headroom is fine, ``compact_if_needed`` succeeds.
@@ -4389,6 +4668,7 @@ class _OverflowModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
     overflow_count: int = 0
     call_index: int = 0
 
@@ -4474,6 +4754,7 @@ class _RawOverflowModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
     overflow_count: int = 0
     call_index: int = 0
 
@@ -4664,6 +4945,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         supports_account_auth: bool = False
         max_image_dim: int = 8_000
         max_image_bytes: int = 5 * 1024 * 1024
+        max_request_bytes: int = 32 * 1024 * 1024
 
         @property
         def pricing(self) -> types.model.Pricing:
@@ -5294,6 +5576,204 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
         isinstance(e, types.runtime.AssistantMessage) and e.text == "recovered"
         for e in a.history
     )
+
+
+@dataclass(slots=True, kw_only=True)
+class _ByteOverflowModel(StubModel):
+    """Model that raises ``RequestTooLargeError`` (byte wire-limit) on first N calls.
+
+    The byte limit is distinct from token-window overflow:
+    ``is_context_overflow`` returns False, but recovery must still fire
+    via the ``RequestTooLargeError`` type so the wedge becomes
+    non-fatal.
+    """
+
+    overflow_count: int = 0
+    call_index: int = 0
+
+    @override
+    def is_context_overflow(self, error: Exception) -> bool:
+        del error
+        return False
+
+    @override
+    async def stream(
+        self,
+        request: types.model.ModelRequest,
+        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
+    ) -> types.model.ModelResponse:
+        del request, publish
+        idx = self.call_index
+        self.call_index += 1
+        if idx < self.overflow_count:
+            raise types.model.RequestTooLargeError("Request exceeds the maximum size")
+        return types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text="recovered")
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
+    """A 413 byte-overflow must compact and recover, never dead-halt.
+
+    ``request_too_large`` is not classified as context overflow, yet the
+    recovery loop must still engage (keyed on the ``RequestTooLargeError``
+    type) so compaction sheds historical attachment bytes and the next
+    attempt fits.
+    """
+    compact_calls: list[int] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _CountingCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            compact_calls.append(1)
+            return _summary_override(
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    model = _ByteOverflowModel(overflow_count=1)
+    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
+    message = await a._agent_model.stream(
+        history=[types.runtime.UserMessage(text="x")],
+        publish=lambda _ev: None,
+    )
+    assert message.text == "recovered"
+    assert len(compact_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> None:
+    """Exhausted byte-overflow recovery surfaces byte-specific remediation.
+
+    The remediation must NOT advise switching to a larger-window model:
+    a larger window has the same 32 MB byte wire-limit. It is a
+    ``RequestTooLargeError`` (its own type, not a context-overflow alias),
+    so the classifier never lies about which limit was hit.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _NoOpCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    model = _ByteOverflowModel(overflow_count=10)  # always too large
+    a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
+    with pytest.raises(types.model.RequestTooLargeError) as ei:
+        await a._agent_model.stream(
+            history=[types.runtime.UserMessage(text="x")],
+            publish=lambda _ev: None,
+        )
+    msg = str(ei.value)
+    assert "larger" not in msg.lower(), (
+        f"byte-overflow remediation must not advise a larger window; got {msg!r}"
+    )
+    assert isinstance(ei.value.__cause__, types.model.RequestTooLargeError)
+    # Prove the recovery loop actually iterated (compacted between attempts),
+    # not short-circuited on the first failure: model hit once per attempt.
+    assert model.call_index >= MAX_OVERFLOW_RECOVERY + 1, (
+        f"recovery must iterate all attempts; model.call_index={model.call_index}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_oversize_attachment_rejected_before_send() -> None:
+    """A single fresh attachment over the byte ceiling is rejected pre-send.
+
+    Compaction cannot shed this turn's own attachment, so sending it would
+    waste ``MAX_OVERFLOW_RECOVERY + 1`` full provider round-trips before the
+    same byte-overflow exhaustion. A pre-send guard raises the typed
+    ``RequestTooLargeError`` immediately -- the model is never called.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _SmallByteModel(StubModel):
+        max_request_bytes: int = 4 * 1024 * 1024
+        max_image_bytes: int = 4 * 1024 * 1024
+        call_index: int = 0
+
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
+        ) -> types.model.ModelResponse:
+            del request, publish
+            self.call_index += 1
+            return types.model.ModelResponse(
+                message=types.runtime.AssistantMessage(text="should not be reached")
+            )
+
+    model = _SmallByteModel()
+    a = Agent(model=model, tools=[], compactor=_ThresholdCompactor())
+    # 6 MB raw PDF -> ~8 MB base64, over the 4 MB ceiling, and it is THIS
+    # turn's fresh input -> not compactable. Seed the runtime tape (the
+    # production source the stream loop refetches from), not just the arg.
+    huge = b"%PDF-" + b"\x00" * (6 * 1024 * 1024)
+    user = types.runtime.UserMessage(
+        text="describe",
+        attachments=(types.runtime.BytesMessage(huge, "application/pdf"),),
+    )
+    a.runtime.append_history(user)
+    history = a.runtime.context().messages
+    with pytest.raises(types.model.RequestTooLargeError):
+        await a._agent_model.stream(history=history, publish=lambda _ev: None)
+    assert model.call_index == 0, "oversize fresh attachment must be rejected pre-send"
 
 
 @pytest.mark.asyncio

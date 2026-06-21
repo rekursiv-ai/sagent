@@ -100,6 +100,7 @@ class _NoopModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
 
     @property
     def pricing(self) -> Pricing:

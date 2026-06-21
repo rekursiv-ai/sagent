@@ -65,6 +65,7 @@ from urllib.parse import quote_plus
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import inspect
 import json
 import logging
@@ -102,7 +103,10 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
+    error_status_code,
     find_response_not_read,
+    is_request_too_large,
+    raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
@@ -188,8 +192,17 @@ _FINISH_MAP: dict[str, str] = {
 
 
 def _subscription_profile(profile: ModelProfile) -> ModelProfile:
-    """Clamp public API model metadata to the subscription wire contract."""
-    return ModelProfile(
+    """Clamp the public API profile to the subscription token contract.
+
+    Only the token windows differ between the API and the Codex
+    subscription backend, so only they are clamped. The image and wire
+    byte caps are a property of the underlying OpenAI model, identical
+    across the two auth paths -- inherit them from ``profile`` so a future
+    per-model divergence in the parent flows through automatically instead
+    of being silently overwritten by a stale local constant.
+    """
+    return dataclasses.replace(
+        profile,
         max_request_tokens=min(
             profile.max_request_tokens,
             _SUBSCRIPTION_MAX_REQUEST_TOKENS,
@@ -198,7 +211,6 @@ def _subscription_profile(profile: ModelProfile) -> ModelProfile:
             profile.max_response_tokens,
             _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
         ),
-        pricing=profile.pricing,
     )
 
 
@@ -758,15 +770,22 @@ class _OpenAISubModel(_OpenAIModel):
 
     @override
     def is_context_overflow(self, error: Exception) -> bool:
-        """Check whether an error indicates context-window overflow.
+        """Check whether an error indicates token context-window overflow.
+
+        Excludes the byte wire-limit via the shared classifier first, so a
+        413 byte error routes to byte-overflow recovery -- uniform with the
+        compat/google siblings -- rather than being mis-read as token
+        overflow because its body incidentally names the context window.
 
         Args:
           error: Exception raised by the API call.
 
         Returns:
-          overflow: ``True`` if the error is a context-length overflow.
+          overflow: ``True`` if the error is a token context-length overflow.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return (
             "context_length_exceeded" in msg
@@ -886,6 +905,7 @@ class _OpenAISubModel(_OpenAIModel):
                     provider_name="OpenAI subscription",
                     cause=not_read,
                 ) from exc
+            raise_if_request_too_large(error_status_code(exc), str(exc), cause=exc)
             if self.is_context_overflow(exc):
                 # The compactor's shrink-and-retry path keys off
                 # PromptTooLongError; leaking raw SDK errors makes outer
@@ -929,16 +949,18 @@ def _build_tool(tool: Tool) -> oai_responses.FunctionToolParam:
 def _build_input(
     request: ModelRequest,
     *,
-    max_image_dim: int = 2048,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> oai_responses.ResponseInputParam:
     """Convert history entries to Responses API input items.
 
     Args:
       request: Fully-built model request.
       max_image_dim: Maximum image dimension (pixels); larger inputs are
-          resized before encoding.
-      max_image_bytes: Maximum image size in bytes after resize.
+          resized before encoding. ``0`` (the default) means no cap; the
+          live caller passes the model profile's ``max_image_dim``.
+      max_image_bytes: Maximum image size in bytes after resize. ``0`` (the
+          default) means no cap.
 
     Returns:
       items: Responses API input items in send order.
