@@ -597,6 +597,34 @@ def test_migrate_real_sagent_home_common_case(
     assert (legacy / "papers" / "arxiv_1.pdf").exists()
 
 
+def test_migrate_merges_into_existing_projects_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The orphan bug: once a fresh session creates the XDG ``projects/`` dir, the
+    # per-directory skip-if-exists made migration skip the WHOLE tree, stranding
+    # every not-yet-copied project. The copy must merge into the existing dir.
+    _claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    legacy = tmp_path / "real-dot-sagent"
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", legacy)
+    _write_session(
+        legacy / "projects" / "_home_u_old" / "deadbeef0001", session_id="OLD"
+    )
+    # Simulate a fresh session already having created the XDG projects dir.
+    _write_session(
+        sagent / "projects" / "_home_u_new" / "cafef00d0001", session_id="NEW"
+    )
+
+    sessions.migrate_legacy_home()
+
+    # The pre-existing new session is untouched AND the old one is brought over.
+    assert (
+        sagent / "projects" / "_home_u_new" / "cafef00d0001" / "session.jsonl"
+    ).exists()
+    assert (
+        sagent / "projects" / "_home_u_old" / "deadbeef0001" / "session.jsonl"
+    ).exists()
+
+
 def test_migrate_prefers_real_sagent_over_claude(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
