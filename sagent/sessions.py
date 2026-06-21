@@ -75,11 +75,14 @@ def _legacy_cwd_slug(cwd: str | Path) -> str:
 
 
 def _copy_tree_merge(src: Path, dst: Path) -> None:
-    """Recursively copy ``src`` into ``dst``, skipping entries that exist.
+    """Recursively copy ``src`` into ``dst``, skipping existing files.
 
-    Per-entry skip-if-exists keeps the copy idempotent and non-destructive:
-    a re-run never overwrites already-migrated data, and a destination that
-    predates migration is merged into, not clobbered.
+    Skip-if-exists is applied per *file*, not per directory: an existing
+    destination file is never overwritten (idempotent, non-destructive), but an
+    existing destination *directory* is recursed into and merged. Recursing
+    rather than skipping is load-bearing -- the destination ``projects/`` dir is
+    created the moment any new session runs, so a per-directory skip would
+    orphan every not-yet-copied project beneath it.
 
     Symlinks are NOT followed: a symlinked directory is recreated as a symlink
     rather than recursed into. Following them would dereference a link into a fat
@@ -90,14 +93,15 @@ def _copy_tree_merge(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     for child in src.iterdir():
         target = dst / child.name
-        if target.exists() or target.is_symlink():
-            continue
         if child.is_symlink():
+            if target.exists() or target.is_symlink():
+                continue
             with contextlib.suppress(OSError):
                 target.symlink_to(child.readlink())
         elif child.is_dir():
+            # Merge into an existing dir rather than skipping it wholesale.
             _copy_tree_merge(child, target)
-        else:
+        elif not target.exists():
             shutil.copy2(child, target)
 
 

@@ -36,6 +36,7 @@ from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
 
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.session_io import unpersisted_session_error
 from sagent.providers import infer_provider
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
@@ -145,6 +146,17 @@ async def run_repl(
             uninstall_committer()
             if render_observer in agent.runtime.observers:
                 agent.runtime.observers.remove(render_observer)
+    # A non-empty tape with no transcript on disk is silent data loss. The
+    # runtime isolates observer exceptions (Runtime.publish), so a persistence
+    # write failure cannot surface mid-turn; this end-of-session check is where
+    # it is pulled. Emit a loud error and exit non-zero -- consistent with the
+    # CLI's stderr-and-exit convention -- rather than print a resume hint for a
+    # session that cannot be resumed.
+    persistence_error = unpersisted_session_error(agent)
+    if persistence_error is not None:
+        _ = sys.stderr.write(f"FATAL: {persistence_error}\n")
+        logger.error("session persistence failed: %s", persistence_error)
+        sys.exit(1)
     if agent.session_dir is not None:
         _ = sys.stderr.write(
             "Resume this session with:\n"
