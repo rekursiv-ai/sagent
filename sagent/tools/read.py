@@ -588,7 +588,10 @@ def _read_pdf(path: Path, pages: str) -> ToolResult:
     rendered = len(page_jpegs)
     # The full count comes from the same render call -- no second open that
     # could transiently fail and silently mark a partial read as complete.
-    requested_last = last if last is not None else total_pages
+    # Clamp to ``total_pages``: ``extract_pdf_pages`` renders at most the real
+    # pages (``hi = min(last, n_pages)``), so an over-range ``last`` (e.g.
+    # ``pages="1-9999"`` on a short PDF) is a COMPLETE read, not a truncation.
+    requested_last = min(last, total_pages) if last is not None else total_pages
     # ``extract_pdf_pages`` returns a prefix when the rendered-byte budget
     # truncated the read. Make the truncation VISIBLE so the model doesn't
     # mistake a partial read for a complete one, and name the resume range.
@@ -602,7 +605,8 @@ def _read_pdf(path: Path, pages: str) -> ToolResult:
             f"the remaining pages.]"
         )
     else:
-        range_note = f" pages {start}-{last or 'end'}" if first is not None else ""
+        # Report the clamped end, never the caller's raw over-range ``last``.
+        range_note = f" pages {start}-{requested_last}" if first is not None else ""
         note = f"[PDF: {path.name} ({rendered} page(s){range_note})]"
     return ToolResult(
         call_id="",

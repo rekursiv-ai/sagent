@@ -293,6 +293,12 @@ def resize(
     mime = Image.MIME.get(img.format or "", "application/octet-stream")
 
     width, height = img.size
+    if width <= 0 or height <= 0:
+        # A degenerate (0-dimension) decode -- a corrupt or truncated buffer that
+        # PIL opened lazily but cannot size. Nothing to shrink; pass the bytes
+        # through rather than letting a later ``img.resize``/``save`` raise
+        # PIL's "height and width must be > 0" deep in the call stack.
+        return data, mime
     # ``max_dim`` / ``max_bytes`` of 0 (or negative) means "no cap" -- a
     # model profile may legitimately declare no per-image limit. Treating 0
     # as a literal ceiling would force a needless re-encode of every image.
@@ -316,9 +322,12 @@ def resize(
     out = buf.getvalue()
     mime = Image.MIME.get(fmt, mime)
 
-    # Still too big? Fall back to JPEG quality ramp. ``max_bytes <= 0`` means
-    # no byte cap, so never trigger the ramp on that basis.
-    if max_bytes > 0 and len(out) > max_bytes and fmt != "JPEG":
+    # Still too big? Fall back to a JPEG quality ramp. This runs for ANY
+    # source format, including JPEG: a high-quality JPEG that only exceeds the
+    # byte cap (not the dimension cap) must still be re-encoded smaller, else
+    # the cap is unenforced and a downstream byte guard under-counts.
+    # ``max_bytes <= 0`` means no byte cap, so never ramp on that basis.
+    if max_bytes > 0 and len(out) > max_bytes:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         for quality in (85, 70, 55, 40):

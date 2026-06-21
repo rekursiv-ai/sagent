@@ -432,6 +432,29 @@ async def test_read_pdf_partial_truncation_does_not_depend_on_recount(
     assert "truncate" in result.content.lower() or "remaining" in result.content.lower()
 
 
+@pytest.mark.asyncio
+async def test_read_pdf_over_range_last_is_not_truncation(tmp_path: Path) -> None:
+    """An over-range ``last`` that fits the byte budget is a COMPLETE read.
+
+    ``extract_pdf_pages`` clamps ``hi`` to the real page count, so a request
+    like ``pages="1-9999"`` on a short PDF renders every page. The truncation
+    check must compare against the clamped page count, not the caller's raw
+    ``last`` -- otherwise a complete read is mislabeled byte-truncated and the
+    resume hint points past the end of the document.
+    """
+    f = tmp_path / "short.pdf"
+    _build_pdf(f, 3)
+    large = FakeAgent()
+    large.max_request_bytes = 1 << 30  # ample: all pages fit
+    with with_fake_agent(agent=large) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f), "pages": "1-9999"})
+    assert not result.is_error
+    assert len(result.attachments) == 3, "all real pages render"
+    assert "truncate" not in result.content.lower()
+    assert "9999" not in result.content
+
+
 def test_summary_minimal() -> None:
     assert read.summary({"file_path": "/tmp/x.txt"}) == "Read x.txt"  # noqa: S108
 

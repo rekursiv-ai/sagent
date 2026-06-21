@@ -79,10 +79,15 @@ def post_process_result(
 
     """
     content = result.content
-    if not content and not result.attachments and not result.is_error:
+    # Empty content with no attachment ships an empty wire block, which some
+    # providers reject (Anthropic 400, fatal). The marker applies to error
+    # results too: an empty FAILED result is the same wire hazard, and the
+    # ``is_error`` flag is preserved through the replace.
+    if not content and not result.attachments:
+        verb = "failed" if result.is_error else "completed"
         return dataclasses.replace(
             result,
-            content=f"({tool_name} completed with no output)",
+            content=f"({tool_name} {verb} with no output)",
         )
     if _should_persist(
         content,
