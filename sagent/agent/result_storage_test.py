@@ -30,9 +30,41 @@ def test_empty_result_gets_completed_marker() -> None:
     assert out.content == "(Bash completed with no output)"
 
 
-def test_error_result_skips_persist_and_marker() -> None:
-    """C9: error results pass through untouched."""
+def test_nonempty_error_result_skips_persist_and_marker() -> None:
+    """C9: error results with content pass through untouched (no persist)."""
     result = ToolResult(call_id="c1", content="boom", is_error=True)
+    out = post_process_result(result, "Bash", session_dir=None, persist_threshold=10)
+    assert out is result
+
+
+def test_empty_error_result_gets_completed_marker() -> None:
+    """An empty-content error result must still get a non-empty marker.
+
+    A ``ToolResult(is_error=True, content="", attachments=())`` would ship an
+    empty ``tool_result`` block, which Anthropic rejects (HTTP 400, fatal /
+    non-retryable). The empty-output marker must cover error results too, not
+    just successful ones.
+    """
+    result = ToolResult(call_id="c1", content="", is_error=True)
+    out = post_process_result(
+        result, "Bash", session_dir=None, persist_threshold=10_000
+    )
+    assert out.content
+    assert out.is_error, "the error flag is preserved"
+
+
+def test_empty_error_result_with_attachment_passes_through() -> None:
+    """An empty error result that carries an attachment needs no marker.
+
+    The attachment fills the content block, so the wire block is non-empty;
+    only the no-content, no-attachment case requires the marker.
+    """
+    result = ToolResult(
+        call_id="c1",
+        content="",
+        is_error=True,
+        attachments=(BytesMessage(b"\xff\xd8\xff\xe0data", "image/jpeg"),),
+    )
     out = post_process_result(result, "Bash", session_dir=None, persist_threshold=10)
     assert out is result
 
