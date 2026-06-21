@@ -33,6 +33,12 @@ if TYPE_CHECKING:
 PDF_MAGIC = b"%PDF-"
 MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB hard cap before rasterizing
 MAX_INLINE_PAGES = 10
+# Conservative ceiling on the cumulative rendered JPEG bytes a single read
+# may emit. A single fresh read's bytes are this turn's, not history, so
+# compaction cannot shed them; bounding here stops one read from authoring an
+# unshrinkable, over-the-wire-ceiling request. Sized below the smallest
+# provider request limit (~20 MB) with headroom for system prompt + history.
+MAX_RENDERED_BYTES = 12 * 1024 * 1024
 # pypdfium2 page.render(scale=N) renders at N * 72 DPI. 2 = 144 DPI,
 # which is a good vision/OCR sweet spot.
 _RENDER_SCALE = 2
@@ -108,12 +114,36 @@ def extract_pdf_pages(
     path: Path,
     first: int | None = None,
     last: int | None = None,
-) -> list[bytes]:
+    *,
+    max_total_bytes: int = 0,
+) -> tuple[list[bytes], int]:
     """Rasterize ``path`` pages to JPEG bytes (1-indexed, inclusive).
 
     ``first=None`` defaults to page 1; ``last=None`` defaults to the last
-    page. Returns one JPEG byte string per page in range. Raises
-    :class:`PdfError` on out-of-range, unsupported, or invalid input.
+    page.
+
+    When ``max_total_bytes > 0``, the cumulative rendered JPEG size is
+    bounded: a single read whose rasterized bytes would exceed the request
+    wire ceiling is the one wedge compaction cannot shed (the bytes are this
+    turn's, not history), so it is stopped where the bytes are produced.
+    On bust, the pages rendered so far are returned (a PARTIAL read) rather
+    than discarded -- so the caller makes immediate progress and can surface
+    a continuation hint -- UNLESS the very first page alone exceeds the
+    budget, which is unrecoverable (no narrower range helps) and raises.
+    Each page is rendered and encoded, then its size is checked before it is
+    appended; the busting page is rendered but not returned.
+
+    Returns:
+      pages: One JPEG per rendered page (a prefix of the requested range
+          when the byte budget truncated the read).
+      total_pages: The PDF's full page count. The caller uses it to compute
+          the continuation range without re-opening the PDF -- a re-open can
+          transiently fail and silently mark a partial read as complete.
+
+    Raises:
+      PdfError: On out-of-range / unsupported / invalid input, or when even
+          the first requested page exceeds ``max_total_bytes``.
+
     """
     with _PDFIUM_LOCK:
         doc = _open(path)
@@ -128,15 +158,30 @@ def extract_pdf_pages(
             if hi < lo:
                 raise PdfError(f"empty page range {lo}-{hi}")
             out: list[bytes] = []
+            total = 0
             for i in range(lo - 1, hi):
                 page = doc[i]
                 try:
                     bitmap = page.render(scale=_RENDER_SCALE)
                     pil = bitmap.to_pil()
-                    out.append(_encode_jpeg(pil))
+                    jpeg = _encode_jpeg(pil)
                 finally:
                     page.close()
-            return out
+                if max_total_bytes > 0 and total + len(jpeg) > max_total_bytes:
+                    if not out:
+                        # First requested page alone busts: no narrower range
+                        # can help; this is the unrecoverable case.
+                        raise PdfError(
+                            f"page {i + 1} alone exceeds the request byte budget "
+                            f"({len(jpeg)} > {max_total_bytes} bytes); the page is "
+                            f"too dense to inline."
+                        )
+                    # Truncate: return the prefix that fits. The caller adds a
+                    # continuation hint for the remaining range.
+                    break
+                total += len(jpeg)
+                out.append(jpeg)
+            return out, n_pages
         finally:
             doc.close()
 

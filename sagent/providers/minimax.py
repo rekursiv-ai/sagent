@@ -33,6 +33,15 @@ class _MiniMaxModel(OpenAICompatModel):
     _reasoning_field: ClassVar[str | None] = "reasoning_content"
 
 
+# MiniMax (OpenAI-compatible) publishes no per-image pixel or byte limit and no
+# request-body byte ceiling; images are preprocessed server-side. Use the
+# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
+# https://platform.minimax.io/docs/api-reference/text-openai-api).
+_IMAGE_DIM = 0
+_IMAGE_BYTES = 0
+_REQUEST_BYTES = 0
+
+
 class MiniMax(OpenAICompat):
     """MiniMax provider (api.minimax.io)."""
 
@@ -53,6 +62,9 @@ class MiniMax(OpenAICompat):
                 request=0.30,
                 response=1.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "MiniMax-M2.7-highspeed": ModelProfile(
             max_request_tokens=204_800,
@@ -61,6 +73,9 @@ class MiniMax(OpenAICompat):
                 request=0.60,
                 response=2.40,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "MiniMax-M2.5": ModelProfile(
             max_request_tokens=204_800,
@@ -69,6 +84,9 @@ class MiniMax(OpenAICompat):
                 request=0.30,
                 response=1.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "MiniMax-M1": ModelProfile(
             max_request_tokens=1_000_000,
@@ -77,6 +95,9 @@ class MiniMax(OpenAICompat):
                 request=0.40,
                 response=2.20,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "MiniMax-Text-01": ModelProfile(
             max_request_tokens=1_000_000,
@@ -85,6 +106,9 @@ class MiniMax(OpenAICompat):
                 request=0.20,
                 response=1.10,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "abab6.5s-chat": ModelProfile(
             max_request_tokens=245_000,
@@ -93,6 +117,9 @@ class MiniMax(OpenAICompat):
                 request=0.15,
                 response=0.15,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "abab6.5-chat": ModelProfile(
             max_request_tokens=245_000,
@@ -101,6 +128,9 @@ class MiniMax(OpenAICompat):
                 request=1.50,
                 response=1.50,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

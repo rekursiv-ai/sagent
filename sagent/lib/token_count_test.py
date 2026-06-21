@@ -93,6 +93,32 @@ def test_user_with_image_attachment() -> None:
     assert n == 7
 
 
+def test_image_tokens_are_modality_tokens_not_byte_inflated() -> None:
+    """Image token estimate is the provider's modality count, never bytes.
+
+    The token estimate must report *tokens* (what the context window is
+    measured in). A byte-heavy attachment must NOT inflate the token count:
+    request *bytes* are a separate budget (``Model.max_request_bytes``),
+    enforced separately, not smuggled into the token estimate. Folding bytes
+    into tokens caused spurious compaction on byte-heavy / token-light
+    requests that fit the window.
+    """
+    big = b"\xff\xd8\xff\xe0" + b"\x00" * (3 * 1024 * 1024)
+    n = approx_request_tokens(
+        _req(
+            [
+                UserMessage(
+                    text="",
+                    attachments=(BytesMessage(data=big, descriptor="image/jpeg"),),
+                ),
+            ],
+        ),
+        _TokenModel(),  # approx_image_tokens returns 7
+    )
+    # Modality estimate only: 7. NOT byte-inflated to ~1M.
+    assert n == 7
+
+
 def test_user_with_pdf_attachment_counted() -> None:
     """PDF attachments contribute to the token estimate.
 

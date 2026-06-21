@@ -23,6 +23,7 @@ from sagent.types.model import (
     ModelRequest,
     Pricing,
     PromptTooLongError,
+    RequestTooLargeError,
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
@@ -458,6 +459,9 @@ class _DummyProvider(OpenAICompat):
             max_request_tokens=1000,
             max_response_tokens=200,
             pricing=Pricing(),
+            max_image_dim=2048,
+            max_image_bytes=20 * 1024 * 1024,
+            max_request_bytes=20 * 1024 * 1024,
         )
     }
 
@@ -681,7 +685,12 @@ async def test_stream_4xx_context_overflow_raises_prompt_too_long(
     status_code: int,
     message: str,
 ) -> None:
-    """Status code is not the signal: any 4xx with overflow body normalizes."""
+    """A 4xx whose body names the token context window is token overflow.
+
+    Includes a 413 with a context-window body: the body disambiguates it
+    from the byte wire-limit, so it stays ``PromptTooLongError`` (a larger
+    window helps) rather than routing to byte-overflow recovery.
+    """
 
     def handle(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code, text=message)
@@ -689,6 +698,23 @@ async def test_stream_4xx_context_overflow_raises_prompt_too_long(
     transport = httpx.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     with pytest.raises(PromptTooLongError):
+        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+@pytest.mark.asyncio
+async def test_stream_413_byte_body_raises_request_too_large() -> None:
+    """A 413 with a byte-limit body raises ``RequestTooLargeError``.
+
+    The byte ceiling is fixed across models, so it routes to byte-overflow
+    recovery (shed attachment bytes), not token-overflow recovery.
+    """
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, text="Request entity too large")
+
+    transport = httpx.MockTransport(handle)
+    _, model = _make_provider_with_mock(transport)
+    with pytest.raises(RequestTooLargeError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 

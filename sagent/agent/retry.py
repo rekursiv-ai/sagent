@@ -43,6 +43,7 @@ from sagent.types.model import (
     Model,
     ModelRequest,
     ModelResponse,
+    RequestTooLargeError,
     StreamInterruptedError,
 )
 
@@ -141,6 +142,11 @@ def is_retryable(error: Exception, model: Model) -> bool:
       retryable: True if the error is transient.
 
     """
+    # The request-byte wire-limit is fatal by type: retrying the identical
+    # oversized request never helps, and a 5xx/429 wrapper in the cause
+    # chain must not flip it retryable. Classify before walking the chain.
+    if isinstance(error, RequestTooLargeError):
+        return False
     if model.is_retryable_provider_error(error):
         return True
     return _is_retryable(error, 0)

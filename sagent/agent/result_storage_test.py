@@ -14,7 +14,7 @@ from sagent.agent.result_storage import (
     PERSISTED_TAG,
     post_process_result,
 )
-from sagent.types.runtime import ToolResult
+from sagent.types.runtime import BytesMessage, ToolResult
 
 
 if TYPE_CHECKING:
@@ -112,6 +112,25 @@ def test_persist_collision_writes_distinct_file(tmp_path: Path) -> None:
     assert saved.name != "call_abc.txt"
     assert saved.read_text() == "X" * 5_000
     assert (target / "call_abc.txt").read_text() == "PRIOR"
+
+
+def test_post_process_does_not_touch_attachments() -> None:
+    """Result post-processing never inspects or drops attachment bytes.
+
+    Attachment-byte budgeting is NOT a per-result reject at this seam (the
+    per-image limit is the wrong scalar and resize happens later in the
+    provider). A result carrying large attachments passes through unchanged;
+    the request byte ceiling is enforced by the proactive byte-aware
+    compaction gate and the read-tool's rendered-byte bound instead.
+    """
+    big = b"\xff\xd8\xff\xe0" + b"\x00" * (8 * 1024 * 1024)
+    result = ToolResult(
+        call_id="pdf1",
+        content="[PDF: big.pdf (10 page(s))]",
+        attachments=(BytesMessage(big, "image/jpeg"),),
+    )
+    out = post_process_result(result, "Read", session_dir=None, persist_threshold=0)
+    assert out is result
 
 
 def test_persist_handles_posix_short_writes(

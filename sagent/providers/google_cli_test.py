@@ -226,10 +226,11 @@ def test_google_cli_legacy_model_does_not_support_thinking() -> None:
 
 
 def test_max_image_limits() -> None:
-    """Vision limits match the Gemini API recipe."""
+    """Gemini has no per-image pixel/byte cap; only the 20 MB total applies."""
     model = GoogleCLI().model("gemini-2.5-flash")
-    assert model.max_image_dim == 3072
-    assert model.max_image_bytes == 20 * 1024 * 1024
+    assert model.max_image_dim == 0
+    assert model.max_image_bytes == 0
+    assert model.max_request_bytes == 20 * 1024 * 1024
 
 
 def test_is_context_overflow_text_markers() -> None:
@@ -240,15 +241,30 @@ def test_is_context_overflow_text_markers() -> None:
     assert model.is_context_overflow(RuntimeError("other")) is False
 
 
+def test_byte_limit_not_classified_as_context_overflow() -> None:
+    """A request-byte-limit error must not be swallowed by ``"too large"``.
+
+    The bare ``"too large"`` substring would otherwise mis-route a byte
+    wire-limit error into token-overflow recovery; the shared byte guard
+    must short-circuit it first, uniform with the HTTP siblings.
+    """
+    model = GoogleCLI().model("gemini-2.5-flash")
+    assert model.is_context_overflow(RuntimeError("request entity too large")) is False
+
+
 def test_user_prompt_blocks_text_only() -> None:
     """Plain text turns into a single ``{type:text}`` block."""
-    blocks = _user_prompt_blocks(UserMessage(text="hi"), max_image_dim=3072)
+    blocks = _user_prompt_blocks(
+        UserMessage(text="hi"), max_image_dim=3072, max_image_bytes=20 * 1024 * 1024
+    )
     assert blocks == [{"type": "text", "text": "hi"}]
 
 
 def test_user_prompt_blocks_empty_user_emits_placeholder() -> None:
     """An empty user message still emits one block to satisfy ACP shape."""
-    blocks = _user_prompt_blocks(UserMessage(text=""), max_image_dim=3072)
+    blocks = _user_prompt_blocks(
+        UserMessage(text=""), max_image_dim=3072, max_image_bytes=20 * 1024 * 1024
+    )
     assert blocks == [{"type": "text", "text": ""}]
 
 
@@ -256,7 +272,9 @@ def test_serialize_prompt_blocks_rejects_tool_result() -> None:
     """Tool results never traverse stdin -- the MCP bridge handles them."""
     with pytest.raises(RuntimeError, match="ToolResult in history"):
         _ = _serialize_prompt_blocks(
-            ToolResult(call_id="x", content="done"), max_image_dim=3072
+            ToolResult(call_id="x", content="done"),
+            max_image_dim=3072,
+            max_image_bytes=20 * 1024 * 1024,
         )
 
 

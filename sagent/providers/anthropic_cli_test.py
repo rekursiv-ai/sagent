@@ -258,6 +258,17 @@ def test_is_context_overflow_text_markers() -> None:
     assert model.is_context_overflow(RuntimeError("network error")) is False
 
 
+def test_byte_limit_not_classified_as_context_overflow() -> None:
+    """A request-byte-limit error must not classify as token overflow.
+
+    Uniform with the HTTP providers: the byte wire-limit routes to
+    byte-overflow recovery, never the ``/model`` larger-window remediation
+    a larger window cannot satisfy.
+    """
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    assert model.is_context_overflow(RuntimeError("request entity too large")) is False
+
+
 def test_argv_contains_required_flags() -> None:
     """The spawn recipe sets every knob the CLI needs for stream-json mode."""
     argv = _build_anthropic_argv(
@@ -417,7 +428,9 @@ def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
 
 def test_user_line_text_only() -> None:
     """A plain ``UserMessage`` becomes a single ``content: str`` line."""
-    line = _user_line(UserMessage(text="hello"), max_image_dim=8000)
+    line = _user_line(
+        UserMessage(text="hello"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+    )
     assert line == {"type": "user", "message": {"role": "user", "content": "hello"}}
 
 
@@ -425,7 +438,9 @@ def test_serialize_for_stdin_rejects_tool_result() -> None:
     """Tool results never traverse stdin -- the MCP bridge handles them."""
     with pytest.raises(RuntimeError, match="ToolResult in history"):
         _ = _serialize_for_stdin(
-            ToolResult(call_id="x", content="done"), max_image_dim=8000
+            ToolResult(call_id="x", content="done"),
+            max_image_dim=8000,
+            max_image_bytes=5 * 1024 * 1024,
         )
 
 
@@ -2149,7 +2164,9 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
 
 def test_serialize_for_stdin_user_passthrough() -> None:
     """``UserMessage`` falls through ``_serialize_for_stdin`` to ``_user_line``."""
-    line = _serialize_for_stdin(UserMessage(text="ping"), max_image_dim=8000)
+    line = _serialize_for_stdin(
+        UserMessage(text="ping"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+    )
     assert line["type"] == "user"
 
 

@@ -51,7 +51,14 @@ def post_process_result(
     message_budget_chars: int = 0,
     used_message_chars: int = 0,
 ) -> ToolResult:
-    """Persist oversized content, inject empty marker, return new result.
+    """Persist oversized content and inject the empty-output marker.
+
+    Attachment-byte budgeting is NOT done here: a per-result byte reject is
+    the wrong mechanism (the per-image cap is the wrong scalar, and the
+    provider resizes images later in serialization). Request-byte pressure
+    is handled by the byte-aware compaction gate (which sheds history
+    attachment bytes) and the read tool's rendered-byte bound (which caps a
+    single fresh read).
 
     Args:
       result: Tool result to post-process.

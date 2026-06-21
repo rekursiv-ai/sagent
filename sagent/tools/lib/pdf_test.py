@@ -95,28 +95,87 @@ def test_get_pdf_page_count_corrupt(tmp_path: Path) -> None:
 
 def test_extract_all_pages(tmp_path: Path) -> None:
     f = _make_pdf(tmp_path, 3)
-    pages = extract_pdf_pages(f)
+    pages, total = extract_pdf_pages(f)
     assert len(pages) == 3
+    assert total == 3
     for jpeg in pages:
         assert jpeg.startswith(b"\xff\xd8\xff")  # JPEG SOI
 
 
+def test_extract_returns_total_page_count(tmp_path: Path) -> None:
+    """``total`` is the PDF's full page count, independent of the rendered range.
+
+    The caller uses it to compute the continuation range without re-opening
+    the PDF (avoiding a redundant ``get_pdf_page_count`` that could
+    transiently fail and silently mark a partial read as complete).
+    """
+    f = _make_pdf(tmp_path, 5)
+    pages, total = extract_pdf_pages(f, first=2, last=3)
+    assert len(pages) == 2
+    assert total == 5
+
+
 def test_extract_single_page(tmp_path: Path) -> None:
     f = _make_pdf(tmp_path, 5)
-    pages = extract_pdf_pages(f, first=2, last=2)
+    pages, _ = extract_pdf_pages(f, first=2, last=2)
     assert len(pages) == 1
 
 
 def test_extract_range(tmp_path: Path) -> None:
     f = _make_pdf(tmp_path, 5)
-    pages = extract_pdf_pages(f, first=2, last=4)
+    pages, _ = extract_pdf_pages(f, first=2, last=4)
     assert len(pages) == 3
 
 
 def test_extract_range_clamps_to_last_page(tmp_path: Path) -> None:
     f = _make_pdf(tmp_path, 3)
-    pages = extract_pdf_pages(f, first=2, last=99)
+    pages, _ = extract_pdf_pages(f, first=2, last=99)
     assert len(pages) == 2
+
+
+def test_extract_returns_partial_pages_within_byte_budget(tmp_path: Path) -> None:
+    """When the byte budget busts after >=1 page, return the pages that fit.
+
+    Atomic failure (discard everything) forces the model into blind
+    page-by-page retries. Instead, return the prefix that fits so the model
+    makes immediate progress; the read tool surfaces a continuation hint for
+    the rest. Each ``_make_pdf`` page renders to a small but non-zero JPEG;
+    a budget between one and two page sizes yields exactly the pages that
+    fit.
+    """
+    f = _make_pdf(tmp_path, 5)
+    one_page, _ = extract_pdf_pages(f, first=1, last=1)
+    per_page = len(one_page[0])
+    # Budget fits 2 pages but not 3.
+    pages, total = extract_pdf_pages(f, max_total_bytes=int(per_page * 2.5))
+    assert 1 <= len(pages) < 5, f"expected a partial prefix, got {len(pages)}"
+    assert total == 5  # full count still reported for the continuation hint
+
+
+def test_extract_first_page_over_budget_raises(tmp_path: Path) -> None:
+    """Zero pages fit (the first page alone busts) -> unrecoverable, raise.
+
+    A single page too dense to inline cannot be narrowed further; the model
+    needs a clear error, not a partial of length zero it might mistake for
+    a complete empty read.
+    """
+    f = _make_pdf(tmp_path, 3)
+    with pytest.raises(PdfError, match=r"byte budget"):
+        extract_pdf_pages(f, max_total_bytes=1)  # first page alone busts
+
+
+def test_extract_within_byte_budget_returns_all_pages(tmp_path: Path) -> None:
+    """A read within the rendered-byte budget returns every page."""
+    f = _make_pdf(tmp_path, 2)
+    pages, _ = extract_pdf_pages(f, max_total_bytes=50 * 1024 * 1024)
+    assert len(pages) == 2
+
+
+def test_extract_byte_budget_zero_disables_bound(tmp_path: Path) -> None:
+    """``max_total_bytes=0`` (default) imposes no rendered-byte bound."""
+    f = _make_pdf(tmp_path, 3)
+    pages, _ = extract_pdf_pages(f, max_total_bytes=0)
+    assert len(pages) == 3
 
 
 def test_extract_first_out_of_range(tmp_path: Path) -> None:
@@ -142,7 +201,7 @@ def test_extract_oversize_pdf(tmp_path: Path) -> None:
 def test_extracted_jpeg_is_decodable(tmp_path: Path) -> None:
     """JPEG bytes round-trip through Pillow with a sane size."""
     f = _make_pdf(tmp_path, 1)
-    (jpeg,) = extract_pdf_pages(f)
+    (jpeg,), _ = extract_pdf_pages(f)
     img = Image.open(io.BytesIO(jpeg))
     img.load()  # pyright: ignore[reportUnknownMemberType] -- Pillow's Image.load returns core.PixelAccess via a deferred-import module that pyright can't resolve
     # 1-inch page rendered at 144 DPI → ~144x144 px.
@@ -172,7 +231,7 @@ def test_concurrent_extract_does_not_corrupt_heap(tmp_path: Path) -> None:
     def work(p: Path) -> None:
         try:
             for _ in range(4):
-                pages = extract_pdf_pages(p, first=1, last=3)
+                pages, _total = extract_pdf_pages(p, first=1, last=3)
                 assert len(pages) == 3
                 assert get_pdf_page_count(p) == 3
                 results.append(len(pages))

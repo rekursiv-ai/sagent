@@ -79,6 +79,7 @@ class MockModelCaps:
     supports_account_auth: bool = False
     max_image_dim: int = 8000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
 
     @property
     def pricing(self) -> Pricing:
@@ -153,6 +154,9 @@ class FakeAgent:
 
     tool_state: ToolState = field(default_factory=ToolState)
     """Per-agent tool state (read cache, bash_cwd, etc.)."""
+
+    max_request_bytes: int = 32 * 1024 * 1024
+    """Active model's request byte ceiling (mirrors ``Agent.max_request_bytes``)."""
 
     runtime: agent_runtime.AgentRuntime = field(default_factory=_new_runtime)
     """Real ``AgentRuntime`` with a null model; its observers list

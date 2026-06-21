@@ -60,6 +60,11 @@ from sagent.providers.lib.cost import (
     Pricing,
     compute_cost,
 )
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
+    raise_if_request_too_large,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
@@ -419,13 +424,18 @@ class OpenAICompatModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension (pixels) accepted by the API."""
-        return 2048
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size (bytes) accepted by the API."""
-        return 20 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def _is_effort_model(self, model_id: str) -> bool:
         """Override: does ``model_id`` accept ``reasoning_effort``?"""
@@ -442,15 +452,21 @@ class OpenAICompatModel:
         return body
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a context-window overflow.
+        """Classify an error as a token context-window overflow.
+
+        Excludes the byte wire-limit (HTTP 413): that is a different
+        condition handled by ``RequestTooLargeError`` -- a larger-window
+        model does not relieve the byte ceiling.
 
         Args:
           error: Exception raised by the provider call.
 
         Returns:
-          overflow: True when ``error`` indicates context overflow.
+          overflow: True when ``error`` indicates token-context overflow.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         return _is_context_overflow_text(str(error))
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
@@ -584,6 +600,7 @@ class OpenAICompatModel:
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
+                raise_if_request_too_large(r.status_code, err_body)
                 if _is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
             r.raise_for_status()
@@ -623,8 +640,8 @@ class _TiktokenEstimator:
 
 def build_messages(
     request: ModelRequest,
-    max_image_dim: int = 2048,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> list[MutableJSON]:
     """Convert history entries to OpenAI chat-completions format.
 

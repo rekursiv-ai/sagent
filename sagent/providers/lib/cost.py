@@ -65,6 +65,23 @@ class ModelProfile:
     4.0 matches legacy behavior; override per model when the tokenizer
     diverges (e.g. opus-4-7 measures 2.83 on mixed code+JSON)."""
 
+    max_image_dim: int = 0
+    """Maximum image edge (pixels) the model accepts before resize. ``0``
+    means no dimension cap (skip dimension-based resize). Per-model: vision
+    tiling/limits differ across a provider's model range, so this is a
+    profile field, not a provider-wide constant."""
+
+    max_image_bytes: int = 0
+    """Maximum size (bytes) of a single image after resize. ``0`` means no
+    per-image byte cap (skip byte-based resize). Per-model."""
+
+    max_request_bytes: int = 0
+    """Maximum request-body size (bytes) the model's API accepts -- the HTTP
+    wire ceiling, distinct from the token window and the per-image cap.
+    ``0`` means no fixed wire ceiling (e.g. in-process / self-hosted
+    models, bounded only by the token window); the byte-aware compaction
+    gate is disabled when this is ``0``. Per-model."""
+
 
 def compute_cost(
     pricing: Pricing,

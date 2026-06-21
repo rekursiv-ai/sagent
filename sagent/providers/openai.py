@@ -59,6 +59,20 @@ class _OpenAIModel(OpenAICompatModel):
         return ("fast",)
 
 
+# Image / wire byte limits shared by every OpenAI model (verified Jun 2026):
+#   - ``max_image_dim`` = 2048: detail:high images are first scaled to fit
+#     within a 2048x2048 square before tiling
+#     (https://developers.openai.com/api/docs/guides/images-vision); pre-resizing
+#     to this caps wire bytes without losing fidelity the model would keep.
+#   - ``max_image_bytes`` = 20 MB: documented per-image upload limit.
+#   - ``max_request_bytes`` = 20 MB: conservative wire ceiling; OpenAI does not
+#     publish a single Responses-API body limit, and the 20 MB per-image figure
+#     is the binding practical constraint for image-bearing requests.
+_IMAGE_DIM = 2048
+_IMAGE_BYTES = 20 * 1024 * 1024
+_REQUEST_BYTES = 20 * 1024 * 1024
+
+
 class OpenAI(OpenAICompat):
     """OpenAI provider."""
 
@@ -90,6 +104,9 @@ class OpenAI(OpenAICompat):
                 response=30.0,
                 cache_read=0.5,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.5-pro": ModelProfile(
             max_request_tokens=1_050_000,
@@ -98,6 +115,9 @@ class OpenAI(OpenAICompat):
                 request=30.0,
                 response=180.0,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4": ModelProfile(
             max_request_tokens=1_050_000,
@@ -107,6 +127,9 @@ class OpenAI(OpenAICompat):
                 response=15.0,
                 cache_read=0.25,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4-pro": ModelProfile(
             max_request_tokens=1_050_000,
@@ -115,6 +138,9 @@ class OpenAI(OpenAICompat):
                 request=30.0,
                 response=180.0,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4-mini": ModelProfile(
             max_request_tokens=400_000,
@@ -124,6 +150,9 @@ class OpenAI(OpenAICompat):
                 response=4.5,
                 cache_read=0.075,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4-nano": ModelProfile(
             max_request_tokens=400_000,
@@ -133,6 +162,9 @@ class OpenAI(OpenAICompat):
                 response=1.25,
                 cache_read=0.02,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.3-codex": ModelProfile(
             max_request_tokens=400_000,
@@ -142,6 +174,9 @@ class OpenAI(OpenAICompat):
                 response=14.0,
                 cache_read=0.175,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.3-codex-spark": ModelProfile(
             max_request_tokens=400_000,
@@ -151,6 +186,9 @@ class OpenAI(OpenAICompat):
                 response=14.0,
                 cache_read=0.175,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.2": ModelProfile(
             max_request_tokens=400_000,
@@ -160,6 +198,9 @@ class OpenAI(OpenAICompat):
                 response=14.0,
                 cache_read=0.175,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.3-chat-latest": ModelProfile(
             max_request_tokens=128_000,
@@ -169,6 +210,9 @@ class OpenAI(OpenAICompat):
                 response=14.0,
                 cache_read=0.175,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4.1": ModelProfile(
             max_request_tokens=1_047_576,
@@ -178,6 +222,9 @@ class OpenAI(OpenAICompat):
                 response=8.0,
                 cache_read=0.5,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4.1-mini": ModelProfile(
             max_request_tokens=1_047_576,
@@ -187,6 +234,9 @@ class OpenAI(OpenAICompat):
                 response=1.6,
                 cache_read=0.1,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4.1-nano": ModelProfile(
             max_request_tokens=1_047_576,
@@ -196,6 +246,9 @@ class OpenAI(OpenAICompat):
                 response=0.4,
                 cache_read=0.025,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4o": ModelProfile(
             max_request_tokens=128_000,
@@ -205,6 +258,9 @@ class OpenAI(OpenAICompat):
                 response=10.0,
                 cache_read=1.25,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4o-mini": ModelProfile(
             max_request_tokens=128_000,
@@ -214,6 +270,9 @@ class OpenAI(OpenAICompat):
                 response=0.6,
                 cache_read=0.075,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4-turbo": ModelProfile(
             max_request_tokens=128_000,
@@ -222,6 +281,9 @@ class OpenAI(OpenAICompat):
                 request=10.0,
                 response=30.0,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-4": ModelProfile(
             max_request_tokens=8_192,
@@ -230,6 +292,9 @@ class OpenAI(OpenAICompat):
                 request=30.0,
                 response=60.0,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "o1": ModelProfile(
             max_request_tokens=200_000,
@@ -239,6 +304,9 @@ class OpenAI(OpenAICompat):
                 response=60.0,
                 cache_read=7.5,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "o1-mini": ModelProfile(
             max_request_tokens=128_000,
@@ -248,6 +316,9 @@ class OpenAI(OpenAICompat):
                 response=12.0,
                 cache_read=1.5,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "o3-mini": ModelProfile(
             max_request_tokens=200_000,
@@ -257,6 +328,9 @@ class OpenAI(OpenAICompat):
                 response=4.4,
                 cache_read=0.55,
             ),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _OpenAIModel

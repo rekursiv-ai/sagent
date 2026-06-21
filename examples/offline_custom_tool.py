@@ -60,6 +60,7 @@ class ScriptedModel:
     supports_account_auth = False
     max_image_dim = 0
     max_image_bytes = 0
+    max_request_bytes = 0
     pricing = Pricing()
 
     def approx_text_tokens(self, text: str) -> int:

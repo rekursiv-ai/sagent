@@ -32,6 +32,10 @@ from sagent.lib import token_count
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
+)
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
@@ -669,13 +673,18 @@ class _AnthropicCLIModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Anthropic's documented vision pixel cap."""
-        return 8000
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Anthropic's documented vision byte cap (5 MiB)."""
-        return 5 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``."""
@@ -703,15 +712,22 @@ class _AnthropicCLIModel:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify whether an error means the prompt exceeded the window.
+        """Classify whether an error means the prompt exceeded the token window.
+
+        Excludes the request-byte wire-limit via the shared classifier first,
+        uniform with the HTTP providers and ``GoogleCLI``: a byte-limit error
+        routes to byte-overflow recovery, not the ``/model`` larger-window
+        remediation the byte ceiling ignores.
 
         Args:
           error: Exception raised by the call path.
 
         Returns:
-          overflow: ``True`` for known overflow markers in the message text.
+          overflow: ``True`` for known token-overflow markers in the message.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return (
             "prompt is too long" in msg or "context window" in msg or "too_long" in msg
@@ -1134,7 +1150,9 @@ class _AnthropicCLIModel:
         sees no tools and answers "no tools have been provided".
         """
         await self._await_mcp_listed(proc)
-        line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
+        line = json.dumps(
+            _serialize_for_stdin(entry, self.max_image_dim, self.max_image_bytes)
+        )
         await proc.write_line(line)
 
     async def _drain_until_result(
@@ -1754,10 +1772,12 @@ def _build_anthropic_argv(
     return base
 
 
-def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
+def _serialize_for_stdin(
+    entry: TapeEvent, max_image_dim: int, max_image_bytes: int
+) -> MutableJSON:
     """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
     if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_line(entry, max_image_dim)
+        return _user_line(entry, max_image_dim, max_image_bytes)
     assert isinstance(entry, ToolResult)
     # Tool results never traverse stdin: the CLI's MCP client handled
     # the tool_use round-trip internally. Surface mistakes loudly.
@@ -1767,7 +1787,9 @@ def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
 
 
 def _user_line(
-    entry: AgentSendMessage | UserMessage, max_image_dim: int
+    entry: AgentSendMessage | UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
 ) -> MutableJSON:
     """Build a ``{"type":"user", ...}`` stdin line, attaching images inline."""
     image_attachments = [
@@ -1781,7 +1803,7 @@ def _user_line(
     content: list[MutableJSON] = []
     for att in image_attachments:
         raw, mime = image_lib.resize(
-            att.data, max_dim=max_image_dim, max_bytes=5 * 1024 * 1024
+            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
         )
         content.append(
             cast(

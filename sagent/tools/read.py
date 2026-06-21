@@ -17,6 +17,7 @@ from sagent.lib.custom_json import (
     json_freeze,
 )
 from sagent.tools.core import (
+    current_agent_var,
     file_lock_key,
     get_tool_state,
     load_tool_description,
@@ -31,6 +32,7 @@ from sagent.tools.lib.bash import (
 from sagent.tools.lib.pdf import (
     MAX_INLINE_PAGES,
     MAX_PDF_BYTES,
+    MAX_RENDERED_BYTES,
     PdfError,
     extract_pdf_pages,
     get_pdf_page_count,
@@ -578,16 +580,70 @@ def _read_pdf(path: Path, pages: str) -> ToolResult:
     first, last = resolved
 
     try:
-        page_jpegs = extract_pdf_pages(path, first=first, last=last)
+        page_jpegs, total_pages = _render_pdf_jpegs(path, first=first, last=last)
     except PdfError as e:
         return ToolResult(call_id="", content=f"PDF: {e}", is_error=True)
 
-    range_note = f" pages {first}-{last or 'end'}" if first is not None else ""
+    start = first if first is not None else 1
+    rendered = len(page_jpegs)
+    # The full count comes from the same render call -- no second open that
+    # could transiently fail and silently mark a partial read as complete.
+    requested_last = last if last is not None else total_pages
+    # ``extract_pdf_pages`` returns a prefix when the rendered-byte budget
+    # truncated the read. Make the truncation VISIBLE so the model doesn't
+    # mistake a partial read for a complete one, and name the resume range.
+    truncated = start + rendered - 1 < requested_last
+    if truncated:
+        resume = start + rendered
+        note = (
+            f"[PDF: {path.name} -- rendered pages {start}-{start + rendered - 1} "
+            f"of requested {start}-{requested_last}; output truncated at the "
+            f'request byte budget. Pass pages="{resume}-{requested_last}" to read '
+            f"the remaining pages.]"
+        )
+    else:
+        range_note = f" pages {start}-{last or 'end'}" if first is not None else ""
+        note = f"[PDF: {path.name} ({rendered} page(s){range_note})]"
     return ToolResult(
         call_id="",
-        content=f"[PDF: {path.name} ({len(page_jpegs)} page(s){range_note})]",
+        content=note,
         attachments=tuple(BytesMessage(jpeg, "image/jpeg") for jpeg in page_jpegs),
     )
+
+
+def _render_pdf_jpegs(
+    path: Path, *, first: int | None, last: int | None
+) -> tuple[list[bytes], int]:
+    """Rasterize the page range to JPEGs under the rendered-byte budget.
+
+    Returns the rendered JPEGs and the PDF's full page count (for the
+    continuation hint, without a second open).
+    """
+    return extract_pdf_pages(
+        path, first=first, last=last, max_total_bytes=_rendered_byte_budget()
+    )
+
+
+def _rendered_byte_budget() -> int:
+    """Per-read cap on cumulative rendered JPEG bytes, from the active model.
+
+    Provider request ceilings vary by orders of magnitude (a small local
+    model may allow far less than a 32 MB Anthropic request), so the bound
+    must follow the ACTIVE model's ``max_request_bytes``, not a single
+    constant. The rendered JPEGs are raw bytes that ship base64-expanded
+    (``4/3``), and the request also carries system prompt + history + text,
+    so reserve headroom: budget the raw render at half the ceiling's
+    base64-deflated size. Falls back to ``MAX_RENDERED_BYTES`` when no agent
+    is in context (standalone tool use / tests) or the model declares no
+    ceiling (``<= 0``).
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_request_bytes if agent is not None else 0
+    if ceiling <= 0:
+        return MAX_RENDERED_BYTES
+    # Half the ceiling (headroom for system/history/text), then deflate by
+    # the base64 4/3 expansion to bound the RAW rendered bytes.
+    return max(1, (ceiling // 2) * 3 // 4)
 
 
 def _resolve_page_range(

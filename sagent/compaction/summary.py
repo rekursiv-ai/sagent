@@ -275,7 +275,15 @@ class SummaryCompactor:
         # (legacy ``""`` plus the persisted id) still passes
         # ``_validate_mask_disjoint``.
         mask = full_tape_mask(tape)
-        history = _strip_attachments(list(context))
+        # Split the UN-stripped history so the preserved tail keeps its
+        # image/PDF bytes -- the model is actively using them, and stripping
+        # them on every compaction (token- or byte-triggered) is silent
+        # vision-data loss. Only the summarized region is stripped below; its
+        # bytes are folded into the text summary, so shedding them is correct.
+        # ``_strip_attachments`` inspects only entry type / text / tool
+        # pairing-irrelevant fields, so splitting before vs after stripping
+        # yields the same boundaries.
+        history = list(context)
         direction = self._direction
         effective_keep = self._keep_recent
         if direction == "from":
@@ -290,6 +298,7 @@ class SummaryCompactor:
                 to_keep, to_summarize = _safe_split(
                     history, effective_keep, direction="up_to"
                 )
+            to_summarize = _strip_attachments(to_summarize)
             if not to_keep:
                 # ``_safe_split`` snaps the boundary left past unresolved
                 # tool_use; when the entire prefix is unsafe it keeps
@@ -302,7 +311,7 @@ class SummaryCompactor:
                     effective_keep,
                 )
         else:
-            to_summarize = history
+            to_summarize = _strip_attachments(history)
             to_keep = []
 
         token_before = estimate_entry_tokens(compact_model, history)
