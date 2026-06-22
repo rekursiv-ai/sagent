@@ -16,6 +16,7 @@ from sagent.lib.web.search import (
     TorrentResult,
     VideoResult,
 )
+from sagent.tools.paper_search import PaperSearch
 from sagent.tools.web_search import (
     WebSearch,
     _build_query,
@@ -37,6 +38,14 @@ def test_description_resolves() -> None:
     # wrong asset or empty template is caught.
     assert "Web search" in desc
     assert "Sources:" in desc
+    # The @property exists to substitute {{NOW}} each access; an unsubstituted
+    # template token must never survive into the rendered description.
+    assert "{{NOW}}" not in desc
+
+
+def test_papersearch_description_resolves_now() -> None:
+    # PaperSearch.description is also a @property; same {{NOW}} contract.
+    assert "{{NOW}}" not in PaperSearch().description
 
 
 def test_summary_short_query() -> None:
@@ -88,6 +97,28 @@ def test_build_query_ignores_non_string_domains() -> None:
 def test_build_query_ignores_non_list() -> None:
     q = _build_query("ml", "not-a-list", None)
     assert q == "ml"
+
+
+def test_build_query_rejects_operator_injection() -> None:
+    # A domain value carrying an embedded operator must not splice into the
+    # query and un-scope/contradict the filter.
+    q = _build_query("ml", ["example.com -site:trusted.com"], None)
+    assert q == "ml"
+    assert "-site:trusted.com" not in q
+
+
+def test_build_query_rejects_whitespace_and_non_hostname() -> None:
+    q = _build_query("ml", ["not a host", "valid.com", "no-dot"], ["a.b -c"])
+    assert "site:valid.com" in q
+    assert "not a host" not in q
+    assert "site:no-dot" not in q  # single label, not a hostname
+    assert "-site:a.b" not in q  # embedded operator rejected wholesale
+
+
+def test_build_query_accepts_wildcard_and_port() -> None:
+    q = _build_query("ml", ["*.arxiv.org", "host.com:8080"], None)
+    assert "site:*.arxiv.org" in q
+    assert "site:host.com:8080" in q
 
 
 def test_run_returns_formatted_results() -> None:

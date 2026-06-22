@@ -23,12 +23,12 @@ import json
 import os
 import time
 
-from sagent.lib.env import env_truthy
 from sagent.lib.userdirs import data_dir
 
 
 _DEFAULT_PATH = data_dir("sagent") / "debug.log"
 _MAX_PREVIEW = 200
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def log_path() -> Path:
@@ -50,7 +50,7 @@ def trace(event: str, **data: object) -> None:
       **data: Arbitrary key-value payload.
 
     """
-    if env_truthy("SAGENT_DEBUG"):
+    if os.environ.get("SAGENT_DEBUG", "").lower() in _TRUTHY:
         _write(event, data)
 
 

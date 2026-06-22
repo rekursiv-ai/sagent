@@ -350,7 +350,11 @@ def int_val(v: object, default: int) -> int:
       result: Integer value or ``default``.
 
     """
-    if isinstance(v, (int, float, bool)):
+    if isinstance(v, bool):
+        # Reject bool uniformly with ``bool_val``/``float_val``: a JSON ``true``
+        # where an int was expected is a shape mismatch, not the value ``1``.
+        return default
+    if isinstance(v, (int, float)):
         return int(v)
     if isinstance(v, str):
         try:

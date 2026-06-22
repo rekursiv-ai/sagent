@@ -38,6 +38,7 @@ from sagent.tools.paper_common import (
     truncation_notice,
     validate_abstract_chars,
     validate_limit,
+    validate_year_range,
     year_in_range,
 )
 from sagent.types.runtime import ToolResult
@@ -46,8 +47,9 @@ from sagent.types.runtime import ToolResult
 logger = logging.getLogger(__name__)
 
 _OPENALEX_BASE = "https://api.openalex.org"
-# Match S2_TIMEOUT: the fused backend queries both, so a 60s OpenAlex ceiling
-# would let one leg silently hang an interactive turn even after S2 returned.
+# Matches S2_TIMEOUT (paper_common): the fused backend queries both legs, so a
+# loose OpenAlex ceiling would let one leg silently hang an interactive turn
+# even after the other returned. Keep the two interactive ceilings equal.
 _HTTP_TIMEOUT = 10.0
 
 _OPENALEX_PER_PAGE_MAX = 200
@@ -113,9 +115,11 @@ async def _search_s2(
     if isinstance(data, ToolResult):
         return data
     total = int_val(data.get("total"), 0)
+    rows = data.get("data")
     records = [
         s2_paper_to_record(entry)
-        for entry in cast(list[MutableJSON], data.get("data") or [])
+        for entry in cast(list[MutableJSON], rows if isinstance(rows, list) else [])
+        if isinstance(entry, dict)
     ]
     return records, total
 
@@ -360,6 +364,13 @@ async def _search_searxng(
     return capped, len(capped)
 
 
+# Candidate count fetched from SearXNG when the caller sets no ``limit``. Larger
+# than searxng's bare default (10) because the year/open-access filters run
+# client-side AFTER the fetch (SearXNG science exposes no server-side filter),
+# so an unfiltered page must over-fetch to leave enough survivors.
+_SEARXNG_SCIENCE_DEFAULT = 20
+
+
 def _searxng_science_call(query: str, limit: int | None) -> list[PaperResult]:
     """Call SearXNG's science category, preserving the ``PaperResult`` overload.
 
@@ -370,7 +381,9 @@ def _searxng_science_call(query: str, limit: int | None) -> list[PaperResult]:
     """
     return list(
         searxng(
-            query, num_results=limit if limit is not None else 30, categories="science"
+            query,
+            num_results=limit if limit is not None else _SEARXNG_SCIENCE_DEFAULT,
+            categories="science",
         )
     )
 
@@ -388,6 +401,10 @@ def _searxng_paper_to_record(hit: PaperResult) -> PaperRecord:
     """
     arxiv_match = _ARXIV_URL_RE.search(hit.url)
     arxiv_id = arxiv_match.group(1) if arxiv_match else None
+    # ``hit.tags`` (SearXNG field-of-study tags) is intentionally dropped:
+    # ``PaperRecord`` carries no tag concept, and the S2 / OpenAlex converters
+    # likewise do not map tags, so dropping here keeps the record uniform across
+    # all three backends rather than making SearXNG records asymmetric.
     # A SearXNG result whose own URL is a bare DOI/arXiv link still parses; keep
     # only DOIs we can normalize, else leave the field empty.
     doi = hit.doi or None
@@ -521,7 +538,17 @@ class PaperSearch:
     name: str = "PaperSearch"
     tool_id: str = "application/x-tool-papersearch"
     clearable_results: bool = True
-    description: str = load_tool_description("PaperSearch")
+
+    @property
+    def description(self) -> str:
+        """Return the tool description, re-evaluating ``{{NOW}}`` each access.
+
+        Mirrors ``WebSearch.description``: resolving at access (not class-body
+        import) keeps the same contract across the tool family, so a template
+        token added to the asset later is not silently frozen at import.
+        """
+        return load_tool_description("PaperSearch")
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -648,6 +675,9 @@ class PaperSearch:
             return limit
         year_from = opt_int(args, "year_from")
         year_to = opt_int(args, "year_to")
+        year_error = validate_year_range(year_from, year_to)
+        if year_error is not None:
+            return year_error
         open_access_only = bool_val(args.get("open_access_only"), False)
         cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
         if isinstance(cap, ToolResult):
@@ -655,7 +685,7 @@ class PaperSearch:
         q = query.strip()
         if not q:
             return ToolResult(call_id="", content="'query' is required.", is_error=True)
-        src = (source or "s2").strip().lower()
+        src = source.strip().lower()
         if src not in _VALID_SOURCES:
             return ToolResult(
                 call_id="",
@@ -707,16 +737,16 @@ class PaperSearch:
                 "one specific term has no match -- drop the most specific term "
                 "and retry to broaden."
             )
-        if not hits and src == "s2":
-            # S2 ranks against title/abstract tokens, NOT author names, so an
-            # author surname in the query (e.g. "Andrews Capturing Sparks...")
-            # silently sinks the real paper to zero hits while OpenAlex, which
-            # indexes authors, finds it. Nudge the agent to the fused backend
-            # instead of letting it accept the empty result (live 2026-06-19).
+        if not hits:
+            # Every backend ranks against title/abstract tokens, NOT author
+            # names: S2 search, and OpenAlex via ``title_and_abstract.search``
+            # (it does NOT use an author filter here), both sink an
+            # author-surname query to zero hits. Switching backends will not
+            # help -- the author-indexed path is the dedicated PaperAuthor tool.
             text += (
-                "\nNote: Semantic Scholar matches title/abstract text, not "
-                "author names. If your query included an author surname, retry "
-                'with source="fused" (adds OpenAlex, which indexes authors).'
+                "\nNote: paper search matches title/abstract text, not author "
+                "names (true for every source). If your query was an author "
+                "name, use the PaperAuthor tool instead."
             )
         # Cache only a complete result. A fused partial (one backend errored)
         # must be retried next time, not pinned -- mirrors s2_batch_blocks, which

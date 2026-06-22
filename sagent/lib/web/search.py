@@ -431,9 +431,19 @@ def searxng(
         headers=headers,
         timeout_sec=_SEARXNG_TIMEOUT_SEC,
     )
-    items = cast("list[dict[str, object]]", json.loads(body).get("results", []))
+    payload = cast("object", json.loads(body))
+    raw = (
+        cast("dict[str, object]", payload).get("results")
+        if isinstance(payload, dict)
+        else None
+    )
+    items = cast("list[object]", raw) if isinstance(raw, list) else []
     parse = _SEARXNG_PARSERS.get(categories, _searxng_web)
-    return [parse(item) for item in items[:num_results]]
+    return [
+        parse(cast("dict[str, object]", item))
+        for item in items[:num_results]
+        if isinstance(item, dict)
+    ]
 
 
 def _searxng_web(item: dict[str, object]) -> SearchResult:
@@ -627,7 +637,7 @@ def _searxng_url() -> str:
     """Return the configured SearXNG base URL without a trailing slash."""
     url = os.environ.get(_SEARXNG_URL_ENV, "").rstrip("/")
     if not url:
-        raise RuntimeError(
+        raise SearchError(
             f"{_SEARXNG_URL_ENV} must be set to use SearXNG search",
         )
     return url
