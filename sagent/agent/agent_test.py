@@ -35,6 +35,7 @@ from sagent.agent.agent import (
     _resolve_target_spec,
     _should_cancel_background,
     _wire_attachment_bytes,
+    _wire_request_bytes,
 )
 from sagent.agent.background import (
     BackgroundAwareTool,
@@ -5669,6 +5670,78 @@ async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
+    """A persisted resume wait is honored ONCE, never replayed on recovery.
+
+    ``resume_retry_at`` is a one-shot wall-clock wait carried across a restart.
+    The first ``send_with_retry`` honors it; if that send then raises overflow,
+    the recovery re-attempt must NOT re-wait the same deadline. Clearing the
+    local only on the success path replays the wait on every overflow loop.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _PassThroughCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    model = _ByteOverflowModel(overflow_count=1)  # one overflow, then success
+    a = Agent(model=model, tools=[], compactor=_PassThroughCompactor())
+    # A short, in-range resume wait so ``send_with_retry`` sleeps it the first
+    # time. Overflow raises immediately (no backoff sleep), so the ONLY sleeps
+    # observed are the resume waits -- count them.
+    a.runtime.resume_retry_at = time.time() + 30.0
+
+    resume_sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _recording_sleep(delay: float, *args: object, **kwargs: object) -> object:
+        # The resume wait is the only multi-second sleep in this scenario.
+        if delay > 1.0:
+            resume_sleeps.append(delay)
+            return None  # don't actually wait 30s
+        return await real_sleep(delay, *args, **kwargs)
+
+    with patch("sagent.agent.retry.asyncio.sleep", _recording_sleep):
+        message = await a._agent_model.stream(
+            history=[types.runtime.UserMessage(text="x")],
+            publish=lambda _ev: None,
+        )
+    assert message.text == "recovered"
+    assert len(resume_sleeps) == 1, (
+        f"resume wait replayed on overflow recovery: {resume_sleeps}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> None:
     """Exhausted byte-overflow recovery surfaces byte-specific remediation.
 
@@ -5774,6 +5847,133 @@ async def test_fresh_oversize_attachment_rejected_before_send() -> None:
     with pytest.raises(types.model.RequestTooLargeError):
         await a._agent_model.stream(history=history, publish=lambda _ev: None)
     assert model.call_index == 0, "oversize fresh attachment must be rejected pre-send"
+
+
+@pytest.mark.asyncio
+async def test_fresh_text_heavy_request_rejected_before_send() -> None:
+    """Pre-send guard counts the WHOLE request, not just attachment bytes.
+
+    A request whose attachment bytes alone are UNDER the ceiling but whose
+    text payload pushes the total OVER it must be rejected before the model
+    call. Counting only attachments (the prior behavior) let a text-heavy
+    fresh request slip the guard and 413 reactively, burning overflow-recovery
+    round-trips on history that compaction cannot shed.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _SmallByteModel(StubModel):
+        max_request_bytes: int = 4 * 1024 * 1024
+        max_image_bytes: int = 4 * 1024 * 1024
+        call_index: int = 0
+
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
+        ) -> types.model.ModelResponse:
+            del request, publish
+            self.call_index += 1
+            return types.model.ModelResponse(
+                message=types.runtime.AssistantMessage(text="should not be reached")
+            )
+
+    model = _SmallByteModel()
+    # No compactor: ``compact_if_needed`` is a no-op, so the fresh text reaches
+    # the pre-send guard intact (a summarizing compactor would otherwise shed
+    # it). This isolates the guard's whole-request byte accounting.
+    a = Agent(model=model, tools=[], compactor=None)
+    # No attachments at all: 5 MB of fresh user text over the 4 MB ceiling.
+    # Attachment-only accounting would see 0 bytes and wave it through.
+    user = types.runtime.UserMessage(text="x" * (5 * 1024 * 1024))
+    a.runtime.append_history(user)
+    history = a.runtime.context().messages
+    with pytest.raises(types.model.RequestTooLargeError):
+        await a._agent_model.stream(history=history, publish=lambda _ev: None)
+    assert model.call_index == 0, "text-heavy fresh request must be rejected pre-send"
+
+
+@pytest.mark.asyncio
+async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
+    """The guard must size the MATERIALIZED request, not raw history.
+
+    A large HISTORICAL tool result is shed by ``materialize_request``'s
+    ``tool_result_budget_chars`` elision (-> ``<elided>``) before the request
+    ships. Sizing raw history counts the un-elided bytes and false-rejects a
+    request the provider would happily accept. The guard must measure the same
+    artifact that ``send_with_retry`` sends (mirrors ``persist_budget_used_chars``,
+    which already materializes-then-measures).
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _CapturingModel(StubModel):
+        max_request_bytes: int = 1 * 1024 * 1024
+        max_image_bytes: int = 1 * 1024 * 1024
+        call_index: int = 0
+
+        @override
+        async def stream(
+            self,
+            request: types.model.ModelRequest,
+            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
+        ) -> types.model.ModelResponse:
+            del publish
+            self.call_index += 1
+            self.received.append(request)
+            return types.model.ModelResponse(
+                message=types.runtime.AssistantMessage(text="done")
+            )
+
+    model = _CapturingModel()
+    # message_budget_chars=1000 -> the 5 MB historical tool result elides to the
+    # short placeholder; the materialized body is tiny and well under 1 MB.
+    a = Agent(model=model, tools=[], compactor=None)
+    a._budget = replace(a._budget, message_budget_chars=1_000)
+    # A CLOSED tool pair in HISTORY (not this turn's input): user asks, model
+    # calls a tool, a 5 MB tool result returns, then a fresh user turn.
+    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(
+        types.runtime.AssistantMessage(
+            tool_calls=(types.runtime.ToolCall(id="c1", name="Bash", args={}),)
+        )
+    )
+    a.runtime.append_history(
+        types.runtime.ToolResult(call_id="c1", content="x" * (5 * 1024 * 1024))
+    )
+    a.runtime.append_history(types.runtime.UserMessage(text="continue"))
+    history = a.runtime.context().messages
+    # Must NOT raise: the materialized request elides the oversized tool result.
+    await a._agent_model.stream(history=history, publish=lambda _ev: None)
+    assert model.call_index == 1, "guard false-rejected an elidable historical result"
+    sent = model.received[0]
+    elided = next(m for m in sent.messages if isinstance(m, types.runtime.ToolResult))
+    assert len(elided.content) < 1_000, (
+        "tool result should have been elided on the wire"
+    )
+
+
+def test_wire_request_bytes_counts_tool_call_and_thinking_surfaces() -> None:
+    """``_wire_request_bytes`` must count every wire surface it claims to bound.
+
+    The estimate is documented as a conservative LOWER bound that "counts every
+    text surface". An ``AssistantMessage`` ships its ``tool_calls`` args and
+    ``thinking_blocks`` on the wire; omitting them lets a tool-call/thinking-heavy
+    history slip the guard and 413 reactively. Adding such surfaces must strictly
+    increase the estimate.
+    """
+    plain = types.runtime.AssistantMessage(text="hi")
+    heavy = types.runtime.AssistantMessage(
+        text="hi",
+        thinking_blocks=({"type": "thinking", "thinking": "z" * 5_000},),
+        tool_calls=(
+            types.runtime.ToolCall(id="c1", name="Bash", args={"command": "y" * 5_000}),
+        ),
+    )
+    base = _wire_request_bytes([plain], system="", max_image_bytes=0)
+    with_payload = _wire_request_bytes([heavy], system="", max_image_bytes=0)
+    assert with_payload > base + 9_000, (
+        "tool-call args and thinking-block text must be counted on the wire"
+    )
 
 
 @pytest.mark.asyncio
@@ -6413,6 +6613,27 @@ def test_subagent_tool_state_depth_increments() -> None:
         assert root.tool_state.depth == 0
         with child._install_contextvars():
             assert child.tool_state.depth == 1
+
+
+def test_tool_state_depth_restored_on_context_exit() -> None:
+    """``_install_contextvars`` must restore ``tool_state.depth`` like its ContextVars.
+
+    ``depth`` is a plain instance field mutated inside the block; every other
+    piece of state is token-restored on exit. If ``depth`` is not restored, a
+    reused agent re-entered under a different parent computes ``parent.depth+1``
+    from a stale starting value and the depth cap drifts.
+    """
+    root = _build_agent()
+    deep = _build_agent()  # one agent object reused under two parents
+    with root._install_contextvars(), deep._install_contextvars():
+        assert deep.tool_state.depth == 1
+    # After both blocks exit, the reused agent's depth must be back to its
+    # pre-entry value (0), not left at the in-context 1.
+    assert deep.tool_state.depth == 0, "depth leaked past the context block"
+    # Re-enter under a fresh root: depth must again be exactly 1, not 2.
+    root2 = _build_agent()
+    with root2._install_contextvars(), deep._install_contextvars():
+        assert deep.tool_state.depth == 1, "stale depth accumulated across re-entry"
 
 
 def test_default_named_agents_get_unique_registry_label() -> None:

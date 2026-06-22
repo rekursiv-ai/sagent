@@ -22,6 +22,7 @@ from sagent.agent.retry import (
     RETRYABLE_STATUS_CODES,
     RateLimitError,
     RetriesExhaustedError,
+    _backoff_delay,
     error_diagnostics,
     error_status,
     extract_retry_after,
@@ -42,6 +43,41 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     RuntimeEvent,
 )
+
+
+def test_backoff_delay_keeps_jitter_visible_at_the_cap() -> None:
+    """Late attempts must still vary -- jitter survives the clamp.
+
+    The prior ``min(base + jitter, cap)`` shape collapsed every attempt whose
+    raw base exceeded the cap to exactly ``cap`` (jitter invisible), which
+    re-synchronizes concurrent retriers into a thundering herd. Clamping the
+    base BEFORE jitter keeps delays de-correlated at the ceiling.
+    """
+    # attempt=20 -> raw base 0.5 * 2**20 >> the cap, so every sample is at the
+    # ceiling band; they must NOT all be identical.
+    samples = {_backoff_delay(20, cap=PERSISTENT_MAX_BACKOFF_SEC) for _ in range(50)}
+    assert len(samples) > 1, "jitter collapsed at the cap"
+    # Bounded to [0.75 * cap, cap]: cap is a HARD ceiling, jitter subtracts.
+    assert all(
+        0.75 * PERSISTENT_MAX_BACKOFF_SEC <= s <= PERSISTENT_MAX_BACKOFF_SEC
+        for s in samples
+    )
+
+
+def test_backoff_delay_never_exceeds_cap() -> None:
+    """``cap`` is a hard ceiling -- the interactive limit must never be breached."""
+    assert all(
+        _backoff_delay(n, cap=INTERACTIVE_MAX_SLEEP_SEC) <= INTERACTIVE_MAX_SLEEP_SEC
+        for n in range(30)
+        for _ in range(5)
+    )
+
+
+def test_backoff_delay_below_cap_is_exponential() -> None:
+    """Early attempts ramp exponentially from ``RETRY_BASE_SEC``."""
+    # attempt=0: base = RETRY_BASE_SEC, jitter subtracts <= 25%.
+    d0 = _backoff_delay(0, cap=MAX_RETRY_DELAY)
+    assert 0.75 * RETRY_BASE_SEC <= d0 <= RETRY_BASE_SEC
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1247,8 +1283,9 @@ async def test_send_with_retry_corrects_divergent_retry_output() -> None:
     )
 
     assert resp.message.text == "xyz"
-    assert (
-        "".join(chunks) == "abc\n[retry response diverged; final response follows]\nxyz"
+    assert "".join(chunks) == (
+        "abc\n[retry diverged; discard the text above -- "
+        "the corrected response follows]\nxyz"
     )
 
 
@@ -1454,6 +1491,43 @@ async def test_send_with_retry_resume_retry_at_over_ceiling_does_not_wedge(
     assert response.message.text == "ok"
     assert sleeps == [], "resume wait beyond ceiling must not sleep-wedge"
     assert model.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_resume_over_ceiling_notifies_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping a stale over-ceiling resume wait must NOTIFY, not vanish silently.
+
+    The prior session painted a "service suspended until <T>" banner from the
+    persisted ``retry_at``. When that wait is past the interactive ceiling we
+    skip it and proceed -- but with no signal the user is left staring at a
+    suspension banner the code silently abandoned. Emit a recoverable notice so
+    the abandonment is visible.
+    """
+    model = _ScriptedModel(stream_responses=[_resp("ok")])
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+
+    async def fake_sleep(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    notes: list[str] = []
+
+    response = await send_with_retry(
+        model,
+        _request(),
+        publish=_silent,
+        max_attempts=3,
+        persistent_retry=False,
+        publish_recoverable=notes.append,
+        resume_retry_at=100.0 + INTERACTIVE_MAX_SLEEP_SEC + 86_400.0,
+    )
+
+    assert response.message.text == "ok"
+    assert any("resume" in n.lower() for n in notes), (
+        f"skipped over-ceiling resume wait must notify the user; got {notes}"
+    )
 
 
 @pytest.mark.asyncio

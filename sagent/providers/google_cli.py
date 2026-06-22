@@ -36,6 +36,7 @@ from sagent.lib import token_count
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, MutableJSON, validate_json_schema
 from sagent.providers.google import Google
+from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -88,8 +89,6 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
-_TURN_RESPAWN_THRESHOLD = 100
-_CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
 _CREDENTIALS_SCHEMA: JSON = {
     "type": "object",
     "required": ["access_token", "refresh_token", "expiry_date"],
@@ -511,11 +510,10 @@ class _GoogleCLIModel:
             return True
         if _hash_system(request.system) != self._system_hash:
             return True
-        if self._turn_count >= _TURN_RESPAWN_THRESHOLD:
-            return True
-        return (
-            self._last_input_tokens
-            > self._max_request_tokens * _CONTEXT_FRACTION_RESPAWN_THRESHOLD
+        return respawn_for_cadence(
+            turn_count=self._turn_count,
+            last_input_tokens=self._last_input_tokens,
+            max_request_tokens=self._max_request_tokens,
         )
 
     def _sync_tools_bridge(self, request: ModelRequest) -> None:

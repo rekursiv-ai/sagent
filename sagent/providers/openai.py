@@ -18,15 +18,11 @@ from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
-    build_messages,
-    parse_response,
 )
 
 
 __all__ = [
     "OpenAI",
-    "build_messages",
-    "parse_response",
 ]
 
 

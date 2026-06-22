@@ -92,6 +92,23 @@ logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
 
+# Map sagent's effort vocabulary onto the effort levels OpenAI's reasoning
+# models actually accept (``minimal``/``low``/``medium``/``high``). The agent
+# advertises a wider set (``none``..``max``) for cross-provider uniformity, so
+# both OpenAI transports -- chat-completions (``reasoning_effort`` here) and the
+# subscription Responses API (``reasoning.effort`` in ``openai_sub``) -- must
+# funnel through this single table. Sending a raw ``none``/``xhigh``/``max`` is
+# a 400 on the wire, and two transports disagreeing is a contract drift bug.
+OPENAI_REASONING_EFFORT: dict[str, str] = {
+    "none": "minimal",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
+
 
 class OpenAICompat:
     """Base provider for OpenAI chat-completions compatible endpoints."""
@@ -191,7 +208,13 @@ class OpenAICompat:
 
 
 def _is_context_overflow_text(msg: str) -> bool:
-    """True if the error body text describes a context-window overflow."""
+    """True if the error body text describes a context-window overflow.
+
+    Callers MUST run ``is_request_too_large`` first and short-circuit on a
+    byte wire-limit: the ``"input too large"`` phrase below is byte-ambiguous,
+    so this helper is only sound when the byte case has already been excluded
+    (see :meth:`OpenAICompatModel.is_context_overflow`).
+    """
     with contextlib.suppress(json.JSONDecodeError):
         raw_body = json.loads(msg)
         if isinstance(raw_body, Mapping):
@@ -518,7 +541,18 @@ class OpenAICompatModel:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
         if request.effort is not None and self.supports_effort:
-            body["reasoning_effort"] = request.effort
+            # Map through the shared table: the wire accepts only a subset of
+            # sagent's advertised efforts. An unknown value should be impossible
+            # (the agent's effort setter validates against ``valid_efforts``), so
+            # warn rather than silently run at the most expensive level.
+            mapped = OPENAI_REASONING_EFFORT.get(request.effort)
+            if mapped is None:
+                logger.warning(
+                    "unknown reasoning effort %r; defaulting to 'high'",
+                    request.effort,
+                )
+                mapped = "high"
+            body["reasoning_effort"] = mapped
         tier = self.effective_service_tier(request)
         if tier is not None:
             body["service_tier"] = tier
@@ -780,93 +814,6 @@ def _extract_usage(usage: MutableJSON) -> tuple[int, int, int]:
     )
     cache_read = int_val(details.get("cached_tokens"), 0)
     return input_tokens, output_tokens, cache_read
-
-
-def parse_response(
-    data: MutableJSON,
-    *,
-    pricing: Pricing,
-    reasoning_field: str | None,
-) -> ModelResponse:
-    """Convert a non-streaming chat-completions body to ``ModelResponse``.
-
-    Args:
-      data: Decoded JSON response body.
-      pricing: Per-token price schedule for cost computation.
-      reasoning_field: Provider-specific reasoning-text field name,
-          or ``None`` when the provider does not surface reasoning.
-
-    Returns:
-      response: Parsed ``ModelResponse`` with usage and cost filled in.
-
-    """
-    choices = cast(list[MutableJSON], data["choices"])
-    choice = choices[0]
-    message = cast(MutableJSON, choice["message"])
-
-    text = ""
-    thinking_blocks: list[Mapping[str, object]] = []
-
-    raw_content = message.get("content")
-    if isinstance(raw_content, str):
-        text = raw_content
-
-    if reasoning_field:
-        raw_thinking = message.get(reasoning_field)
-        if isinstance(raw_thinking, str) and raw_thinking:
-            # Wrap reasoning text in a single opaque dict so the
-            # AssistantMessage round-trips through history (provider
-            # may discard on resend if the wire doesn't support it).
-            thinking_blocks.append({"type": "reasoning", "text": raw_thinking})
-
-    tool_calls: list[ToolCall] = []
-    for tc in cast(list[MutableJSON], message.get("tool_calls") or []):
-        func = cast(MutableJSON, tc["function"])
-        tc_name = cast(str, func["name"])
-        tc_id = cast(str, tc["id"])
-        parsed = _parse_tool_arguments(
-            cast(str, func.get("arguments") or ""),
-            source="message",
-            tool_name=tc_name,
-            call_id=tc_id,
-        )
-        tool_calls.append(
-            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], parsed))
-        )
-
-    asst = AssistantMessage(
-        text=text,
-        thinking_blocks=tuple(thinking_blocks),
-        tool_calls=tuple(tool_calls),
-    )
-
-    usage = cast(MutableJSON, data.get("usage") or {})
-    input_tokens, output_tokens, cache_read = _extract_usage(usage)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        max(0, input_tokens - cache_read),
-        output_tokens,
-        cache_read=cache_read,
-    )
-    message_id = cast(str, data.get("id") or "")
-    return ModelResponse(
-        message=asst,
-        tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-        ),
-        stop_reason=normalize_stop_reason(
-            cast(str | None, choice.get("finish_reason")),
-            kind="openai",
-            has_tool_use=bool(tool_calls),
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
-    )
 
 
 async def consume_stream(

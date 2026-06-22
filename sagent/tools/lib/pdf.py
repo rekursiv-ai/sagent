@@ -1,7 +1,7 @@
 """PDF rasterization helpers (pypdfium2-backed).
 
 The ``Read`` tool uses these to render PDF pages as JPEGs that the
-vision-capable model can consume. Pure-Python rendering via pypdfium2 —
+vision-capable model can consume. Pure-Python rendering via pypdfium2 --
 no system binaries required.
 """
 
@@ -50,7 +50,7 @@ class PdfError(Exception):
 
 
 def is_pdf(path: Path) -> bool:
-    """True iff the first four bytes of ``path`` are ``%PDF``."""
+    """True iff ``path`` begins with the ``%PDF-`` signature (5 bytes)."""
     try:
         with path.open("rb") as f:
             return f.read(len(PDF_MAGIC)) == PDF_MAGIC

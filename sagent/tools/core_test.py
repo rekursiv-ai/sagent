@@ -170,6 +170,43 @@ def test_tool_state_mark_read_mtime_default_stats(tmp_path: Path) -> None:
     assert entry.mtime > 0.0
 
 
+def test_tool_state_empty_file_not_stale_after_mtime_bump(tmp_path: Path) -> None:
+    """An empty file whose mtime bumps but content stays empty is NOT stale.
+
+    ``mark_read`` cached content only when truthy (``if content:``), so an empty
+    file ("") never populated the content cache; ``check_stale`` then saw
+    ``cached_content is None`` and returned True on any mtime drift -- an empty
+    file touched (no content change) reported stale forever, looping re-reads.
+    The empty string must be cached so content comparison short-circuits.
+    """
+    f = tmp_path / "empty.txt"
+    f.write_text("")
+    s = ToolState()
+    s.mark_read(str(f), content="")
+    # Bump mtime without changing content (still empty).
+    bumped = f.stat().st_mtime + 100.0
+    os.utime(f, (bumped, bumped))
+    assert s.check_stale(str(f)) is False, "empty file with unchanged content is fresh"
+
+
+def test_tool_state_mark_read_none_content_drops_stale_cache(tmp_path: Path) -> None:
+    """A no-content (``None``) read must drop a prior cached text snapshot.
+
+    Caching text from an earlier read, then re-marking the same path with no
+    content (binary re-read, or an OSError fallback), must NOT leave the old text
+    cached -- otherwise ``check_stale`` compares disk against a stale snapshot and
+    can report fresh on a real change (or vice versa). ``None`` clears the belief.
+    """
+    f = tmp_path / "f.txt"
+    f.write_text("v0")
+    s = ToolState()
+    s.mark_read(str(f), content="v0", mtime=1.0)
+    assert str(f.resolve()) in s._content_cache
+    # Re-read with no content (e.g. fallback path): the stale snapshot must go.
+    s.mark_read(str(f), content=None, mtime=2.0)
+    assert str(f.resolve()) not in s._content_cache
+
+
 def test_tool_state_mark_read_missing_file_mtime_zero(tmp_path: Path) -> None:
     s = ToolState()
     missing = tmp_path / "missing.txt"

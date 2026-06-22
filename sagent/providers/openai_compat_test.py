@@ -14,10 +14,10 @@ from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
+    _extract_usage,
     _is_context_overflow_text,
     build_messages,
     consume_stream,
-    parse_response,
 )
 from sagent.types.model import (
     ModelRequest,
@@ -114,156 +114,24 @@ def test_build_messages_empty_history_returns_empty_list() -> None:
     assert build_messages(_make_request(messages=[])) == []
 
 
-def test_parse_response_text_only() -> None:
-    data = cast(
+def test_extract_usage_splits_cache_read_out_of_input() -> None:
+    """``_extract_usage`` reports total input and the cached portion separately.
+
+    Preserves the cache-accounting coverage formerly carried by the (now
+    deleted) non-streaming ``parse_response`` path.
+    """
+    usage = cast(
         MutableJSON,
         {
-            "id": "msg-1",
-            "choices": [
-                {
-                    "message": {"content": "hello"},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "prompt_tokens": 1000,
+            "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 400},
         },
     )
-    resp = parse_response(data, pricing=Pricing(), reasoning_field=None)
-    assert resp.message.text == "hello"
-    assert resp.message.tool_calls == ()
-    assert resp.tokens.input_tokens == 10
-    assert resp.tokens.output_tokens == 5
-    assert resp.stop_reason == "model_finished"
-    assert resp.message_id == "msg-1"
-
-
-def test_parse_response_extracts_tool_call() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "id": "msg-2",
-            "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_xyz",
-                                "type": "function",
-                                "function": {
-                                    "name": "Bash",
-                                    "arguments": '{"cmd": "ls"}',
-                                },
-                            }
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
-            ],
-        },
-    )
-    resp = parse_response(data, pricing=Pricing(), reasoning_field=None)
-    assert len(resp.message.tool_calls) == 1
-    call = resp.message.tool_calls[0]
-    assert call.id == "call_xyz"
-    assert call.name == "Bash"
-    assert dict(call.args) == {"cmd": "ls"}
-    assert resp.stop_reason == "model_tool_use"
-
-
-def test_parse_response_reasoning_field_round_trips() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "choices": [
-                {
-                    "message": {
-                        "content": "out",
-                        "reasoning_content": "thinking",
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-        },
-    )
-    resp = parse_response(data, pricing=Pricing(), reasoning_field="reasoning_content")
-    assert resp.message.text == "out"
-    assert len(resp.message.thinking_blocks) == 1
-    block = resp.message.thinking_blocks[0]
-    assert block["type"] == "reasoning"
-    assert block["text"] == "thinking"
-
-
-def test_parse_response_cache_read_split_out_of_input() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "choices": [
-                {"message": {"content": ""}, "finish_reason": "stop"},
-            ],
-            "usage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 100,
-                "prompt_tokens_details": {"cached_tokens": 400},
-            },
-        },
-    )
-    pricing = Pricing(request=1.0, response=2.0, cache_read=0.1)
-    resp = parse_response(data, pricing=pricing, reasoning_field=None)
-    assert resp.tokens.input_tokens == 1000
-    assert resp.tokens.cache_read_tokens == 400
-    # (1000-400)*1 + 400*0.1 = 600 + 40 = 640 / 1M = 0.00064.
-    assert resp.input_cost == pytest.approx(0.00064)
-
-
-def test_parse_response_empty_tool_arguments_becomes_empty_dict() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "x",
-                                "type": "function",
-                                "function": {"name": "N", "arguments": ""},
-                            }
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
-            ],
-        },
-    )
-    resp = parse_response(data, pricing=Pricing(), reasoning_field=None)
-    assert dict(resp.message.tool_calls[0].args) == {}
-
-
-def test_parse_response_invalid_json_tool_arguments_becomes_empty_dict() -> None:
-    data = cast(
-        MutableJSON,
-        {
-            "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "x",
-                                "type": "function",
-                                "function": {"name": "N", "arguments": "not json"},
-                            }
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
-            ],
-        },
-    )
-    resp = parse_response(data, pricing=Pricing(), reasoning_field=None)
-    assert dict(resp.message.tool_calls[0].args) == {}
+    input_tokens, output_tokens, cache_read = _extract_usage(usage)
+    assert input_tokens == 1000
+    assert output_tokens == 100
+    assert cache_read == 400
 
 
 def _sse_response(events: list[MutableJSON]) -> httpx.Response:

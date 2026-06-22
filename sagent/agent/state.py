@@ -131,7 +131,7 @@ class ToolState:
         offset: int = 0,
         limit: int = 0,
         last_lines: int = 0,
-        content: str = "",
+        content: str | None = None,
         mtime: float | None = None,
     ) -> None:
         """Record that a file has been read.
@@ -141,7 +141,12 @@ class ToolState:
           offset: Starting line offset of the read.
           limit: Maximum lines read.
           last_lines: EOF-anchored line count.
-          content: Full file text for content-based staleness checks.
+          content: Full file text for content-based staleness checks, or
+              ``None`` when the caller has no text to cache (binary/image
+              reads). An EMPTY string is a real value -- an empty text file --
+              and IS cached, so its staleness check can short-circuit on
+              unchanged-empty content rather than treating every mtime bump as
+              a change.
           mtime: Pre-read mtime. If None, the file is stat'd now.
               Pass the mtime captured *before* reading bytes to avoid
               races with concurrent writers.
@@ -157,8 +162,14 @@ class ToolState:
             except OSError:
                 mtime = 0.0
         self.read_cache[resolved] = ReadCacheEntry(offset, limit, last_lines, mtime)
-        if content:
+        if content is not None:
             self._content_cache[resolved] = content
+        else:
+            # No content to cache (binary/image read, or a fallback re-read after
+            # an OSError). Drop any prior text belief so ``check_stale`` falls back
+            # to mtime-only rather than comparing disk against a now-stale snapshot
+            # from an earlier text read of the same path.
+            self._content_cache.pop(resolved, None)
 
     def mark_written(self, path: str) -> None:
         """Re-stamp after a successful write.
