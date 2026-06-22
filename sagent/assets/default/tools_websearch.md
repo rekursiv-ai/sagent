@@ -13,4 +13,15 @@ Sources:
 
 - `allowed_domains` / `blocked_domains` scope results.
 - `backend` -- only set to compare engines or recover from failure. Retry with a different backend before declaring unanswerable.
+- `categories` -- SearXNG result tab. Omit for general web. A non-default value forces the SearXNG backend (overriding `backend`) and returns results structured for that domain:
+  - `general` -- web results (default).
+  - `images` -- image URL, resolution, format, source.
+  - `videos` -- duration, view count, channel, embed URL.
+  - `news` -- web results with publish date.
+  - `map` -- places with coordinates and structured address.
+  - `music` -- tracks with audio/embed URL and duration.
+  - `it` -- software: packages (name/version/license/homepage), repos, code (repository/filename/language).
+  - `science` -- papers with authors/DOI/citations. Prefer the `PaperSearch` tool for scholarly work (citation graph, fetch-by-id); use this only for a quick web-style lookup.
+  - `files` -- files (filename/size/type) and torrents (size, seed/leech, magnet).
+  - `social media` -- posts from Mastodon/Lemmy (web results).
 - Current time: {{NOW}}. Resolve relative terms to absolute dates; include the current year for "latest" queries.

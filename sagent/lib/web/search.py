@@ -265,6 +265,16 @@ def _gsa_headers_for_query(query: str) -> dict[str, str]:
 
 _SEARXNG_URL_ENV = "SEARXNG_URL"
 
+# SearXNG is a metasearch aggregator: one query fans out to several upstream
+# engines and the response returns only once they finish or hit SearXNG's own
+# per-engine timeouts (``outgoing.request_timeout`` defaults to 3s, but heavy
+# science engines like Crossref are configured up to ~30s). The client ceiling
+# must therefore clear SearXNG's internal aggregation tail, not a single
+# engine's latency: at 10s the multi-engine ``it``/``science`` tabs hit a
+# premature client-side timeout mid-aggregation (observed live). 15s clears the
+# common tail while still bounding an interactive turn.
+_SEARXNG_TIMEOUT_SEC = 15.0
+
 # SearXNG result categories (tabs) -- the full set from ``categories_as_tabs``
 # in SearXNG's ``settings.yml``. Each maps to one or more result-template
 # shapes; ``science`` yields ``paper.html`` (structured ``PaperResult``). The
@@ -416,7 +426,11 @@ def searxng(
     params = urlencode(
         {"q": query, "format": "json", "pageno": "1", "categories": categories}
     )
-    body = fetch(f"{base_url}/search?{params}", headers=headers, timeout_sec=10)
+    body = fetch(
+        f"{base_url}/search?{params}",
+        headers=headers,
+        timeout_sec=_SEARXNG_TIMEOUT_SEC,
+    )
     items = cast("list[dict[str, object]]", json.loads(body).get("results", []))
     parse = _SEARXNG_PARSERS.get(categories, _searxng_web)
     return [parse(item) for item in items[:num_results]]
