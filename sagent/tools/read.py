@@ -42,20 +42,11 @@ from sagent.tools.lib.pdf import (
 from sagent.types.runtime import BytesMessage, ToolResult
 
 
-_IMAGE_EXTS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".bmp",
-    ".webp",
-    # SVG is XML; send it as text so providers do not reject image/svg+xml.
-    # ".svg",
-}
-_PDF_EXT = ".pdf"
-_NOTEBOOK_EXT = ".ipynb"
-_NUDGE = "cat via Bash is a bad UX. Use the Read tool."
-_CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
+# Single source of truth for image handling: extension -> wire MIME. The set of
+# image extensions is DERIVED from these keys (below) so the two can never drift
+# -- adding a format here is the only edit needed.
+# SVG is intentionally absent: it is XML, sent as text so providers do not
+# reject ``image/svg+xml``.
 _MIME_BY_EXT: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -63,9 +54,12 @@ _MIME_BY_EXT: dict[str, str] = {
     ".gif": "image/gif",
     ".bmp": "image/bmp",
     ".webp": "image/webp",
-    # Keep inactive with _IMAGE_EXTS; SVG falls through to _read_text.
-    # ".svg": "image/svg+xml",
 }
+_IMAGE_EXTS = frozenset(_MIME_BY_EXT)
+_PDF_EXT = ".pdf"
+_NOTEBOOK_EXT = ".ipynb"
+_NUDGE = "cat via Bash is a bad UX. Use the Read tool."
+_CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
 
 
 class Read:
@@ -323,15 +317,15 @@ class Read:
         unwrapped = unwrap_cd_prefix(trees)
         if unwrapped is None:
             return None
-        cwd, cmd = unwrapped
+        cmd = unwrapped[1]  # [0] is the cd-prefix cwd, unused by the nudge
         if cmd.env_prefix:
             return None
         if cmd.exe == "cat":
-            return _match_cat(cwd, cmd.args)
+            return _match_cat(cmd.args)
         if cmd.exe == "head":
-            return _match_head_tail(cwd, cmd.args, which="head")
+            return _match_head_tail(cmd.args, which="head")
         if cmd.exe == "tail":
-            return _match_head_tail(cwd, cmd.args, which="tail")
+            return _match_head_tail(cmd.args, which="tail")
         return None
 
 
@@ -424,10 +418,6 @@ def _read_text(
             content=f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]",
         )
     try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        mtime = None
-    try:
         text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         size = p.stat().st_size
@@ -438,6 +428,15 @@ def _read_text(
                 " Use Bash with an explicit decoder to inspect.]"
             ),
         )
+    # Stamp the mtime AFTER reading. A writer that lands between stat and read
+    # would otherwise pair a pre-write mtime with post-write content, and the
+    # next ``check_stale`` would see disk-mtime > cached-mtime, treat the entry
+    # as fresh, and silently adopt the new content. Stamping after read means a
+    # racing write bumps the mtime past what we cached, so staleness fires.
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = None
     mark_read(
         file_path,
         offset=offset,
@@ -486,16 +485,14 @@ def _window_text(
     return result_str
 
 
-def _match_cat(cwd: str | None, args: tuple[str, ...]) -> str | None:
+def _match_cat(args: tuple[str, ...]) -> str | None:
     """Match ``cat FILE`` (exactly one positional, no flags) for a Read nudge."""
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     if len(args) != 1 or args[0].startswith("-"):
         return None
     return "cat via Bash is a bad UX. Use the Read tool."
 
 
 def _match_head_tail(
-    cwd: str | None,
     args: tuple[str, ...],
     *,
     which: str,
@@ -506,7 +503,6 @@ def _match_head_tail(
     ``<cmd> -N FILE``. Anything else (e.g. ``-c`` bytes, bundled
     flags) bails.
     """
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     positional: list[str] = []
     i = 0
     while i < len(args):
@@ -690,6 +686,9 @@ def _check_minimum(
     (an absent key has ``raw is None`` and is allowed to fall through
     to the default).
     """
+    # Defense-in-depth: ``validate_tool_input`` (the JSON-schema gate run by
+    # ``_AgentTool.run``) is the primary enforcer of these minima; this re-check
+    # covers direct ``._run()`` callers (tests, internal reuse) that bypass it.
     for name, coerced, raw in fields:
         if raw is None:
             continue

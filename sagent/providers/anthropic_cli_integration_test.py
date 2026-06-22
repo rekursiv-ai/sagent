@@ -23,9 +23,12 @@ What they cover (the production-correctness gaps the unit suite leaves):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import asyncio
+import json
 import shutil
+import subprocess
 import uuid as _uuid
 
 import pytest
@@ -42,7 +45,14 @@ from sagent.types.runtime import UserMessage
 # server, whose startup polls ``asyncio.sleep`` to yield to the serve
 # task. The conftest's autouse ``_fast_sleep`` no-ops ``asyncio.sleep``,
 # which starves uvicorn startup and trips the bridge's 10s deadline.
-pytestmark = [pytest.mark.integration, pytest.mark.real_sleep]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.real_sleep,
+    # Spawns the real ``claude`` binary: a heavy subprocess with model-latency
+    # turns. Runs in the low-parallelism ``real_llm`` gate so the CLI gets enough
+    # CPU to finish within the timeout instead of being starved under ``-n 8``.
+    pytest.mark.real_llm,
+]
 
 
 def _claude_available() -> bool:
@@ -62,6 +72,32 @@ _requires_claude = pytest.mark.skipif(not _claude_available(), reason=_SKIP_REAS
 _BRIDGE_UNAVAILABLE = "MCP bridge could not start in this environment"
 
 
+# OAuth bearer tokens expire and refresh on a schedule, so a run can land in a
+# window where the CLI's token is momentarily invalid. That is a transient
+# environment state, not a provider regression, so it is a skip -- but it must
+# be detected FAST: a turn against an expired token makes the CLI retry for
+# ~175s before returning a 403, and some session paths hang until the test
+# timeout. A one-shot session-scoped probe (below) catches it up front and
+# skips the whole suite in seconds instead of minutes per test.
+_AUTH_FAILURE_MARKERS = (
+    "bearer token has expired",
+    "failed to authenticate",
+    "could not be refreshed",
+    "please log out",
+    "oauth token",
+    "401",
+    "403",
+)
+_AUTH_UNAVAILABLE = "claude auth is unavailable (token expired/refreshing)"
+_AUTH_PROBE_TIMEOUT_SEC = 45.0
+
+
+def _looks_like_auth_failure(text: str) -> bool:
+    """Whether CLI output/error text signals a transient auth failure."""
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_FAILURE_MARKERS)
+
+
 def _skip_if_bridge_unavailable(exc: Exception) -> None:
     msg = str(exc)
     # A loopback-forbidding host surfaces the same root cause two ways:
@@ -72,6 +108,74 @@ def _skip_if_bridge_unavailable(exc: Exception) -> None:
         pytest.skip(f"{_BRIDGE_UNAVAILABLE}: {msg}")
     if isinstance(exc, SubprocessTransportError) and "mcp bridge" in msg.lower():
         pytest.skip(f"{_BRIDGE_UNAVAILABLE}: {msg}")
+    # A token that expired mid-run surfaces as a 403/auth-error result.
+    if isinstance(exc, SubprocessTransportError) and _looks_like_auth_failure(msg):
+        pytest.skip(f"{_AUTH_UNAVAILABLE}: {msg}")
+
+
+def _probe_claude_auth() -> str:
+    """Run one bounded ``claude --print`` turn; return ``""`` if auth works.
+
+    Returns a non-empty reason string when the CLI is reachable but its token is
+    expired/refreshing (a transient skip) so the caller can skip every live
+    test fast instead of each one burning ~175s on the CLI's auth retries. A
+    timeout or spawn failure here is itself treated as auth-unavailable.
+    """
+    try:
+        proc = subprocess.run(
+            [  # noqa: S607
+                "claude",
+                "--print",
+                "--output-format",
+                "json",
+                "--model",
+                "claude-haiku-4-5",
+            ],
+            input="Reply with exactly: ok",
+            capture_output=True,
+            text=True,
+            timeout=_AUTH_PROBE_TIMEOUT_SEC,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return f"probe failed ({type(exc).__name__})"
+    if proc.returncode != 0 and _looks_like_auth_failure(proc.stdout + proc.stderr):
+        return proc.stderr.strip()[:200] or "non-zero exit"
+    try:
+        parsed: object = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return ""  # unparseable but exit 0: let the real test surface it
+    if not isinstance(parsed, dict):
+        return ""
+    result = cast("dict[str, object]", parsed)
+    if result.get("is_error"):
+        detail = str(result.get("result", ""))
+        if _looks_like_auth_failure(detail):
+            return detail[:200]
+    return ""
+
+
+# One-element cache for the session's auth-probe outcome: ``None`` = not yet
+# probed, ``""`` = auth works, non-empty = the transient-failure reason. A list
+# cell (not a reassigned module global) keeps it mutable without a ``global``
+# statement or tripping the uppercase-constant rule.
+_auth_probe_cache: list[str | None] = [None]
+
+
+@pytest.fixture(autouse=True)
+def _require_live_claude_auth() -> None:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
+    """Skip every live test fast when the CLI's token is expired/refreshing.
+
+    Probes once per session (the result is cached) so a transient auth window
+    skips the whole suite in one ~13s probe rather than each test hanging on the
+    CLI's multi-minute auth retry. A working token is a no-op.
+    """
+    if not _claude_available():
+        return  # the per-test ``_requires_claude`` skipif already handles this
+    if _auth_probe_cache[0] is None:
+        _auth_probe_cache[0] = _probe_claude_auth()
+    if _auth_probe_cache[0]:
+        pytest.skip(f"{_AUTH_UNAVAILABLE}: {_auth_probe_cache[0]}")
 
 
 @_requires_claude

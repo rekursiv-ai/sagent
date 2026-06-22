@@ -625,6 +625,23 @@ def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
     assert m.supports_account_auth is True
 
 
+def test_subscription_effort_prefixes_match_api_key_path() -> None:
+    """Both OpenAI transports must agree on which ids are reasoning models.
+
+    The subscription path previously used a bare ``"o"`` prefix, which
+    over-matches ids the API-key ``_OpenAIModel`` rejects (e.g. a future
+    ``omni-*``). The two share one ``KNOWN_MODELS`` catalog, so a divergence is a
+    contract bug. ``omni-foo`` must be a non-effort model on BOTH paths.
+    """
+    sub = _make_provider().model("gpt-5.5")
+    api = OpenAI.from_key("k").model("gpt-5.5")
+    for model_id in ("o1", "o3-mini", "gpt-5.5"):
+        assert sub._is_effort_model(model_id) == api._is_effort_model(model_id)
+    # The over-match the bare "o" prefix introduced -- both must say False.
+    assert sub._is_effort_model("omni-foo") is False
+    assert api._is_effort_model("omni-foo") is False
+
+
 def test_subscription_valid_service_tiers_priority_only() -> None:
     # Codex ``/fast`` slash command sets service_tier="priority"; the
     # subscription endpoint accepts no other values.
@@ -764,6 +781,20 @@ async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> No
     assert effort == "high"
 
 
+@pytest.mark.anyio
+async def test_subscription_stream_maps_sagent_none_effort_to_openai_minimal() -> None:
+    """Responses transport funnels through the SHARED ``OPENAI_REASONING_EFFORT``.
+
+    Locks the cross-transport contract: ``none`` must map to ``minimal`` here
+    exactly as it does in the chat-completions ``_build_body`` path, so the two
+    OpenAI transports never disagree on the wire vocabulary.
+    """
+    effort = await _reasoning_effort_for(
+        ModelRequest(messages=[UserMessage(text="hi")], effort="none")
+    )
+    assert effort == "minimal"
+
+
 async def _reasoning_for(request: ModelRequest) -> object:
     """Return the ``reasoning`` object passed to ``responses.create``."""
     provider = _make_provider()
@@ -851,6 +882,104 @@ class TestHandleAuthError:
             await provider.handle_auth_error()
         assert provider._access_token == fresh_access
         assert provider._refresh_token == _FRESH_REFRESH
+
+    @pytest.mark.anyio
+    async def test_refreshes_when_adopted_disk_token_also_expired(
+        self, tmp_path: Path
+    ) -> None:
+        """A DIFFERENT but already-expired disk token must still force a refresh.
+
+        On a 401, a sibling may have written a token whose own lifetime already
+        lapsed. Adopting it and returning (no re-expiry check) hands the caller a
+        stale token -> the retry 401s again. ``handle_auth_error`` must mirror
+        ``_ensure_valid``: after adopting a fresher-looking disk token, refresh
+        anyway if it is still expired.
+        """
+        cred_file = tmp_path / "auth.json"
+        expired_disk = _make_jwt({"exp": time.time() - 50})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=expired_disk,
+                refresh_token=_FRESH_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() - 50,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=time.time() - 100,
+        )
+        refreshed: list[bool] = []
+
+        async def _fake_refresh() -> None:
+            refreshed.append(True)
+            provider._access_token = _make_jwt({"exp": time.time() + 3600})
+            provider._expires_at = time.time() + 3600
+
+        with (
+            patch.object(provider, "_refresh", _fake_refresh),
+            patch(
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                cred_file,
+            ),
+        ):
+            await provider.handle_auth_error()
+
+        assert refreshed == [True], "expired adopted disk token must trigger _refresh"
+        assert not provider.expired
+
+    @pytest.mark.anyio
+    async def test_force_refresh_when_disk_same_even_if_clock_valid(
+        self, tmp_path: Path
+    ) -> None:
+        """A 401 on a clock-VALID token (same on disk) must STILL force a refresh.
+
+        ``handle_auth_error`` runs because the server already rejected this exact
+        token (revoked, or server/client clock skew). The local ``expired`` clock
+        says "valid", but the server is authoritative -- trusting the clock and
+        returning without refreshing leaves the caller retrying the same rejected
+        token in an infinite 401 loop. Only a genuinely DIFFERENT disk token (a
+        sibling's refresh) may be adopted without a network refresh.
+        """
+        cred_file = tmp_path / "auth.json"
+        # exp far in the future -> ``self.expired`` is False, yet the server 401'd.
+        clock_valid = _make_jwt({"exp": time.time() + 3600})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=clock_valid,
+                refresh_token=_STALE_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() + 3600,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=clock_valid,  # SAME as disk
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=time.time() + 3600,
+        )
+        refreshed: list[bool] = []
+
+        async def _fake_refresh() -> None:
+            refreshed.append(True)
+            provider._access_token = _make_jwt({"exp": time.time() + 7200})
+
+        with (
+            patch.object(provider, "_refresh", _fake_refresh),
+            patch(
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                cred_file,
+            ),
+        ):
+            await provider.handle_auth_error()
+
+        assert refreshed == [True], (
+            "a 401 on a clock-valid same-disk token must force _refresh, not return"
+        )
 
     @pytest.mark.anyio
     async def test_force_refresh_when_disk_same(self, tmp_path: Path) -> None:
@@ -999,6 +1128,93 @@ class TestEnsureValidRace:
         assert token == fresh_access
         assert provider._access_token == fresh_access
         assert provider._refresh_token == _FRESH_REFRESH
+
+    @pytest.mark.anyio
+    async def test_refreshes_when_disk_token_also_expired(self, tmp_path: Path) -> None:
+        """An adopted disk token that is ALSO expired must trigger a refresh.
+
+        A sibling may have written a token whose own lifetime has already
+        lapsed (its refresh aged out, or clock skew). Adopting it and returning
+        it would 401 on the next call; ``_ensure_valid`` must fall through to
+        ``_refresh`` instead of handing back the stale disk token.
+        """
+        cred_file = tmp_path / "auth.json"
+        expired_disk = _make_jwt({"exp": time.time() - 50})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=expired_disk,
+                refresh_token=_FRESH_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() - 50,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=time.time() - 100,
+        )
+        refreshed: list[bool] = []
+
+        async def _fake_refresh() -> None:
+            refreshed.append(True)
+            provider._access_token = _make_jwt({"exp": time.time() + 3600})
+            provider._expires_at = time.time() + 3600
+
+        with (
+            patch.object(provider, "_refresh", _fake_refresh),
+            patch(
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                cred_file,
+            ),
+        ):
+            token = await provider._ensure_valid()
+
+        assert refreshed == [True], "expired disk token must trigger _refresh"
+        assert token == provider._access_token
+        assert not provider.expired
+
+    @pytest.mark.anyio
+    async def test_adopting_disk_token_closes_old_sdk(self, tmp_path: Path) -> None:
+        """Adopting a sibling's fresher disk token must CLOSE the stale SDK.
+
+        Dropping ``self._sdk`` without awaiting ``aclose`` orphans the old
+        ``AsyncOpenAI`` HTTP client (its pooled connections leak until process
+        exit). The credential-replacement path in ``get_sdk`` closes the old
+        client; the disk-adopt path must do the same.
+        """
+        cred_file = tmp_path / "auth.json"
+        fresh_access = _make_jwt({"exp": time.time() + 3600})
+        OpenAISubscription.save(
+            OpenAISubscription.Credentials(
+                access_token=fresh_access,
+                refresh_token=_FRESH_REFRESH,
+                account_id=_FAKE_ACCOUNT,
+                expires_at=time.time() + 3600,
+            ),
+            path=cred_file,
+        )
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),  # expired -> triggers adopt
+            refresh_token=_STALE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=0.0,
+        )
+        closed: list[bool] = []
+        stale_sdk = MagicMock()
+        stale_sdk.close = AsyncMock(side_effect=lambda: closed.append(True))
+        provider._sdk = stale_sdk
+        provider._sdk_token = _make_jwt({"exp": 0.0})
+
+        with patch(
+            "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+            cred_file,
+        ):
+            token = await provider._ensure_valid()
+
+        assert token == fresh_access
+        assert closed == [True], "adopting a disk token must close the old SDK client"
 
 
 class TestStreamResponseNotRead:
@@ -1188,6 +1404,44 @@ class TestStreamIdleTimeout:
         assert "param=input" in msg
 
     @pytest.mark.anyio
+    async def test_error_event_closes_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mid-stream error event must close the stream before propagating.
+
+        ``ResponseErrorEvent``/``ResponseFailedEvent`` raise from inside the
+        ``async for``; if the only cleanup is the cancellation/timeout ``except``
+        plus the not-completed fallthrough, the raised error skips both and the
+        SSE connection leaks. The stream must be closed on EVERY non-completed
+        exit.
+        """
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseErrorEvent",
+            _ResponseErrorEvent,
+        )
+
+        class _ClosableStream:
+            def __init__(self, events: list[object]) -> None:
+                self._events = events
+                self.closed = False
+
+            def __aiter__(self) -> _ClosableStream:
+                return self
+
+            async def __anext__(self) -> object:
+                if not self._events:
+                    raise StopAsyncIteration
+                return self._events.pop(0)
+
+            async def aclose(self) -> None:
+                self.closed = True
+
+        stream = _ClosableStream([_ResponseErrorEvent()])
+        with pytest.raises(UserFacingError):
+            await _consume_stream(stream, pricing=Pricing(), publish=None)
+        assert stream.closed, "error-event path leaked the stream (aclose never called)"
+
+    @pytest.mark.anyio
     async def test_response_failed_event_is_user_facing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1335,6 +1589,51 @@ class TestRefreshErrors:
             f"AuthRefreshError must guide the user to /login; got: {msg!r}"
         )
         assert "HTTPStatusError" not in msg
+
+    @pytest.mark.anyio
+    async def test_refresh_overwrites_missing_field_creds_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A creds file with valid JSON but missing fields must not crash refresh.
+
+        ``load`` indexes ``raw["tokens"]["refresh_token"]`` etc., raising
+        ``KeyError`` on ``{"tokens": {}}``. ``_refresh`` already holds fresh
+        tokens by then and is meant to overwrite the corrupt file, so the
+        load-recovery must catch ``KeyError`` like the other adopt sites do, not
+        propagate it.
+        """
+        cred_file = tmp_path / "auth.json"
+        cred_file.write_text('{"tokens": {}}', encoding="utf-8")
+        provider = _make_provider(expires_at=0.0)
+        refreshed_access = _make_jwt({"exp": time.time() + 3600})
+        mock_resp = MagicMock()
+        mock_resp.json = MagicMock(
+            return_value={
+                "access_token": refreshed_access,
+                "refresh_token": _FRESH_REFRESH,
+                "expires_in": 3600,
+            },
+        )
+        mock_resp.status_code = 200
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch(
+                "sagent.providers.openai_sub.httpx.AsyncClient",
+                return_value=mock_http,
+            ),
+            patch(
+                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                cred_file,
+            ),
+        ):
+            await provider._refresh()  # must not raise KeyError
+        assert provider._access_token == refreshed_access
+        # The corrupt file was overwritten with a well-formed token set.
+        reloaded = OpenAISubscription.load(path=cred_file)
+        assert reloaded["access_token"] == refreshed_access
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("status", [500, 502, 503])

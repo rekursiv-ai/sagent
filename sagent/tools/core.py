@@ -663,7 +663,7 @@ def mark_read(
     offset: int = 0,
     limit: int = 0,
     last_lines: int = 0,
-    content: str = "",
+    content: str | None = None,
     mtime: float | None = None,
 ) -> None:
     """Record that a file has been read.
@@ -673,7 +673,9 @@ def mark_read(
       offset: Starting line offset of the read.
       limit: Maximum lines read.
       last_lines: EOF-anchored line count.
-      content: Full file text for content-based staleness checks.
+      content: Full file text for content-based staleness checks, or ``None``
+          when there is no text to cache. An empty string is cached as a real
+          value (an empty file), distinct from ``None`` (no content provided).
       mtime: Pre-read mtime, or None to stat now.
 
     """

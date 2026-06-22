@@ -617,6 +617,48 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     assert model._last_input_tokens == 96_003
 
 
+@pytest.mark.asyncio
+async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
+    """A zero-round drain (no ``message_start``) must not zero the anchor.
+
+    ``_last_input_tokens`` drives the context-fraction respawn gate. A turn
+    that emits a ``result`` with no preceding ``message_start`` carries no new
+    footprint; overwriting the last known value with 0 would read as "context
+    empty" and suppress a respawn the still-full context needs. The prior
+    anchor must survive.
+    """
+    events = [
+        cast(
+            MutableJSON,
+            {
+                "type": "result",
+                "stop_reason": "end_turn",
+                "is_error": False,
+                "modelUsage": {
+                    "claude-haiku-4-5": {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "costUSD": 0.0,
+                    }
+                },
+            },
+        ),
+    ]
+
+    class _Proc:
+        async def read_json_line(
+            self, *, skip_non_json: bool = False
+        ) -> MutableJSON | None:
+            del skip_non_json
+            return events.pop(0) if events else None
+
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    model._last_input_tokens = 180_000  # a genuinely full prior context
+    _ = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
+    assert model._last_input_tokens == 180_000, "zero-round drain wiped the anchor"
+
+
 def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
     """``AnthropicCLI.model(subprocess_read_timeout_sec=…)`` plumbs to the model.
 
@@ -1006,6 +1048,26 @@ def test_detached_delivery_entry_holds_buffer_until_turn_succeeds() -> None:
     model._pending_detached_text = None
     assert model._detached_delivery_entry() is None
     assert bridge.drain_calls == 2  # now consults the (empty) bridge again
+
+
+def test_clear_drops_pending_detached_buffer() -> None:
+    """``agent.clear()`` must wipe a buffered detached result.
+
+    The buffer holds tool results the model was promised. After a clear the
+    model no longer knows those tool calls, so re-injecting the buffer would
+    surface a phantom ``[detached tool result]`` referencing calls that no
+    longer exist in context. Both reset boundaries (session clear and respawn)
+    must drop it.
+    """
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5", session_id="sess-clear-detached")
+    model._pending_detached_text = "[detached tool result] staged"
+    model._reset_for_clear()
+    assert model._pending_detached_text is None, "session clear must drop the buffer"
+
+    model._pending_detached_text = "[detached tool result] staged"
+    model._reset_active_state()
+    assert model._pending_detached_text is None, "respawn must drop the buffer"
 
 
 @pytest.mark.asyncio

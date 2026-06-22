@@ -109,6 +109,26 @@ def test_openai_build_body_omits_unset_service_tier() -> None:
     assert "service_tier" not in body
 
 
+def test_openai_build_body_maps_effort_to_wire_vocabulary() -> None:
+    """Chat-completions effort is mapped, not sent raw.
+
+    sagent advertises ``none``..``max``; the OpenAI wire accepts only
+    ``minimal``/``low``/``medium``/``high``. Both OpenAI transports must funnel
+    through the shared table so they agree (e.g. ``none`` -> ``minimal``).
+    """
+    m = OpenAI.from_key("k").model("gpt-5.5")
+    none_body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], effort="none"),
+        stream=False,
+    )
+    assert none_body["reasoning_effort"] == "minimal"
+    max_body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], effort="max"),
+        stream=False,
+    )
+    assert max_body["reasoning_effort"] == "high"
+
+
 def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
     # gpt-5 / o-series reject ``max_tokens`` (400 unsupported_parameter);
     # they require ``max_completion_tokens``.

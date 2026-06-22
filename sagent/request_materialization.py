@@ -202,7 +202,11 @@ def _defer_user_between_tool_pair(
     out: list[ModelContextEvent] = []
     for entry in messages:
         if isinstance(entry, AssistantMessage):
-            pending = {tc.id for tc in entry.tool_calls}
+            # ``pending`` is "all still-unanswered tool calls", NOT "this AM's
+            # calls". Accumulate -- a later text-only AM (or one opening fresh
+            # calls) must not clear an earlier call that has no ToolResult yet,
+            # or an interleaved user turn would ship inside the still-open pair.
+            pending |= {tc.id for tc in entry.tool_calls}
             out.append(entry)
         elif isinstance(entry, ToolResult):
             out.append(entry)

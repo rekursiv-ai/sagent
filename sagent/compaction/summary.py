@@ -99,7 +99,10 @@ class SummaryCompactor:
           (``post_compact_size / pre_compact_size``) for the non-system body,
           reserved out of the window. Default ``0.01``. See
           ``should_compact`` for the full inequality.
-      max_attempts: Retries on ``PromptTooLongError`` before giving up.
+      max_attempts: Outer shrink-retries on ``PromptTooLongError`` before
+          giving up. Note this also caps the inner ``send_with_retry`` network
+          retries per shrink attempt (same value), so worst-case underlying
+          model calls are ``max_attempts`` shrink x ``max_attempts`` transport.
       keep_recent: Default ``keep_recent`` when ``compact`` doesn't override.
       proactive: When True, the continuation resumes work autonomously.
       verify_summary: When True, run a second LLM call after summarization
@@ -278,11 +281,13 @@ class SummaryCompactor:
         # Split the UN-stripped history so the preserved tail keeps its
         # image/PDF bytes -- the model is actively using them, and stripping
         # them on every compaction (token- or byte-triggered) is silent
-        # vision-data loss. Only the summarized region is stripped below; its
-        # bytes are folded into the text summary, so shedding them is correct.
-        # ``_strip_attachments`` inspects only entry type / text / tool
-        # pairing-irrelevant fields, so splitting before vs after stripping
-        # yields the same boundaries.
+        # vision-data loss. ``_strip_attachments`` is applied ONLY to the
+        # ``to_summarize`` region below (never to ``to_keep``): its bytes are
+        # folded into the text summary, so shedding them is correct. The split
+        # boundary is computed on the un-stripped list, so the entry-dropping
+        # ``_strip_attachments`` does (empty-marker entries) cannot move the
+        # keep/summarize boundary -- it only shrinks the region already chosen
+        # for summarization.
         history = list(context)
         direction = self._direction
         effective_keep = self._keep_recent
@@ -485,6 +490,10 @@ class SummaryCompactor:
                 tools=None,
             )
             try:
+                # ``persistent_retry=False`` (unlike the main summarization
+                # pass, which uses True): verification is an optional refinement
+                # that degrades to the unverified-but-valid summary on failure,
+                # so it should not block for minutes waiting out a 429.
                 response = await send_with_retry(
                     compact_model,
                     request,
@@ -935,11 +944,20 @@ def _strip_attachments(
         if isinstance(entry, (AgentSendMessage, UserMessage)) and entry.attachments:
             marked = _attach_markers(entry.text, entry.attachments)
             if not marked:
+                logger.debug(
+                    "compaction dropped an empty %s with no markable attachments",
+                    type(entry).__name__,
+                )
                 continue
             out.append(dataclasses.replace(entry, text=marked, attachments=()))
         elif isinstance(entry, ToolResult) and entry.attachments:
             marked = _attach_markers(entry.content, entry.attachments)
             if not marked:
+                logger.debug(
+                    "compaction dropped an empty ToolResult with no markable"
+                    " attachments (call_id=%s)",
+                    entry.call_id,
+                )
                 continue
             out.append(dataclasses.replace(entry, content=marked, attachments=()))
         else:
