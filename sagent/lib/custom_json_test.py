@@ -136,6 +136,10 @@ class TestIntVal:
     def test_string(self) -> None:
         assert int_val("3", 0) == 3
 
+    def test_string_strips_whitespace(self) -> None:
+        # Uniform with float_val, which strips before parsing.
+        assert int_val("  4 ", 0) == 4
+
     def test_bad_string_uses_default(self) -> None:
         assert int_val("nope", 7) == 7
 
