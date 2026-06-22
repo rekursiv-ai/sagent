@@ -4,16 +4,22 @@ Default backend is Semantic Scholar (~200M papers, strong citation-graph
 metadata). Set env var `SEMANTIC_SCHOLAR_API_KEY` for higher rate limits; omit
 it to use unauthenticated API limits.
 Alternative backends available for comparison when S2 coverage seems
-thin: OpenAlex (~240M works, broader non-CS coverage) and a fused mode
-that merges both.
+thin: OpenAlex (~240M works, broader non-CS coverage), a fused mode that
+merges both, and SearXNG science metasearch (adds PubMed, Crossref,
+arXiv, OpenAIRE breadth beyond S2/OpenAlex).
 
 Parameters:
   - `query` (required) — free-form text. Title words, author names,
     or venue fragments all work.
-  - `source` — `"s2"` (default), `"openalex"`, or `"fused"`. Use
-    `"openalex"` to sanity-check S2 results or reach beyond S2's
-    coverage; use `"fused"` to dedup-merge both indexes (S2 ordering
-    preserved, OpenAlex-only hits appended at their OpenAlex rank).
+  - `source` — `"fused"` (default), `"s2"`, `"openalex"`, or
+    `"searxng"`. Use `"openalex"` to sanity-check S2 results or reach
+    beyond S2's coverage; use `"fused"` to dedup-merge S2 + OpenAlex (S2
+    ordering preserved, OpenAlex-only hits appended at their OpenAlex
+    rank); use `"searxng"` to widen to PubMed/Crossref/arXiv via the
+    self-hosted SearXNG instance when S2 + OpenAlex miss a paper (e.g.
+    biomedical or very recent work). SearXNG has no citation graph, so
+    its hits carry no reference counts and `year_from`/`year_to`/
+    `open_access_only` are applied best-effort client-side.
   - `limit` — cap on returned hits. Omit to let the backend decide its
     default page; no cap is imposed by the tool.
   - `year_from` / `year_to` — publication-year bounds, inclusive.
@@ -38,12 +44,16 @@ Workflow guidance:
     before widening `limit`.
   - If S2 returns nothing for a query you expect to have hits (often
     for non-CS, older, or non-English work), retry with
-    `source="openalex"` or `source="fused"`.
+    `source="openalex"` or `source="fused"`; for biomedical or very
+    recent work that S2 + OpenAlex both miss, try `source="searxng"`.
+  - SearXNG hits have no citation graph: to walk references/citations
+    of a SearXNG result, take its DOI/arXiv id to `PaperDetails`.
 
 No Google Scholar backend is provided. GS requires scraping with
 captcha/proxy handling, which is out of scope — OpenAlex covers the
 "broad academic search" niche without the fragility.
 
 Sources:
-  - Semantic Scholar: https://api.semanticscholar.org
-  - OpenAlex: https://api.openalex.org
+  - Semantic Scholar: https://api.semanticscholar.org (`SEMANTIC_SCHOLAR_API_KEY`)
+  - OpenAlex: https://api.openalex.org (`OPENALEX_API_KEY`)
+  - SearXNG science metasearch (`SEARXNG_URL`)

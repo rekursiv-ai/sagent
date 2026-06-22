@@ -9,7 +9,21 @@ import asyncio
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze
 from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
-from sagent.lib.web.search import CaptchaError, SearchError
+from sagent.lib.web.search import (
+    CaptchaError,
+    CodeResult,
+    FileResult,
+    ImageResult,
+    MapResult,
+    MediaResult,
+    PackageResult,
+    PaperResult,
+    SearchError,
+    SearchResult,
+    SearxngCategory,
+    TorrentResult,
+    VideoResult,
+)
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -54,6 +68,18 @@ class WebSearch:
                     "enum": get_args(SearchBackends),
                     "description": (
                         f'Search backend (default: "{DEFAULT_SEARCH_BACKEND}").'
+                    ),
+                },
+                "categories": {
+                    "type": "string",
+                    "enum": list(get_args(SearxngCategory.__value__)),
+                    "description": (
+                        "SearXNG result category (tab). Non-default values force "
+                        "the SearXNG backend. 'science' returns papers, 'images' "
+                        "image results, 'videos' video metadata, 'news'/'music' "
+                        "dated/media results, 'map' places with coordinates, 'it' "
+                        "packages/code, 'files' files/torrents. Omit for general "
+                        "web results."
                     ),
                 },
             },
@@ -108,11 +134,12 @@ class WebSearch:
 
         Args:
           args: Directive with ``query``, optional ``allowed_domains`` /
-              ``blocked_domains`` / ``backend``.
+              ``blocked_domains`` / ``backend`` / ``categories``.
 
         Returns:
-          result: Top results rendered as ``[title](url)`` over a
-              snippet line, or an error when the backend rejects the query.
+          result: Top results rendered per category -- a markdown link plus a
+              snippet, enriched with the structured fields a SearXNG category
+              carries -- or an error when the backend rejects the query.
 
         """
         query = str(args.get("query", ""))
@@ -129,21 +156,39 @@ class WebSearch:
                 ),
                 is_error=True,
             )
+        valid_categories = get_args(SearxngCategory.__value__)
+        categories: SearxngCategory = "general"
+        categories_val = args.get("categories")
+        if isinstance(categories_val, str) and categories_val in valid_categories:
+            categories = cast(SearxngCategory, categories_val)
+        elif categories_val is not None:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid category {categories_val!r}."
+                    f" Valid: {', '.join(valid_categories)}."
+                ),
+                is_error=True,
+            )
+        # A non-general category requires SearXNG; force it rather than erroring
+        # when the caller left the backend at its default.
+        if categories != "general":
+            backend = "searxng"
         q = _build_query(
             query,
             args.get("allowed_domains"),
             args.get("blocked_domains"),
         )
         try:
-            results = await asyncio.to_thread(search, q, backend=backend)
+            results = await asyncio.to_thread(
+                search, q, backend=backend, categories=categories
+            )
         except (CaptchaError, RuntimeError, SearchError, ValueError) as err:
             return ToolResult(call_id="", content=str(err), is_error=True)
         if not results:
             text = "(no results)"
         else:
-            text = "\n\n".join(
-                f"[{r.title}]({r.url})\n{r.snippet}" for r in results[:10]
-            )
+            text = "\n\n".join(_format_result(r) for r in results[:10])
         return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
 
 
@@ -170,3 +215,71 @@ def _build_query(
         if isinstance(domain, str) and domain:
             query += f" -site:{domain.strip()}"
     return query
+
+
+def _format_result(r: SearchResult) -> str:
+    """Render one result as a markdown link plus its structured fields.
+
+    Dispatches on the concrete :class:`SearchResult` subclass so a category's
+    extra fields (a paper's authors/DOI, an image's source URL, a place's
+    coordinates) reach the agent instead of being flattened to title/snippet.
+    The base ``[title](url)`` line and snippet are always emitted; subclass
+    fields follow on an indented detail line when present.
+    """
+    head = f"[{r.title}]({r.url})"
+    detail = _result_detail(r)
+    body = "\n".join(part for part in (r.snippet, detail) if part)
+    return f"{head}\n{body}" if body else head
+
+
+def _result_detail(r: SearchResult) -> str:
+    """Return the category-specific detail line for a result, or empty."""
+    if isinstance(r, PaperResult):
+        parts = [
+            ", ".join(r.authors[:3]) + (" +" if len(r.authors) > 3 else ""),
+            r.journal,
+            str(r.published.year) if r.published else "",
+            f"doi:{r.doi}" if r.doi else "",
+            f"cites:{r.citations}" if r.citations is not None else "",
+            r.pdf_url,
+        ]
+    elif isinstance(r, ImageResult):
+        parts = [r.image_url, r.resolution, r.img_format, r.source]
+    elif isinstance(r, VideoResult):
+        parts = [
+            r.author,
+            r.length,
+            f"{r.views} views" if r.views else "",
+            r.iframe_url,
+        ]
+    elif isinstance(r, MediaResult):
+        parts = [
+            str(r.published.date()) if r.published else "",
+            r.length,
+            r.audio_url or r.iframe_url,
+        ]
+    elif isinstance(r, MapResult):
+        coords = f"{r.latitude},{r.longitude}" if r.latitude is not None else ""
+        parts = [coords, ", ".join(r.address.values())]
+    elif isinstance(r, PackageResult):
+        parts = [
+            r.package_name,
+            r.version,
+            r.license_name,
+            r.homepage or r.source_code_url,
+        ]
+    elif isinstance(r, CodeResult):
+        parts = [r.repository, r.filename, r.code_language]
+    elif isinstance(r, FileResult):
+        parts = [r.filename, r.size, r.mimetype]
+    elif isinstance(r, TorrentResult):
+        parts = [
+            r.filesize,
+            f"seed:{r.seed}" if r.seed is not None else "",
+            f"leech:{r.leech}" if r.leech is not None else "",
+            r.magnet_url,
+        ]
+    else:
+        return ""
+    kept = [p for p in parts if p]
+    return "  " + " · ".join(kept) if kept else ""
