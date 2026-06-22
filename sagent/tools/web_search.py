@@ -6,10 +6,11 @@ from collections.abc import Mapping
 from typing import cast, get_args
 
 import asyncio
+import re
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze
-from sagent.lib.web import DEFAULT_SEARCH_BACKEND, SearchBackends, search
 from sagent.lib.web.search import (
+    DEFAULT_SEARCH_BACKEND,
     CaptchaError,
     CodeResult,
     FileResult,
@@ -18,11 +19,13 @@ from sagent.lib.web.search import (
     MediaResult,
     PackageResult,
     PaperResult,
+    SearchBackends,
     SearchError,
     SearchResult,
     SearxngCategory,
     TorrentResult,
     VideoResult,
+    search,
 )
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -192,12 +195,25 @@ class WebSearch:
         return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
 
 
+# A bare hostname: dot-separated labels of letters/digits/hyphens, optional
+# leading wildcard and trailing port. Anything else (whitespace, a ``site:`` or
+# ``-site:`` operator, a query fragment) is NOT a hostname and must not be
+# spliced into the query string, or a caller could inject/contradict the scope
+# (e.g. ``"x.com -site:trusted.com"`` would un-scope the search).
+_HOSTNAME_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?$")
+
+
 def _build_query(
     query: str,
     allowed_domains: object,
     blocked_domains: object,
 ) -> str:
-    """Return *query* with site:/-site: filters appended."""
+    """Return *query* with ``site:`` / ``-site:`` filters for valid domains.
+
+    Only tokens matching a bare-hostname shape are appended; a non-hostname
+    value (containing whitespace or query operators) is silently dropped rather
+    than spliced in, so a domain filter cannot inject extra query syntax.
+    """
     allowed = (
         list(cast(list[JSONValue], allowed_domains))
         if isinstance(allowed_domains, (list, tuple))
@@ -209,10 +225,10 @@ def _build_query(
         else []
     )
     for domain in allowed:
-        if isinstance(domain, str) and domain:
+        if isinstance(domain, str) and _HOSTNAME_RE.match(domain.strip()):
             query += f" site:{domain.strip()}"
     for domain in blocked:
-        if isinstance(domain, str) and domain:
+        if isinstance(domain, str) and _HOSTNAME_RE.match(domain.strip()):
             query += f" -site:{domain.strip()}"
     return query
 

@@ -46,6 +46,7 @@ from sagent.tools.paper_common import (
     truncation_notice,
     validate_abstract_chars,
     validate_limit,
+    validate_year_range,
     year_in_range,
 )
 from sagent.types.runtime import ToolResult
@@ -290,6 +291,9 @@ class PaperAuthor:
             return limit
         year_from = opt_int(args, "year_from")
         year_to = opt_int(args, "year_to")
+        year_error = validate_year_range(year_from, year_to)
+        if year_error is not None:
+            return year_error
         cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
         if isinstance(cap, ToolResult):
             return cap

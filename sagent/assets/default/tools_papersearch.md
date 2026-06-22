@@ -1,21 +1,24 @@
 Text search over the scholarly literature.
 
-Default backend is Semantic Scholar (~200M papers, strong citation-graph
-metadata). Set env var `SEMANTIC_SCHOLAR_API_KEY` for higher rate limits; omit
-it to use unauthenticated API limits.
-Alternative backends available for comparison when S2 coverage seems
-thin: OpenAlex (~240M works, broader non-CS coverage), a fused mode that
-merges both, and SearXNG science metasearch (adds PubMed, Crossref,
+Default mode is `fused`: it queries Semantic Scholar (~200M papers, strong
+citation-graph metadata) and OpenAlex (~240M works, broader non-CS coverage)
+in parallel and reciprocal-rank-fuses them. Set env var
+`SEMANTIC_SCHOLAR_API_KEY` for higher S2 rate limits; omit it to use
+unauthenticated API limits. Pin a single backend (`s2`, `openalex`) for
+comparison, or widen with SearXNG science metasearch (adds PubMed, Crossref,
 arXiv, OpenAIRE breadth beyond S2/OpenAlex).
 
 Parameters:
-  - `query` (required) — free-form text. Title words, author names,
-    or venue fragments all work.
+  - `query` (required) — free-form text. Matches title/abstract text.
+    NOT author names: every backend ranks against title/abstract, so an
+    author surname alone can zero-hit (use the `PaperAuthor` tool for
+    author search).
   - `source` — `"fused"` (default), `"s2"`, `"openalex"`, or
-    `"searxng"`. Use `"openalex"` to sanity-check S2 results or reach
-    beyond S2's coverage; use `"fused"` to dedup-merge S2 + OpenAlex (S2
-    ordering preserved, OpenAlex-only hits appended at their OpenAlex
-    rank); use `"searxng"` to widen to PubMed/Crossref/arXiv via the
+    `"searxng"`. `"fused"` reciprocal-rank-fuses S2 + OpenAlex: a paper
+    both backends rank well floats above either backend's lone top hit,
+    with S2 weighted higher; OpenAlex-only hits still place by their own
+    rank. Use `"openalex"` to sanity-check S2 or reach beyond its
+    coverage; use `"searxng"` to widen to PubMed/Crossref/arXiv via the
     self-hosted SearXNG instance when S2 + OpenAlex miss a paper (e.g.
     biomedical or very recent work). SearXNG has no citation graph, so
     its hits carry no reference counts and `year_from`/`year_to`/
