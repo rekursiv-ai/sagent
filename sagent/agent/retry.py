@@ -43,6 +43,7 @@ from sagent.types.model import (
     Model,
     ModelRequest,
     ModelResponse,
+    RequestTooLargeError,
     StreamInterruptedError,
 )
 
@@ -55,9 +56,10 @@ MAX_RETRY_DELAY = 32.0
 # longer than this is surfaced as a ``RateLimitError`` halt rather than a
 # blocking sleep, so a multi-hour rate-limit reset can't freeze the REPL.
 INTERACTIVE_MAX_SLEEP_SEC = 60.0
-# Below this, a local-backoff retry is a transient transport blip that
-# recovers before the user notices; it retries silently rather than
-# publishing a "model service suspended" banner. Server-advertised waits
+# Notification threshold for a LOCAL-backoff retry: at or below this the wait
+# is short enough to retry silently (a sub-5s transport blip the user never
+# perceives); a local backoff longer than this publishes the "model service
+# suspended" banner so the user understands the pause. Server-advertised waits
 # always notify regardless of length.
 SUSPENSION_NOTICE_SEC = 5.0
 # A throttle without a long advertised reset clears in seconds-to-minutes
@@ -141,6 +143,11 @@ def is_retryable(error: Exception, model: Model) -> bool:
       retryable: True if the error is transient.
 
     """
+    # The request-byte wire-limit is fatal by type: retrying the identical
+    # oversized request never helps, and a 5xx/429 wrapper in the cause
+    # chain must not flip it retryable. Classify before walking the chain.
+    if isinstance(error, RequestTooLargeError):
+        return False
     if model.is_retryable_provider_error(error):
         return True
     return _is_retryable(error, 0)
@@ -180,14 +187,16 @@ def error_status(error: Exception) -> int | None:
 
 
 def extract_retry_after(error: Exception) -> float | None:
-    """Extract retry delay (sec) from an HTTP error response.
+    """Extract retry delay (sec) from a provider error.
 
     Checks in order:
 
-    1. ``retry-after`` (RFC 7231, either delta-seconds or HTTP-date).
-    2. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
+    1. ``error.retry_after_ms`` attribute (a structured hint a CLI-transport
+       provider parses out of a stream-json event; it has no HTTP response).
+    2. ``retry-after`` header (RFC 7231, either delta-seconds or HTTP-date).
+    3. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
        limit fully clears) - converted to delta-from-now.
-    3. Google ``google.rpc.RetryInfo.retryDelay`` (e.g. ``"16s"``),
+    4. Google ``google.rpc.RetryInfo.retryDelay`` (e.g. ``"16s"``),
        carried in the JSON error body rather than a header.
 
     All return paths are clamped to ``_MAX_SERVER_RETRY_AFTER_SEC`` (24h)
@@ -481,6 +490,15 @@ async def send_with_retry(
         # send proceed rather than wedge the REPL.
         if 0 < delay <= INTERACTIVE_MAX_SLEEP_SEC:
             await asyncio.sleep(delay)
+        elif delay > INTERACTIVE_MAX_SLEEP_SEC:
+            # Skipping silently leaves the prior session's "service suspended"
+            # banner uncleared with no signal it was abandoned. Surface the skip
+            # in-band so the user knows why the send is proceeding now.
+            publish_recoverable(
+                f"prior resume wait ({delay:.0f}s) exceeds the interactive"
+                f" ceiling ({INTERACTIVE_MAX_SLEEP_SEC:.0f}s); skipping it and"
+                " sending now"
+            )
     last_error: Exception | None = None
     prior_emitted = ""
     attempt = -1
@@ -506,9 +524,15 @@ async def send_with_retry(
                     if suffix:
                         publish(runtime_types.ModelResponsePartial(suffix))
                 else:
+                    # The partial streamed before the interrupt does not prefix
+                    # the retry, so it cannot be extended -- the text above this
+                    # banner is superseded by what follows. (A structural fix
+                    # that drops the stale text outright needs a renderer-side
+                    # reset event; the explicit banner is the in-band signal.)
                     publish(
                         runtime_types.ModelResponsePartial(
-                            "\n[retry response diverged; final response follows]\n"
+                            "\n[retry diverged; discard the text above -- "
+                            "the corrected response follows]\n"
                         )
                     )
                     publish(runtime_types.ModelResponsePartial(full))
@@ -531,7 +555,7 @@ async def send_with_retry(
             if on_discarded_response is not None:
                 on_discarded_response(
                     e.response
-                )  # may raise (e.g. budget exhaustion) — intentional
+                )  # may raise (e.g. budget exhaustion) -- intentional
             attempt -= 1
             continue
         except Exception as e:
@@ -584,15 +608,14 @@ async def send_with_retry(
                     raise RetriesExhaustedError(
                         f"Failed after {persistent_attempt} persistent attempts: {e}",
                     ) from e
-                base = RETRY_BASE_SEC * (2.0**persistent_attempt)
-                delay = min(
-                    base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
-                    PERSISTENT_MAX_BACKOFF_SEC,
-                )
+                attempt_label = persistent_attempt - 1
+                # Exponent is the 0-based attempt index, uniform with the
+                # rate-limit and generic branches below (first backoff starts at
+                # ``RETRY_BASE_SEC``, not one rung higher).
+                delay = _backoff_delay(attempt_label, cap=PERSISTENT_MAX_BACKOFF_SEC)
                 if server_delay is not None:
                     delay = max(delay, server_delay)
                 attempt -= 1
-                attempt_label = persistent_attempt - 1
             elif rate_limited:
                 # A throttle with no (or a short) advertised reset clears in
                 # seconds-to-minutes, so retry on a wall-clock budget rather
@@ -605,11 +628,8 @@ async def send_with_retry(
                 rate_limit_attempt += 1
                 if rate_limit_attempt >= _MAX_RATE_LIMIT_ATTEMPTS:
                     raise RateLimitError(None, e) from e
-                base = RETRY_BASE_SEC * (2.0**rate_limit_attempt)
-                delay = min(
-                    base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
-                    INTERACTIVE_MAX_SLEEP_SEC,
-                )
+                attempt_label = rate_limit_attempt - 1
+                delay = _backoff_delay(attempt_label, cap=INTERACTIVE_MAX_SLEEP_SEC)
                 if server_delay is not None:
                     delay = max(delay, server_delay)
                 if time.time() + delay > rate_limit_deadline:
@@ -618,7 +638,6 @@ async def send_with_retry(
                     )
                     raise RateLimitError(reset_time, e) from e
                 attempt -= 1
-                attempt_label = rate_limit_attempt - 1
             else:
                 # Exhaustion raises here, BEFORE the sleep: sleeping first
                 # paints "resumes in Ns", waits the full backoff, then fails
@@ -628,11 +647,7 @@ async def send_with_retry(
                     raise RetriesExhaustedError(
                         f"Failed after {max_attempts} attempts: {e}",
                     ) from e
-                base = RETRY_BASE_SEC * (2.0**attempt)
-                delay = min(
-                    base + random.uniform(0, 0.25 * base),  # noqa: S311 -- jitter, not security
-                    MAX_RETRY_DELAY,
-                )
+                delay = _backoff_delay(attempt, cap=MAX_RETRY_DELAY)
                 if server_delay is not None:
                     delay = max(delay, server_delay)
                 attempt_label = attempt
@@ -668,6 +683,31 @@ async def send_with_retry(
     raise RetriesExhaustedError(
         f"Failed after {max_attempts} attempts: {last_error}",
     ) from last_error
+
+
+def _backoff_delay(attempt: int, *, cap: float) -> float:
+    """Exponential backoff with downward jitter; ``cap`` is a hard ceiling.
+
+    The base doubles per attempt (``RETRY_BASE_SEC * 2**attempt``) and is
+    clamped to ``cap``. Jitter is then subtracted (up to 25% of the clamped
+    base), so the result is always in ``[0.75 * cap_base, cap_base]`` and never
+    exceeds ``cap`` -- ``cap`` stays a true upper bound (the interactive
+    ceiling must never be breached). Jittering DOWN rather than the prior
+    ``min(base + jitter, cap)`` keeps the jitter visible at the ceiling:
+    that shape collapsed every late attempt to exactly ``cap``, re-synchronizing
+    concurrent retriers into a thundering herd.
+
+    Args:
+      attempt: Zero-based backoff attempt number.
+      cap: Hard ceiling on the returned delay, in seconds.
+
+    Returns:
+      delay_sec: Backoff delay in ``[0.75 * cap_base, cap_base]`` where
+          ``cap_base = min(RETRY_BASE_SEC * 2**attempt, cap)``.
+
+    """
+    base = min(RETRY_BASE_SEC * (2.0**attempt), cap)
+    return base - random.uniform(0, 0.25 * base)  # noqa: S311 -- jitter, not security
 
 
 def _is_retryable(error: Exception, depth: int) -> bool:

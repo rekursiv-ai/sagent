@@ -49,7 +49,7 @@ else:
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
 from sagent.lib import debug_log, token_count
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
     int_val,
@@ -59,6 +59,11 @@ from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
     compute_cost,
+)
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
+    raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -86,6 +91,23 @@ from sagent.types.runtime import (
 logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
+
+# Map sagent's effort vocabulary onto the effort levels OpenAI's reasoning
+# models actually accept (``minimal``/``low``/``medium``/``high``). The agent
+# advertises a wider set (``none``..``max``) for cross-provider uniformity, so
+# both OpenAI transports -- chat-completions (``reasoning_effort`` here) and the
+# subscription Responses API (``reasoning.effort`` in ``openai_sub``) -- must
+# funnel through this single table. Sending a raw ``none``/``xhigh``/``max`` is
+# a 400 on the wire, and two transports disagreeing is a contract drift bug.
+OPENAI_REASONING_EFFORT: dict[str, str] = {
+    "none": "minimal",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "high",
+    "max": "high",
+}
 
 
 class OpenAICompat:
@@ -186,7 +208,13 @@ class OpenAICompat:
 
 
 def _is_context_overflow_text(msg: str) -> bool:
-    """True if the error body text describes a context-window overflow."""
+    """True if the error body text describes a context-window overflow.
+
+    Callers MUST run ``is_request_too_large`` first and short-circuit on a
+    byte wire-limit: the ``"input too large"`` phrase below is byte-ambiguous,
+    so this helper is only sound when the byte case has already been excluded
+    (see :meth:`OpenAICompatModel.is_context_overflow`).
+    """
     with contextlib.suppress(json.JSONDecodeError):
         raw_body = json.loads(msg)
         if isinstance(raw_body, Mapping):
@@ -419,13 +447,18 @@ class OpenAICompatModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension (pixels) accepted by the API."""
-        return 2048
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size (bytes) accepted by the API."""
-        return 20 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def _is_effort_model(self, model_id: str) -> bool:
         """Override: does ``model_id`` accept ``reasoning_effort``?"""
@@ -442,15 +475,21 @@ class OpenAICompatModel:
         return body
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a context-window overflow.
+        """Classify an error as a token context-window overflow.
+
+        Excludes the byte wire-limit (HTTP 413): that is a different
+        condition handled by ``RequestTooLargeError`` -- a larger-window
+        model does not relieve the byte ceiling.
 
         Args:
           error: Exception raised by the provider call.
 
         Returns:
-          overflow: True when ``error`` indicates context overflow.
+          overflow: True when ``error`` indicates token-context overflow.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         return _is_context_overflow_text(str(error))
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
@@ -502,7 +541,18 @@ class OpenAICompatModel:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
         if request.effort is not None and self.supports_effort:
-            body["reasoning_effort"] = request.effort
+            # Map through the shared table: the wire accepts only a subset of
+            # sagent's advertised efforts. An unknown value should be impossible
+            # (the agent's effort setter validates against ``valid_efforts``), so
+            # warn rather than silently run at the most expensive level.
+            mapped = OPENAI_REASONING_EFFORT.get(request.effort)
+            if mapped is None:
+                logger.warning(
+                    "unknown reasoning effort %r; defaulting to 'high'",
+                    request.effort,
+                )
+                mapped = "high"
+            body["reasoning_effort"] = mapped
         tier = self.effective_service_tier(request)
         if tier is not None:
             body["service_tier"] = tier
@@ -584,6 +634,7 @@ class OpenAICompatModel:
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
+                raise_if_request_too_large(r.status_code, err_body)
                 if _is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
             r.raise_for_status()
@@ -623,8 +674,8 @@ class _TiktokenEstimator:
 
 def build_messages(
     request: ModelRequest,
-    max_image_dim: int = 2048,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> list[MutableJSON]:
     """Convert history entries to OpenAI chat-completions format.
 
@@ -763,93 +814,6 @@ def _extract_usage(usage: MutableJSON) -> tuple[int, int, int]:
     )
     cache_read = int_val(details.get("cached_tokens"), 0)
     return input_tokens, output_tokens, cache_read
-
-
-def parse_response(
-    data: MutableJSON,
-    *,
-    pricing: Pricing,
-    reasoning_field: str | None,
-) -> ModelResponse:
-    """Convert a non-streaming chat-completions body to ``ModelResponse``.
-
-    Args:
-      data: Decoded JSON response body.
-      pricing: Per-token price schedule for cost computation.
-      reasoning_field: Provider-specific reasoning-text field name,
-          or ``None`` when the provider does not surface reasoning.
-
-    Returns:
-      response: Parsed ``ModelResponse`` with usage and cost filled in.
-
-    """
-    choices = cast(list[MutableJSON], data["choices"])
-    choice = choices[0]
-    message = cast(MutableJSON, choice["message"])
-
-    text = ""
-    thinking_blocks: list[Mapping[str, object]] = []
-
-    raw_content = message.get("content")
-    if isinstance(raw_content, str):
-        text = raw_content
-
-    if reasoning_field:
-        raw_thinking = message.get(reasoning_field)
-        if isinstance(raw_thinking, str) and raw_thinking:
-            # Wrap reasoning text in a single opaque dict so the
-            # AssistantMessage round-trips through history (provider
-            # may discard on resend if the wire doesn't support it).
-            thinking_blocks.append({"type": "reasoning", "text": raw_thinking})
-
-    tool_calls: list[ToolCall] = []
-    for tc in cast(list[MutableJSON], message.get("tool_calls") or []):
-        func = cast(MutableJSON, tc["function"])
-        tc_name = cast(str, func["name"])
-        tc_id = cast(str, tc["id"])
-        parsed = _parse_tool_arguments(
-            cast(str, func.get("arguments") or ""),
-            source="message",
-            tool_name=tc_name,
-            call_id=tc_id,
-        )
-        tool_calls.append(
-            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], parsed))
-        )
-
-    asst = AssistantMessage(
-        text=text,
-        thinking_blocks=tuple(thinking_blocks),
-        tool_calls=tuple(tool_calls),
-    )
-
-    usage = cast(MutableJSON, data.get("usage") or {})
-    input_tokens, output_tokens, cache_read = _extract_usage(usage)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        max(0, input_tokens - cache_read),
-        output_tokens,
-        cache_read=cache_read,
-    )
-    message_id = cast(str, data.get("id") or "")
-    return ModelResponse(
-        message=asst,
-        tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-        ),
-        stop_reason=normalize_stop_reason(
-            cast(str | None, choice.get("finish_reason")),
-            kind="openai",
-            has_tool_use=bool(tool_calls),
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
-    )
 
 
 async def consume_stream(

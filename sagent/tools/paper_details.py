@@ -18,7 +18,7 @@ from typing import cast
 
 import cachetools
 
-from sagent.lib.json import JSON, MutableJSON, bool_val, json_freeze
+from sagent.lib.custom_json import JSON, MutableJSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     S2_PAPER_FIELDS,

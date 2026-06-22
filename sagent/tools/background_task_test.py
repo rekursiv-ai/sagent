@@ -19,7 +19,7 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
 )
 from sagent.agent.state import agent_registry
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.tools.background_task import (
     BackgroundTask,

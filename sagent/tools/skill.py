@@ -23,8 +23,9 @@ import dataclasses
 import logging
 import re
 
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.userdirs import data_dir
 from sagent.tools.core import (
     ToolState,
     get_tool_state,
@@ -61,7 +62,7 @@ class SkillInfo:
     """Absolute path to the source ``SKILL.md``."""
 
 
-_USER_SKILL_ROOTS: tuple[Path, ...] = (Path.home() / ".sagent" / "skills",)
+_USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("sagent") / "skills",)
 _PROJECT_SKILL_SUBDIRS = (".sagent/skills",)
 _IMPORT_SKILL_SUBDIRS = {
     "agents": ".agents/skills",

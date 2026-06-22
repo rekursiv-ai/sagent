@@ -8,12 +8,19 @@ from unittest.mock import patch
 
 import asyncio
 import json
+import time
 
 import cachetools
 import pytest
 
-from sagent.lib.json import MutableJSON
-from sagent.lib.ratelimit import FileStore, TokenBucketRateLimiter
+from sagent.lib.custom_json import MutableJSON
+from sagent.lib.ratelimit import (
+    CooldownGate,
+    FileStore,
+    SystemClock,
+    TokenBucketRateLimiter,
+)
+from sagent.lib.userdirs import data_dir
 from sagent.lib.web.fetch import FetchError
 from sagent.tools import paper_common
 from sagent.tools.paper_common import (
@@ -46,6 +53,24 @@ from sagent.tools.paper_common import (
 from sagent.types.runtime import ToolResult
 
 
+class _FakeClock:
+    """Controllable clock: records sleeps and advances ``now`` by them."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.async_sleeps: list[float] = []
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+    async def sleep_async(self, seconds: float) -> None:
+        self.async_sleeps.append(seconds)
+        self.now += seconds
+
+
 @pytest.fixture(autouse=True)
 def _neutralize_rate_gate(  # pyright: ignore[reportUnusedFunction] -- autouse fixture
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -67,6 +92,15 @@ def _neutralize_rate_gate(  # pyright: ignore[reportUnusedFunction] -- autouse f
 
     monkeypatch.setattr(gate, "acquire_async", _no_wait)
     monkeypatch.setattr(paper_common, "_s2_gate", lambda: gate)
+
+    # Hermetic cooldown too: a per-test lockfile so a 429 path in one test
+    # cannot leak a cooldown into ``~/.sagent`` or another test. Tests that
+    # assert cooldown behavior override this with their own instance.
+    cooldown = CooldownGate(
+        store=FileStore(tmp_path / "cooldown.lock"),
+        clock=SystemClock(source=time.time),
+    )
+    monkeypatch.setattr(paper_common, "_s2_cooldown", lambda: cooldown)
 
 
 def test_short_id_short_unchanged() -> None:
@@ -176,9 +210,9 @@ def test_id_slug_arxiv_old_style_safe_chars() -> None:
     assert id_slug("arxiv", "hep-th/9901001") == "arxiv_hep-th_9901001"
 
 
-def test_papers_cache_dir_under_home() -> None:
+def test_papers_cache_dir_under_data_dir() -> None:
     p = papers_cache_dir()
-    assert p == Path.home() / ".sagent" / "papers"
+    assert p == data_dir("sagent") / "papers"
 
 
 def _make_record(
@@ -397,6 +431,89 @@ def test_s2_get_success() -> None:
     assert not isinstance(data, ToolResult)
     inner = data["data"]
     assert isinstance(inner, list)
+
+
+def test_s2_attempt_429_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hard-throttled S2 must surface the error in an INTERACTIVE timeframe,
+    # not burn a 15s exponential-backoff budget (1+2+4+8). The total wait
+    # before giving up is bounded; we assert it via the fake clock's recorded
+    # async sleeps rather than wall time.
+    clock = _FakeClock()
+    cd = CooldownGate(store=FileStore(tmp_path / "cd.lock"), clock=clock)
+    monkeypatch.setattr(paper_common, "_s2_cooldown", lambda: cd)
+
+    async def _no_wait() -> None:
+        return None
+
+    gate = TokenBucketRateLimiter(
+        max_calls=1, per_seconds=1.0, store=FileStore(tmp_path / "g.lock")
+    )
+    monkeypatch.setattr(gate, "acquire_async", _no_wait)
+    monkeypatch.setattr(paper_common, "_s2_gate", lambda: gate)
+
+    def always_429() -> bytes:
+        raise FetchError(url="u", status=429, headers={}, body=b"")
+
+    result = asyncio.run(paper_common._s2_attempt(always_429))
+    assert isinstance(result, FetchError)
+    assert result.status == 429
+    # Total backoff slept before giving up must be interactive (<= 5s), not the
+    # old 1+2+4+8 = 15s.
+    assert sum(clock.async_sleeps) <= 5.0
+
+
+def test_s2_429_records_shared_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A 429 in one requester must be a SHARED discovery: it writes a cooldown
+    # window into the gate so a concurrent/subsequent requester waits instead
+    # of independently rediscovering the same throttle. Without this, N callers
+    # each pay the 429 discovery cost and amplify the throttle.
+    cooldown = CooldownGate(
+        store=FileStore(tmp_path / "cooldown.lock"),
+        clock=_FakeClock(),
+    )
+    monkeypatch.setattr(paper_common, "_s2_cooldown", lambda: cooldown)
+
+    # No cooldown initially.
+    assert cooldown.remaining() == 0.0
+    # Recording a 429 opens a window.
+    cooldown.trigger(8.0)
+    assert cooldown.remaining() == pytest.approx(8.0)
+
+
+def test_s2_attempt_waits_out_active_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When the shared cooldown is already open (a sibling 429'd), a new attempt
+    # must wait it out BEFORE its first fetch -- not fire blindly into the
+    # throttle. We assert the wait happened by capturing sleeps.
+    clock = _FakeClock()
+    cooldown = CooldownGate(
+        store=FileStore(tmp_path / "cooldown.lock"),
+        clock=clock,
+    )
+    cooldown.trigger(5.0)
+    monkeypatch.setattr(paper_common, "_s2_cooldown", lambda: cooldown)
+
+    # Neutralize the rate gate so only the cooldown governs timing.
+    async def _no_wait() -> None:
+        return None
+
+    gate = TokenBucketRateLimiter(
+        max_calls=1, per_seconds=1.0, store=FileStore(tmp_path / "s2.lock")
+    )
+    monkeypatch.setattr(gate, "acquire_async", _no_wait)
+    monkeypatch.setattr(paper_common, "_s2_gate", lambda: gate)
+
+    with patch("sagent.tools.paper_common.fetch", return_value=b"{}"):
+        asyncio.run(paper_common._s2_attempt(lambda: b"{}"))
+
+    # The cooldown's async sleep was invoked for the full remaining window.
+    assert clock.async_sleeps
+    assert max(clock.async_sleeps) >= 5.0
 
 
 def test_s2_get_uses_interactive_timeout() -> None:

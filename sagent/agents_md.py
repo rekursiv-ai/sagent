@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from markdown_it.token import Token
 
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
+from sagent.lib.userdirs import data_dir
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class AgentsMdConfig:
     system_dir: Path = field(default_factory=_default_system_dir)
     """System-wide config root (``/etc/sagent`` or platform equivalent)."""
 
-    user_dir: Path = field(default_factory=lambda: Path.home() / ".sagent")
+    user_dir: Path = field(default_factory=lambda: data_dir("sagent"))
     """User config root (``~/.sagent``)."""
 
     additional_dirs: list[Path] = field(default_factory=list)

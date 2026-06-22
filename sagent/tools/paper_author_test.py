@@ -8,7 +8,7 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.tools.paper_author import (
     PaperAuthor,
     _s2_author_to_record,

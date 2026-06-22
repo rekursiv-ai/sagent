@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers import anthropic_cli
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.anthropic_cli import (
@@ -258,6 +258,17 @@ def test_is_context_overflow_text_markers() -> None:
     assert model.is_context_overflow(RuntimeError("network error")) is False
 
 
+def test_byte_limit_not_classified_as_context_overflow() -> None:
+    """A request-byte-limit error must not classify as token overflow.
+
+    Uniform with the HTTP providers: the byte wire-limit routes to
+    byte-overflow recovery, never the ``/model`` larger-window remediation
+    a larger window cannot satisfy.
+    """
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    assert model.is_context_overflow(RuntimeError("request entity too large")) is False
+
+
 def test_argv_contains_required_flags() -> None:
     """The spawn recipe sets every knob the CLI needs for stream-json mode."""
     argv = _build_anthropic_argv(
@@ -417,7 +428,9 @@ def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
 
 def test_user_line_text_only() -> None:
     """A plain ``UserMessage`` becomes a single ``content: str`` line."""
-    line = _user_line(UserMessage(text="hello"), max_image_dim=8000)
+    line = _user_line(
+        UserMessage(text="hello"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+    )
     assert line == {"type": "user", "message": {"role": "user", "content": "hello"}}
 
 
@@ -425,7 +438,9 @@ def test_serialize_for_stdin_rejects_tool_result() -> None:
     """Tool results never traverse stdin -- the MCP bridge handles them."""
     with pytest.raises(RuntimeError, match="ToolResult in history"):
         _ = _serialize_for_stdin(
-            ToolResult(call_id="x", content="done"), max_image_dim=8000
+            ToolResult(call_id="x", content="done"),
+            max_image_dim=8000,
+            max_image_bytes=5 * 1024 * 1024,
         )
 
 
@@ -600,6 +615,48 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     assert response.tokens.cache_read_tokens == 96_000
     assert response.tokens.output_tokens == 70
     assert model._last_input_tokens == 96_003
+
+
+@pytest.mark.asyncio
+async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
+    """A zero-round drain (no ``message_start``) must not zero the anchor.
+
+    ``_last_input_tokens`` drives the context-fraction respawn gate. A turn
+    that emits a ``result`` with no preceding ``message_start`` carries no new
+    footprint; overwriting the last known value with 0 would read as "context
+    empty" and suppress a respawn the still-full context needs. The prior
+    anchor must survive.
+    """
+    events = [
+        cast(
+            MutableJSON,
+            {
+                "type": "result",
+                "stop_reason": "end_turn",
+                "is_error": False,
+                "modelUsage": {
+                    "claude-haiku-4-5": {
+                        "inputTokens": 0,
+                        "outputTokens": 0,
+                        "costUSD": 0.0,
+                    }
+                },
+            },
+        ),
+    ]
+
+    class _Proc:
+        async def read_json_line(
+            self, *, skip_non_json: bool = False
+        ) -> MutableJSON | None:
+            del skip_non_json
+            return events.pop(0) if events else None
+
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5")
+    model._last_input_tokens = 180_000  # a genuinely full prior context
+    _ = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
+    assert model._last_input_tokens == 180_000, "zero-round drain wiped the anchor"
 
 
 def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
@@ -991,6 +1048,26 @@ def test_detached_delivery_entry_holds_buffer_until_turn_succeeds() -> None:
     model._pending_detached_text = None
     assert model._detached_delivery_entry() is None
     assert bridge.drain_calls == 2  # now consults the (empty) bridge again
+
+
+def test_clear_drops_pending_detached_buffer() -> None:
+    """``agent.clear()`` must wipe a buffered detached result.
+
+    The buffer holds tool results the model was promised. After a clear the
+    model no longer knows those tool calls, so re-injecting the buffer would
+    surface a phantom ``[detached tool result]`` referencing calls that no
+    longer exist in context. Both reset boundaries (session clear and respawn)
+    must drop it.
+    """
+    provider = AnthropicCLI()
+    model = provider.model("claude-haiku-4-5", session_id="sess-clear-detached")
+    model._pending_detached_text = "[detached tool result] staged"
+    model._reset_for_clear()
+    assert model._pending_detached_text is None, "session clear must drop the buffer"
+
+    model._pending_detached_text = "[detached tool result] staged"
+    model._reset_active_state()
+    assert model._pending_detached_text is None, "respawn must drop the buffer"
 
 
 @pytest.mark.asyncio
@@ -2149,7 +2226,9 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
 
 def test_serialize_for_stdin_user_passthrough() -> None:
     """``UserMessage`` falls through ``_serialize_for_stdin`` to ``_user_line``."""
-    line = _serialize_for_stdin(UserMessage(text="ping"), max_image_dim=8000)
+    line = _serialize_for_stdin(
+        UserMessage(text="ping"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+    )
     assert line["type"] == "user"
 
 

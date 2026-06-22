@@ -379,6 +379,38 @@ async def test_compact_strips_image_attachments() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_preserves_kept_tail_attachments() -> None:
+    """Compaction keeps the kept-tail's image/PDF bytes; sheds summarized ones.
+
+    The model is actively using recent attachments; stripping them on every
+    compaction (token- or byte-triggered) is silent vision-data loss. Only
+    the SUMMARIZED region's attachments become ``[image]`` markers (their
+    bytes are shed); the preserved tail keeps its bytes verbatim.
+    """
+    body = "summary"
+    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    compactor = SummaryCompactor(keep_recent=2)
+    old_img = BytesMessage(data=b"\x89PNG-old", descriptor="image/png")
+    kept_img = BytesMessage(data=b"\x89PNG-kept", descriptor="image/png")
+    history: list[ModelContextEvent] = [
+        UserMessage(text="old turn", attachments=(old_img,)),
+        AssistantMessage(text="ack old"),
+        # Kept tail (keep_recent=2): the user's active image must survive.
+        UserMessage(text="look at this", attachments=(kept_img,)),
+        AssistantMessage(text="ack kept"),
+    ]
+    result = await _apply_compact(compactor, history, model)
+    kept_bytes = [
+        att.data
+        for entry in result
+        if isinstance(entry, UserMessage)
+        for att in entry.attachments
+    ]
+    assert b"\x89PNG-kept" in kept_bytes, "kept-tail image bytes must survive"
+    assert b"\x89PNG-old" not in kept_bytes, "summarized image bytes must be shed"
+
+
+@pytest.mark.asyncio
 async def test_compact_with_unresolved_tool_use_snaps_split_left() -> None:
     """``_safe_split`` avoids slicing through an unfinished tool_use pair."""
     body = "summary"

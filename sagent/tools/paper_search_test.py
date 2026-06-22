@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import asyncio
 import json
 
-from sagent.lib.json import MutableJSON
+
+if TYPE_CHECKING:
+    import pytest
+
+from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.fetch import FetchError
 from sagent.tools.paper_common import PaperRecord
 from sagent.tools.paper_search import (
@@ -162,12 +167,65 @@ def test_merge_prefers_first() -> None:
     assert out.sources == ("s2", "openalex")
 
 
-def test_fuse_orders_s2_first() -> None:
-    s2 = [PaperRecord(title="X", doi="10.1/a")]
-    oa = [PaperRecord(title="Y", doi="10.1/b")]
+def test_fuse_rewards_agreement_across_backends() -> None:
+    # RRF: a paper both backends rank highly must outrank a paper only one
+    # backend has, even when the single-backend paper is that backend's #1.
+    # AGREE is S2 #2 and OA #1; SOLO is S2 #1 but absent from OA.
+    s2 = [
+        PaperRecord(title="Solo", doi="10.1/solo", sources=("s2",)),
+        PaperRecord(title="Agree", doi="10.1/agree", sources=("s2",)),
+    ]
+    oa = [PaperRecord(title="Agree", doi="10.1/agree", sources=("openalex",))]
     fused = _fuse(s2, oa)
-    assert fused[0].doi == "10.1/a"
-    assert fused[1].doi == "10.1/b"
+    assert fused[0].doi == "10.1/agree"  # cross-backend agreement wins
+    assert {r.doi for r in fused} == {"10.1/agree", "10.1/solo"}
+
+
+def test_fuse_upweights_s2_on_single_backend_tie() -> None:
+    # When two papers each appear in exactly one backend at the same rank
+    # (S2 #1 vs OpenAlex #1), the S2 paper ranks first: S2's relevance is more
+    # precise, so it carries a higher per-engine weight.
+    s2 = [PaperRecord(title="FromS2", doi="10.1/s2", sources=("s2",))]
+    oa = [PaperRecord(title="FromOA", doi="10.1/oa", sources=("openalex",))]
+    fused = _fuse(s2, oa)
+    assert fused[0].doi == "10.1/s2"
+    assert fused[1].doi == "10.1/oa"
+
+
+def test_fuse_strong_openalex_hit_interleaves_not_buried() -> None:
+    # A strong OpenAlex-only hit (its #1) must interleave into S2's top, not
+    # sink below the entire S2 list. With k=60 the RRF curve is so flat that
+    # all of S2's top ~27 outrank OpenAlex #1, burying cross-pollinated hits;
+    # a smaller k keeps the per-engine weights meaningful. Contract: OpenAlex #1
+    # outranks the tail of a 10-deep S2 list.
+    s2 = [
+        PaperRecord(title=f"S{i}", doi=f"10.1/s{i}", sources=("s2",)) for i in range(10)
+    ]
+    oa = [PaperRecord(title="OAtop", doi="10.1/oatop", sources=("openalex",))]
+    fused = _fuse(s2, oa)
+    pos = {r.doi: i for i, r in enumerate(fused)}
+    # OpenAlex #1 must rank above S2's #10 (last) -- it is NOT buried at the end.
+    assert pos["10.1/oatop"] < pos["10.1/s9"]
+
+
+def test_fuse_includes_openalex_only_hits() -> None:
+    # Something every time: an OpenAlex-only paper still appears (ranked by its
+    # single-backend RRF score), so a fused result is never just S2's list.
+    s2 = [PaperRecord(title="S", doi="10.1/s", sources=("s2",))]
+    oa = [PaperRecord(title="O", doi="10.1/o", sources=("openalex",))]
+    fused = _fuse(s2, oa)
+    assert {r.doi for r in fused} == {"10.1/s", "10.1/o"}
+
+
+def test_fuse_empty_s2_returns_openalex_ranked() -> None:
+    # S2 down/throttled -> fused degrades to OpenAlex alone, in OpenAlex rank
+    # order, not an empty or error result.
+    oa = [
+        PaperRecord(title="First", doi="10.1/1", sources=("openalex",)),
+        PaperRecord(title="Second", doi="10.1/2", sources=("openalex",)),
+    ]
+    fused = _fuse([], oa)
+    assert [r.doi for r in fused] == ["10.1/1", "10.1/2"]
 
 
 def test_fuse_dedups_by_doi() -> None:
@@ -210,37 +268,111 @@ def _s2_search_payload() -> bytes:
 
 
 def test_run_s2_success() -> None:
+    # Pin source="s2": default fused would also hit the (unpatched) OpenAlex.
     with patch(
         "sagent.tools.paper_common.fetch",
         return_value=_s2_search_payload(),
     ):
-        result = asyncio.run(PaperSearch().run({"query": "transformers"}))
+        result = asyncio.run(
+            PaperSearch().run({"query": "transformers", "source": "s2"})
+        )
     assert not result.is_error
     assert "Hit" in result.content
 
 
 def test_run_no_results() -> None:
+    # Pin source="s2" so only the (patched, empty) S2 path runs; default fused
+    # would also query the real OpenAlex.
     payload = json.dumps({"total": 0, "data": []}).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
-        result = asyncio.run(PaperSearch().run({"query": "nothing"}))
+        result = asyncio.run(PaperSearch().run({"query": "nothing", "source": "s2"}))
     assert result.content.startswith("(no results)")
 
 
+def test_run_no_results_multiterm_explains_and_narrowing() -> None:
+    # A multi-term query that returns nothing is most often AND-narrowing: both
+    # backends require EVERY term in title/abstract, so one rare term zeroes the
+    # result. The empty must explain this and tell the agent to drop terms --
+    # the only cross-backend broadening lever (operators aren't portable).
+    s2_empty = json.dumps({"total": 0, "data": []}).encode()
+    oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
+
+    def fake(**kw: object) -> bytes:
+        url = str(kw.get("url", ""))
+        return oa_empty if "openalex" in url else s2_empty
+
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=fake),
+        patch("sagent.tools.paper_search.fetch", side_effect=fake),
+    ):
+        result = asyncio.run(
+            PaperSearch().run({"query": "object-centric slot attention ARC"})
+        )
+    assert "(no results)" in result.content
+    assert "every query term" in result.content.lower()
+    assert "drop" in result.content.lower()
+
+
+def test_run_fused_one_errors_other_empty_is_not_error() -> None:
+    # S2 throttled (error) + OpenAlex clean-empty must NOT surface as an error:
+    # one backend genuinely answered (empty), so it's a real AND-narrowing empty
+    # with guidance, not a failure hidden behind the sibling's throttle.
+    err = FetchError(url="u", status=429, headers={}, body=b"")
+    oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
+
+    def fake(**kw: object) -> bytes:
+        if "openalex" in str(kw.get("url", "")):
+            return oa_empty
+        raise err
+
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=fake),
+        patch("sagent.tools.paper_search.fetch", side_effect=fake),
+    ):
+        result = asyncio.run(
+            PaperSearch().run({"query": "object-centric slot attention ARC"})
+        )
+    assert not result.is_error
+    assert "(no results)" in result.content
+    assert "drop" in result.content.lower()  # AND-narrowing guidance present
+
+
+def test_run_no_results_single_term_no_and_hint() -> None:
+    # A single-term empty isn't an AND-narrowing problem; no drop-terms advice.
+    s2_empty = json.dumps({"total": 0, "data": []}).encode()
+    oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
+
+    def fake(**kw: object) -> bytes:
+        url = str(kw.get("url", ""))
+        return oa_empty if "openalex" in url else s2_empty
+
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=fake),
+        patch("sagent.tools.paper_search.fetch", side_effect=fake),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "xyzzynonsense"}))
+    assert "drop" not in result.content.lower()
+
+
 def test_run_no_results_s2_appends_author_hint() -> None:
-    # S2 (default) returning nothing must nudge toward the fused backend:
-    # an author-surname query silently zero-hits on S2 but resolves via
-    # OpenAlex (live 2026-06-19 ARC-AGI survey reference walk).
+    # An EXPLICIT source="s2" returning nothing must nudge toward fused: an
+    # author-surname query silently zero-hits on S2 but resolves via OpenAlex
+    # (live 2026-06-19 ARC-AGI survey reference walk). The hint fires only for
+    # explicit s2 now, since fused is the default and already covers it.
     payload = json.dumps({"total": 0, "data": []}).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
-        result = asyncio.run(PaperSearch().run({"query": "Andrews Sparks"}))
+        result = asyncio.run(
+            PaperSearch().run({"query": "Andrews Sparks", "source": "s2"})
+        )
     assert "(no results)" in result.content
     assert 'source="fused"' in result.content
     assert "author" in result.content.lower()
 
 
-def test_run_no_results_fused_no_hint() -> None:
-    # Fused already includes OpenAlex; suggesting "retry with fused" would be
-    # circular, so an empty fused result stays bare.
+def test_run_no_results_fused_no_author_hint() -> None:
+    # Fused already includes OpenAlex, so the s2-only author-name hint would be
+    # circular and must NOT appear. (The generic AND-narrowing note may appear
+    # for a multi-term query -- that is correct and separate.)
     s2_empty = json.dumps({"total": 0, "data": []}).encode()
     oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
 
@@ -255,16 +387,20 @@ def test_run_no_results_fused_no_hint() -> None:
         result = asyncio.run(
             PaperSearch().run({"query": "nothing here", "source": "fused"})
         )
-    assert result.content == "(no results)"
+    assert result.content.startswith("(no results)")
+    assert "author names" not in result.content  # no circular fused-author hint
 
 
 def test_run_hits_no_author_hint() -> None:
     # The hint is for empty results only; a populated result stays clean.
+    # Pin source="s2" (the hint path is s2-only) so fused doesn't hit OpenAlex.
     with patch(
         "sagent.tools.paper_common.fetch",
         return_value=_s2_search_payload(),
     ):
-        result = asyncio.run(PaperSearch().run({"query": "transformers"}))
+        result = asyncio.run(
+            PaperSearch().run({"query": "transformers", "source": "s2"})
+        )
     assert 'source="fused"' not in result.content
 
 
@@ -287,20 +423,148 @@ def test_openalex_uses_interactive_timeout() -> None:
     assert timeout <= 15.0
 
 
-def test_default_source_is_s2_only() -> None:
-    # The module docstring and behavior must agree: default queries S2 ALONE,
-    # not the fused both-backends path.
+def test_openalex_uses_precise_title_abstract_filter() -> None:
+    # OpenAlex's broad ``search=`` param is noisy (returns thousands of loosely
+    # related works). Use the ``title_and_abstract.search`` filter for precision
+    # so the OpenAlex-only (S2-throttled) path returns relevant hits.
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b'{"meta": {"count": 3}, "results": [{"title": "Hit", "doi": "10/x"}]}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperSearch().run({"query": "arc reasoning", "source": "openalex"})
+        )
+    params = cast(dict[str, object], captured["params"])
+    assert "search" not in params  # not the broad param
+    flt = str(params.get("filter", ""))
+    # Unquoted: OpenAlex treats unquoted terms as AND-of-terms (the recall we
+    # want). Quoting would force exact-PHRASE match -> near-zero hits.
+    assert "title_and_abstract.search:arc reasoning" in flt
+    assert '"' not in flt
+
+
+def test_openalex_query_with_comma_does_not_break_filter() -> None:
+    # A comma in the query is OpenAlex's filter separator -> bare comma yields
+    # HTTP 400. Replace it with a space (commas aren't a search operator), which
+    # keeps AND-of-terms semantics. Quoting would avoid the 400 too but at the
+    # cost of phrase-match (recall collapse), so it is NOT used.
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b'{"meta": {"count": 0}, "results": []}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperSearch().run(
+                {"query": "deep learning, attention", "source": "openalex"}
+            )
+        )
+    flt = str(cast(dict[str, object], captured["params"])["filter"])
+    # Comma gone (replaced by space), value unquoted, AND-semantics intact.
+    assert "title_and_abstract.search:deep learning  attention" in flt
+    assert "," not in flt.split("title_and_abstract.search:")[1]
+    assert '"' not in flt
+
+
+def test_openalex_sends_api_key_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A configured OPENALEX_API_KEY must be sent (raises the daily credit
+    # budget); otherwise the key in the user's env is silently ignored.
+    monkeypatch.setenv("OPENALEX_API_KEY", "testkey123")
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b'{"meta": {"count": 0}, "results": []}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperSearch().run({"query": "apikey_set_probe", "source": "openalex"})
+        )
+    params = cast(dict[str, object], captured["params"])
+    assert params.get("api_key") == "testkey123"
+
+
+def test_openalex_omits_api_key_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_fetch(**kw: object) -> bytes:
+        captured.update(kw)
+        return b'{"meta": {"count": 0}, "results": []}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        _ = asyncio.run(
+            PaperSearch().run({"query": "apikey_unset_probe", "source": "openalex"})
+        )
+    assert "api_key" not in cast(dict[str, object], captured["params"])
+
+
+def test_openalex_does_not_fall_back_to_fulltext() -> None:
+    # An empty title_and_abstract result must NOT fall back to the broad
+    # fulltext ``search`` param: its relevance_score is citation-dominated and
+    # surfaces high-cite off-topic reviews. One request, never the broad param;
+    # a clean empty is correct (the fused default still covers it via S2).
+    calls: list[dict[str, object]] = []
+
+    def fake_fetch(**kw: object) -> bytes:
+        calls.append(dict(cast(dict[str, object], kw.get("params") or {})))
+        return b'{"meta": {"count": 0}, "results": []}'
+
+    with patch("sagent.tools.paper_search.fetch", side_effect=fake_fetch):
+        result = asyncio.run(
+            PaperSearch().run(
+                {"query": "very specific long query", "source": "openalex"}
+            )
+        )
+    assert len(calls) == 1  # single request, no fulltext fallback
+    assert "title_and_abstract" in str(calls[0].get("filter", ""))
+    assert "search" not in calls[0]
+    assert result.content.startswith("(no results)")
+
+
+def test_default_source_is_fused() -> None:
+    # Default now queries BOTH backends and fuses, so a throttled/missing S2
+    # still yields OpenAlex results -- "something every time".
+    oa_payload = json.dumps(
+        {"meta": {"count": 1}, "results": [{"title": "OA", "doi": "10.0/oa"}]}
+    ).encode()
     with (
         patch(
             "sagent.tools.paper_common.fetch",
             return_value=_s2_search_payload(),
         ) as s2_fetch,
-        patch("sagent.tools.paper_search.fetch") as oa_fetch,
+        patch(
+            "sagent.tools.paper_search.fetch",
+            return_value=oa_payload,
+        ) as oa_fetch,
     ):
         result = asyncio.run(PaperSearch().run({"query": "default_source_probe"}))
     assert not result.is_error
     assert s2_fetch.call_count == 1
-    assert oa_fetch.call_count == 0
+    assert oa_fetch.call_count == 1  # OpenAlex queried too, by default
+
+
+def test_default_source_survives_s2_throttle() -> None:
+    # The whole point of fused-default: a 429 from S2 must not blank the result;
+    # OpenAlex carries it.
+    err = FetchError(url="u", status=429, headers={}, body=b"")
+    oa_payload = json.dumps(
+        {"meta": {"count": 1}, "results": [{"title": "Rescued", "doi": "10.0/r"}]}
+    ).encode()
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=err),
+        patch(
+            "sagent.tools.paper_search.fetch",
+            return_value=oa_payload,
+        ),
+    ):
+        result = asyncio.run(PaperSearch().run({"query": "throttle_probe"}))
+    assert not result.is_error
+    assert "Rescued" in result.content
 
 
 def test_run_rejects_zero_abstract_chars() -> None:
@@ -434,11 +698,61 @@ def test_run_fused_all_fail_returns_error() -> None:
 
 
 def test_run_caches_results() -> None:
+    # Pin source="s2" so the cache test is hermetic (fused would also hit the
+    # unpatched OpenAlex) and the call-count assertion targets one backend.
     payload = _s2_search_payload()
     with patch("sagent.tools.paper_common.fetch", return_value=payload) as mock_fetch:
-        _ = asyncio.run(PaperSearch().run({"query": "uniquecachetestkey1"}))
-        _ = asyncio.run(PaperSearch().run({"query": "uniquecachetestkey1"}))
+        args = {"query": "uniquecachetestkey1", "source": "s2"}
+        _ = asyncio.run(PaperSearch().run(args))
+        _ = asyncio.run(PaperSearch().run(args))
     assert mock_fetch.call_count == 1
+
+
+def test_fused_partial_failure_is_not_cached() -> None:
+    # A fused result where one backend ERRORED (S2 429) and the other answered
+    # must NOT be cached -- otherwise a later query returns the degraded
+    # one-backend result and never retries the recovered backend.
+    oa_payload = json.dumps(
+        {"meta": {"count": 1}, "results": [{"title": "OnlyOA", "doi": "10.0/oa"}]}
+    ).encode()
+    s2_payload = json.dumps(
+        {
+            "total": 1,
+            "data": [
+                {"title": "NowS2", "externalIds": {"DOI": "10.0/s2"}, "authors": []}
+            ],
+        }
+    ).encode()
+    q = "fused_partial_cache_probe_xyzzy"
+
+    # First call: S2 throttled, OpenAlex answers -> partial result, must not cache.
+    with (
+        patch(
+            "sagent.tools.paper_common.fetch",
+            side_effect=FetchError(url="u", status=429, headers={}, body=b""),
+        ),
+        patch(
+            "sagent.tools.paper_search.fetch",
+            return_value=oa_payload,
+        ),
+    ):
+        first = asyncio.run(PaperSearch().run({"query": q}))
+    assert "OnlyOA" in first.content
+
+    # Second call: S2 recovered -> must re-query S2 (cache miss), not serve stale.
+    with (
+        patch(
+            "sagent.tools.paper_common.fetch",
+            return_value=s2_payload,
+        ) as s2_fetch,
+        patch(
+            "sagent.tools.paper_search.fetch",
+            return_value=oa_payload,
+        ),
+    ):
+        second = asyncio.run(PaperSearch().run({"query": q}))
+    assert s2_fetch.call_count == 1
+    assert "NowS2" in second.content
 
 
 if __name__ == "__main__":

@@ -29,9 +29,14 @@ import shutil
 import tempfile
 
 from sagent.lib import token_count
-from sagent.lib.json import JSON, MutableJSON, int_val, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
 from sagent.providers.anthropic import Anthropic
+from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
+)
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.oauth import credentials_path
@@ -76,8 +81,6 @@ logger = logging.getLogger(__name__)
 
 
 _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
-_TURN_RESPAWN_THRESHOLD = 100
-_CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
 # Cap on waiting for the CLI to fetch the MCP catalog (proof the
 # in-process bridge connected) before feeding the first user line. The
 # CLI's MCP connect + catalog fetch is ~2-3s on a cold subprocess
@@ -669,13 +672,18 @@ class _AnthropicCLIModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Anthropic's documented vision pixel cap."""
-        return 8000
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Anthropic's documented vision byte cap (5 MiB)."""
-        return 5 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``."""
@@ -703,15 +711,22 @@ class _AnthropicCLIModel:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify whether an error means the prompt exceeded the window.
+        """Classify whether an error means the prompt exceeded the token window.
+
+        Excludes the request-byte wire-limit via the shared classifier first,
+        uniform with the HTTP providers and ``GoogleCLI``: a byte-limit error
+        routes to byte-overflow recovery, not the ``/model`` larger-window
+        remediation the byte ceiling ignores.
 
         Args:
           error: Exception raised by the call path.
 
         Returns:
-          overflow: ``True`` for known overflow markers in the message text.
+          overflow: ``True`` for known token-overflow markers in the message.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return (
             "prompt is too long" in msg or "context window" in msg or "too_long" in msg
@@ -920,7 +935,7 @@ class _AnthropicCLIModel:
         # after launch, and if our tool catalog isn't there at that
         # moment, opus falls back to emitting tool calls as plain
         # text inside the assistant message (Episode 2.7 pathology
-        # — observed 2026-06-02 23:16 when TL produced
+        # -- observed 2026-06-02 23:16 when TL produced
         # "Bash {command: ls -la …}" as text instead of a tool_use
         # block on the first turn after refactor).
         await self._ensure_tools_bridge()
@@ -1021,11 +1036,10 @@ class _AnthropicCLIModel:
             return True
         if _hash_system(request.system) != self._system_hash:
             return True
-        if self._turn_count >= _TURN_RESPAWN_THRESHOLD:
-            return True
-        return (
-            self._last_input_tokens
-            > self._max_request_tokens * _CONTEXT_FRACTION_RESPAWN_THRESHOLD
+        return respawn_for_cadence(
+            turn_count=self._turn_count,
+            last_input_tokens=self._last_input_tokens,
+            max_request_tokens=self._max_request_tokens,
         )
 
     def _sync_tools_bridge(
@@ -1134,7 +1148,9 @@ class _AnthropicCLIModel:
         sees no tools and answers "no tools have been provided".
         """
         await self._await_mcp_listed(proc)
-        line = json.dumps(_serialize_for_stdin(entry, self.max_image_dim))
+        line = json.dumps(
+            _serialize_for_stdin(entry, self.max_image_dim, self.max_image_bytes)
+        )
         await proc.write_line(line)
 
     async def _drain_until_result(
@@ -1232,9 +1248,13 @@ class _AnthropicCLIModel:
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
         assert usage_event is not None
-        if update_input_tokens:
-            # Cache-inclusive context footprint of the last internal
-            # round; feeds the context-fraction respawn heuristic.
+        if update_input_tokens and last_round_usage is not None:
+            # Cache-inclusive context footprint of the last internal round;
+            # feeds the context-fraction respawn heuristic. Only overwrite when
+            # a round was actually observed: a zero-round drain (no
+            # ``message_start``) carries NO footprint signal, and clobbering the
+            # last known value with 0 would read as "context is empty" and
+            # suppress a respawn that a genuinely full context still needs.
             self._last_input_tokens = _round_context_tokens(last_round_usage)
         return _build_model_response(
             usage_event=usage_event,
@@ -1401,6 +1421,10 @@ class _AnthropicCLIModel:
         """Reset active subprocess counters after a respawn boundary."""
         self._turn_count = 0
         self._last_input_tokens = 0
+        # A buffered detached result is promised to the OUTGOING context; a
+        # respawn starts fresh, so drop it rather than inject a phantom
+        # ``[detached tool result]`` referencing calls the new process never saw.
+        self._pending_detached_text = None
         self._reset_delta_state()
 
     def _reset_for_clear(self) -> None:
@@ -1408,14 +1432,19 @@ class _AnthropicCLIModel:
 
         Wipes the cumulative-sent counter, marks the session as
         uninitialised (next spawn will use ``--session-id`` again),
-        and DELETES the on-disk session JSONL so the next
+        DELETES the on-disk session JSONL so the next
         ``--session-id <same-uuid>`` call doesn't error with
-        "Session ID is already in use".
+        "Session ID is already in use", and drops any buffered detached
+        result -- the cleared context no longer knows the tool calls it
+        answered, so re-injecting it would be a phantom result.
 
         Called from :meth:`_stream_session_persistent` when it
         detects ``_last_sent_index > len(request.messages)``, which
         is the post-``Clear`` shape.
         """
+        # The detached buffer is context state, cleared regardless of session
+        # mode (the early-return below only gates the session-file teardown).
+        self._pending_detached_text = None
         if self._session_id is None:
             return
         self._last_sent_index = 0
@@ -1754,10 +1783,12 @@ def _build_anthropic_argv(
     return base
 
 
-def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
+def _serialize_for_stdin(
+    entry: TapeEvent, max_image_dim: int, max_image_bytes: int
+) -> MutableJSON:
     """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
     if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_line(entry, max_image_dim)
+        return _user_line(entry, max_image_dim, max_image_bytes)
     assert isinstance(entry, ToolResult)
     # Tool results never traverse stdin: the CLI's MCP client handled
     # the tool_use round-trip internally. Surface mistakes loudly.
@@ -1767,7 +1798,9 @@ def _serialize_for_stdin(entry: TapeEvent, max_image_dim: int) -> MutableJSON:
 
 
 def _user_line(
-    entry: AgentSendMessage | UserMessage, max_image_dim: int
+    entry: AgentSendMessage | UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
 ) -> MutableJSON:
     """Build a ``{"type":"user", ...}`` stdin line, attaching images inline."""
     image_attachments = [
@@ -1781,7 +1814,7 @@ def _user_line(
     content: list[MutableJSON] = []
     for att in image_attachments:
         raw, mime = image_lib.resize(
-            att.data, max_dim=max_image_dim, max_bytes=5 * 1024 * 1024
+            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
         )
         content.append(
             cast(
@@ -1869,7 +1902,7 @@ def _dispatch_stream_event(
             # final signature is the concatenation across deltas
             # (typically a single delta in practice). Required so a
             # downstream wire re-send (session-mode history rebuild)
-            # embeds the signature in the thinking block — Anthropic's
+            # embeds the signature in the thinking block -- Anthropic's
             # API rejects unsigned thinking with HTTP 400
             # ``thinking.signature: Field required``.
             sig = cast(str, delta.get("signature") or "")
@@ -1885,7 +1918,7 @@ def _dispatch_stream_event(
         tool_name = cast(str, state["name"])
         tool_id = cast(str, state["id"])
         json_parts = cast(list[str], state["json_parts"])
-        args_summary = _render_tool_args(tool_name, "".join(json_parts))
+        args_summary = _render_tool_args("".join(json_parts))
         label_text = f"{tool_name} {args_summary}".rstrip()
         if publish is not None:
             try:
@@ -1897,7 +1930,22 @@ def _dispatch_stream_event(
         return
 
 
-def _render_tool_args(name: str, raw_json: str) -> str:
+# Single truncation cap for every tool-arg label branch (parsed, unparsed, and
+# fallback), so a label's length does not depend on which rendering path hit.
+_ARG_LABEL_MAX = 120
+
+
+def _truncate_label(s: str) -> str:
+    """Clamp ``s`` to ``_ARG_LABEL_MAX``, appending ``…`` iff it was clipped.
+
+    One rule for every label branch (parsed string, content, fallback dict, and
+    the unparsed raw form), so the ellipsis no longer depends on which rendering
+    path produced the value.
+    """
+    return s if len(s) <= _ARG_LABEL_MAX else s[:_ARG_LABEL_MAX] + "…"
+
+
+def _render_tool_args(raw_json: str) -> str:
     """Render tool input JSON as a short label suffix.
 
     Best-effort: if the JSON is incomplete (streaming aborted mid-flight)
@@ -1906,40 +1954,38 @@ def _render_tool_args(name: str, raw_json: str) -> str:
     ``content``) get a friendly rendering; unknown tools fall back to
     the raw arg dict.
     """
-    del name  # reserved for future per-tool renderings
     if not raw_json:
         return ""
     try:
         args = json.loads(raw_json)
     except (json.JSONDecodeError, ValueError):
-        snippet = raw_json[:80].replace("\n", " ")
-        return f"({snippet}…)" if len(raw_json) > 80 else f"({snippet})"
+        return f"({_truncate_label(raw_json.replace(chr(10), ' '))})"
     if not isinstance(args, dict):
-        return str(args)[:80]
+        return _truncate_label(str(args))
     arg_map = cast(dict[object, object], args)
     for key in ("command", "file_path", "path", "pattern", "query", "to"):
         val = arg_map.get(key)
         if isinstance(val, str):
-            return val if len(val) <= 120 else val[:120] + "…"
+            return _truncate_label(val)
     content = arg_map.get("content")
     if isinstance(content, str):
-        return content if len(content) <= 120 else content[:120] + "…"
+        return _truncate_label(content)
     rendered = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
-    return rendered[:120]
+    return _truncate_label(rendered)
 
 
 def _round_context_tokens(round_usage: MutableJSON | None) -> int:
     """Cache-inclusive input footprint of one internal round's request.
 
     ``round_usage`` is the raw Anthropic API ``usage`` object off a
-    ``message_start`` stream event (snake_case keys — unlike the
+    ``message_start`` stream event (snake_case keys -- unlike the
     camelCase rows in the CLI's terminal ``result.modelUsage``). The
     sum of non-cached input plus both cache pools is the full prompt
-    size the server counted for that request — the same number the
+    size the server counted for that request -- the same number the
     direct-API provider's per-request usage reports. Returns 0 when no
     round was observed (defensive; a successful drain always sees at
     least one ``message_start``), which downstream consumers treat as
-    "unknown — estimate instead".
+    "unknown -- estimate instead".
     """
     if round_usage is None:
         return 0
@@ -1972,13 +2018,13 @@ def _build_model_response(
     spuriously (live 2026-06-09). Normalization at this boundary:
 
     - **input side** (``input_tokens``, ``cache_creation_tokens``,
-      ``cache_read_tokens``): the LAST round's request usage — the
+      ``cache_read_tokens``): the LAST round's request usage -- the
       true context footprint, matching direct-API semantics. Zeros
       when no round was observed (consumers fall back to estimates).
-    - **output side** (``output_tokens``): cumulative across rounds —
+    - **output side** (``output_tokens``): cumulative across rounds --
       output genuinely accumulates (every internal round's generation
       was produced and billed).
-    - **billing**: unaffected — ``total_cost`` sums
+    - **billing**: unaffected -- ``total_cost`` sums
       ``modelUsage.costUSD``, which the CLI computes from the full
       cumulative usage, so under-reporting cumulative input *tokens*
       here loses no cost fidelity.
@@ -1999,6 +2045,14 @@ def _build_model_response(
         raw = usage_event.get("total_cost_usd")
         if isinstance(raw, (int, float)):
             total_cost = float(raw)
+        elif not model_usage:
+            # Neither cost source present: a genuinely-free turn and a dropped
+            # usage summary both read as 0.0 here. Log so the latter is not
+            # silently indistinguishable from the former.
+            logger.debug(
+                "no cost signal in result event (modelUsage and total_cost_usd"
+                " both absent); reporting total_cost=0.0"
+            )
     input_tokens = 0
     cache_creation = 0
     cache_read = 0
@@ -2007,7 +2061,7 @@ def _build_model_response(
         cache_creation = int_val(last_round_usage.get("cache_creation_input_tokens"), 0)
         cache_read = int_val(last_round_usage.get("cache_read_input_tokens"), 0)
     # Build the single thinking block from the accumulated body + signature.
-    # The signature MUST be present whenever the body is — otherwise a
+    # The signature MUST be present whenever the body is -- otherwise a
     # subsequent wire send rejects with ``thinking.signature: Field required``.
     # We elide the block entirely if there's no body (no thinking happened).
     if thinking_parts:

@@ -25,7 +25,7 @@ import platform
 import shutil
 import subprocess
 
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,

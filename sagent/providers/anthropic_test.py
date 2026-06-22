@@ -13,9 +13,10 @@ import httpx
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.anthropic import (
     Anthropic,
+    _AnthropicModel,
     _assistant_blocks,
     _build_messages,
     _guard_stream_interrupt,
@@ -28,6 +29,7 @@ from sagent.providers.anthropic import (
     context_betas,
     supports_native_context_management,
 )
+from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.types.model import (
@@ -35,6 +37,7 @@ from sagent.types.model import (
     ModelResponse,
     Pricing,
     PromptTooLongError,
+    RequestTooLargeError,
     StreamInterruptedError,
     TokenCount,
 )
@@ -785,14 +788,119 @@ def test_parse_response_bills_standard_when_server_falls_back() -> None:
 def test_anthropic_model_image_limits() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    assert m.max_image_dim == 8000
+    # opus-4-7 is a high-resolution model: native long edge 2576 px (server
+    # downscales above this), per the Anthropic Vision docs.
+    assert m.max_image_dim == 2576
     assert m.max_image_bytes == 5 * 1024 * 1024
+
+
+def test_anthropic_standard_model_image_dim_is_native_1568() -> None:
+    """Pre-4.7 models cap the native long edge at 1568 px, not the high-res 2576."""
+    m = Anthropic.from_key("k").model("claude-sonnet-4-5")
+    assert m.max_image_dim == 1568
+
+
+def test_anthropic_model_max_request_bytes() -> None:
+    """Anthropic's request wire ceiling is ~32 MB (distinct from per-image)."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.max_request_bytes == 32 * 1024 * 1024
+    # The request ceiling is much larger than the per-image cap.
+    assert m.max_request_bytes > m.max_image_bytes
+
+
+def test_anthropic_image_byte_limits_read_from_profile_not_constant() -> None:
+    """The three byte/image limits derive from the model PROFILE, per-model.
+
+    A constant ``return`` would report the same value for every model; reading
+    the profile lets a future model with different vision/wire limits diverge
+    without touching the provider class. Proven by a profile with distinct
+    values flowing through to the model properties.
+    """
+    profile = ModelProfile(
+        max_request_tokens=200_000,
+        max_response_tokens=64_000,
+        max_image_dim=4096,
+        max_image_bytes=7 * 1024 * 1024,
+        max_request_bytes=15 * 1024 * 1024,
+    )
+    m = _AnthropicModel(
+        provider=Anthropic.from_key("k"),
+        model_id="claude-opus-4-7",
+        profile=profile,
+    )
+    assert m.max_image_dim == 4096
+    assert m.max_image_bytes == 7 * 1024 * 1024
+    assert m.max_request_bytes == 15 * 1024 * 1024
 
 
 def test_anthropic_model_is_context_overflow_non_api_status_error() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     assert m.is_context_overflow(RuntimeError("anything")) is False
+
+
+def test_anthropic_byte_limit_not_classified_as_context_overflow() -> None:
+    """A 413 byte-overflow must NOT classify as token-context overflow.
+
+    The two limits are distinct: a larger-window model relieves token
+    overflow but not the byte ceiling. ``is_context_overflow`` must
+    return False so the byte case routes to byte-overflow recovery.
+    """
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _request_too_large_error("Request exceeds the maximum size")
+    assert m.is_context_overflow(err) is False
+
+
+def test_anthropic_byte_413_without_structured_body_stays_byte() -> None:
+    """A 413 byte error with no structured body still classifies as byte.
+
+    The structured-body path already handles ``request_too_large``, but a
+    413 whose body is not a parsed mapping (stringified error, proxy-mangled
+    body) falls through to ``_matches_overflow_phrase`` on the raw text -- a
+    text like "request too large: maximum exceeded by context window" would
+    then mis-classify as token overflow. The shared ``is_request_too_large``
+    guard keys on the 413 STATUS, closing that hole and matching every other
+    provider's classifier.
+    """
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(413, request=request)
+    err = anthropic_sdk.APIStatusError(
+        "request entity too large: maximum exceeded by context window",
+        response=response,
+        body=None,  # no structured body -> falls to substring path
+    )
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    assert m.is_context_overflow(err) is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
+    """The stream path raises ``RequestTooLargeError`` chaining the original.
+
+    The original ``APIStatusError`` must be preserved on ``__cause__`` so
+    diagnostics and the retry classifier can inspect the provider error.
+    """
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _request_too_large_error(
+        "Request exceeds the maximum allowed number of bytes."
+        " The maximum request size is 32 MB"
+    )
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(RequestTooLargeError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+    assert raised.value.__cause__ is err, (
+        "original APIStatusError must chain via __cause__"
+    )
 
 
 def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatusError:
@@ -802,6 +910,17 @@ def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatus
     body = {
         "type": "error",
         "error": {"type": "invalid_request_error", "message": message},
+    }
+    return anthropic_sdk.APIStatusError(message, response=response, body=body)
+
+
+def _request_too_large_error(message: str) -> anthropic_sdk.APIStatusError:
+    """Construct the 413 ``request_too_large`` APIStatusError the SDK yields."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(413, request=request)
+    body = {
+        "type": "error",
+        "error": {"type": "request_too_large", "message": message},
     }
     return anthropic_sdk.APIStatusError(message, response=response, body=body)
 

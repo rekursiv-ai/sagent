@@ -65,6 +65,7 @@ from urllib.parse import quote_plus
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import inspect
 import json
 import logging
@@ -94,7 +95,7 @@ else:
 
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import MutableJSON, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -102,7 +103,10 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
+    error_status_code,
     find_response_not_read,
+    is_request_too_large,
+    raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.oauth import (
@@ -114,6 +118,7 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
+from sagent.providers.openai_compat import OPENAI_REASONING_EFFORT
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,
@@ -169,16 +174,12 @@ _SUBSCRIPTION_MAX_REQUEST_TOKENS = 272_000
 _SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
 _STREAM_IDLE_TIMEOUT = 600.0
 
-_EFFORT_PREFIXES = ("o", "gpt-5")
-_OPENAI_REASONING_EFFORT = {
-    "none": "minimal",
-    "minimal": "minimal",
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "high",
-    "max": "high",
-}
+# Must stay identical to ``_OpenAIModel._is_effort_model``'s prefix set
+# (openai.py): the two OpenAI transports share one ``KNOWN_MODELS`` catalog and
+# the wire-mapping docstring requires them to agree on which ids are reasoning
+# models. A bare ``"o"`` over-matches (e.g. a future ``omni-*`` id), diverging
+# from the API-key path -- pin the exact reasoning families instead.
+_EFFORT_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
 _FINISH_MAP: dict[str, str] = {
     "completed": "stop",
@@ -188,8 +189,17 @@ _FINISH_MAP: dict[str, str] = {
 
 
 def _subscription_profile(profile: ModelProfile) -> ModelProfile:
-    """Clamp public API model metadata to the subscription wire contract."""
-    return ModelProfile(
+    """Clamp the public API profile to the subscription token contract.
+
+    Only the token windows differ between the API and the Codex
+    subscription backend, so only they are clamped. The image and wire
+    byte caps are a property of the underlying OpenAI model, identical
+    across the two auth paths -- inherit them from ``profile`` so a future
+    per-model divergence in the parent flows through automatically instead
+    of being silently overwritten by a stale local constant.
+    """
+    return dataclasses.replace(
+        profile,
         max_request_tokens=min(
             profile.max_request_tokens,
             _SUBSCRIPTION_MAX_REQUEST_TOKENS,
@@ -198,7 +208,6 @@ def _subscription_profile(profile: ModelProfile) -> ModelProfile:
             profile.max_response_tokens,
             _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
         ),
-        pricing=profile.pricing,
     )
 
 
@@ -410,7 +419,12 @@ class OpenAISubscription(OpenAI):
             access_token=access_token,
             refresh_token=cast(str, data["refresh_token"]),
             account_id=account_id,
-            expires_at=time.time() + cast(float, data["expires_in"]),
+            # Anchor on the JWT ``exp`` claim, matching ``load`` and ``_refresh``.
+            # A local-clock ``time.time() + expires_in`` value would disagree with
+            # what a later ``load`` reads back from the same token, forcing a
+            # spurious disk-adopt/refresh cycle under clock skew. The issuer's
+            # ``exp`` is the single authoritative expiry source.
+            expires_at=_jwt_exp(access_token),
         )
         id_token = data.get("id_token")
         if isinstance(id_token, str):
@@ -531,6 +545,64 @@ class OpenAISubscription(OpenAI):
             self._sdk_token = None
         await sdk.close()
 
+    async def _adopt_fresher_disk_creds(self) -> bool:
+        """Adopt a DIFFERENT, still-valid sibling-written disk token.
+
+        A concurrent process holding the same account may have refreshed and
+        written newer creds to disk. Load them under the already-held file lock
+        and adopt only when the on-disk access token (a) DIFFERS from ours and
+        (b) is itself non-expired. The boolean answers exactly "did we just adopt
+        a token we can use without a network refresh?" -- never "is our current
+        token valid?".
+
+        Two failure modes this guards, both of which return False so the caller
+        refreshes:
+          - disk token MATCHES ours: a sibling did not refresh; our token is the
+            one that needs replacing (especially under ``handle_auth_error``,
+            where the server already rejected it regardless of the local clock).
+          - disk token DIFFERS but is itself already expired (its own refresh
+            aged out, or clock skew): adopting it would 401 again next call.
+
+        ``load`` raises ``KeyError`` on a missing-field file and ``ValueError``
+        on malformed JSON; both mean "no usable disk creds", so both return False.
+
+        Disk I/O runs in a worker thread so the event loop is not blocked on a
+        slow/NFS read while the credential lock is held. Adopting a new token
+        invalidates the cached SDK; the stale client is closed (not merely
+        dropped) so its pooled HTTP connections are released immediately rather
+        than orphaned until GC.
+
+        Returns:
+          adopted: True iff a different, non-expired disk token is now in memory.
+
+        """
+        try:
+            creds = await asyncio.to_thread(
+                OpenAISubscription.load, account=self._account
+            )
+            disk_at = creds["access_token"]
+        except (FileNotFoundError, ValueError, KeyError):
+            return False
+        if disk_at == self._access_token:
+            return False
+        self._access_token = disk_at
+        self._refresh_token = creds["refresh_token"]
+        self._account_id = creds["account_id"]
+        self._expires_at = creds["expires_at"]
+        await self._discard_sdk()
+        return not self.expired
+
+    async def _discard_sdk(self) -> None:
+        """Drop and close the cached SDK so its pooled connections release.
+
+        Idempotent. The caller must already hold ``self._lock``.
+        """
+        old = self._sdk
+        self._sdk = None
+        self._sdk_token = None
+        if old is not None:
+            await old.close()
+
     async def _ensure_valid(self) -> str:
         """Return a valid access token, reloading from disk or refreshing.
 
@@ -545,19 +617,8 @@ class OpenAISubscription(OpenAI):
         async with self._lock, credential_file_lock(cred_path):
             if not self.expired:
                 return self._access_token
-            try:
-                creds = OpenAISubscription.load(account=self._account)
-                disk_at = creds["access_token"]
-                if disk_at != self._access_token:
-                    self._access_token = disk_at
-                    self._refresh_token = creds["refresh_token"]
-                    self._account_id = creds["account_id"]
-                    self._expires_at = creds["expires_at"]
-                    self._sdk = None
-                    self._sdk_token = None
-                    return self._access_token
-            except (FileNotFoundError, ValueError, KeyError):
-                pass
+            if await self._adopt_fresher_disk_creds():
+                return self._access_token
             await self._refresh()
             return self._access_token
 
@@ -569,22 +630,13 @@ class OpenAISubscription(OpenAI):
         """
         cred_path = credentials_path(DEFAULT_CREDENTIALS_PATH, self._account)
         async with self._lock, credential_file_lock(cred_path):
-            try:
-                creds = OpenAISubscription.load(account=self._account)
-                disk_at = creds["access_token"]
-                if disk_at != self._access_token:
-                    self._access_token = disk_at
-                    self._refresh_token = creds["refresh_token"]
-                    self._account_id = creds["account_id"]
-                    self._expires_at = creds["expires_at"]
-                    self._sdk = None
-                    self._sdk_token = None
-                    return
-            except (FileNotFoundError, ValueError, KeyError):
-                pass
+            # Adopt a sibling's fresher creds only if they are actually valid;
+            # an adopted-but-expired token would 401 again on retry, so fall
+            # through to ``_refresh`` (the same rule ``_ensure_valid`` uses).
+            if await self._adopt_fresher_disk_creds():
+                return
             await self._refresh()
-            self._sdk = None
-            self._sdk_token = None
+            await self._discard_sdk()
 
     async def _refresh(self) -> None:
         """Exchange the refresh token for a new access token."""
@@ -614,10 +666,33 @@ class OpenAISubscription(OpenAI):
             data: MutableJSON = cast(MutableJSON, r.json())
         self._access_token = cast(str, data["access_token"])
         self._refresh_token = cast(str, data["refresh_token"])
-        self._expires_at = time.time() + cast(float, data["expires_in"])
+        # Anchor expiry on the JWT ``exp`` claim, matching ``load``. Deriving it
+        # from ``time.time() + expires_in`` (the local clock) would disagree
+        # with the value a later ``load`` reads back, so under clock skew the
+        # in-memory and on-disk deadlines drift. The JWT issuer's ``exp`` is the
+        # single authoritative source.
+        self._expires_at = _jwt_exp(self._access_token)
         try:
             creds = OpenAISubscription.load(account=self._account)
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError:
+            creds = OpenAISubscription.Credentials(
+                access_token="",
+                refresh_token="",
+                account_id=self._account_id,
+                expires_at=0.0,
+            )
+        except (ValueError, KeyError):
+            # Unusable creds file: malformed JSON (``ValueError``) or valid JSON
+            # missing required fields like ``{"tokens": {}}`` (``KeyError`` from
+            # ``load``'s indexing). ``save`` below overwrites it with the
+            # freshly-refreshed tokens; log first so the corruption is not
+            # silently erased. Matches the swallow set in
+            # ``_adopt_fresher_disk_creds``.
+            logger.warning(
+                "OpenAI creds file at %s was unreadable; overwriting with "
+                "refreshed tokens",
+                credentials_path(DEFAULT_CREDENTIALS_PATH, self._account),
+            )
             creds = OpenAISubscription.Credentials(
                 access_token="",
                 refresh_token="",
@@ -758,15 +833,22 @@ class _OpenAISubModel(_OpenAIModel):
 
     @override
     def is_context_overflow(self, error: Exception) -> bool:
-        """Check whether an error indicates context-window overflow.
+        """Check whether an error indicates token context-window overflow.
+
+        Excludes the byte wire-limit via the shared classifier first, so a
+        413 byte error routes to byte-overflow recovery -- uniform with the
+        compat/google siblings -- rather than being mis-read as token
+        overflow because its body incidentally names the context window.
 
         Args:
           error: Exception raised by the API call.
 
         Returns:
-          overflow: ``True`` if the error is a context-length overflow.
+          overflow: ``True`` if the error is a token context-length overflow.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return (
             "context_length_exceeded" in msg
@@ -886,6 +968,7 @@ class _OpenAISubModel(_OpenAIModel):
                     provider_name="OpenAI subscription",
                     cause=not_read,
                 ) from exc
+            raise_if_request_too_large(error_status_code(exc), str(exc), cause=exc)
             if self.is_context_overflow(exc):
                 # The compactor's shrink-and-retry path keys off
                 # PromptTooLongError; leaking raw SDK errors makes outer
@@ -898,7 +981,7 @@ class _OpenAISubModel(_OpenAIModel):
         if not self.supports_effort:
             return None
         if request.effort is not None:
-            return _OPENAI_REASONING_EFFORT.get(request.effort, "high")
+            return OPENAI_REASONING_EFFORT.get(request.effort, "high")
         if request.thinking == "adaptive":
             return "medium"
         if request.thinking == "enabled":
@@ -929,16 +1012,18 @@ def _build_tool(tool: Tool) -> oai_responses.FunctionToolParam:
 def _build_input(
     request: ModelRequest,
     *,
-    max_image_dim: int = 2048,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> oai_responses.ResponseInputParam:
     """Convert history entries to Responses API input items.
 
     Args:
       request: Fully-built model request.
       max_image_dim: Maximum image dimension (pixels); larger inputs are
-          resized before encoding.
-      max_image_bytes: Maximum image size in bytes after resize.
+          resized before encoding. ``0`` (the default) means no cap; the
+          live caller passes the model profile's ``max_image_dim``.
+      max_image_bytes: Maximum image size in bytes after resize. ``0`` (the
+          default) means no cap.
 
     Returns:
       items: Responses API input items in send order.
@@ -1055,6 +1140,11 @@ async def _consume_stream(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
+    # Single cleanup rule: every path that does not return a COMPLETED response
+    # closes the stream. A mid-stream error event (raises below), an idle
+    # timeout / cancellation, and the no-completion fallthrough all leave the
+    # SSE connection open otherwise -- a per-error connection leak. ``completed``
+    # gates the one exit that legitimately keeps reading until done.
     try:
         async with asyncio.timeout_at(deadline) as watchdog:
             async for event in stream:
@@ -1110,7 +1200,6 @@ async def _consume_stream(
                 ):
                     raise _openai_stream_response_error(event.response)
                 elif isinstance(event, oai_responses.ResponseCompletedEvent):
-                    completed = True
                     resp = event.response
                     message_id = resp.id
                     if resp.usage:
@@ -1124,9 +1213,13 @@ async def _consume_stream(
                         kind="openai_responses",
                         service_tier=getattr(resp, "service_tier", None),
                     )
-    except (asyncio.CancelledError, TimeoutError):
-        await _close_stream(stream)
-        raise
+                    # Set last: if a usage/attr read above raises on an SDK shape
+                    # change, ``completed`` stays False so the ``finally`` still
+                    # closes the stream instead of leaking the connection.
+                    completed = True
+    finally:
+        if not completed:
+            await _close_stream(stream)
 
     response = _build_stream_response(
         text_parts=text_parts,
@@ -1140,7 +1233,6 @@ async def _consume_stream(
         pricing=pricing,
     )
     if not completed:
-        await _close_stream(stream)
         raise StreamInterruptedError(response)
     return response
 
@@ -1227,15 +1319,24 @@ def _build_stream_response(
 
 
 async def _close_stream(stream: object) -> None:
-    """Close a Responses stream after timeout or cancellation."""
+    """Close a Responses stream after timeout, cancellation, or stream error.
+
+    Runs in a ``finally`` / cleanup context, so a failure HERE must never
+    replace the error that triggered the close (e.g. a ``UserFacingError`` from a
+    ``ResponseFailedEvent``). A broken pipe on ``aclose`` would otherwise surface
+    to the user instead of the real cause -- swallow and log it.
+    """
     close = getattr(stream, "aclose", None)
     if close is None:
         close = getattr(stream, "close", None)
     if close is None:
         return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:  # noqa: BLE001 -- cleanup must not mask the original error
+        logger.debug("stream close raised during cleanup", exc_info=True)
 
 
 def _parse_tool_arguments(

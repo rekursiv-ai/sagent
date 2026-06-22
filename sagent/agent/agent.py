@@ -39,6 +39,7 @@ import contextlib
 import contextvars
 import dataclasses
 import itertools
+import json
 import logging
 import time
 import uuid
@@ -51,7 +52,6 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.agent.compaction import (
-    MAX_CONSECUTIVE_COMPACT_FAILURES,
     CompactionState,
     post_compact_enrich,
 )
@@ -77,7 +77,10 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
-from sagent.compaction.history import estimate_entry_tokens
+from sagent.compaction.history import (
+    MAX_CONSECUTIVE_COMPACT_FAILURES,
+    estimate_entry_tokens,
+)
 from sagent.compaction.scrunch import (
     ScrunchTooLargeError,
     scrunch_to_fit,
@@ -173,6 +176,11 @@ class Agent:
       max_tool_call_rounds: Cap on tool-call rounds before the agent
           forces ``types.runtime.ModelResponseError``.
       thinking: Extended-thinking mode; passed through when supported.
+          Ignored when ``thinking_state`` is also given -- the canonical
+          ``thinking_state`` derives ``thinking``/``show_thinking`` and takes
+          precedence (the ``rebuild`` path passes both deliberately).
+      thinking_state: Canonical thinking state; when set, it derives the
+          request mode and display, overriding ``thinking``/``show_thinking``.
       effort: Effort hint; passed through when supported.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
       persistent_retry: Enable persistent-mode backoff for 429/529.
@@ -297,6 +305,7 @@ class Agent:
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[types.tools.Tool]] | None = None
         self._persist_budget_cache: tuple[int, int] | None = None
+        self._live_tool_result_cache: tuple[int, int] | None = None
         agent_tools: list[agent_runtime.Tool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
@@ -345,6 +354,11 @@ class Agent:
     def budget(self) -> types.model.ContextBudget:
         """Context budget; auto-derived from the model when unset."""
         return self._budget
+
+    @property
+    def max_request_bytes(self) -> int:
+        """The active model's request-body byte ceiling (wire limit)."""
+        return self.model.max_request_bytes
 
     @property
     def max_request_tokens(self) -> int:
@@ -741,11 +755,19 @@ class Agent:
         because the bytes still travel on the wire until ``materialize_request``
         elides them. Use ``persist_budget_used_chars`` instead when feeding
         ``post_process_result.used_message_chars``.
+
+        Cached against ``runtime.context().version`` (mirrors
+        ``persist_budget_used_chars``); a new tape record invalidates it.
         """
+        resolved = self.runtime.context()
+        cached = self._live_tool_result_cache
+        if cached is not None and cached[0] == resolved.version:
+            return cached[1]
         total = 0
-        for entry in self.runtime.context().messages:
+        for entry in resolved.messages:
             if isinstance(entry, types.runtime.ToolResult):
                 total += len(entry.content)
+        self._live_tool_result_cache = (resolved.version, total)
         return total
 
     def persist_budget_used_chars(self) -> int:
@@ -1435,6 +1457,7 @@ class Agent:
             else None
         )
         parent_state = tool_state_var.get(None)
+        prior_depth = self.tool_state.depth
         self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
         # Persistent agents have a definite ``self.name`` set by
         # ``AgentSpawn._spawn_persistent`` and own their own task; their
@@ -1466,6 +1489,11 @@ class Agent:
             if cost_token is not None:
                 cost_root_var.reset(cost_token)
             current_agent_var.reset(agent_token)
+            # ``depth`` is a plain instance field, not a ContextVar, so it needs
+            # explicit restoration to match the token resets above -- otherwise a
+            # reused agent re-entered under a different parent starts from a stale
+            # depth.
+            self.tool_state.depth = prior_depth
 
     async def _await_event(
         self,
@@ -1835,6 +1863,7 @@ class Agent:
         self,
         history: list[types.runtime.ModelContextEvent],
         model: types.model.Model,
+        byte_compact_trigger: float = 0.8,
     ) -> bool:
         """Proactively compact when the compactor says headroom is gone.
 
@@ -1856,6 +1885,18 @@ class Agent:
           model: Rich model whose tokenizer seeds the first-request
               fallback estimate and whose ``max_request_tokens`` caps the
               budget.
+          byte_compact_trigger: Fraction of the model's
+              ``max_request_bytes`` at which the proactive gate fires on
+              byte pressure. The headroom below 1.0 reserves margin for the
+              request bytes ``_compactable_wire_bytes`` does NOT count
+              (system prompt, tool schemas, message text, JSON framing), so
+              compaction lands before the full request body crosses the wire
+              limit. A per-call default-valued kwarg (self-documenting and
+              overridable) parallel to the compactor's token-side
+              ``utilization_trigger``; must be in ``(0, 1]``.
+
+        Raises:
+          ValueError: If ``byte_compact_trigger`` is not in ``(0, 1]``.
 
         Returns:
           progressed: ``True`` when no compaction was needed, or when
@@ -1865,6 +1906,10 @@ class Agent:
               proactive vs reactive path.
 
         """
+        if not 0.0 < byte_compact_trigger <= 1.0:
+            raise ValueError(
+                f"byte_compact_trigger must be in (0, 1], got {byte_compact_trigger!r}"
+            )
         if self._agent_compactor is None:
             return True
         used = self._last_input_tokens
@@ -1892,11 +1937,23 @@ class Agent:
             # about to be sent, not the previous one; without it the
             # proactive gate lags one turn behind the growing context.
             used += self._tokens_appended_since_last_response(history, model)
-        if not self._agent_compactor.should_compact(
+        token_gate = self._agent_compactor.should_compact(
             current_tokens=used,
             max_request_tokens=self.max_request_tokens,
             system_tokens=model.approx_text_tokens(self.system_prompt()),
-        ):
+        )
+        # Byte gate: request *bytes* are a budget the token gate cannot see.
+        # Attachment bytes can approach the wire ceiling
+        # (``Model.max_request_bytes``) while the token estimate stays well
+        # under the window. Fire compaction (which sheds history attachment
+        # bytes) when the estimated request byte payload crosses the trigger
+        # fraction -- independent of, and OR'd with, the token gate. A
+        # non-positive ``max_request_bytes`` means "no wire limit" (offline /
+        # self-hosted), disabling the byte gate.
+        byte_gate = model.max_request_bytes > 0 and self._compactable_wire_bytes(
+            history, model
+        ) >= int(model.max_request_bytes * byte_compact_trigger)
+        if not token_gate and not byte_gate:
             self.compaction_state.compact_failures = 0
             return True
         # Circuit breaker: after N consecutive auto-compact failures, stop
@@ -1934,14 +1991,7 @@ class Agent:
         system/tools (already in the anchor), so the proactive gate sees
         the full request about to be sent rather than the previous one.
         """
-        last_assistant = next(
-            (
-                idx
-                for idx in range(len(history) - 1, -1, -1)
-                if isinstance(history[idx], types.runtime.AssistantMessage)
-            ),
-            None,
-        )
+        last_assistant = _last_assistant_index(history)
         if last_assistant is None:
             return 0
         since = history[last_assistant + 1 :]
@@ -1952,6 +2002,39 @@ class Agent:
                 types.model.ModelRequest(messages=list(since)),
                 tool_result_budget_chars=self.budget.message_budget_chars,
             )
+        )
+
+    def _compactable_wire_bytes(
+        self,
+        history: Sequence[types.runtime.ModelContextEvent],
+        model: types.model.Model,
+    ) -> int:
+        """Wire bytes of attachments compaction can shed, as they will ship.
+
+        Counts only the prefix up to and including the last
+        ``AssistantMessage`` -- the already-sent history compaction can
+        summarize. Bytes appended *since* that response are this turn's own
+        input (the user's fresh message, this turn's tool results);
+        ``_strip_attachments`` would destroy them before the model sees them,
+        so gating on them is both useless (nothing prior to shed) and harmful
+        (strips the user's request). A single fresh read is instead bounded at
+        the source by the read tool's rendered-byte cap.
+
+        Measured over the materialized prefix so attachments on tool results
+        that ``materialize_request`` drops are not counted, and via
+        :func:`_wire_attachment_bytes` so the estimate matches the base64,
+        post-resize payload that actually ships.
+        """
+        last_assistant = _last_assistant_index(history)
+        if last_assistant is None:
+            return 0
+        prefix = history[: last_assistant + 1]
+        materialized = materialize_request(
+            types.model.ModelRequest(messages=list(prefix)),
+            tool_result_budget_chars=self.budget.message_budget_chars,
+        )
+        return _wire_attachment_bytes(
+            materialized.messages, max_image_bytes=model.max_image_bytes
         )
 
     async def compact_now(self) -> bool:
@@ -2077,6 +2160,114 @@ def _context_overflow_error(
         attempts=attempts,
         final_tokens=final_tokens,
     )
+
+
+def _last_assistant_index(
+    history: Sequence[types.runtime.ModelContextEvent],
+) -> int | None:
+    """Index of the last ``AssistantMessage`` in ``history``, or ``None``.
+
+    The boundary between already-sent history (compactable) and this turn's
+    fresh, un-sheddable entries: both the token-delta estimate and the byte
+    gate split history here.
+    """
+    return next(
+        (
+            idx
+            for idx in range(len(history) - 1, -1, -1)
+            if isinstance(history[idx], types.runtime.AssistantMessage)
+        ),
+        None,
+    )
+
+
+def _wire_attachment_bytes(
+    messages: Sequence[types.runtime.ModelContextEvent],
+    *,
+    max_image_bytes: int,
+) -> int:
+    """Estimate the on-the-wire byte size of all attachments in ``messages``.
+
+    The wire carries base64 (``ceil(4/3)`` expansion), and the provider
+    serializer resizes images to ``max_image_bytes`` before encoding while
+    leaving PDFs/documents un-resized (see ``providers/*._attachment_block``
+    and ``sagent.lib.image.resize``). So per attachment the wire cost is:
+
+    - image: ``4/3 * min(len(data), max_image_bytes)``
+    - PDF/other: ``4/3 * len(data)``
+
+    Counting raw bytes (as the first cut did) both under-counts (ignores
+    base64) and over-counts (ignores resize); this mirrors what actually
+    ships so the byte gate compares wire-bytes to a wire-byte ceiling.
+    """
+    total = 0
+    for entry in messages:
+        if not isinstance(
+            entry,
+            (
+                types.runtime.UserMessage,
+                types.runtime.AgentSendMessage,
+                types.runtime.ToolResult,
+            ),
+        ):
+            continue
+        for att in entry.attachments:
+            raw = len(att.data)
+            # Images are resized to ``max_image_bytes`` before encoding, so
+            # clamp -- but ``max_image_bytes <= 0`` is the "no cap" sentinel
+            # (0 = unlimited everywhere: ModelProfile, image_lib.resize, the
+            # byte gate). ``min(raw, 0)`` would zero every image, so guard it.
+            effective = (
+                min(raw, max_image_bytes)
+                if att.descriptor.startswith("image/") and max_image_bytes > 0
+                else raw
+            )
+            # Exact base64 wire size is ``4 * ceil(n / 3)``, not the floored
+            # ``n * 4 // 3`` -- the floor under-counts non-multiple-of-3
+            # payloads, biasing the gate to fire one turn late.
+            total += 4 * ((effective + 2) // 3)
+    return total
+
+
+def _wire_request_bytes(
+    messages: Sequence[types.runtime.ModelContextEvent],
+    *,
+    system: str,
+    max_image_bytes: int,
+) -> int:
+    """Estimate the whole request body's wire byte size.
+
+    Sums attachment wire bytes (:func:`_wire_attachment_bytes`) and the UTF-8
+    byte length of every text surface that ships on the wire: the system prompt,
+    each message's text / tool-result content, and -- for an ``AssistantMessage``
+    -- its ``thinking_blocks`` and ``tool_calls`` arguments (both serialized
+    inline by the provider transports). Only tool-schema and JSON-framing bytes
+    are omitted: they are bounded and roughly constant, so the estimate stays a
+    conservative LOWER bound that never false-rejects a request the provider
+    would accept.
+
+    Callers must pass the MATERIALIZED messages (post
+    :func:`materialize_request`), so elided tool results are sized at their wire
+    placeholder rather than their pre-elision length -- otherwise the guard
+    over-counts bytes the request never carries.
+    """
+    total = _wire_attachment_bytes(messages, max_image_bytes=max_image_bytes)
+    total += len(system.encode("utf-8"))
+    for entry in messages:
+        if isinstance(
+            entry,
+            (types.runtime.UserMessage, types.runtime.AgentSendMessage),
+        ):
+            total += len(entry.text.encode("utf-8"))
+        elif isinstance(entry, types.runtime.AssistantMessage):
+            total += len(entry.text.encode("utf-8"))
+            for block in entry.thinking_blocks:
+                total += len(json.dumps(block, default=str).encode("utf-8"))
+            for call in entry.tool_calls:
+                total += len(json.dumps(call.args, default=str).encode("utf-8"))
+        else:
+            total += len(entry.content.encode("utf-8"))
+    return total
 
 
 def _budget_for_model_ratio(
@@ -2302,6 +2493,54 @@ class _AgentModel:
         # resolved view so subsequent attempts in this call see it.
         history = self._agent.runtime.context().messages
 
+        # Compute the system prompt once per ``stream`` call. Each tool's
+        # ``prompt()`` may capture cwd / registry / persistent-IPC state,
+        # but none of that state changes between overflow-recovery
+        # attempts within a single stream call -- so rebuilding up to
+        # ``MAX_OVERFLOW_RECOVERY + 1`` times per call is wasted work.
+        # ``Agent.system_prompt()`` callers outside this loop continue to
+        # observe live state via ``_build_system`` on demand. Computed before
+        # the pre-send guard so the guard can count the system-prompt bytes.
+        cached_system = self._agent.system_prompt()
+
+        # Pre-send byte guard: compaction has now shed every attachment it
+        # can (the summarized region). If the request STILL exceeds the
+        # provider's byte ceiling, the overage is in un-sheddable bytes --
+        # this turn's own fresh input (a user-pasted oversize PDF that bypasses
+        # the read tool's rendered-byte bound, or a text-heavy fresh request).
+        # Sending it would burn ``MAX_OVERFLOW_RECOVERY + 1`` full round-trips
+        # before the identical byte-overflow exhaustion. Reject up front with
+        # the typed error so the user gets immediate, actionable feedback.
+        #
+        # Measure the MATERIALIZED request (same artifact ``send_with_retry``
+        # ships), so tool results elided by ``tool_result_budget_chars`` are
+        # sized at their wire placeholder -- not their pre-elision length. This
+        # mirrors ``persist_budget_used_chars``, which already
+        # materializes-then-measures, and keeps a single rule: byte accounting
+        # always runs over the materialized view. ``_wire_request_bytes`` counts
+        # attachments and every text surface but omits tool-schema / JSON
+        # framing, so it stays a conservative lower bound that never
+        # false-rejects a request the provider would accept; a genuine miss
+        # still hits the reactive 413.
+        max_request_bytes = self._inner.max_request_bytes
+        if max_request_bytes > 0:
+            guard_messages = materialize_request(
+                types.model.ModelRequest(messages=list(history)),
+                tool_result_budget_chars=self._agent.budget.message_budget_chars,
+            ).messages
+            wire_bytes = _wire_request_bytes(
+                guard_messages,
+                system=cached_system,
+                max_image_bytes=self._inner.max_image_bytes,
+            )
+            if wire_bytes > max_request_bytes:
+                raise types.model.RequestTooLargeError(
+                    f"Request payload ({wire_bytes:,} bytes) exceeds the provider "
+                    f"limit ({max_request_bytes:,} bytes) and cannot be compacted "
+                    "away (it is this turn's own input). Attach a smaller file, send "
+                    "less text, or read large PDFs/images in smaller page ranges."
+                )
+
         # Wrap every rich tool with ``BackgroundAwareTool`` so the
         # provider-visible schema advertises the ``background`` /
         # ``delay`` properties without polluting the raw tool's
@@ -2320,14 +2559,16 @@ class _AgentModel:
             self._agent.service_tier if self._inner.valid_service_tiers else None
         )
         rich_latency = self._agent.latency if self._inner.valid_latency_modes else None
-        # Compute the system prompt once per ``stream`` call. Each tool's
-        # ``prompt()`` may capture cwd / registry / persistent-IPC state,
-        # but none of that state changes between overflow-recovery
-        # attempts within a single stream call -- so rebuilding up to
-        # ``MAX_OVERFLOW_RECOVERY + 1`` times per call is wasted work.
-        # ``Agent.system_prompt()`` callers outside this loop continue to
-        # observe live state via ``_build_system`` on demand.
-        cached_system = self._agent.system_prompt()
+
+        # Consume the persisted resume deadline ONCE, before the loop. It is a
+        # one-shot wall-clock wait carried across a process restart (a prior
+        # ``ModelServiceSuspended`` retry_at); the first ``send_with_retry``
+        # honors it, and any overflow-recovery re-attempt must NOT replay a
+        # wait the first send already satisfied. Clearing it up front makes the
+        # single-use semantic explicit rather than relying on it being nulled
+        # mid-iteration.
+        resume_retry_at = self._agent.runtime.resume_retry_at
+        self._agent.runtime.resume_retry_at = None
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             request = materialize_request(
@@ -2344,8 +2585,14 @@ class _AgentModel:
                 ),
                 tool_result_budget_chars=self._agent.budget.message_budget_chars,
             )
-            resume_retry_at = self._agent.runtime.resume_retry_at
-            self._agent.runtime.resume_retry_at = None
+            # Hand the one-shot resume wait to THIS attempt only, then clear it
+            # unconditionally -- before the send can raise. ``send_with_retry``
+            # honors the wait at its top (before the first stream), so by the
+            # time it returns OR raises (overflow, auth, anything) the wait is
+            # already spent. Clearing on the success path alone would replay the
+            # wait on every overflow-recovery iteration.
+            attempt_resume_retry_at = resume_retry_at
+            resume_retry_at = None
             try:
                 response = await send_with_retry(
                     self._inner,
@@ -2359,19 +2606,42 @@ class _AgentModel:
                     ),
                     on_discarded_response=self._agent.record_response,
                     on_service_suspended=self._agent.publish_service_suspended,
-                    resume_retry_at=resume_retry_at,
+                    resume_retry_at=attempt_resume_retry_at,
                 )
             except Exception as exc:
-                # Catch any exception the provider classifies as
-                # context overflow, not just ``PromptTooLongError``.
-                # Provider-side normalization can slip (e.g. unusual
-                # HTTP status carrying overflow body text); the
-                # canonical signal is ``is_context_overflow``.
-                if not self._inner.is_context_overflow(exc):
+                # Two distinct overflow conditions route to the same
+                # recovery action (compaction sheds history tokens AND
+                # attachment bytes), but carry different exhaustion
+                # remediation:
+                #   - token-context overflow (``is_context_overflow``):
+                #     a larger-window model helps.
+                #   - byte wire-limit (``RequestTooLargeError``, the ~32MB
+                #     ceiling driven by attachment bytes): a larger window
+                #     does NOT help -- the byte ceiling is the same. Keyed
+                #     on the typed error the provider raises rather than a
+                #     Model-protocol method, so it stays provider-agnostic.
+                # Provider-side normalization can slip (e.g. unusual HTTP
+                # status carrying overflow body text), so the canonical
+                # signal for the token case is ``is_context_overflow``.
+                byte_overflow = isinstance(exc, types.model.RequestTooLargeError)
+                if not byte_overflow and not self._inner.is_context_overflow(exc):
                     raise
                 if attempt >= MAX_OVERFLOW_RECOVERY:
+                    if byte_overflow:
+                        # No ``/model`` advice: the byte ceiling is fixed
+                        # across models, so a wider window cannot relieve it.
+                        raise types.model.RequestTooLargeError(
+                            "Request exceeds the provider byte limit even after"
+                            " auto-compaction. Use /clear to wipe history, or"
+                            " re-read large PDFs/images in smaller page ranges"
+                            " so fewer attachment bytes ship at once."
+                        ) from exc
                     raise _context_overflow_error(attempts=attempt) from exc
-                logger.info("Context overflow recovery attempt %d", attempt)
+                logger.info(
+                    "%s recovery attempt %d",
+                    "byte-overflow" if byte_overflow else "context-overflow",
+                    attempt,
+                )
                 # Short-circuit when compaction itself failed -- looping
                 # to retry the model on unchanged (or slightly longer)
                 # history burns the retry budget on the same 400 (the

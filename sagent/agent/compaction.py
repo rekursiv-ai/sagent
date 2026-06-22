@@ -23,10 +23,7 @@ import time
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import ToolState
 from sagent.compaction.files import reattach_files
-from sagent.compaction.history import (
-    MAX_CONSECUTIVE_COMPACT_FAILURES,
-    append_to_first_user,
-)
+from sagent.compaction.history import append_to_first_user
 from sagent.types.compactor import CompactRestorable
 from sagent.types.model import ContextBudget
 from sagent.types.runtime import (
@@ -39,9 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
-    "MAX_CONSECUTIVE_COMPACT_FAILURES",
     "CompactionState",
-    "append_to_first_user",
     "inject_background_status",
     "post_compact_enrich",
 ]

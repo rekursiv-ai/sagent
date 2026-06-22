@@ -44,11 +44,6 @@ __all__ = [
     "resize",
 ]
 
-# Defaults suit the current crop of LLM image APIs. Caller overrides for
-# any provider with different limits.
-IMAGE_MAX_DIM = 2000
-IMAGE_MAX_BYTES = 5 * 1024 * 1024
-
 
 def get_mime(data: bytes) -> str | None:
     """Detect image MIME type from bytes. Returns None if unrecognized."""
@@ -263,8 +258,8 @@ def decode_image_pil(
 
 def resize(
     data: bytes,
-    max_dim: int = IMAGE_MAX_DIM,
-    max_bytes: int = IMAGE_MAX_BYTES,
+    max_dim: int = 0,
+    max_bytes: int = 0,
 ) -> tuple[bytes, str]:
     """Shrink an image if it exceeds dimension or byte limits.
 
@@ -274,8 +269,12 @@ def resize(
 
     Args:
       data: Raw image bytes.
-      max_dim: Max width/height in pixels.
-      max_bytes: Target byte size (may exceed if JPEG fallback overshoots).
+      max_dim: Max width/height in pixels; ``0`` (the default) means no
+          dimension cap. Caps are a per-model property; callers pass the
+          model profile's ``max_image_dim`` rather than relying on a
+          library-wide magic number.
+      max_bytes: Target byte size (may exceed if JPEG fallback overshoots);
+          ``0`` (the default) means no byte cap.
 
     Returns:
       data: Possibly-resized bytes.
@@ -294,9 +293,18 @@ def resize(
     mime = Image.MIME.get(img.format or "", "application/octet-stream")
 
     width, height = img.size
-    scale = min(1.0, max_dim / max(width, height))
+    if width <= 0 or height <= 0:
+        # A degenerate (0-dimension) decode -- a corrupt or truncated buffer that
+        # PIL opened lazily but cannot size. Nothing to shrink; pass the bytes
+        # through rather than letting a later ``img.resize``/``save`` raise
+        # PIL's "height and width must be > 0" deep in the call stack.
+        return data, mime
+    # ``max_dim`` / ``max_bytes`` of 0 (or negative) means "no cap" -- a
+    # model profile may legitimately declare no per-image limit. Treating 0
+    # as a literal ceiling would force a needless re-encode of every image.
+    scale = min(1.0, max_dim / max(width, height)) if max_dim > 0 else 1.0
     needs_resize = scale < 1.0
-    needs_shrink = len(data) > max_bytes
+    needs_shrink = max_bytes > 0 and len(data) > max_bytes
 
     if not needs_resize and not needs_shrink:
         return data, mime
@@ -314,8 +322,12 @@ def resize(
     out = buf.getvalue()
     mime = Image.MIME.get(fmt, mime)
 
-    # Still too big? Fall back to JPEG quality ramp.
-    if len(out) > max_bytes and fmt != "JPEG":
+    # Still too big? Fall back to a JPEG quality ramp. This runs for ANY
+    # source format, including JPEG: a high-quality JPEG that only exceeds the
+    # byte cap (not the dimension cap) must still be re-encoded smaller, else
+    # the cap is unenforced and a downstream byte guard under-counts.
+    # ``max_bytes <= 0`` means no byte cap, so never ramp on that basis.
+    if max_bytes > 0 and len(out) > max_bytes:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         for quality in (85, 70, 55, 40):

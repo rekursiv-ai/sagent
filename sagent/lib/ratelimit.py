@@ -372,3 +372,80 @@ class TokenBucketRateLimiter:
 
         self._store.transact(update)
         return wait
+
+
+class CooldownGate:
+    """Shared back-off window: one party's "slow down" makes all parties wait.
+
+    A rate limiter paces *grants* at a steady rate. A cooldown is the orthogonal
+    signal: an external authority (e.g. an HTTP 429 with a back-off) tells one
+    requester to wait, and every concurrent requester sharing the same resource
+    should honor it rather than independently rediscovering it (and amplifying
+    the throttle by all retrying at once). Pair with the same scope-pluggable
+    :class:`Store` a limiter uses: an :class:`InProcessStore` coordinates
+    coroutines/threads in one process; a :class:`FileStore` (with a wall-clock
+    :class:`Clock`) coordinates separate processes sharing the resource.
+
+    The window is a single absolute deadline (``cooldown_until``). It is stored
+    in the bucket :class:`Store`'s ``(float, float)`` slot as
+    ``(cooldown_until, 0.0)`` -- the second slot is unused, reserved padding to
+    reuse the existing store shape without widening its type.
+
+    Args:
+      store: Backing state + lock; defaults to :class:`InProcessStore`.
+      clock: Time source; defaults to monotonic system time. Use a wall-clock
+        source with :class:`FileStore` so the deadline is comparable across
+        processes.
+
+    """
+
+    def __init__(
+        self, *, store: Store | None = None, clock: Clock | None = None
+    ) -> None:
+        self._store: Store = store if store is not None else InProcessStore()
+        self._clock: Clock = clock if clock is not None else SystemClock()
+
+    def remaining(self) -> float:
+        """Seconds left in the active cooldown window, or ``0.0`` if none."""
+        until = 0.0
+
+        def read(state: tuple[float, float] | None) -> tuple[float, float]:
+            nonlocal until
+            until = state[0] if state is not None else 0.0
+            return state if state is not None else (0.0, 0.0)
+
+        self._store.transact(read)
+        return max(0.0, until - self._clock.time())
+
+    def trigger(self, backoff_sec: float) -> None:
+        """Open (or extend) the shared cooldown to ``now + backoff_sec``.
+
+        Uses ``max`` against the stored deadline so a shorter back-off can
+        never shrink a longer one already in flight; the window only grows.
+        """
+        target = self._clock.time() + backoff_sec
+
+        def write(state: tuple[float, float] | None) -> tuple[float, float]:
+            prior = state[0] if state is not None else 0.0
+            return (max(prior, target), 0.0)
+
+        self._store.transact(write)
+
+    def wait(self) -> None:
+        """Block the thread until the active cooldown elapses."""
+        wait = self.remaining()
+        if wait > 0:
+            self._clock.sleep(wait)
+
+    async def wait_async(self) -> None:
+        """Block the coroutine until the active cooldown elapses.
+
+        Reads the window once and sleeps it. An extension by another party
+        *during* this sleep is not re-honored within this call -- the caller's
+        own retry loop re-enters :meth:`wait_async` and picks it up, which
+        bounds amplification without risking starvation under a continuous
+        throttle.
+        """
+        wait = self.remaining()
+        if wait > 0:
+            await self._clock.sleep_async(wait)

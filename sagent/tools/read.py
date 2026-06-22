@@ -9,7 +9,7 @@ from typing import cast
 import asyncio
 import json
 
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     JSON,
     MutableJSON,
     MutableJSONValue,
@@ -17,6 +17,7 @@ from sagent.lib.json import (
     json_freeze,
 )
 from sagent.tools.core import (
+    current_agent_var,
     file_lock_key,
     get_tool_state,
     load_tool_description,
@@ -31,6 +32,7 @@ from sagent.tools.lib.bash import (
 from sagent.tools.lib.pdf import (
     MAX_INLINE_PAGES,
     MAX_PDF_BYTES,
+    MAX_RENDERED_BYTES,
     PdfError,
     extract_pdf_pages,
     get_pdf_page_count,
@@ -40,20 +42,11 @@ from sagent.tools.lib.pdf import (
 from sagent.types.runtime import BytesMessage, ToolResult
 
 
-_IMAGE_EXTS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".bmp",
-    ".webp",
-    # SVG is XML; send it as text so providers do not reject image/svg+xml.
-    # ".svg",
-}
-_PDF_EXT = ".pdf"
-_NOTEBOOK_EXT = ".ipynb"
-_NUDGE = "cat via Bash is a bad UX. Use the Read tool."
-_CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
+# Single source of truth for image handling: extension -> wire MIME. The set of
+# image extensions is DERIVED from these keys (below) so the two can never drift
+# -- adding a format here is the only edit needed.
+# SVG is intentionally absent: it is XML, sent as text so providers do not
+# reject ``image/svg+xml``.
 _MIME_BY_EXT: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -61,9 +54,12 @@ _MIME_BY_EXT: dict[str, str] = {
     ".gif": "image/gif",
     ".bmp": "image/bmp",
     ".webp": "image/webp",
-    # Keep inactive with _IMAGE_EXTS; SVG falls through to _read_text.
-    # ".svg": "image/svg+xml",
 }
+_IMAGE_EXTS = frozenset(_MIME_BY_EXT)
+_PDF_EXT = ".pdf"
+_NOTEBOOK_EXT = ".ipynb"
+_NUDGE = "cat via Bash is a bad UX. Use the Read tool."
+_CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
 
 
 class Read:
@@ -321,15 +317,15 @@ class Read:
         unwrapped = unwrap_cd_prefix(trees)
         if unwrapped is None:
             return None
-        cwd, cmd = unwrapped
+        cmd = unwrapped[1]  # [0] is the cd-prefix cwd, unused by the nudge
         if cmd.env_prefix:
             return None
         if cmd.exe == "cat":
-            return _match_cat(cwd, cmd.args)
+            return _match_cat(cmd.args)
         if cmd.exe == "head":
-            return _match_head_tail(cwd, cmd.args, which="head")
+            return _match_head_tail(cmd.args, which="head")
         if cmd.exe == "tail":
-            return _match_head_tail(cwd, cmd.args, which="tail")
+            return _match_head_tail(cmd.args, which="tail")
         return None
 
 
@@ -422,10 +418,6 @@ def _read_text(
             content=f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]",
         )
     try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        mtime = None
-    try:
         text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         size = p.stat().st_size
@@ -436,6 +428,15 @@ def _read_text(
                 " Use Bash with an explicit decoder to inspect.]"
             ),
         )
+    # Stamp the mtime AFTER reading. A writer that lands between stat and read
+    # would otherwise pair a pre-write mtime with post-write content, and the
+    # next ``check_stale`` would see disk-mtime > cached-mtime, treat the entry
+    # as fresh, and silently adopt the new content. Stamping after read means a
+    # racing write bumps the mtime past what we cached, so staleness fires.
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = None
     mark_read(
         file_path,
         offset=offset,
@@ -484,16 +485,14 @@ def _window_text(
     return result_str
 
 
-def _match_cat(cwd: str | None, args: tuple[str, ...]) -> str | None:
+def _match_cat(args: tuple[str, ...]) -> str | None:
     """Match ``cat FILE`` (exactly one positional, no flags) for a Read nudge."""
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     if len(args) != 1 or args[0].startswith("-"):
         return None
     return "cat via Bash is a bad UX. Use the Read tool."
 
 
 def _match_head_tail(
-    cwd: str | None,
     args: tuple[str, ...],
     *,
     which: str,
@@ -504,7 +503,6 @@ def _match_head_tail(
     ``<cmd> -N FILE``. Anything else (e.g. ``-c`` bytes, bundled
     flags) bails.
     """
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
     positional: list[str] = []
     i = 0
     while i < len(args):
@@ -578,16 +576,74 @@ def _read_pdf(path: Path, pages: str) -> ToolResult:
     first, last = resolved
 
     try:
-        page_jpegs = extract_pdf_pages(path, first=first, last=last)
+        page_jpegs, total_pages = _render_pdf_jpegs(path, first=first, last=last)
     except PdfError as e:
         return ToolResult(call_id="", content=f"PDF: {e}", is_error=True)
 
-    range_note = f" pages {first}-{last or 'end'}" if first is not None else ""
+    start = first if first is not None else 1
+    rendered = len(page_jpegs)
+    # The full count comes from the same render call -- no second open that
+    # could transiently fail and silently mark a partial read as complete.
+    # Clamp to ``total_pages``: ``extract_pdf_pages`` renders at most the real
+    # pages (``hi = min(last, n_pages)``), so an over-range ``last`` (e.g.
+    # ``pages="1-9999"`` on a short PDF) is a COMPLETE read, not a truncation.
+    requested_last = min(last, total_pages) if last is not None else total_pages
+    # ``extract_pdf_pages`` returns a prefix when the rendered-byte budget
+    # truncated the read. Make the truncation VISIBLE so the model doesn't
+    # mistake a partial read for a complete one, and name the resume range.
+    truncated = start + rendered - 1 < requested_last
+    if truncated:
+        resume = start + rendered
+        note = (
+            f"[PDF: {path.name} -- rendered pages {start}-{start + rendered - 1} "
+            f"of requested {start}-{requested_last}; output truncated at the "
+            f'request byte budget. Pass pages="{resume}-{requested_last}" to read '
+            f"the remaining pages.]"
+        )
+    else:
+        # Report the clamped end, never the caller's raw over-range ``last``.
+        range_note = f" pages {start}-{requested_last}" if first is not None else ""
+        note = f"[PDF: {path.name} ({rendered} page(s){range_note})]"
     return ToolResult(
         call_id="",
-        content=f"[PDF: {path.name} ({len(page_jpegs)} page(s){range_note})]",
+        content=note,
         attachments=tuple(BytesMessage(jpeg, "image/jpeg") for jpeg in page_jpegs),
     )
+
+
+def _render_pdf_jpegs(
+    path: Path, *, first: int | None, last: int | None
+) -> tuple[list[bytes], int]:
+    """Rasterize the page range to JPEGs under the rendered-byte budget.
+
+    Returns the rendered JPEGs and the PDF's full page count (for the
+    continuation hint, without a second open).
+    """
+    return extract_pdf_pages(
+        path, first=first, last=last, max_total_bytes=_rendered_byte_budget()
+    )
+
+
+def _rendered_byte_budget() -> int:
+    """Per-read cap on cumulative rendered JPEG bytes, from the active model.
+
+    Provider request ceilings vary by orders of magnitude (a small local
+    model may allow far less than a 32 MB Anthropic request), so the bound
+    must follow the ACTIVE model's ``max_request_bytes``, not a single
+    constant. The rendered JPEGs are raw bytes that ship base64-expanded
+    (``4/3``), and the request also carries system prompt + history + text,
+    so reserve headroom: budget the raw render at half the ceiling's
+    base64-deflated size. Falls back to ``MAX_RENDERED_BYTES`` when no agent
+    is in context (standalone tool use / tests) or the model declares no
+    ceiling (``<= 0``).
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_request_bytes if agent is not None else 0
+    if ceiling <= 0:
+        return MAX_RENDERED_BYTES
+    # Half the ceiling (headroom for system/history/text), then deflate by
+    # the base64 4/3 expansion to bound the RAW rendered bytes.
+    return max(1, (ceiling // 2) * 3 // 4)
 
 
 def _resolve_page_range(
@@ -630,6 +686,9 @@ def _check_minimum(
     (an absent key has ``raw is None`` and is allowed to fall through
     to the default).
     """
+    # Defense-in-depth: ``validate_tool_input`` (the JSON-schema gate run by
+    # ``_AgentTool.run``) is the primary enforcer of these minima; this re-check
+    # covers direct ``._run()`` callers (tests, internal reuse) that bypass it.
     for name, coerced, raw in fields:
         if raw is None:
             continue

@@ -10,11 +10,12 @@ import os
 
 from PIL import Image
 
+import pypdfium2 as pdfium
 import pytest
 
-from sagent.testing import with_fake_agent
+from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.lib.bash import parse_bash
-from sagent.tools.lib.pdf import MAX_PDF_BYTES
+from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
 from sagent.tools.read import Read
 from sagent.types.runtime import BytesMessage, ToolResult
 
@@ -317,6 +318,141 @@ async def test_read_pdf_too_large(tmp_path: Path) -> None:
         result = await read.run({"file_path": str(f)})
     assert result.is_error
     assert "too large" in result.content
+
+
+def _build_pdf(path: Path, n_pages: int) -> None:
+    """Write a renderable ``n_pages``-page PDF via pypdfium2."""
+    doc = pdfium.PdfDocument.new()
+    try:
+        for _ in range(n_pages):
+            doc.new_page(72, 72)
+        doc.save(str(path))
+    finally:
+        doc.close()
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_byte_budget_is_provider_specific(tmp_path: Path) -> None:
+    """The rendered-byte bound follows the ACTIVE model's request ceiling.
+
+    A model with a small ``max_request_bytes`` must truncate a PDF read more
+    aggressively than a large-ceiling model -- the bound is not a single
+    hardcoded constant. Same PDF, two ceilings, different page counts.
+    """
+    f = tmp_path / "doc.pdf"
+    _build_pdf(f, 6)
+    one, _ = extract_pdf_pages(f, first=1, last=1)
+    per_page = len(one[0])
+
+    # Tiny ceiling: only a couple pages fit (after headroom).
+    small = FakeAgent()
+    small.max_request_bytes = per_page * 3
+    with with_fake_agent(agent=small) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        small_result = await read.run({"file_path": str(f), "pages": "1-6"})
+
+    # Large ceiling: all 6 pages fit.
+    large = FakeAgent()
+    large.max_request_bytes = per_page * 100
+    with with_fake_agent(agent=large) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        large_result = await read.run({"file_path": str(f), "pages": "1-6"})
+
+    assert len(large_result.attachments) == 6, "large ceiling reads all pages"
+    assert len(small_result.attachments) < len(large_result.attachments), (
+        "small-ceiling model must truncate more than large-ceiling model"
+    )
+    assert "pages=" in small_result.content  # continuation hint on the truncated read
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_partial_on_byte_budget_surfaces_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that busts the rendered-byte budget returns the pages that fit
+    plus a VISIBLE continuation hint naming the remaining range.
+
+    The model must not mistake a partial read for a complete one (silent
+    truncation = data loss), so the result text states which pages were
+    rendered and how to read the rest.
+    """
+    f = tmp_path / "dense.pdf"
+    _build_pdf(f, 4)
+    del monkeypatch  # budget now derives from the active model ceiling
+    # Active-model ceiling that admits some but not all pages. The rendered
+    # budget is ``(ceiling // 2) * 3 // 4`` raw bytes; size the ceiling so a
+    # couple of pages fit but not all four.
+    one, _ = extract_pdf_pages(f, first=1, last=1)
+    per_page = len(one[0])
+    small = FakeAgent()
+    small.max_request_bytes = per_page * 7
+    with with_fake_agent(agent=small) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f), "pages": "1-4"})
+    assert not result.is_error
+    assert result.attachments, "partial read must still return the pages that fit"
+    assert len(result.attachments) < 4
+    # Continuation hint names the next page to resume from.
+    assert "pages=" in result.content
+    assert "truncate" in result.content.lower() or "remaining" in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_partial_truncation_does_not_depend_on_recount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Truncation is surfaced from the renderer's total, not a re-open.
+
+    Previously ``_read_pdf`` called ``get_pdf_page_count`` a SECOND time to
+    compute the resume range; a transient ``None`` there silently marked a
+    partial read as complete (data loss). The total now flows out of
+    ``extract_pdf_pages``, so even if a re-count would fail, truncation is
+    still reported. Pin it by making any post-render ``get_pdf_page_count``
+    return ``None``.
+    """
+    f = tmp_path / "dense.pdf"
+    _build_pdf(f, 4)
+    one, _ = extract_pdf_pages(f, first=1, last=1)
+    per_page = len(one[0])
+
+    # If _read_pdf re-counts pages, this would force a false "complete".
+    # Use "1-" (last=None) -- the case that previously triggered the recount.
+    def _no_count(_p: Path) -> int | None:
+        return None
+
+    monkeypatch.setattr("sagent.tools.read.get_pdf_page_count", _no_count)
+    small = FakeAgent()
+    small.max_request_bytes = per_page * 7  # admits some, not all 4 pages
+    with with_fake_agent(agent=small) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f), "pages": "1-"})
+    assert not result.is_error
+    assert len(result.attachments) < 4
+    assert "pages=" in result.content
+    assert "truncate" in result.content.lower() or "remaining" in result.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_over_range_last_is_not_truncation(tmp_path: Path) -> None:
+    """An over-range ``last`` that fits the byte budget is a COMPLETE read.
+
+    ``extract_pdf_pages`` clamps ``hi`` to the real page count, so a request
+    like ``pages="1-9999"`` on a short PDF renders every page. The truncation
+    check must compare against the clamped page count, not the caller's raw
+    ``last`` -- otherwise a complete read is mislabeled byte-truncated and the
+    resume hint points past the end of the document.
+    """
+    f = tmp_path / "short.pdf"
+    _build_pdf(f, 3)
+    large = FakeAgent()
+    large.max_request_bytes = 1 << 30  # ample: all pages fit
+    with with_fake_agent(agent=large) as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f), "pages": "1-9999"})
+    assert not result.is_error
+    assert len(result.attachments) == 3, "all real pages render"
+    assert "truncate" not in result.content.lower()
+    assert "9999" not in result.content
 
 
 def test_summary_minimal() -> None:

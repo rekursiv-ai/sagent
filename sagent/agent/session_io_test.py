@@ -38,6 +38,7 @@ from sagent.agent.session_io import (
     restore_model,
     restore_tool_state,
     serialize_tool_state,
+    unpersisted_session_error,
 )
 from sagent.tools.core import ReadCacheEntry, ToolState
 from sagent.types.model import (
@@ -100,6 +101,7 @@ class _NoopModel:
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
+    max_request_bytes: int = 32 * 1024 * 1024
 
     @property
     def pricing(self) -> Pricing:
@@ -1902,6 +1904,42 @@ def test_thought_signature_round_trips(tmp_path: Path) -> None:
     assert isinstance(reloaded, AssistantMessage)
     assert reloaded.thought_signature == "sig-text-abc"
     assert reloaded.tool_calls[0].thought_signature == "sig-fc-xyz"
+
+
+def test_unpersisted_session_error_none_without_session_dir() -> None:
+    # Persistence disabled (no session_dir): never an error.
+    agent = Agent(model=_NoopModel(), session_dir=None)
+    agent.runtime.append_history(UserMessage(text="x"))
+    assert unpersisted_session_error(agent) is None
+
+
+def test_unpersisted_session_error_none_for_empty_tape(tmp_path: Path) -> None:
+    # Opened and quit without a turn: legitimately empty, nothing to save.
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    assert not agent.runtime.tape
+    assert not (tmp_path / "session.jsonl").exists()
+    assert unpersisted_session_error(agent) is None
+
+
+def test_unpersisted_session_error_none_when_persisted(tmp_path: Path) -> None:
+    # Normal path: a turn happened and the observer wrote the transcript.
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    agent.runtime.append_history(UserMessage(text="x"))
+    agent.runtime.publish(SaveSession())
+    assert (tmp_path / "session.jsonl").exists()
+    assert unpersisted_session_error(agent) is None
+
+
+def test_unpersisted_session_error_flags_silent_data_loss(tmp_path: Path) -> None:
+    # The failure mode: tape has conversation but no transcript reached disk
+    # (every persistence write was dropped). Must surface as an error.
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+    agent.runtime.append_history(UserMessage(text="lost work"))
+    # No SaveSession published -> no session.jsonl, simulating a swallowed write.
+    assert not (tmp_path / "session.jsonl").exists()
+    msg = unpersisted_session_error(agent)
+    assert msg is not None
+    assert "cannot be resumed" in msg
 
 
 if __name__ == "__main__":

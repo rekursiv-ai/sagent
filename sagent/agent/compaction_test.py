@@ -12,11 +12,11 @@ import pytest
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import (
     CompactionState,
-    append_to_first_user,
     inject_background_status,
     post_compact_enrich,
 )
-from sagent.lib.json import JSON
+from sagent.compaction.history import append_to_first_user
+from sagent.lib.custom_json import JSON
 from sagent.tools.core import ToolState
 from sagent.types.model import ContextBudget
 from sagent.types.runtime import (

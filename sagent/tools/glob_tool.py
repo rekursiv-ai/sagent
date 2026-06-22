@@ -7,7 +7,7 @@ from pathlib import Path
 
 import time
 
-from sagent.lib.json import JSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import (
     get_tool_state,
     load_tool_description,

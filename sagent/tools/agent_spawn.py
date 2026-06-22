@@ -34,7 +34,7 @@ from sagent.agent.session_io import (
     PersistentAgentState,
     append_persistent_agent_lifecycle,
 )
-from sagent.lib.json import JSON, bool_val, json_freeze
+from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,

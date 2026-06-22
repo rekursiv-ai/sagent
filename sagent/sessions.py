@@ -28,21 +28,193 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, cast
 
+import contextlib
 import json
 import logging
 import re
+import shutil
 import sys
 import time
 import uuid
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
+from sagent.lib.userdirs import data_dir
 
 
 logger = logging.getLogger(__name__)
 
-_SAGENT_HOME = Path.home() / ".sagent"
+_SAGENT_HOME = data_dir("sagent")
 _PICK_CAP = 20
 _PROJECTS_DIR = _SAGENT_HOME / "projects"
+# Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
+# followed OS data-dir conventions). For most users that was a real directory.
+# However, some users may have instead symlinked ``~/.sagent -> ~/.claude`` so
+# sagent's data landed intermixed in the Claude CLI's tree. Migration must
+# therefore handle BOTH: a real ``~/.sagent`` is the common case; the
+# ``~/.claude`` squat is the symlink case. ``~/.claude`` is also where the
+# symlink resolves to, so the two are disambiguated by whether ``~/.sagent`` is
+# a real dir or a symlink.
+_LEGACY_SAGENT_HOME = Path.home() / ".sagent"
+_LEGACY_CLAUDE_HOME = Path.home() / ".claude"
+# Subdirs of the Claude home that, when present, are bridged back via symlink so
+# skills authored in either tool stay unified. Only ``skills`` qualifies today;
+# papers/memory are sagent-owned and get copied, not bridged.
+_BRIDGE_SUBDIRS = ("skills",)
+
+
+def _legacy_cwd_slug(cwd: str | Path) -> str:
+    """Slug under the pre-convention rule: every non-alphanumeric -> ``-``.
+
+    This is the scheme the squatted ``~/.claude`` tree (and the Claude CLI
+    itself) used. Distinct from :func:`cwd_slug`, which maps ``/`` to ``_``.
+    Forward-only and well-defined; the inverse is not (``/`` and ``.`` both
+    collapse to ``-``), which is why migration copies legacy dirs verbatim
+    under their original name rather than translating the slug.
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", str(Path(cwd).resolve()))
+
+
+def _copy_tree_merge(src: Path, dst: Path) -> None:
+    """Recursively copy ``src`` into ``dst``, skipping existing files.
+
+    Skip-if-exists is applied per *file*, not per directory: an existing
+    destination file is never overwritten (idempotent, non-destructive), but an
+    existing destination *directory* is recursed into and merged. Recursing
+    rather than skipping is load-bearing -- the destination ``projects/`` dir is
+    created the moment any new session runs, so a per-directory skip would
+    orphan every not-yet-copied project beneath it.
+
+    Symlinks are NOT followed: a symlinked directory is recreated as a symlink
+    rather than recursed into. Following them would dereference a link into a fat
+    duplicate copy and -- worse -- a cycle (``a/loop -> a``) would recurse until
+    ``RecursionError``. The walk uses ``is_symlink()`` before ``is_dir()`` so the
+    link itself, not its (possibly self-referential) target, is what's copied.
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in src.iterdir():
+        target = dst / child.name
+        if child.is_symlink():
+            if target.exists() or target.is_symlink():
+                continue
+            with contextlib.suppress(OSError):
+                target.symlink_to(child.readlink())
+        elif child.is_dir():
+            # Merge into an existing dir rather than skipping it wholesale.
+            _copy_tree_merge(child, target)
+        elif not target.exists():
+            shutil.copy2(child, target)
+
+
+def migrate_legacy_home() -> None:
+    """Copy a pre-convention sagent home into the XDG data dir, once.
+
+    Two legacy layouts existed before sagent followed OS data-dir conventions,
+    and both are handled:
+
+    - **Real ``~/.sagent`` directory** (the common case): sagent's own data
+      written under the old hardcoded home. Its ``projects/``, ``papers/``, and
+      ``memory/`` are copied verbatim into the XDG home -- the slugs there are
+      already sagent's ``_`` form, so no translation is needed.
+    - **``~/.sagent`` symlinked to ``~/.claude``** (the squat case): sagent's
+      data landed intermixed with the Claude CLI's files. Only the
+      sagent-authored pieces are extracted (``projects/<slug>/<hex>/`` dirs with
+      a ``session.jsonl``, their sibling ``memory/``, and ``papers/``), copied
+      under their original ``-``-slug name (which :func:`project_dir` resolves).
+      Claude's own bare ``<uuid>.jsonl`` sessions and other entries are left
+      untouched, and shared ``skills`` are bridged back via symlink.
+
+    Copy (not move) leaves the legacy tree intact as a fallback. Best-effort,
+    idempotent, non-blocking: per-item failures are logged and swallowed so a
+    migration hiccup never blocks startup. Call once at startup, before any
+    sagent path is read.
+    """
+    try:
+        # A real ``~/.sagent`` dir is the standard legacy home. A *symlink*
+        # there is the squat -- it resolves into ``~/.claude``, so we must NOT
+        # treat it as a real home (that would double-process the Claude tree).
+        if _LEGACY_SAGENT_HOME.is_dir() and not _LEGACY_SAGENT_HOME.is_symlink():
+            _migrate_real_sagent_home()
+        elif _LEGACY_CLAUDE_HOME.is_dir():
+            _migrate_legacy_projects()
+            _migrate_legacy_papers()
+            _bridge_shared_dirs()
+    except (OSError, RecursionError) as exc:  # never block startup on migration
+        logger.warning("legacy sagent migration incomplete: %s", exc)
+
+
+def _migrate_real_sagent_home() -> None:
+    """Copy a real legacy ``~/.sagent`` into the XDG home (the common case).
+
+    The legacy dir IS sagent's own tree, so its contents (projects, papers,
+    memory, etc.) copy verbatim. Skip when the XDG home is the legacy path
+    itself OR a descendant of it (e.g. ``XDG_DATA_HOME=~/.sagent`` makes the home
+    ``~/.sagent/sagent``): copying a directory into its own subtree would walk
+    the just-created destination and recurse unboundedly.
+    """
+    legacy = _LEGACY_SAGENT_HOME.resolve()
+    home = _SAGENT_HOME.resolve()
+    if home == legacy or legacy in home.parents:
+        return
+    _copy_tree_merge(_LEGACY_SAGENT_HOME, _SAGENT_HOME)
+    logger.info(
+        "migrated legacy sagent home %s -> %s", _LEGACY_SAGENT_HOME, _SAGENT_HOME
+    )
+
+
+def _migrate_legacy_projects() -> None:
+    """Copy sagent-authored project dirs from the Claude tree, verbatim."""
+    src_root = _LEGACY_CLAUDE_HOME / "projects"
+    if not src_root.is_dir():
+        return
+    for proj in src_root.iterdir():
+        if not proj.is_dir():
+            continue
+        # Sagent sessions live in ``<hex>/`` subdirs holding session.jsonl;
+        # a project dir with none is pure Claude CLI -- skip it.
+        sess_dirs = [
+            c for c in proj.iterdir() if c.is_dir() and (c / "session.jsonl").exists()
+        ]
+        if not sess_dirs:
+            continue
+        dst = _PROJECTS_DIR / proj.name
+        for sd in sess_dirs:
+            tgt = dst / sd.name
+            if not tgt.exists():
+                _copy_tree_merge(sd, tgt)
+        mem = proj / "memory"
+        if mem.is_dir():
+            _copy_tree_merge(mem, dst / "memory")
+        if dst.is_dir():
+            logger.info("migrated legacy sessions %s -> %s", proj, dst)
+
+
+def _migrate_legacy_papers() -> None:
+    """Copy the sagent papers cache out of the Claude tree."""
+    src = _LEGACY_CLAUDE_HOME / "papers"
+    if src.is_dir():
+        _copy_tree_merge(src, _SAGENT_HOME / "papers")
+
+
+def _bridge_shared_dirs() -> None:
+    """Symlink shared-authoring dirs back to Claude when they exist there.
+
+    Only acts when the Claude subdir exists and the sagent side is absent, so an
+    established sagent dir is never shadowed and a re-run is a no-op. Today only
+    ``skills`` qualifies, and only if the user has authored Claude skills.
+    """
+    for name in _BRIDGE_SUBDIRS:
+        claude_dir = _LEGACY_CLAUDE_HOME / name
+        sagent_path = _SAGENT_HOME / name
+        if not claude_dir.is_dir() or sagent_path.exists() or sagent_path.is_symlink():
+            continue
+        try:
+            sagent_path.parent.mkdir(parents=True, exist_ok=True)
+            sagent_path.symlink_to(claude_dir, target_is_directory=True)
+            logger.info("bridged shared dir %s -> %s", sagent_path, claude_dir)
+        except OSError as exc:
+            logger.warning("could not bridge shared dir %s: %s", sagent_path, exc)
+
+
 # Path separators map to ``_`` so the slug stays injective on the
 # separator structure: ``/tmp/a-b`` and ``/tmp/a/b`` previously
 # collapsed to the same slug because both ``/`` and ``-`` became
@@ -84,6 +256,11 @@ def cwd_slug(cwd: str | Path) -> str:
 def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
     """Return the project directory under ``~/.sagent/projects/``.
 
+    Resolves to the current ``_``-slug dir. When that does not yet exist but a
+    migrated legacy ``-``-slug dir does, returns the legacy one so resume finds
+    pre-convention sessions without an (impossible) slug translation. New
+    sessions always write to the current slug.
+
     Args:
       cwd: Current working directory.
       projects_dir: Override for the projects root directory.
@@ -92,7 +269,13 @@ def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
       path: Project directory path.
 
     """
-    return (projects_dir or _PROJECTS_DIR) / cwd_slug(cwd)
+    root = projects_dir or _PROJECTS_DIR
+    current = root / cwd_slug(cwd)
+    if not current.exists():
+        legacy = root / _legacy_cwd_slug(cwd)
+        if legacy != current and legacy.is_dir():
+            return legacy
+    return current
 
 
 def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
@@ -106,8 +289,13 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
       path: ``~/.sagent/projects/<slug>/<uuid4-hex>/``.
 
     """
+    # A NEW session always establishes the current ``_``-slug. ``project_dir``
+    # is read-biased (it falls back to a migrated legacy ``-``-slug for resume);
+    # writing through it would keep new sessions in the legacy dir and never
+    # create the current slug. So derive the write path directly here.
+    root = projects_dir or _PROJECTS_DIR
     sid = uuid.uuid4().hex[:12]
-    d = project_dir(cwd, projects_dir=projects_dir) / sid
+    d = root / cwd_slug(cwd) / sid
     d.mkdir(parents=True, exist_ok=True)
     return d
 

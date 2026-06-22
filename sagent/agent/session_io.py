@@ -40,7 +40,7 @@ from wrapt import lazy_import
 
 from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
-from sagent.lib.json import float_val, int_val
+from sagent.lib.custom_json import float_val, int_val
 from sagent.types.model import Model, ModelSpec, TokenCount
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
@@ -1331,6 +1331,36 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
 
     agent.runtime.observers.append(_on_event)
     return _rebaseline
+
+
+def unpersisted_session_error(agent: Agent) -> str | None:
+    """Return an error message if a non-empty session was never persisted.
+
+    The persistence observer writes ``session.jsonl`` synchronously on the first
+    ``SaveSession``/``StatusChanged`` event, so by shutdown a non-empty tape MUST
+    have a backing file. A non-empty tape with no file means every persistence
+    write was dropped (disk full, permissions, a swallowed observer error -- the
+    runtime isolates observer exceptions by design, see ``Runtime.publish``) and
+    the user's conversation is gone.
+
+    Returns ``None`` -- not an error -- when there is no ``session_dir``
+    (persistence disabled) or the tape is empty (a session opened and quit
+    without a turn is legitimately empty and has nothing to save). Otherwise
+    returns a human-facing message describing the data loss. The caller decides
+    how to surface it; this function neither logs nor raises so it composes with
+    the REPL's stderr-and-exit error convention.
+    """
+    session_dir = agent.session_dir
+    if session_dir is None or not agent.runtime.tape:
+        return None
+    session_file = session_dir / "session.jsonl"
+    if session_file.exists():
+        return None
+    return (
+        f"session {agent.session_id!r} has {len(agent.runtime.tape)} tape"
+        f" record(s) but no transcript was written to {session_file}."
+        " Persistence failed and this conversation cannot be resumed."
+    )
 
 
 def _persisted_refs(path: Path) -> set[TapeRef]:

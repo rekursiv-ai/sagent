@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 import json
 import logging
 
-from sagent.lib.json import json_unfreeze
+from sagent.lib.custom_json import json_unfreeze
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -132,6 +132,13 @@ def _attachment_tokens(descriptor: str, data: bytes, model: TokenEstimator) -> i
     providers; both contribute to the request token budget. New
     descriptors are logged so a silent drop -- the previous bug, where
     PDFs were filtered out and compaction fired late -- can't recur.
+
+    Returns the provider's modality estimate (pixel area / tile counts).
+    This is a TOKEN count only: request *bytes* are a separate budget
+    (``Model.max_request_bytes``) enforced by the byte-aware compaction
+    gate and the read-tool's rendered-byte bound, never folded into the
+    token estimate -- doing so caused spurious compaction on byte-heavy,
+    token-light requests that fit the window.
     """
     if descriptor.startswith("image/") or descriptor == "application/pdf":
         return model.approx_image_tokens(data)

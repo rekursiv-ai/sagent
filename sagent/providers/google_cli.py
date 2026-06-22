@@ -34,12 +34,17 @@ import tempfile
 
 from sagent.lib import token_count
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import JSON, MutableJSON, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, validate_json_schema
 from sagent.providers.google import Google
+from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
     compute_cost,
+)
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
 )
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
@@ -84,8 +89,6 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
-_TURN_RESPAWN_THRESHOLD = 100
-_CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
 _CREDENTIALS_SCHEMA: JSON = {
     "type": "object",
     "required": ["access_token", "refresh_token", "expiry_date"],
@@ -356,13 +359,18 @@ class _GoogleCLIModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Gemini's documented vision pixel cap."""
-        return 3072
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Gemini's documented vision byte cap (20 MiB)."""
-        return 20 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
@@ -393,15 +401,23 @@ class _GoogleCLIModel:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify whether an error means the prompt exceeded the window.
+        """Classify whether an error means the prompt exceeded the token window.
+
+        Excludes the request-byte wire-limit via the shared classifier first
+        (uniform with the HTTP providers): a byte-limit error routes to
+        byte-overflow recovery, not the ``/model`` larger-window remediation
+        the byte ceiling ignores. Without this guard the bare ``"too large"``
+        marker would swallow a byte-limit error into token overflow.
 
         Args:
           error: Exception raised by the call path.
 
         Returns:
-          overflow: ``True`` for known overflow markers in the message text.
+          overflow: ``True`` for known token-overflow markers in the message.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
@@ -494,11 +510,10 @@ class _GoogleCLIModel:
             return True
         if _hash_system(request.system) != self._system_hash:
             return True
-        if self._turn_count >= _TURN_RESPAWN_THRESHOLD:
-            return True
-        return (
-            self._last_input_tokens
-            > self._max_request_tokens * _CONTEXT_FRACTION_RESPAWN_THRESHOLD
+        return respawn_for_cadence(
+            turn_count=self._turn_count,
+            last_input_tokens=self._last_input_tokens,
+            max_request_tokens=self._max_request_tokens,
         )
 
     def _sync_tools_bridge(self, request: ModelRequest) -> None:
@@ -542,7 +557,9 @@ class _GoogleCLIModel:
             entry for entry in new_entries if not isinstance(entry, AssistantMessage)
         ]
         for entry in user_like_entries[:-1]:
-            blocks = _serialize_prompt_blocks(entry, self.max_image_dim)
+            blocks = _serialize_prompt_blocks(
+                entry, self.max_image_dim, self.max_image_bytes
+            )
             _ = await self._send_prompt(
                 proc,
                 blocks,
@@ -554,7 +571,9 @@ class _GoogleCLIModel:
         thinking_parts: list[str] = []
         stop_reason: str | None = None
         if user_like_entries:
-            blocks = _serialize_prompt_blocks(user_like_entries[-1], self.max_image_dim)
+            blocks = _serialize_prompt_blocks(
+                user_like_entries[-1], self.max_image_dim, self.max_image_bytes
+            )
             stop_reason = await self._send_prompt(
                 proc,
                 blocks,
@@ -984,10 +1003,11 @@ async def _rpc_send(
 def _serialize_prompt_blocks(
     entry: TapeEvent,
     max_image_dim: int,
+    max_image_bytes: int,
 ) -> list[MutableJSON]:
     """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
     if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_prompt_blocks(entry, max_image_dim)
+        return _user_prompt_blocks(entry, max_image_dim, max_image_bytes)
     assert isinstance(entry, ToolResult)
     raise RuntimeError(
         "GoogleCLI: ToolResult in history -- tools must go through the MCP bridge",
@@ -995,7 +1015,9 @@ def _serialize_prompt_blocks(
 
 
 def _user_prompt_blocks(
-    entry: AgentSendMessage | UserMessage, max_image_dim: int
+    entry: AgentSendMessage | UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
 ) -> list[MutableJSON]:
     """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
     blocks: list[MutableJSON] = []
@@ -1005,7 +1027,7 @@ def _user_prompt_blocks(
         if not att.descriptor.startswith("image/"):
             continue
         raw, mime = image_lib.resize(
-            att.data, max_dim=max_image_dim, max_bytes=20 * 1024 * 1024
+            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
         )
         blocks.append(
             cast(

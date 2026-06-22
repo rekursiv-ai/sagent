@@ -39,7 +39,7 @@ import time
 import uuid
 
 from sagent.lib import token_count
-from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.thinking import ThinkingCapability, valid_thinking_states
@@ -595,13 +595,30 @@ class SelfHostedModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Return the maximum image dimension in pixels."""
-        return 2000
+        """No fixed image-dimension cap for a local model.
+
+        ``0`` means unlimited (skip dimension-based resize) -- consistent
+        with the byte caps below; a local vision model has no more a fixed
+        pixel ceiling than a fixed byte ceiling.
+        """
+        return 0
 
     @property
     def max_image_bytes(self) -> int:
-        """Return the maximum image size in bytes."""
-        return 5 * 1024 * 1024
+        """No fixed per-image byte cap; bounded by GPU/context.
+
+        ``0`` means unlimited (skip byte-based resize).
+        """
+        return 0
+
+    @property
+    def max_request_bytes(self) -> int:
+        """No HTTP wire ceiling for an in-process local model.
+
+        ``0`` means unlimited, so the byte-aware compaction gate never
+        fires (the only real limit is the token window).
+        """
+        return 0
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Return whether the error indicates a context overflow.

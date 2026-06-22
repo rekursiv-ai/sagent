@@ -120,7 +120,13 @@ def test_run_arxiv_download_writes_cache(tmp_path: Path) -> None:
 def test_run_cascade_all_fail(tmp_path: Path) -> None:
     """All sources return None → tool error."""
     err = FetchError(url="u", status=500, headers={}, body=b"")
-    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+    # For a DOI id the cascade first does an OA-metadata lookup through the
+    # paper_common client; patch BOTH it and the PDF fetch so the test
+    # never touches the network (~0.7-3.8s).
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=err),
+        patch("sagent.tools.paper_fetch.fetch", side_effect=err),
+    ):
         result = asyncio.run(
             PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/nonexistent"]}),
         )

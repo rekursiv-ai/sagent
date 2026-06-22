@@ -1,0 +1,110 @@
+"""Per-user filesystem locations following OS conventions.
+
+Rolled in-house rather than depending on ``platformdirs``: the surface
+we need is a handful of lines of platform branching, and a 100KB
+third-party module earns its keep only when it handles complexity the
+caller cannot trivially reproduce. The corners ``platformdirs``
+covers that we skip -- AppData redirection via ``SHGetKnownFolderPath``,
+roaming profiles, appauthor/version subdirs, Android, iOS -- do not
+apply to our development tools.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import os
+import sys
+
+
+__all__ = [
+    "config_dir",
+    "data_dir",
+    "state_dir",
+]
+
+
+def data_dir(app: str, platform: str = sys.platform) -> Path:
+    """Resolve the per-user data directory for ``app``.
+
+    Linux/BSD honor the XDG Base Directory Specification; macOS uses
+    ``Application Support``; Windows uses ``LOCALAPPDATA``. The
+    Windows branch reads the env var rather than calling
+    ``SHGetKnownFolderPath``, so AppData redirected via group policy
+    is not detected -- acceptable for development tools, not for
+    shipped end-user software.
+
+    Args:
+      app: Application name. Used as the leaf directory.
+      platform: ``sys.platform`` string. Override for testing; the
+        default closes over the host's ``sys.platform``.
+
+    Returns:
+      path: Absolute path to the application's data directory. The
+        directory is not created.
+
+    References:
+      https://specifications.freedesktop.org/basedir-spec/latest/
+
+    """
+    if platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return base / app
+    if platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / app
+    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / app
+
+
+def config_dir(app: str, platform: str = sys.platform) -> Path:
+    """Resolve the per-user config directory for ``app``.
+
+    On Linux/BSD, distinct from :func:`data_dir` per XDG
+    (``~/.config`` vs ``~/.local/share``); on macOS and Windows the
+    two collapse to the same location.
+
+    Args:
+      app: Application name. Used as the leaf directory.
+      platform: ``sys.platform`` string. Override for testing; the
+        default closes over the host's ``sys.platform``.
+
+    Returns:
+      path: Absolute path to the application's config directory. The
+        directory is not created.
+
+    References:
+      https://specifications.freedesktop.org/basedir-spec/latest/
+
+    """
+    if platform in ("win32", "darwin"):
+        return data_dir(app, platform=platform)
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return base / app
+
+
+def state_dir(app: str, platform: str = sys.platform) -> Path:
+    """Resolve the per-user state directory for ``app``.
+
+    XDG ``$XDG_STATE_HOME`` is for state that should persist between
+    runs but is not configuration or user data -- session captures,
+    logs, undo histories. On Linux/BSD distinct from
+    :func:`data_dir` and :func:`config_dir`; on macOS and
+    Windows the three collapse to the same location.
+
+    Args:
+      app: Application name. Used as the leaf directory.
+      platform: ``sys.platform`` string. Override for testing; the
+        default closes over the host's ``sys.platform``.
+
+    Returns:
+      path: Absolute path to the application's state directory. The
+        directory is not created.
+
+    References:
+      https://specifications.freedesktop.org/basedir-spec/latest/
+
+    """
+    if platform in ("win32", "darwin"):
+        return data_dir(app, platform=platform)
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return base / app

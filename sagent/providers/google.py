@@ -35,7 +35,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import token_count
-from sagent.lib.json import (
+from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
     int_val,
@@ -45,6 +45,11 @@ from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
     compute_cost,
+)
+from sagent.providers.lib.errors import (
+    error_status_code,
+    is_request_too_large,
+    raise_if_request_too_large,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.thinking import ThinkingCapability, valid_thinking_states
@@ -81,6 +86,20 @@ _GOOGLE_THINKING_BUDGETS = {
 }
 
 
+# Image / wire byte limits shared by every Gemini model (verified Jun 2026):
+#   - No per-image pixel cap: "There isn't a specific limit to the number of
+#     pixels in an image" -- larger images are tiled into 768x768 tiles
+#     server-side (https://ai.google.dev/gemini-api/docs/image-understanding;
+#     Firebase AI Logic input-file-requirements). So ``max_image_dim=0`` (no
+#     client resize) and ``max_image_bytes=0`` (no per-image cap).
+#   - The only documented limit is the 20 MB TOTAL inline request size
+#     (text + system + inline bytes), so ``max_request_bytes=20 MB``; the
+#     byte-aware compaction gate enforces it across the whole request.
+_IMAGE_DIM = 0
+_IMAGE_BYTES = 0
+_REQUEST_BYTES = 20 * 1024 * 1024
+
+
 class Google:
     """Google provider - creates Gemini model backends."""
 
@@ -95,43 +114,67 @@ class Google:
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.50, response=3.00, cache_read=0.05),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-3.1-pro-preview": ModelProfile(
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
             pricing=Pricing(request=2.00, response=12.00, cache_read=0.20),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-2.0-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-2.5-flash-lite": ModelProfile(
             max_request_tokens=1_048_576,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-2.5-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.30, response=2.50, cache_read=0.075),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-2.5-pro": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=1.25, response=10.0, cache_read=0.31),
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-1.5-flash": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=0.075, response=0.3, cache_read=0.01875),
             supports_thinking=False,
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "gemini-1.5-pro": ModelProfile(
             max_request_tokens=1_000_000,
             max_response_tokens=65_536,
             pricing=Pricing(request=1.25, response=5.0, cache_read=0.3125),
             supports_thinking=False,
+            max_image_dim=_IMAGE_DIM,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
 
@@ -372,24 +415,35 @@ class _GeminiModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension (pixels) accepted by the API."""
-        return 3072
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size (bytes) accepted by the API."""
-        return 20 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a context-window overflow.
+        """Classify an error as a token context-window overflow.
+
+        Excludes the byte wire-limit (HTTP 413): that is a different
+        condition handled by ``RequestTooLargeError`` -- a larger-window
+        model does not relieve the byte ceiling.
 
         Args:
           error: Exception raised by the provider call.
 
         Returns:
-          overflow: True when ``error`` indicates context overflow.
+          overflow: True when ``error`` indicates token-context overflow.
 
         """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
@@ -465,6 +519,7 @@ class _GeminiModel:
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
+                raise_if_request_too_large(r.status_code, err_body)
                 msg = err_body.lower()
                 if (
                     "too large" in msg
@@ -504,8 +559,8 @@ def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
 
 def _build_request(
     request: ModelRequest,
-    max_image_dim: int = 3072,
-    max_image_bytes: int = 20 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> MutableJSON:
     """Convert history entries to the Gemini API request body.
 

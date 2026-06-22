@@ -39,7 +39,7 @@ from sagent.bin.slack import (
     log_tap,
     parse_slack_args,
 )
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack

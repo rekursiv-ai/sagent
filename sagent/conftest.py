@@ -30,10 +30,20 @@ def anyio_backend(request: pytest.FixtureRequest) -> str:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register the real_sleep marker."""
+    """Register custom markers.
+
+    Registered here (not only in ``pyproject.public.toml``) so they resolve in
+    every context the conftest is exported into: the public export runs with
+    ``filterwarnings = ["error"]``, which turns an unregistered-mark warning into
+    a collection-time error even for a deselected ``integration`` test.
+    """
     config.addinivalue_line(
         "markers",
         "real_sleep: don't patch asyncio.sleep for this test",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_llm: spawns a real model CLI/binary; runs in a low-parallelism gate",
     )
 
 

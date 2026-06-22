@@ -51,7 +51,14 @@ def post_process_result(
     message_budget_chars: int = 0,
     used_message_chars: int = 0,
 ) -> ToolResult:
-    """Persist oversized content, inject empty marker, return new result.
+    """Persist oversized content and inject the empty-output marker.
+
+    Attachment-byte budgeting is NOT done here: a per-result byte reject is
+    the wrong mechanism (the per-image cap is the wrong scalar, and the
+    provider resizes images later in serialization). Request-byte pressure
+    is handled by the byte-aware compaction gate (which sheds history
+    attachment bytes) and the read tool's rendered-byte bound (which caps a
+    single fresh read).
 
     Args:
       result: Tool result to post-process.
@@ -72,10 +79,15 @@ def post_process_result(
 
     """
     content = result.content
-    if not content and not result.attachments and not result.is_error:
+    # Empty content with no attachment ships an empty wire block, which some
+    # providers reject (Anthropic 400, fatal). The marker applies to error
+    # results too: an empty FAILED result is the same wire hazard, and the
+    # ``is_error`` flag is preserved through the replace.
+    if not content and not result.attachments:
+        verb = "failed" if result.is_error else "completed"
         return dataclasses.replace(
             result,
-            content=f"({tool_name} completed with no output)",
+            content=f"({tool_name} {verb} with no output)",
         )
     if _should_persist(
         content,

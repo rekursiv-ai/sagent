@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from sagent.agent.context import validate_context
 from sagent.request_materialization import (
     ELIDED_TOOL_RESULT_TAG,
+    _defer_user_between_tool_pair,
     materialize_messages,
     materialize_request,
 )
@@ -347,6 +348,31 @@ def test_materialize_messages_preserves_tool_pair_around_interleaved_agent_send(
     assert isinstance(materialized[0], AssistantMessage)
     assert isinstance(materialized[1], ToolResult)
     assert isinstance(materialized[2], AgentSendMessage)
+
+
+def test_defer_user_accumulates_pending_across_assistant_turns() -> None:
+    """``pending`` accumulates open call ids; a later AM never clears earlier ones.
+
+    Directly exercises ``_defer_user_between_tool_pair`` (the live path's runtime
+    gate forbids 2+ simultaneously-open tool pairs, so this overlapping input is
+    only reachable by a direct/defensive call). The helper must treat ``pending``
+    as "all still-unanswered calls": a second AM must not reset tracking and let
+    a deferred user turn flush into a still-open pair.
+    """
+    out = _defer_user_between_tool_pair(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="t1", name="Bash", args={}),)),
+            AgentSendMessage(source="peer", text="ping"),
+            AssistantMessage(tool_calls=(ToolCall(id="t2", name="Bash", args={}),)),
+            ToolResult(call_id="t2", content="b"),
+            ToolResult(call_id="t1", content="a"),
+        ]
+    )
+    # The AgentSend must not appear until BOTH t1 and t2 are closed: it lands
+    # after the last ToolResult, not between the two open pairs.
+    send_index = next(i for i, m in enumerate(out) if isinstance(m, AgentSendMessage))
+    last_tr_index = max(i for i, m in enumerate(out) if isinstance(m, ToolResult))
+    assert send_index > last_tr_index, "user turn flushed while a pair was still open"
 
 
 def test_materialize_messages_coalesces_cross_type_user_role() -> None:

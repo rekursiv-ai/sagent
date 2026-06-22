@@ -81,7 +81,8 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
+from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
@@ -975,7 +976,7 @@ def parse_slack_args(
     _ = parser.add_argument(
         "--session-dir",
         dest="session_dir",
-        default=str(Path.home() / ".sagent" / "slack"),
+        default=str(data_dir("sagent") / "slack"),
         help="Directory for session persistence (default: ~/.sagent/slack).",
     )
     _ = parser.add_argument(

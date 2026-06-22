@@ -11,7 +11,7 @@ from typing import cast
 
 import json
 
-from sagent.lib.json import MutableJSON
+from sagent.lib.custom_json import MutableJSON
 from sagent.providers.selfhosted import (
     SelfHostedModel,
     _attention_mask,
@@ -367,8 +367,11 @@ def test_self_hosted_model_properties() -> None:
     assert m.supports_context_management is False
     assert m.supports_persistent_retry is False
     assert m.supports_account_auth is False
-    assert m.max_image_dim == 2000
-    assert m.max_image_bytes == 5 * 1024 * 1024
+    # A local model has no provider-imposed image/wire caps -- all three are
+    # the 0=unlimited sentinel (consistent: no borrowed pixel cap either).
+    assert m.max_image_dim == 0
+    assert m.max_image_bytes == 0
+    assert m.max_request_bytes == 0
     assert m.approx_text_tokens("a" * 16) == 4
     assert m.is_context_overflow(RuntimeError("x")) is False
     assert m.is_retryable_provider_error(RuntimeError("x")) is False

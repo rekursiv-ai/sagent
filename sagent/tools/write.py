@@ -9,7 +9,7 @@ import asyncio
 import re
 
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.json import JSON, json_freeze
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import (
     file_lock_key,
     get_file_write_lock,

@@ -49,7 +49,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log, token_count
-from sagent.lib.json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -57,7 +57,10 @@ from sagent.providers.lib.cost import (
 )
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
+    error_status_code,
     find_response_not_read,
+    is_request_too_large,
+    raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -300,6 +303,25 @@ _HAIKU = Pricing(
 )
 
 
+# Image / wire byte limits, per Anthropic's Vision + API-overview docs
+# (https://platform.claude.com/docs/en/build-with-claude/vision,
+# https://platform.claude.com/docs/en/api/overview#request-size-limits;
+# verified Jun 2026):
+#   - Per-image hard limit: 5 MB (request rejected above this).
+#   - Per-request hard limit: 32 MB for standard endpoints.
+#   - ``max_image_dim`` is set to each model's NATIVE resolution -- the long
+#     edge above which the server downscales the image for free. Pre-resizing
+#     to exactly this caps wire bytes and token cost without losing fidelity
+#     the model would have kept; larger values (e.g. the 8000x8000 hard-reject
+#     ceiling) never trigger a useful client resize. Two tiers:
+#       * High-resolution models (Opus 4.7+, Fable 5, Mythos 5): 2576 px.
+#       * Prior models (Opus 4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5): 1568 px.
+_IMAGE_BYTES = 5 * 1024 * 1024
+_REQUEST_BYTES = 32 * 1024 * 1024
+_NATIVE_DIM_HIRES = 2576
+_NATIVE_DIM_STD = 1568
+
+
 class Anthropic:
     """Anthropic provider - API key auth.
 
@@ -338,6 +360,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-fable-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -347,6 +372,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-8": ModelProfile(
             max_request_tokens=200_000,
@@ -356,6 +384,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-8+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -365,6 +396,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-7": ModelProfile(
             max_request_tokens=200_000,
@@ -374,6 +408,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-7+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -383,6 +420,9 @@ class Anthropic:
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),
             chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-6": ModelProfile(
             max_request_tokens=200_000,
@@ -390,6 +430,9 @@ class Anthropic:
             pricing=_OPUS_FAST_4_6_7,
             valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -397,6 +440,9 @@ class Anthropic:
             pricing=_OPUS_FAST_4_6_7,
             valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-5": ModelProfile(
             max_request_tokens=200_000,
@@ -405,6 +451,9 @@ class Anthropic:
             adaptive_thinking_mode=False,
             valid_efforts=("low", "medium", "high"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-opus-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -413,6 +462,9 @@ class Anthropic:
             adaptive_thinking_mode=False,
             valid_efforts=("low", "medium", "high"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-sonnet-4-6": ModelProfile(
             max_request_tokens=200_000,
@@ -420,6 +472,9 @@ class Anthropic:
             pricing=_SONNET,
             valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-sonnet-4-6+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -427,6 +482,9 @@ class Anthropic:
             pricing=_SONNET,
             valid_efforts=("low", "medium", "high", "max"),
             chars_per_token=3.66,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-sonnet-4-5": ModelProfile(
             max_request_tokens=200_000,
@@ -434,6 +492,9 @@ class Anthropic:
             pricing=_SONNET,
             adaptive_thinking_mode=False,
             chars_per_token=4.83,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-sonnet-4-5+1m": ModelProfile(
             max_request_tokens=1_000_000,
@@ -441,6 +502,9 @@ class Anthropic:
             pricing=_SONNET,
             adaptive_thinking_mode=False,
             chars_per_token=4.83,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
         "claude-haiku-4-5": ModelProfile(
             max_request_tokens=200_000,
@@ -448,6 +512,9 @@ class Anthropic:
             pricing=_HAIKU,
             adaptive_thinking_mode=False,
             chars_per_token=4.83,
+            max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
         ),
     }
 
@@ -1022,34 +1089,48 @@ class _AnthropicModel:
 
     @property
     def max_image_dim(self) -> int:
-        """Maximum image dimension (pixels) accepted by the API."""
-        return 8000
+        """Maximum image edge (pixels) accepted, from the model profile."""
+        return self._profile.max_image_dim
 
     @property
     def max_image_bytes(self) -> int:
-        """Maximum image size (bytes) accepted by the API."""
-        return 5 * 1024 * 1024
+        """Maximum size (bytes) of a single image, from the model profile."""
+        return self._profile.max_image_bytes
+
+    @property
+    def max_request_bytes(self) -> int:
+        """Maximum request-body size (bytes), from the model profile."""
+        return self._profile.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a context-window overflow.
+        """Classify an error as a token-context-window overflow.
 
         The body text is the canonical signal. The HTTP status code
         carries less information: Anthropic returns 400 with body
-        ``"prompt is too long"`` and 413 with body ``"Request size
-        exceeds model context window"``, but other status codes
-        (uncommon but observed in production) can carry the same body
-        text. Trust the body, ignore the status.
+        ``"prompt is too long"``, but other status codes (uncommon but
+        observed in production) can carry the same body text. Trust the
+        body, ignore the status. The byte wire-limit (413
+        ``request_too_large``) is a different condition handled by
+        :meth:`is_request_too_large` and must NOT classify here -- a
+        larger-context model does not relieve the byte ceiling.
 
         Args:
           error: Exception raised by the provider call.
 
         Returns:
-          overflow: True when ``error`` indicates context overflow.
+          overflow: True when ``error`` indicates token-context overflow.
 
         """
         if isinstance(error, PromptTooLongError):
             return True
         if not isinstance(error, anthropic.APIStatusError):
+            return False
+        # Exclude the byte wire-limit first, uniform with every other
+        # provider: a 413 byte error must route to byte-overflow recovery,
+        # not be mis-read as token overflow when its body (or a non-mapping
+        # body that falls to the substring path) incidentally names the
+        # context window.
+        if is_request_too_large(error_status_code(error), str(error)):
             return False
         return _is_prompt_too_long_text(str(error), error_body=_api_status_body(error))
 
@@ -1234,6 +1315,7 @@ class _AnthropicModel:
             # the unread-body crash is handled downstream in
             # ``retry.py::_response_body_excerpt``. Let the error re-raise so
             # the classifier sees the status.
+            raise_if_request_too_large(getattr(e, "status_code", None), str(e), cause=e)
             if not _is_prompt_too_long_text(str(e), error_body=_api_status_body(e)):
                 raise
             debug_log.trace_error(
@@ -1429,8 +1511,8 @@ def _add_cache_breakpoint(
 
 def _build_messages(
     request: ModelRequest,
-    max_image_dim: int = 8000,
-    max_image_bytes: int = 5 * 1024 * 1024,
+    max_image_dim: int = 0,
+    max_image_bytes: int = 0,
 ) -> list[anthropic.types.MessageParam]:
     """Convert history entries to Anthropic message format.
 

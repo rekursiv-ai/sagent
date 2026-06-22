@@ -8,7 +8,7 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.lib.json import json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.providers import Google
 from sagent.types.runtime import (
     AssistantMessage,
