@@ -339,26 +339,26 @@ def float_val(value: object, default: float = 0.0) -> float:
     return default
 
 
-def int_val(v: object, default: int) -> int:
+def int_val(value: object, default: int) -> int:
     """Coerce a JSON value to int, falling back to ``default``.
 
     Args:
-      v: Value to coerce.
+      value: Value to coerce.
       default: Fallback if coercion fails.
 
     Returns:
       result: Integer value or ``default``.
 
     """
-    if isinstance(v, bool):
+    if isinstance(value, bool):
         # Reject bool uniformly with ``bool_val``/``float_val``: a JSON ``true``
         # where an int was expected is a shape mismatch, not the value ``1``.
         return default
-    if isinstance(v, (int, float)):
-        return int(v)
-    if isinstance(v, str):
+    if isinstance(value, int | float):
+        return int(value)
+    if isinstance(value, str):
         try:
-            return int(v)
+            return int(value.strip())
         except ValueError:
             return default
     return default
