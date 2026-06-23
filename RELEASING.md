@@ -22,17 +22,15 @@ Replace `X.Y.Z` with the new version.
 3. Commit and merge to `main`. Confirm the published `pyproject.toml`
    shows the new version before continuing:
    ```bash
-   gh api repos/rekursiv-ai/sagent/contents/pyproject.toml --jq .content \
-     | base64 -d | grep '^version'
+   gh api repos/rekursiv-ai/sagent/contents/pyproject.toml --jq .content | base64 -d | grep '^version'
    ```
 4. Cut the release (this is what actually triggers PyPI publish):
    ```bash
-   gh release create vX.Y.Z --repo rekursiv-ai/sagent \
-       --title "sagent X.Y.Z" --generate-notes
+   gh release create vX.Y.Z --repo rekursiv-ai/sagent --title "sagent X.Y.Z" --generate-notes
    ```
 5. Watch the workflow:
    ```bash
-   gh run list --repo rekursiv-ai/sagent --workflow=publish-pypi.yml --limit 1
+   gh run watch --repo rekursiv-ai/sagent $(gh run list --repo rekursiv-ai/sagent --workflow publish-pypi.yml --limit 1 --json databaseId --jq '.[0].databaseId')
    ```
 
 ## Check what's live on PyPI
