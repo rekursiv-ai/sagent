@@ -16,11 +16,33 @@ import base64
 
 
 type JSONScalar = str | int | float | bool | None
-type JSONValue = JSONScalar | Sequence[JSONValue] | Mapping[str, JSONValue]
+# The scalar union is inlined here rather than referencing ``JSONScalar`` by
+# name. ty 0.0.52 panics ("too many cycle iterations" in
+# PEP695TypeAliasType::raw_value_type_) when a self-recursive PEP-695 alias
+# references a *named* union alias alongside a covariant-abc (Sequence) and
+# invariant-abc (Mapping) member. Inlining the scalar union sidesteps it.
+# https://github.com/astral-sh/ty/issues/3835
+# Was:
+#   type JSONValue = JSONScalar | Sequence[JSONValue] | Mapping[str, JSONValue]
+type JSONValue = (
+    str | int | float | bool | None | Sequence[JSONValue] | Mapping[str, JSONValue]
+)
 type JSON = Mapping[str, JSONValue]
 
+# Scalar union inlined (not ``JSONScalar``) for the same ty 0.0.52 panic; see
+# the JSONValue note above.
+# Was:
+#   type MutableJSONValue = (
+#       JSONScalar
+#       | MutableSequence[MutableJSONValue]
+#       | MutableMapping[str, MutableJSONValue]
+# )
 type MutableJSONValue = (
-    JSONScalar
+    str
+    | int
+    | float
+    | bool
+    | None
     | MutableSequence[MutableJSONValue]
     | MutableMapping[str, MutableJSONValue]
 )
