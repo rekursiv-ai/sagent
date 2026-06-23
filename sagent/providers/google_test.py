@@ -701,6 +701,47 @@ def test_build_request_omits_empty_thought_signature() -> None:
     assert "thoughtSignature" not in parts[1]
 
 
+def test_build_request_preserves_per_call_signature_order() -> None:
+    """Each functionCall part keeps its own signature in call order; a future
+    refactor that reorders or shares parts would break the signature chain.
+    """
+    asst = AssistantMessage(
+        text="answer",
+        thought_signature="sig-text",
+        tool_calls=(
+            ToolCall(id="a", name="Bash", args={"i": 1}, thought_signature="sig-a"),
+            ToolCall(id="b", name="Bash", args={"i": 2}, thought_signature="sig-b"),
+        ),
+    )
+    body = _build_request(_make_request([asst]))
+    parts = cast(
+        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+    )
+    assert cast(MutableJSON, parts[1]["functionCall"])["args"] == {"i": 1}
+    assert parts[1]["thoughtSignature"] == "sig-a"
+    assert cast(MutableJSON, parts[2]["functionCall"])["args"] == {"i": 2}
+    assert parts[2]["thoughtSignature"] == "sig-b"
+
+
+def test_build_request_tool_result_carries_no_signature() -> None:
+    """Signatures attach to model-role parts only; a functionResponse (tool
+    result) must never emit thoughtSignature.
+    """
+    asst = AssistantMessage(
+        text="answer",
+        thought_signature="sig-text",
+        tool_calls=(
+            ToolCall(id="c1", name="Bash", args={}, thought_signature="sig-fc"),
+        ),
+    )
+    res = ToolResult(call_id="c1", content="done")
+    body = _build_request(_make_request([asst, res]))
+    contents = cast(list[MutableJSON], body["contents"])
+    user_parts = cast(list[MutableJSON], contents[1]["parts"])
+    assert "functionResponse" in user_parts[0]
+    assert "thoughtSignature" not in user_parts[0]
+
+
 if __name__ == "__main__":
     from sagent.lib.testing import test_main
 
