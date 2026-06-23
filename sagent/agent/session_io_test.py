@@ -1883,6 +1883,29 @@ def test_persisted_refs_warns_on_unreadable_file(
     assert any("persistence may duplicate" in r.message for r in caplog.records)
 
 
+def test_thought_signature_round_trips(tmp_path: Path) -> None:
+    """Gemini 3.x thought signatures must survive a session save/reload, else a
+    resumed tape breaks the signature chain (400 on the next turn).
+    """
+    assistant = AssistantMessage(
+        text="answer",
+        thought_signature="sig-text-abc",
+        tool_calls=(
+            ToolCall(
+                id="toolu_1",
+                name="Bash",
+                args={"cmd": "ls"},
+                thought_signature="sig-fc-xyz",
+            ),
+        ),
+    )
+    result = ToolResult(call_id="toolu_1", content="ok")
+    reloaded = _round_trip_history([assistant, result], tmp_path)[0]
+    assert isinstance(reloaded, AssistantMessage)
+    assert reloaded.thought_signature == "sig-text-abc"
+    assert reloaded.tool_calls[0].thought_signature == "sig-fc-xyz"
+
+
 def test_unpersisted_session_error_none_without_session_dir() -> None:
     # Persistence disabled (no session_dir): never an error.
     agent = Agent(model=_NoopModel(), session_dir=None)
