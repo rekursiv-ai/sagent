@@ -339,25 +339,114 @@ def float_val(value: object, default: float = 0.0) -> float:
     return default
 
 
-def int_val(v: object, default: int) -> int:
+def int_val(value: object, default: int) -> int:
     """Coerce a JSON value to int, falling back to ``default``.
 
     Args:
-      v: Value to coerce.
+      value: Value to coerce.
       default: Fallback if coercion fails.
 
     Returns:
       result: Integer value or ``default``.
 
     """
-    if isinstance(v, (int, float, bool)):
-        return int(v)
-    if isinstance(v, str):
+    if isinstance(value, bool):
+        # Reject bool uniformly with ``bool_val``/``float_val``: a JSON ``true``
+        # where an int was expected is a shape mismatch, not the value ``1``.
+        return default
+    if isinstance(value, int | float):
+        return int(value)
+    if isinstance(value, str):
         try:
-            return int(v)
+            return int(value.strip())
         except ValueError:
             return default
     return default
+
+
+def str_val(value: object, default: str = "") -> str:
+    """Return ``value`` if it is a string, else ``default``.
+
+    The string sibling of :func:`int_val` / :func:`bool_val` for reading a JSON
+    field whose type is not guaranteed. Deliberately does not stringify
+    non-strings: a numeric or object value where a string was expected is a
+    shape mismatch, so it falls back to ``default`` rather than fabricating
+    ``"42"`` from ``42`` (mirroring ``int_val`` not coercing arbitrary objects).
+
+    Args:
+      value: Value to read.
+      default: Fallback when ``value`` is not a string.
+
+    Returns:
+      result: The string value, or ``default``.
+
+    """
+    return value if isinstance(value, str) else default
+
+
+def str_list_val(value: object) -> tuple[str, ...]:
+    """Read a JSON array, keeping only its string elements as a tuple.
+
+    The list sibling of the scalar ``*_val`` accessors. A non-list value yields
+    an empty tuple; non-string elements are dropped rather than coerced, so a
+    malformed entry never fabricates a value (consistent with :func:`str_val`).
+
+    Args:
+      value: Value to read, expected to be a JSON array of strings.
+
+    Returns:
+      result: Tuple of the string elements, possibly empty.
+
+    """
+    if not isinstance(value, list):
+        return ()
+    return tuple(x for x in cast("list[object]", value) if isinstance(x, str))
+
+
+def str_map_val(value: object) -> Mapping[str, str]:
+    """Read a JSON object, keeping only its string-valued string keys.
+
+    The mapping sibling of :func:`str_list_val`. A non-object value yields an
+    empty mapping; entries whose key or value is not a string are dropped rather
+    than coerced. The result is an immutable :class:`MappingProxyType` so it is
+    safe as a frozen-dataclass field default and cannot be mutated by callers.
+
+    Args:
+      value: Value to read, expected to be a JSON object of string -> string.
+
+    Returns:
+      result: Immutable mapping of the string entries, possibly empty.
+
+    """
+    if not isinstance(value, dict):
+        return MappingProxyType({})
+    items = cast("dict[object, object]", value)
+    return MappingProxyType(
+        {k: v for k, v in items.items() if isinstance(k, str) and isinstance(v, str)}
+    )
+
+
+def datetime_val(value: object, default: datetime | None = None) -> datetime | None:
+    """Parse an ISO 8601 string into a ``datetime``, else ``default``.
+
+    The inverse of the ISO encoding this module's codec emits for ``datetime``
+    fields. A non-string, empty, or malformed value yields ``default`` rather
+    than raising, so callers reading untyped JSON need no try/except.
+
+    Args:
+      value: Value to read, expected to be an ISO 8601 string.
+      default: Fallback when ``value`` is not a parseable ISO string.
+
+    Returns:
+      result: The parsed ``datetime``, or ``default``.
+
+    """
+    if not isinstance(value, str) or not value:
+        return default
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return default
 
 
 # -- Dataclass <-> JSON codec -------------------------------------------------

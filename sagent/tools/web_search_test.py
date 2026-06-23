@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 import asyncio
 
-from sagent.lib.web.search import CaptchaError, SearchResult
-from sagent.tools.web_search import WebSearch, _build_query
+from sagent.lib.web.search import (
+    CaptchaError,
+    ImageResult,
+    MapResult,
+    PaperResult,
+    SearchResult,
+    TorrentResult,
+    VideoResult,
+)
+from sagent.tools.paper_search import PaperSearch
+from sagent.tools.web_search import (
+    WebSearch,
+    _build_query,
+    _format_result,
+)
 from sagent.types.runtime import ToolResult
 
 
@@ -24,6 +38,14 @@ def test_description_resolves() -> None:
     # wrong asset or empty template is caught.
     assert "Web search" in desc
     assert "Sources:" in desc
+    # The @property exists to substitute {{NOW}} each access; an unsubstituted
+    # template token must never survive into the rendered description.
+    assert "{{NOW}}" not in desc
+
+
+def test_papersearch_description_resolves_now() -> None:
+    # PaperSearch.description is also a @property; same {{NOW}} contract.
+    assert "{{NOW}}" not in PaperSearch().description
 
 
 def test_summary_short_query() -> None:
@@ -75,6 +97,28 @@ def test_build_query_ignores_non_string_domains() -> None:
 def test_build_query_ignores_non_list() -> None:
     q = _build_query("ml", "not-a-list", None)
     assert q == "ml"
+
+
+def test_build_query_rejects_operator_injection() -> None:
+    # A domain value carrying an embedded operator must not splice into the
+    # query and un-scope/contradict the filter.
+    q = _build_query("ml", ["example.com -site:trusted.com"], None)
+    assert q == "ml"
+    assert "-site:trusted.com" not in q
+
+
+def test_build_query_rejects_whitespace_and_non_hostname() -> None:
+    q = _build_query("ml", ["not a host", "valid.com", "no-dot"], ["a.b -c"])
+    assert "site:valid.com" in q
+    assert "not a host" not in q
+    assert "site:no-dot" not in q  # single label, not a hostname
+    assert "-site:a.b" not in q  # embedded operator rejected wholesale
+
+
+def test_build_query_accepts_wildcard_and_port() -> None:
+    q = _build_query("ml", ["*.arxiv.org", "host.com:8080"], None)
+    assert "site:*.arxiv.org" in q
+    assert "site:host.com:8080" in q
 
 
 def test_run_returns_formatted_results() -> None:
@@ -148,22 +192,28 @@ def test_run_invalid_backend() -> None:
 def test_run_valid_backend_passes_through() -> None:
     captured: dict[str, object] = {}
 
-    def fake_search(q: str, *, backend: object) -> list[SearchResult]:
+    def fake_search(
+        q: str, *, backend: object, categories: object = "general"
+    ) -> list[SearchResult]:
         captured["q"] = q
         captured["backend"] = backend
+        captured["categories"] = categories
         return []
 
     with patch("sagent.tools.web_search.search", side_effect=fake_search):
         _ = asyncio.run(WebSearch().run({"query": "x", "backend": "duckduckgo"}))
     assert captured["backend"] == "duckduckgo"
+    assert captured["categories"] == "general"
 
 
 def test_run_with_allowed_and_blocked_domains() -> None:
     captured: dict[str, object] = {}
 
-    def fake_search(q: str, *, backend: object) -> list[SearchResult]:
+    def fake_search(
+        q: str, *, backend: object, categories: object = "general"
+    ) -> list[SearchResult]:
         captured["q"] = q
-        del backend
+        del backend, categories
         return []
 
     with patch("sagent.tools.web_search.search", side_effect=fake_search):
@@ -180,6 +230,107 @@ def test_run_with_allowed_and_blocked_domains() -> None:
     assert isinstance(q, str)
     assert "site:arxiv.org" in q
     assert "-site:x.com" in q
+
+
+def test_run_category_forces_searxng_backend() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_search(
+        q: str, *, backend: object, categories: object = "general"
+    ) -> list[SearchResult]:
+        del q
+        captured["backend"] = backend
+        captured["categories"] = categories
+        return []
+
+    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+        # Caller leaves backend at default; a non-general category forces searxng.
+        _ = asyncio.run(WebSearch().run({"query": "x", "categories": "science"}))
+    assert captured["backend"] == "searxng"
+    assert captured["categories"] == "science"
+
+
+def test_run_invalid_category_errors() -> None:
+    result = asyncio.run(WebSearch().run({"query": "x", "categories": "bogus"}))
+    assert result.is_error
+    assert "Invalid category" in result.content
+
+
+def test_format_paper_result() -> None:
+    out = _format_result(
+        PaperResult(
+            url="https://doi.org/10.1/x",
+            title="Attn",
+            snippet="abstract",
+            authors=("A", "B"),
+            journal="NeurIPS",
+            doi="10.1/x",
+            published=datetime(2017, 6, 1),  # noqa: DTZ001 -- naive ok in test
+            citations=42,
+        )
+    )
+    assert "[Attn](https://doi.org/10.1/x)" in out
+    assert "abstract" in out
+    assert "doi:10.1/x" in out
+    assert "cites:42" in out
+    assert "2017" in out
+
+
+def test_format_image_result() -> None:
+    out = _format_result(
+        ImageResult(
+            url="https://p",
+            title="Cat",
+            snippet="",
+            image_url="https://img",
+            resolution="1x1",
+        )
+    )
+    assert "https://img" in out
+    assert "1x1" in out
+
+
+def test_format_map_result() -> None:
+    out = _format_result(
+        MapResult(
+            url="https://m",
+            title="Tower",
+            snippet="",
+            latitude=48.8,
+            longitude=2.3,
+        )
+    )
+    assert "48.8,2.3" in out
+
+
+def test_format_torrent_result() -> None:
+    out = _format_result(
+        TorrentResult(
+            url="https://t",
+            title="ISO",
+            snippet="",
+            magnet_url="magnet:?xt=1",
+            seed=10,
+            leech=2,
+        )
+    )
+    assert "seed:10" in out
+    assert "leech:2" in out
+    assert "magnet:?xt=1" in out
+
+
+def test_format_plain_search_result_has_no_detail() -> None:
+    out = _format_result(SearchResult(url="https://w", title="W", snippet="s"))
+    assert out == "[W](https://w)\ns"
+
+
+def test_video_detail_precedes_media_dispatch() -> None:
+    # VideoResult is-a MediaResult; the formatter must use the video branch.
+    out = _format_result(
+        VideoResult(url="https://v", title="V", snippet="", views="1M", author="C")
+    )
+    assert "1M views" in out
+    assert "C" in out
 
 
 if __name__ == "__main__":

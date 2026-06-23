@@ -709,14 +709,43 @@ def validate_limit(limit: int | None) -> int | None | ToolResult:
     return limit
 
 
+def validate_year_range(
+    year_from: int | None, year_to: int | None
+) -> ToolResult | None:
+    """Reject an inverted year range; ``None`` when the bounds are coherent.
+
+    An inverted range (``year_from > year_to``) is a caller mistake that each
+    backend renders into a different empty/garbage query (S2 ``2025-2020``,
+    OpenAlex a from-after-to filter). Catch it once, locally, with a clear
+    message instead of returning provider-dependent emptiness.
+
+    Args:
+      year_from: Inclusive lower bound, or ``None``.
+      year_to: Inclusive upper bound, or ``None``.
+
+    Returns:
+      error: A ``ToolResult`` error when ``year_from > year_to``, else ``None``.
+
+    """
+    if year_from is not None and year_to is not None and year_from > year_to:
+        return ToolResult(
+            call_id="",
+            content=(
+                f"'year_from' ({year_from}) must not exceed 'year_to' ({year_to})."
+            ),
+            is_error=True,
+        )
+    return None
+
+
 def validate_abstract_chars(cap: int | None) -> int | None | ToolResult:
     """Reject a non-positive ``abstract_chars``; pass ``None`` and positives.
 
-    The schema declares ``minimum: 1``, but the directive layer does not
-    enforce minimums, so a ``0`` would otherwise reach :func:`_trim_abstract`
-    and be silently read as "no truncation" -- contradicting the schema and
-    diverging from :func:`validate_limit`. One validator per positive-int tool
-    arg keeps the contract uniform.
+    The agent dispatch path already enforces the schema's ``minimum: 1`` (via
+    ``validate_json_schema``), but a direct ``run`` caller -- tests, any non-agent
+    entry -- bypasses that, and a ``0`` reaching :func:`_trim_abstract` is
+    silently read as "no truncation". This guard makes the contract hold on
+    every call path, mirroring :func:`validate_limit` for uniformity.
 
     Args:
       cap: Caller-supplied abstract cap (``None`` when omitted).
@@ -988,7 +1017,11 @@ def _s2_error_result(e: FetchError, what: str) -> ToolResult:
     if e.status == 429:
         return ToolResult(
             call_id="",
-            content="Semantic Scholar rate limit hit. Retry shortly.",
+            content=(
+                "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
+                "SEMANTIC_SCHOLAR_API_KEY for a higher tier, retry shortly, or "
+                "try source='openalex'/'searxng' which use a separate quota."
+            ),
             is_error=True,
         )
     body = e.body[:200].decode(errors="replace")

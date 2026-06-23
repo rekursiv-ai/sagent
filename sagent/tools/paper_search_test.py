@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.search import PaperResult
 from sagent.tools.paper_common import PaperRecord
 from sagent.tools.paper_search import (
     PaperSearch,
@@ -24,6 +26,7 @@ from sagent.tools.paper_search import (
     _openalex_filter,
     _openalex_work_to_record,
     _s2_year_param,
+    _searxng_paper_to_record,
 )
 
 
@@ -354,25 +357,26 @@ def test_run_no_results_single_term_no_and_hint() -> None:
     assert "drop" not in result.content.lower()
 
 
-def test_run_no_results_s2_appends_author_hint() -> None:
-    # An EXPLICIT source="s2" returning nothing must nudge toward fused: an
-    # author-surname query silently zero-hits on S2 but resolves via OpenAlex
-    # (live 2026-06-19 ARC-AGI survey reference walk). The hint fires only for
-    # explicit s2 now, since fused is the default and already covers it.
+def test_run_no_results_appends_author_hint() -> None:
+    # An author-surname query zero-hits on EVERY source (all rank against
+    # title/abstract, including OpenAlex's title_and_abstract.search), so the
+    # empty hint must point at the PaperAuthor tool, not a backend switch.
     payload = json.dumps({"total": 0, "data": []}).encode()
     with patch("sagent.tools.paper_common.fetch", return_value=payload):
         result = asyncio.run(
             PaperSearch().run({"query": "Andrews Sparks", "source": "s2"})
         )
     assert "(no results)" in result.content
-    assert 'source="fused"' in result.content
-    assert "author" in result.content.lower()
+    assert "PaperAuthor" in result.content
+    # The old, false advice -- "retry fused, OpenAlex indexes authors" -- must
+    # be gone: switching backends does not enable author search.
+    assert 'source="fused"' not in result.content
+    assert "indexes authors" not in result.content
 
 
-def test_run_no_results_fused_no_author_hint() -> None:
-    # Fused already includes OpenAlex, so the s2-only author-name hint would be
-    # circular and must NOT appear. (The generic AND-narrowing note may appear
-    # for a multi-term query -- that is correct and separate.)
+def test_run_no_results_fused_author_hint_points_to_paper_author() -> None:
+    # Fused covers OpenAlex but still cannot do author search, so the hint must
+    # appear here too and direct to PaperAuthor (never a circular fused retry).
     s2_empty = json.dumps({"total": 0, "data": []}).encode()
     oa_empty = json.dumps({"meta": {"count": 0}, "results": []}).encode()
 
@@ -388,7 +392,8 @@ def test_run_no_results_fused_no_author_hint() -> None:
             PaperSearch().run({"query": "nothing here", "source": "fused"})
         )
     assert result.content.startswith("(no results)")
-    assert "author names" not in result.content  # no circular fused-author hint
+    assert "PaperAuthor" in result.content
+    assert "indexes authors" not in result.content
 
 
 def test_run_hits_no_author_hint() -> None:
@@ -753,6 +758,127 @@ def test_fused_partial_failure_is_not_cached() -> None:
         second = asyncio.run(PaperSearch().run({"query": q}))
     assert s2_fetch.call_count == 1
     assert "NowS2" in second.content
+
+
+def test_searxng_paper_to_record_maps_fields() -> None:
+    rec = _searxng_paper_to_record(
+        PaperResult(
+            url="https://arxiv.org/abs/1706.03762",
+            title="Attention Is All You Need",
+            snippet="We propose the Transformer.",
+            authors=("Vaswani", "Shazeer"),
+            journal="NeurIPS",
+            doi="10.5555/3295222",
+            pdf_url="https://arxiv.org/pdf/1706.03762",
+            published=datetime(2017, 6, 12),  # noqa: DTZ001 -- naive ok in test
+            citations=100,
+        )
+    )
+    assert rec.title == "Attention Is All You Need"
+    assert rec.authors == ("Vaswani", "Shazeer")
+    assert rec.year == 2017
+    assert rec.venue == "NeurIPS"
+    assert rec.doi == "10.5555/3295222"
+    assert rec.arxiv_id == "1706.03762"  # recovered from URL
+    assert rec.citation_count == 100
+    assert rec.open_access_pdf == "https://arxiv.org/pdf/1706.03762"
+    assert rec.sources == ("searxng",)
+
+
+def test_searxng_paper_to_record_drops_unparseable_doi() -> None:
+    rec = _searxng_paper_to_record(
+        PaperResult(url="https://x", title="T", snippet="", doi="not-a-doi")
+    )
+    assert rec.doi is None
+
+
+def test_run_searxng_source() -> None:
+    hits = [
+        PaperResult(
+            url="https://doi.org/10.1/x",
+            title="Hit One",
+            snippet="abstract",
+            doi="10.1/x",
+        )
+    ]
+    with patch("sagent.tools.paper_search.searxng", return_value=hits) as mock:
+        result = asyncio.run(
+            PaperSearch().run({"query": "transformers", "source": "searxng"})
+        )
+    assert not result.is_error
+    assert "Hit One" in result.content
+    assert mock.call_args.kwargs["categories"] == "science"
+
+
+def test_run_searxng_source_year_filter() -> None:
+    hits = [
+        PaperResult(
+            url="https://a",
+            title="Old",
+            snippet="",
+            published=datetime(2010, 1, 1),  # noqa: DTZ001 -- naive ok in test
+        ),
+        PaperResult(
+            url="https://b",
+            title="New",
+            snippet="",
+            published=datetime(2023, 1, 1),  # noqa: DTZ001 -- naive ok in test
+        ),
+    ]
+    with patch("sagent.tools.paper_search.searxng", return_value=hits):
+        result = asyncio.run(
+            PaperSearch().run({"query": "x", "source": "searxng", "year_from": 2020})
+        )
+    assert "New" in result.content
+    assert "Old" not in result.content
+
+
+def test_description_states_fused_default_not_s2() -> None:
+    desc = PaperSearch().description
+    assert "Default mode is `fused`" in desc
+    assert "Default backend is Semantic Scholar" not in desc
+
+
+def test_description_describes_rrf_not_append_at_rank() -> None:
+    desc = PaperSearch().description
+    assert "reciprocal-rank" in desc.lower()
+    assert "S2 ordering preserved" not in desc
+    assert "appended at their OpenAlex" not in desc
+
+
+def test_description_does_not_claim_openalex_author_search() -> None:
+    desc = PaperSearch().description
+    # The OpenAlex leg uses title_and_abstract.search, not an author filter;
+    # the docs must not promise author-name search via any source.
+    assert "OpenAlex indexes authors" not in desc
+    assert "which indexes authors" not in desc
+
+
+def test_run_rejects_inverted_year_range() -> None:
+    result = asyncio.run(
+        PaperSearch().run({"query": "x", "year_from": 2025, "year_to": 2020})
+    )
+    assert result.is_error
+    assert "year_from" in result.content
+
+
+def test_run_searxng_missing_env_is_search_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SEARXNG_URL", raising=False)
+    result = asyncio.run(PaperSearch().run({"query": "x", "source": "searxng"}))
+    assert result.is_error
+    assert "SEARXNG_URL" in result.content
+
+
+def test_s2_non_list_data_does_not_crash() -> None:
+    # A shape regression (``data`` is a string, not a list) must yield a clean
+    # empty result, not iterate the string into characters or raise.
+    payload = json.dumps({"total": 1, "data": "oops"}).encode()
+    with patch("sagent.tools.paper_common.fetch", return_value=payload):
+        result = asyncio.run(PaperSearch().run({"query": "x", "source": "s2"}))
+    assert not result.is_error
+    assert result.content.startswith("(no results)")
 
 
 if __name__ == "__main__":
