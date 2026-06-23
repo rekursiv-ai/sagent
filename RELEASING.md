@@ -26,7 +26,7 @@ Replace `X.Y.Z` with the new version.
    ```
 4. Cut the release (this is what actually triggers PyPI publish):
    ```bash
-   gh release create vX.Y.Z --repo rekursiv-ai/sagent --title "sagent X.Y.Z" --generate-notes
+   gh release create vX.Y.Z --repo rekursiv-ai/sagent --title "vX.Y.Z" --generate-notes
    ```
 5. Watch the workflow:
    ```bash
