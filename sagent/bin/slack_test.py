@@ -554,7 +554,7 @@ class TestCommands:
         _ = (tmp_path / "sre.md").write_text("You are an SRE.")
         adapter, _ = _make_adapter(persona_dir=tmp_path)
         mock = AsyncMock()
-        adapter.spawn_agent = mock  # ty: ignore[invalid-assignment] -- test mock
+        adapter.spawn_agent = mock
         result = await adapter._try_command("create sre as ops", "C1", "1.0")
         assert result is True
         mock.assert_called_once_with("ops", "You are an SRE.")
@@ -564,7 +564,7 @@ class TestCommands:
         _ = (tmp_path / "pm.md").write_text("You are a PM.")
         adapter, _ = _make_adapter(persona_dir=tmp_path)
         mock = AsyncMock()
-        adapter.spawn_agent = mock  # ty: ignore[invalid-assignment] -- test mock
+        adapter.spawn_agent = mock
         result = await adapter._try_command("create pm", "C1", "1.0")
         assert result is True
         mock.assert_called_once_with("pm", "You are a PM.")

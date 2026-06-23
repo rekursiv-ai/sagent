@@ -816,7 +816,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
 
     fake_proc = MagicMock()
     fake_proc.close = AsyncMock()
-    model._spawn_initialized = AsyncMock(return_value=fake_proc)  # ty: ignore[invalid-assignment]
+    model._spawn_initialized = AsyncMock(return_value=fake_proc)
 
     async def _send_entry(proc: object, entry: TapeEvent) -> None:
         del proc
