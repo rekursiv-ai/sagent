@@ -218,7 +218,7 @@ async def run_live(config_name: str, trials: int) -> dict:
     # self-mutate starts cheap, carries a ModelSpec, and upgrades to mut_id
     # (a DIFFERENT, cheaper provider/model than the high-tier baseline).
     mutate_prompt = solver.system_for(allow_upgrade=True, strong_model=mut_id)
-    selfs: list[dict] = []
+    self_runs: list[dict] = []
     for i in range(trials):
         print(f"• self-mutate trial {i + 1}/{trials} …", flush=True)
         cheap_model, cheap_spec = build(cheap_prov, cheap_id)
@@ -230,19 +230,19 @@ async def run_live(config_name: str, trials: int) -> dict:
             model_spec=cheap_spec,
             max_budget=1.00,
         )
-        selfs.append(s)
+        self_runs.append(s)
         print(
             f"    swapped={s['swapped']} models={s['models']} first={s['first_verdict']} "
             f"final={s['final_verdict']} correct={s['correct']} ${s['cost_usd']} err={s['error']!r}"
         )
 
-    money = [s for s in selfs if s["swapped"] and s["correct"]]
-    end_correct = [s for s in selfs if s["correct"]]
+    money = [s for s in self_runs if s["swapped"] and s["correct"]]
+    end_correct = [s for s in self_runs if s["correct"]]
     # Hero = a clean money-path run if we have one, else the best available.
     hero = (
         money[0]
         if money
-        else (next((s for s in selfs if s["correct"]), None) or selfs[0])
+        else (next((s for s in self_runs if s["correct"]), None) or self_runs[0])
     )
 
     print("• canonical histograms …", flush=True)
@@ -266,7 +266,7 @@ async def run_live(config_name: str, trials: int) -> dict:
             "end_correct": len(end_correct),
         },
         "panels": {"low_tier": low, "high_tier": high, "self_mutate": hero},
-        "self_mutate_trials": [_slim(s) for s in selfs],
+        "self_mutate_trials": [_slim(s) for s in self_runs],
         "hist": hist,
     }
     out = HERE / "web" / "data.js"

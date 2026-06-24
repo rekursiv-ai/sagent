@@ -262,10 +262,10 @@ const COND={};
 KEYS.forEach(k=>{ COND[k]=condense((D.panels[k]||{}).timeline||[]);
   document.getElementById('col-'+k).innerHTML=chead(k); });
 
-function reveal(upto){
+function reveal(nShow){
   KEYS.forEach(k=>{
     const box=document.getElementById('steps-'+k);
-    box.innerHTML = COND[k].slice(0,upto).map(stepHTML).join('');
+    box.innerHTML = COND[k].slice(0,nShow).map(stepHTML).join('');
     box.querySelectorAll('.step').forEach(e=>e.classList.add('show'));
   });
 }
