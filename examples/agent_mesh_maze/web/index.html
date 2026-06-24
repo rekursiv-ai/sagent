@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent-mesh maze — peer mesh vs hub-and-spoke</title>
+<style>
+  :root{
+    --bg:#0d1017; --panel:#151a24; --line:#252c3a; --fg:#e6edf3; --dim:#8b97a8;
+    --wall:#1b2030; --floor:#222a3a; --exit:#1f6f43; --diamond:#34d3e0; --junk:#6b7280;
+    --a1:#5b9bf3; --a2:#e0855f; --a3:#67c98c; --hub:#b692f6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:18px 26px 6px}
+  h1{margin:0;font-size:20px}
+  .sub{color:var(--dim);max-width:980px;margin:6px 0 0}
+  .controls{display:flex;gap:12px;align-items:center;padding:10px 26px}
+  button{background:var(--a1);color:#06121f;border:0;border-radius:7px;
+    padding:7px 16px;font-weight:700;cursor:pointer}
+  button.ghost{background:#202736;color:var(--fg)}
+  input[type=range]{flex:1;max-width:520px}
+  .arena{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:8px 26px 20px}
+  @media(max-width:980px){.arena{grid-template-columns:1fr}}
+  .arm{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px 16px 16px;overflow:hidden}
+  .arm h2{margin:0 0 2px;font-size:15px}
+  .arm .tag{font-size:12px;color:var(--dim);margin-bottom:10px}
+  .arm svg{width:100%;height:auto;display:block;background:#0a0d14;border-radius:8px}
+  .stats{display:flex;gap:16px;margin-top:10px;font-size:13px;flex-wrap:wrap}
+  .stats b{font-variant-numeric:tabular-nums}
+  .pill{padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700}
+  .win{background:#16341f;color:#67c98c}
+  .lose{background:#3a1d1d;color:#e0855f}
+  .cgcap{font-size:11px;color:var(--dim);margin:12px 0 2px}
+  .cgraph{width:210px;height:auto;display:block;margin:2px auto 0}
+  .agent-dot{transition:cx .35s linear,cy .35s linear}
+  .msg{stroke-linecap:round;opacity:0;transition:opacity .25s}
+  .msg.on{opacity:.9}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:12px;
+    padding:0 26px 8px}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;
+    margin-right:4px;vertical-align:-1px}
+  .scripts{padding:6px 26px 40px}
+  .scripts h3{font-size:14px;margin:18px 0 8px}
+  .tcols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  @media(max-width:980px){.tcols{grid-template-columns:1fr}}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+    margin-bottom:8px;padding:6px 12px}
+  summary{cursor:pointer;font-weight:600}
+  .step{border-left:2px solid var(--line);margin:6px 0 6px 4px;padding:2px 0 2px 10px;
+    font-size:12.5px;color:#cbd5e1}
+  .step .call{color:#9bb8e8;font-family:ui-monospace,monospace;font-size:11.5px}
+  .step.inbox{border-left-color:#7c5cbf;color:#c4b5e8}
+  .why{margin:10px 26px 36px;background:linear-gradient(180deg,#171c2b,#11141d);
+    border:1px solid var(--line);border-radius:12px;padding:16px 20px}
+  .why h3{margin:0 0 8px}.why p{margin:6px 0;color:#c3ccd9}
+</style>
+</head>
+<body>
+<header>
+  <h1>One task, two ways to wire a team</h1>
+  <p class="sub">Three sagent agents must find a diamond in a foggy maze and carry it
+  to the exit. Left: a <b>peer mesh</b> — any agent broadcasts/messages any other
+  (<code>AgentSend</code>). Right: a <b>hub-and-spoke tree</b> — workers may only
+  message a coordinator, which relays. Same maze, same prompt; watch the
+  <b>message arrows</b>: a web vs a star.</p>
+</header>
+
+<div class="controls">
+  <button id="play">▶ play</button>
+  <button id="restart" class="ghost">↻ restart</button>
+  <input id="scrub" type="range" min="0" value="0" />
+  <span id="clock" class="dim" style="color:var(--dim);font-variant-numeric:tabular-nums"></span>
+</div>
+<div class="legend">
+  <span><i style="background:var(--a1)"></i>a1</span>
+  <span><i style="background:var(--a2)"></i>a2</span>
+  <span><i style="background:var(--a3)"></i>a3</span>
+  <span><i style="background:var(--diamond)"></i>diamond</span>
+  <span><i style="background:var(--junk)"></i>junk key (useless)</span>
+  <span><i style="background:var(--exit)"></i>exit</span>
+</div>
+
+<div class="arena" id="arena"></div>
+
+<div class="scripts">
+  <h3>What each agent was thinking (full transcripts)</h3>
+  <div class="tcols" id="scripts"></div>
+</div>
+
+<section class="why">
+  <h3>Why this needs <span style="color:#b692f6">sagent</span></h3>
+  <p><b>Agents spawn agents and talk in every direction.</b> Each maze runner is a
+  persistent <code>AgentSpawn</code> peer with its own inbox; they coordinate with
+  <code>AgentSend</code> — any-to-any, plus fan-out broadcast — and a routine message
+  is read at the recipient's next decision while an <i>urgent</i> one preempts a move
+  mid-step.</p>
+  <p><b>The wiring is the only difference.</b> Both teams get the identical task and
+  tools; the mesh lets discoveries reach everyone in one hop, while the tree funnels
+  every update through one coordinator. The honest gap shows up under churn (and
+  scale) — see the worklog.</p>
+</section>
+
+<script src="data.js"></script>
+<script>
+const D = window.MAZE || {meta:{grid:[]},arms:{}};
+const M = D.meta, ARMS = D.arms;
+const CELL = 26, R = 8;
+const COL = {a1:"var(--a1)",a2:"var(--a2)",a3:"var(--a3)"};
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(n,a){const e=document.createElementNS(SVGNS,n);for(const k in a)e.setAttribute(k,a[k]);return e;}
+function gridChar(x,y){const r=M.grid[y]||"";return r[x]||"#";}
+
+// Build one arm's SVG + element handles. Returns a renderer state object.
+function buildArm(armKey, arm){
+  const w=M.width*CELL, h=M.height*CELL;
+  const svg=el("svg",{viewBox:`0 0 ${w} ${h}`});
+  // terrain
+  for(let y=0;y<M.height;y++)for(let x=0;x<M.width;x++){
+    const c=gridChar(x,y);
+    let fill="var(--floor)";
+    if(c==="#")fill="var(--wall)";
+    else if(c==="E")fill="var(--exit)";
+    else if(c==="P")fill="#3a3450";
+    svg.appendChild(el("rect",{x:x*CELL+1,y:y*CELL+1,width:CELL-2,height:CELL-2,rx:3,fill}));
+    if(c==="E"){const t=el("text",{x:x*CELL+CELL/2,y:y*CELL+CELL/2+4,"text-anchor":"middle","font-size":11,fill:"#bff0d0"});t.textContent="exit";svg.appendChild(t);}
+  }
+  const msgLayer=el("g",{}); svg.appendChild(msgLayer);
+  const itemLayer=el("g",{}); svg.appendChild(itemLayer);
+  const agentLayer=el("g",{}); svg.appendChild(agentLayer);
+  // item + agent handles built lazily per frame
+  const wrap=document.createElement("div"); wrap.className="arm";
+  const isMesh=arm.mesh;
+  wrap.innerHTML=`<h2>${isMesh?"Peer mesh":"Hub-and-spoke tree"}</h2>
+    <div class="tag">${isMesh?"any agent → any agent + broadcast":"workers → coordinator <b>"+arm.coordinator+"</b> → workers"}</div>`;
+  wrap.appendChild(svg);
+  const stats=document.createElement("div"); stats.className="stats"; wrap.appendChild(stats);
+  const cgCap=document.createElement("div"); cgCap.className="cgcap";
+  cgCap.textContent="messages so far — who talked to whom:";
+  wrap.appendChild(cgCap);
+  const cg=el("svg",{viewBox:"0 0 300 96",class:"cgraph"}); wrap.appendChild(cg);
+  return {arm,wrap,svg,msgLayer,itemLayer,agentLayer,stats,cg,agentEls:{},itemEls:{}};
+}
+
+function center(xy){return [xy[0]*CELL+CELL/2, xy[1]*CELL+CELL/2];}
+
+function renderFrame(R_, t){
+  const arm=R_.arm, frames=arm.trace, f=frames[Math.min(t,frames.length-1)];
+  if(!f)return;
+  // items
+  for(const name in f.items){
+    const it=f.items[name];
+    let e=R_.itemEls[name];
+    if(!e){e=el("circle",{r:5}); R_.itemLayer.appendChild(e); R_.itemEls[name]=e;}
+    if(it.xy && !it.holder){const[cx,cy]=center(it.xy);
+      e.setAttribute("cx",cx);e.setAttribute("cy",cy);
+      e.setAttribute("fill",it.kind==="diamond"?"var(--diamond)":"var(--junk)");
+      e.setAttribute("opacity",1);
+    } else { e.setAttribute("opacity",0); } // carried items hide (shown on the agent)
+  }
+  // agents
+  for(const id in f.agents){
+    const a=f.agents[id];const[cx,cy]=center(a.xy);
+    let g=R_.agentEls[id];
+    if(!g){g={};
+      g.c=el("circle",{r:R,class:"agent-dot",fill:COL[id]||"#fff","stroke":"#0a0d14","stroke-width":2});
+      g.t=el("text",{class:"agent-dot","text-anchor":"middle","font-size":10,"font-weight":700,fill:"#06121f"});
+      g.d=el("circle",{r:3.5,fill:"var(--diamond)","stroke":"#06121f","stroke-width":1,class:"agent-dot"}); // carried-diamond badge
+      R_.agentLayer.appendChild(g.c);R_.agentLayer.appendChild(g.t);R_.agentLayer.appendChild(g.d);
+      R_.agentEls[id]=g;
+    }
+    g.c.setAttribute("cx",cx);g.c.setAttribute("cy",cy);
+    g.t.setAttribute("x",cx);g.t.setAttribute("y",cy+3);g.t.textContent=id.replace("a","");
+    const carries=(a.inv||[]).some(n=>n.includes("diamond"));
+    g.d.setAttribute("cx",cx+8);g.d.setAttribute("cy",cy-8);g.d.setAttribute("opacity",carries?1:0);
+  }
+  // message arrows: accumulate every message so far (faint lines = the topology
+  // map building up), with the last few frames bright. Endpoints are the agents'
+  // positions at send time. The mesh draws a web; the tree draws a star on the hub.
+  R_.msgLayer.innerHTML="";
+  for(let k=0;k<=t;k++){
+    const fr=frames[Math.min(k,frames.length-1)]; const age=t-k;
+    for(const ev of (fr.events||[])){
+      if(ev.kind!=="msg")continue;
+      const fa=fr.agents[ev.frm], ta=fr.agents[ev.to];
+      if(!fa||!ta)continue;
+      const[x1,y1]=center(fa.xy),[x2,y2]=center(ta.xy);
+      const ln=el("line",{x1,y1,x2,y2,
+        stroke:ev.urgent?"#e0855f":(COL[ev.frm]||"#9bb8e8"),
+        "stroke-width":age<4?2.4:1.2,
+        opacity:age<5?Math.max(0.2,0.9*(1-age/6)):0.16});
+      R_.msgLayer.appendChild(ln);
+    }
+  }
+  // stats
+  const msgsSoFar=frames.slice(0,t+1).reduce((s,fr)=>s+(fr.events||[]).filter(e=>e.kind==="msg").length,0);
+  R_.stats.innerHTML=
+    `<span>tick <b>${f.tick}</b></span>`+
+    `<span>messages <b>${msgsSoFar}</b></span>`+
+    `<span>budget <b>${f.budget_left}</b></span>`+
+    (t>=frames.length-1?`<span class="pill ${arm.solved?"win":"lose"}">${arm.solved?"✓ delivered in "+arm.ticks+" ticks":"✗ ran out"}</span>`:"");
+  // comm graph: cumulative unordered message counts up to t (tree=star, mesh=web)
+  const NP={a1:[150,20],a2:[48,78],a3:[252,78]};
+  const cnt={};
+  for(let k=0;k<=t;k++)for(const ev of (frames[Math.min(k,frames.length-1)].events||[])){
+    if(ev.kind!=="msg")continue;
+    const key=[ev.frm,ev.to].sort().join("-"); cnt[key]=(cnt[key]||0)+1;
+  }
+  R_.cg.innerHTML="";
+  for(const key in cnt){const[p,q]=key.split("-");
+    if(!NP[p]||!NP[q])continue;
+    const[x1,y1]=NP[p],[x2,y2]=NP[q];
+    R_.cg.appendChild(el("line",{x1,y1,x2,y2,stroke:"#9bb8e8",
+      "stroke-width":1+Math.min(7,cnt[key]*0.8),opacity:0.75,"stroke-linecap":"round"}));
+  }
+  for(const id of M.ids){const p=NP[id]; if(!p)continue;
+    R_.cg.appendChild(el("circle",{cx:p[0],cy:p[1],r:14,fill:COL[id]||"#fff",stroke:"#0a0d14","stroke-width":2}));
+    const tx=el("text",{x:p[0],y:p[1]+4,"text-anchor":"middle","font-size":12,"font-weight":700,fill:"#06121f"});
+    tx.textContent=id; R_.cg.appendChild(tx);
+  }
+}
+
+// ---- transcripts ----
+function scriptsHTML(armKey,arm){
+  const box=document.createElement("div");
+  const head=document.createElement("div"); head.innerHTML=`<b>${armKey==="mesh"?"Peer mesh":"Hub-and-spoke"}</b>`; box.appendChild(head);
+  for(const id of M.ids){
+    const steps=(arm.transcripts||{})[id]||[];
+    const d=document.createElement("details");
+    const sum=document.createElement("summary");
+    sum.innerHTML=`<span style="color:${COL[id]}">●</span> ${id} — ${steps.length} steps`;
+    d.appendChild(sum);
+    for(const s of steps){
+      const div=document.createElement("div"); div.className="step"+(s.role==="inbox"?" inbox":"");
+      if(s.role==="inbox"){div.innerHTML=`📨 <b>${s.frm}→</b> ${esc(s.text)}`;}
+      else{
+        const calls=(s.calls||[]).map(c=>`${c.name}(${esc(JSON.stringify(c.args))})`).join(" ");
+        div.innerHTML=(s.text?esc(s.text):"")+(calls?` <span class="call">${calls}</span>`:"");
+      }
+      d.appendChild(div);
+    }
+    box.appendChild(d);
+  }
+  return box;
+}
+function esc(s){return (s||"").replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
+
+// ---- wire up ----
+const arena=document.getElementById("arena"), scripts=document.getElementById("scripts");
+const renderers={};
+for(const k of ["mesh","tree"]){ if(!ARMS[k])continue;
+  const R_=buildArm(k,ARMS[k]); renderers[k]=R_; arena.appendChild(R_.wrap);
+  scripts.appendChild(scriptsHTML(k,ARMS[k]));
+}
+const maxLen=Math.max(...Object.values(renderers).map(R_=>R_.arm.trace.length),1);
+const scrub=document.getElementById("scrub"); scrub.max=maxLen-1;
+const clock=document.getElementById("clock");
+let t=0, playing=false, timer=null;
+function draw(){ for(const k in renderers) renderFrame(renderers[k],t); scrub.value=t; clock.textContent=`step ${t} / ${maxLen-1}`; }
+function step(){ if(t<maxLen-1){t++;draw();} else stop(); }
+function play(){ if(playing)return; playing=true; document.getElementById("play").textContent="⏸ pause"; timer=setInterval(step,480); }
+function stop(){ playing=false; document.getElementById("play").textContent="▶ play"; if(timer)clearInterval(timer); }
+document.getElementById("play").onclick=()=>playing?stop():play();
+document.getElementById("restart").onclick=()=>{stop();t=0;draw();};
+scrub.oninput=()=>{stop();t=+scrub.value;draw();};
+draw();
+</script>
+</body>
+</html>
