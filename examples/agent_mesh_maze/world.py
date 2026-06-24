@@ -376,20 +376,17 @@ class World:
         return all(a.extracted for a in self.agents.values())
 
 
-# Smallest v1 level that forces inventory-sharing + exit-convergence: the diamond
-# (`*`) sits in a far dead-end room; junk keys (`k`) are nearer decoys; the exit
-# (`E`) is across the maze; three agents (`1` `2` `3`) start clustered. Fog hides
-# all of it until explored.
+# v1 level: an OPEN maze (the three horizontal corridors connect at columns 1, 7
+# and 13) so three foggy explorers can realistically cover it. The diamond (`*`)
+# sits mid-maze, out of sight from every spawn; junk keys (`k`) are corner decoys;
+# the exit (`E`) is bottom-right. Agents 1 and 2 start on the left, 3 on the right.
+# Discoveries must be shared to converge quickly -- the mesh-vs-tree contrast.
 LEVEL_V1 = [
     "###############",
-    "#123..#...k..*#",
-    "#.##.#.###.##.#",
-    "#..#.#...#.#..#",
-    "##.#.###.#.#.##",
-    "#..k.....#...##",
-    "#.######.###.k#",
-    "#........#....#",
-    "#.####.###.##.#",
-    "#E...#........#",
+    "#1...........k#",
+    "#.#####.#####.#",
+    "#2.....*.....3#",
+    "#.#####.#####.#",
+    "#k...........E#",
     "###############",
 ]

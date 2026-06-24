@@ -22,7 +22,7 @@ def _nav(w: World, aid: str, goal: tuple[int, int], limit: int = 200) -> bool:
 def test_level_parses() -> None:
     w = World(LEVEL_V1)
     assert w.height == len(LEVEL_V1)
-    assert w.exit_xy == (1, 9)
+    assert w.exit_xy == (13, 5)
     diamonds = [it for it in w.items.values() if it.kind == "diamond"]
     junk = [it for it in w.items.values() if it.kind == "junk"]
     assert len(diamonds) == 1
@@ -34,8 +34,8 @@ def test_spawn_places_agents() -> None:
     w = World(LEVEL_V1)
     w.spawn(["a", "b", "c"])
     assert w.agents["a"].xy == (1, 1)
-    assert w.agents["b"].xy == (2, 1)
-    assert w.agents["c"].xy == (3, 1)
+    assert w.agents["b"].xy == (1, 3)
+    assert w.agents["c"].xy == (13, 3)
 
 
 def test_passable_and_paths_exist() -> None:

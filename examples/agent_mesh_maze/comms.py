@@ -23,7 +23,11 @@ from examples.agent_mesh_maze.sim import Sim
 from examples.agent_mesh_maze.world import World
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import agent_label_var, agent_registry
-from sagent.types.runtime import AgentSendMessage, ToolResult
+from sagent.types.runtime import (
+    AgentSendMessage,
+    AgentSendQueuedMessage,
+    ToolResult,
+)
 
 
 class CommsTool:
@@ -76,6 +80,14 @@ class CommsTool:
                     "description": "Target agent label (required for 'say').",
                 },
                 "content": {"type": "string", "description": "Message text."},
+                "urgent": {
+                    "type": "boolean",
+                    "description": (
+                        "For 'say' only. true = INTERRUPT the recipient mid-action "
+                        "(use only to abort/redirect, e.g. a hazard). Default false = "
+                        "they read it at their next decision point."
+                    ),
+                },
             },
             "required": ["action", "content"],
         }
@@ -109,12 +121,28 @@ class CommsTool:
         del args
         return None
 
-    def _deliver(self, frm: str, to: str, content: str) -> None:
+    def _deliver(
+        self, frm: str, to: str, content: str, *, urgent: bool = False
+    ) -> None:
         target = agent_registry.get(to)
         if target is not None:
-            target.runtime.inbox.push_back(AgentSendMessage(source=frm, text=content))
+            # Routine messages QUEUE (read at the recipient's next decision point,
+            # not mid-move), so discovery-sharing doesn't thrash everyone's movement.
+            # ``urgent`` PREEMPTS (detaches an in-flight action) -- for true interrupts.
+            msg = (
+                AgentSendMessage(source=frm, text=content)
+                if urgent
+                else AgentSendQueuedMessage(source=frm, text=content)
+            )
+            target.runtime.inbox.push_back(msg)
         self.world.log_event(
-            {"kind": "msg", "frm": frm, "to": to, "text": content[:100]}
+            {
+                "kind": "msg",
+                "frm": frm,
+                "to": to,
+                "text": content[:100],
+                "urgent": urgent,
+            }
         )
         self.msg_count += 1
         self.sim.mark_dirty()
@@ -157,7 +185,7 @@ class CommsTool:
                     content=f"unknown agent {to!r}; active: {sorted(agent_registry)}",
                     is_error=True,
                 )
-            self._deliver(me, to, content)
+            self._deliver(me, to, content, urgent=bool(args.get("urgent", False)))
             return ToolResult(call_id="", content=f"sent to {to}")
 
         return ToolResult(
