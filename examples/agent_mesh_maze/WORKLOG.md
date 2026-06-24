@@ -277,9 +277,47 @@ is free and keyless.
   sole-agent fallback.
 - Artifacts: `scratchpad/spike_p2.py` (+ logs).
 
+### 2026-06-24 — Phases 3-5 landed: comms, both arms, webpage
+- `CommsTool` (`say` / `broadcast`, mesh-vs-tree policy, coordinator-aware, QUEUED
+  routine delivery + an `urgent` preempt flag). Tree = workers→coordinator→workers
+  (the hub relays one `say` at a time, no broadcast — the honest serialization tax).
+- `run.py` driver: builds 3 persistent peers per arm, runs the sim, captures trace +
+  full per-agent transcripts + metrics to `web/data.js`. `--live` recaptures both arms.
+- Mesh SOLVED the open v1 level (40–55 ticks): a3 broadcasts the exit on sight, a1
+  finds + carries the diamond, peers dedup "who has it" via broadcast + a direct say.
+- Webpage (`web/index.html`): two mazes animated side-by-side; agents move,
+  items/exit render, message arrows accumulate; per-agent transcripts collapse open;
+  a per-arm **COMM GRAPH** shows the topology — mesh = full triangle (any-to-any),
+  tree = Λ-star on the hub a1 with no a2↔a3 base.
+
+### ⚠️ KEY FINDING — the metric contrast is weak (needs churn/scale; design call)
+Both arms solved in ~55 ticks (mesh 55 / tree 56; msgs 14 / 12). The single-diamond
+find-and-deliver task is too **low-coordination**: with only ~2 discoveries, the
+tree's double-hop latency + hub serialization never bite. The **topology** difference
+is real and visible (comm graph + data: mesh has all 6 directed pairs, the tree only
+hub-touching ones), but a **performance** gap needs churn or scale. Options (a design
+call with the user — they flagged "too obvious an advantage" so it must stay fair):
+- **N-plate simultaneity** (the original showpiece): the vault opens only with all
+  plates pressed at once → real-time sync the hub can't relay fast enough; a hazard
+  knocking an agent off a plate forces an instant re-broadcast. Strongest, biggest build.
+- **Scale** (5–8 agents): the hub relays to N-1 workers per discovery and absorbs N-1
+  reports → serialization + context-bloat bottleneck. The most honest "hub doesn't scale."
+- **Tight extraction barrier + harder maze**: all must reach the exit before a tight
+  budget; slow propagation in the tree strands an agent. Delicate to tune fairly.
+- Honest framing regardless: the claim is the WIRING (any-to-any vs hub-and-spoke),
+  which IS shown; the perf gap is regime-dependent (high churn / many agents), not
+  universal — same honesty discipline as demo 1's cost caveat.
+- Artifacts: `scratchpad/spike_p3.py`, `capture1.log`, `shot_p5.py`.
+
 ---
 
-## 12. Environment & how to run (TBD — fill in as the build lands)
+## 12. Environment & how to run
+
+- Branch `demo/agent-mesh-maze` (off demo-1 HEAD; rebase onto sagent main before the PR).
+- Keys: `~/.config/sagent/anthropic_api_key` (file-based). haiku default (~$0.07/arm).
+- Replay (no key):  `uv run python -m examples.agent_mesh_maze.run`
+- Re-capture both arms:  `uv run python -m examples.agent_mesh_maze.run --live`
+- Tests:  `uv run pytest examples/agent_mesh_maze/ -q` (15, all green; ruff + ty + codespell clean)
 
 - Branch: `demo/agent-mesh-maze` (off demo-1 HEAD; rebase onto sagent main before the PR so
   demo 2 is independent).
