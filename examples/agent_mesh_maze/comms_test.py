@@ -90,3 +90,15 @@ def test_tree_policy_blocks_peer_and_broadcast() -> None:
     assert bcast.is_error
     assert not to_coord.is_error
     assert len(_inbox(fakes["a1"])) == 1
+
+
+def test_tree_coordinator_can_relay() -> None:
+    _world, tool, fakes = _setup(mesh=False, coordinator="a1")
+    tok = agent_label_var.set("a1")  # the coordinator may relay to any worker
+    try:
+        r = asyncio.run(tool.run({"action": "say", "to": "a3", "content": "relay"}))
+    finally:
+        agent_label_var.reset(tok)
+        agent_registry.clear()
+    assert not r.is_error
+    assert len(_inbox(fakes["a3"])) == 1

@@ -64,10 +64,10 @@ class CommsTool:
                 "-- so nobody wastes moves searching for what you already found."
             )
         return (
-            f"Report to the coordinator. action='say' with to='{self.coordinator}' "
-            f"and content; the coordinator relays to the others. You may ONLY message "
-            f"'{self.coordinator}' -- you cannot talk to other workers directly, and "
-            f"broadcast is unavailable."
+            "Coordinate via action='say' (needs to, content). In this team, workers "
+            "may message ONLY the coordinator, which relays; the coordinator may "
+            f"message any worker. Coordinator is '{self.coordinator}'. No broadcast — "
+            "the coordinator relays each fact to workers one at a time."
         )
 
     directive_schema: JSON = json_freeze(
@@ -112,9 +112,16 @@ class CommsTool:
                 f"You are '{me}'. {roster}Share discoveries by broadcasting so the "
                 f"team converges fast."
             )
+        if me == self.coordinator:
+            workers = sorted(a for a in agent_registry if a != self.coordinator)
+            return (
+                f"You are the COORDINATOR '{me}'. Workers ({workers}) report only to "
+                f"you. RELAY each useful discovery to whoever needs it by 'say'-ing "
+                f"them individually -- you have no broadcast. You explore too."
+            )
         return (
-            f"You are '{me}'. Report only to the coordinator '{self.coordinator}'; "
-            f"it is the only agent you can message."
+            f"You are '{me}'. Report discoveries ONLY to the coordinator "
+            f"'{self.coordinator}'; it relays to the others. You cannot reach peers."
         )
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
@@ -173,7 +180,7 @@ class CommsTool:
             to = str(args.get("to", ""))
             if not to:
                 return ToolResult(call_id="", content="say needs 'to'.", is_error=True)
-            if not self.mesh and to != self.coordinator:
+            if not self.mesh and self.coordinator not in (me, to):
                 return ToolResult(
                     call_id="",
                     content=f"you may only message the coordinator '{self.coordinator}'.",
