@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import asyncio
 import re
@@ -34,6 +35,7 @@ import tempfile
 from sagent.agent import Agent
 from sagent.tools import AgentSelf
 from sagent.types.runtime import AssistantMessage, ToolResult, UserMessage
+from sagent.types.tools import Tool
 
 
 try:
@@ -143,7 +145,7 @@ class RunPython:
     clearable_results: bool = True
 
     def __init__(self) -> None:
-        self.calls: list[dict] = []
+        self.calls: list[dict[str, Any]] = []
 
     @property
     def description(self) -> str:
@@ -219,8 +221,10 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _build_timeline(history: list, tool: RunPython, start_model: str) -> list[dict]:
-    steps: list[dict] = []
+def _build_timeline(
+    history: list[Any], tool: RunPython, start_model: str
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
     active = start_model
     run_i = 0
     for m in history:
@@ -228,7 +232,7 @@ def _build_timeline(history: list, tool: RunPython, start_model: str) -> list[di
             continue
         if m.text and m.text.strip():
             steps.append(
-                {"kind": "think", "model": active, "text": _clip(m.text, 2500)}
+                {"kind": "think", "model": active, "text": _clip(m.text, 100000)}
             )
         for tc in m.tool_calls:
             if tc.name == "run_python":
@@ -253,7 +257,7 @@ def _build_timeline(history: list, tool: RunPython, start_model: str) -> list[di
     return steps
 
 
-def _final_text(history: list) -> str:
+def _final_text(history: list[Any]) -> str:
     for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
             return m.text.strip()
@@ -268,7 +272,7 @@ async def run_condition(
     allow_upgrade: bool,
     model_spec=None,
     max_budget: float = 0.50,
-) -> dict:
+) -> dict[str, Any]:
     """Run one arm on the task; return a captured, grader-graded result dict.
 
     ``model`` is a pre-built sagent Model. ``model_spec`` (a ``ModelSpec``) is
@@ -276,7 +280,7 @@ async def run_condition(
     it's what lets the swap cross providers (Google → Anthropic).
     """
     tool = RunPython()
-    tools = [tool, AgentSelf()] if allow_upgrade else [tool]
+    tools: list[Tool] = [tool, AgentSelf()] if allow_upgrade else [tool]
     agent = Agent(
         model=model,
         system=system_prompt,

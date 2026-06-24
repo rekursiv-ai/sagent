@@ -14,7 +14,7 @@ passes. Three arms make the contrast:
 |---|---|---|
 | **low-tier** | Gemini Flash-Lite, pinned | flails and `FAIL`s — can't crack it alone |
 | **high-tier** | Claude **Opus**, pinned | solves it, but you pay the priciest model on every task |
-| **self-mutate** | Gemini Flash-Lite → upgrades itself to Claude **Sonnet** | solves it, **cheaper than always-Opus** |
+| **self-mutate** | Gemini Flash-Lite → upgrades itself to Claude **Sonnet** | solves it by upgrading **itself** when stuck — autonomous + cross-vendor (cost ≈ Opus on this task) |
 
 ## Run it
 
@@ -67,8 +67,15 @@ Claude CLI subscription:
 ## Honest notes
 
 - Rates vary by model and prompt; Gemini is stochastic and 503s under load. The
-  shipped `web/data.js` is a clean run (low `FAIL`, high `PASS`, 3/4 self-upgrade). A
-  live re-run won't always land that cleanly — re-run a couple of times.
+  shipped `web/data.js` is a **cherry-picked** clean run (low `FAIL` with real attempts,
+  high `PASS`, a clean cross-vendor self-upgrade with full reasoning). A live re-run won't
+  always land that cleanly — re-run a couple of times.
+- **Cost is comparable, not lower.** On this hard task the self-upgrade (→ Sonnet) costs about
+  the same as solving with Opus outright — Sonnet's longer re-derivation ≈ Opus's concise solve
+  (Opus 4.8 is *very* cost-effective). The real cost argument is **adaptive routing** — the
+  trials that *didn't* need to escalate solved on the cheap model for ~10× less — not this single
+  escalation. Making cost/time a budget the agent must manage (switch when it crosses a threshold)
+  is the natural next iteration — see `WORKLOG.md`.
 - This is a **toy** chosen so the mechanism is visible — not a benchmark. The
   cheap-vs-strong gap is real, but it's a single hand-picked trap.
 

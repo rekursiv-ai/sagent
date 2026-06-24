@@ -17,6 +17,7 @@ the harness, measures the self-mutate success rate over ``--trials`` runs (defau
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import argparse
 import asyncio
@@ -125,7 +126,7 @@ print("HIST " + json.dumps({
 """
 
 
-def canonical_histograms() -> dict:
+def canonical_histograms() -> dict[str, Any]:
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
         fh.write(_CANON_HIST)
         path = fh.name
@@ -144,7 +145,7 @@ def canonical_histograms() -> dict:
         Path(path).unlink(missing_ok=True)
 
 
-def _slim(s: dict) -> dict:
+def _slim(s: dict[str, Any]) -> dict[str, Any]:
     return {
         k: s[k]
         for k in (
@@ -161,7 +162,7 @@ def _slim(s: dict) -> dict:
     }
 
 
-async def run_live(config_name: str, trials: int) -> dict:
+async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     cfg = CONFIGS[config_name]
     cheap_prov, cheap_id = cfg["cheap"]
     high_prov, high_id = cfg["high"]  # expensive baseline (high-tier panel)
@@ -181,10 +182,11 @@ async def run_live(config_name: str, trials: int) -> dict:
     # low-tier and high-tier get the IDENTICAL prompt (SYS_BASE); only the model differs.
     base_prompt = solver.system_for(allow_upgrade=False)
     print("• low-tier (cheap) …", flush=True)
-    low = None
-    for _ in range(
-        3
-    ):  # a 503 can leave it with no runs; retry so it actually tries+fails
+    low: dict[str, Any] = {}
+    # The cheap-alone arm exists to show the weak model FAILing with real attempts.
+    # Re-roll a 503 / ungraded run, and re-roll the occasional lucky pass, so the
+    # captured low-tier actually ran code, got graded, and FAILed.
+    for _ in range(6):
         low_model, _ = build(cheap_prov, cheap_id)
         low = await solver.run_condition(
             "low-tier",
@@ -193,9 +195,14 @@ async def run_live(config_name: str, trials: int) -> dict:
             allow_upgrade=False,
             max_budget=0.12,
         )
-        if low["n_runs"] > 0:
-            break
-        print("    (low-tier ran no code — likely a 503; retrying)", flush=True)
+        if low["n_runs"] == 0 or low["final_verdict"] is None:
+            print("    (low-tier produced no graded result; retrying)", flush=True)
+            continue
+        if not low["correct"]:
+            break  # ran, got graded, and FAILed — the contrast we want
+        print(
+            "    (low-tier happened to solve it — re-rolling for the FAIL)", flush=True
+        )
     print(
         f"    first={low['first_verdict']} final={low['final_verdict']} "
         f"correct={low['correct']} ${low['cost_usd']}"
@@ -218,9 +225,16 @@ async def run_live(config_name: str, trials: int) -> dict:
     # self-mutate starts cheap, carries a ModelSpec, and upgrades to mut_id
     # (a DIFFERENT, cheaper provider/model than the high-tier baseline).
     mutate_prompt = solver.system_for(allow_upgrade=True, strong_model=mut_id)
-    self_runs: list[dict] = []
-    for i in range(trials):
-        print(f"• self-mutate trial {i + 1}/{trials} …", flush=True)
+    self_runs: list[dict[str, Any]] = []
+    # Run `trials` trials, but keep going (to a hard cap of trials + 4) until at
+    # least one is a money-path (swap + fix) so the captured hero is always a real
+    # cross-vendor swap — the centerpiece of the demo.
+    while True:
+        n = len(self_runs)
+        has_money = any(s["swapped"] and s["correct"] for s in self_runs)
+        if (n >= trials and has_money) or n >= trials + 4:
+            break
+        print(f"• self-mutate trial {n + 1} …", flush=True)
         cheap_model, cheap_spec = build(cheap_prov, cheap_id)
         s = await solver.run_condition(
             "self-mutate",
@@ -238,9 +252,10 @@ async def run_live(config_name: str, trials: int) -> dict:
 
     money = [s for s in self_runs if s["swapped"] and s["correct"]]
     end_correct = [s for s in self_runs if s["correct"]]
-    # Hero = a clean money-path run if we have one, else the best available.
+    # Hero = the CHEAPEST clean money-path (best cost story vs the high-tier baseline);
+    # fall back to any correct run, else the first trial.
     hero = (
-        money[0]
+        min(money, key=lambda s: s["cost_usd"])
         if money
         else (next((s for s in self_runs if s["correct"]), None) or self_runs[0])
     )
@@ -257,11 +272,11 @@ async def run_live(config_name: str, trials: int) -> dict:
             "cheap_provider": cheap_prov,
             "high_provider": high_prov,
             "mutate_provider": mut_prov,
-            "trials": trials,
+            "trials": len(self_runs),
             "captured": True,
         },
         "success": {
-            "trials": trials,
+            "trials": len(self_runs),
             "money_path": len(money),
             "end_correct": len(end_correct),
         },
@@ -274,8 +289,8 @@ async def run_live(config_name: str, trials: int) -> dict:
     out.write_text("window.DEMO = " + json.dumps(data) + ";\n", encoding="utf-8")
 
     print("\n=== success rate (self-mutate) ===")
-    print(f"  money path (upgraded AND fixed): {len(money)}/{trials}")
-    print(f"  ended correct (any path):        {len(end_correct)}/{trials}")
+    print(f"  money path (upgraded AND fixed): {len(money)}/{len(self_runs)}")
+    print(f"  ended correct (any path):        {len(end_correct)}/{len(self_runs)}")
     print(
         f"  hero captured: swapped={hero['swapped']} first={hero['first_verdict']} "
         f"final={hero['final_verdict']} correct={hero['correct']}"

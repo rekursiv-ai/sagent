@@ -161,6 +161,14 @@ const badge = id => NAMES[id] || {label:id||"?",prov:"",color:"var(--dim)"};
 const esc = s => (s||"").replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 // Reasoning collapses to a one-line preview; click "[…]" to expand the full text.
 const oneLine = t => (t||"").replace(/\s+/g," ").trim();
+// Captured reasoning is clipped, so a block can end mid-sentence. Trim back to the
+// last complete sentence so the expanded view never ends on a dangling fragment.
+const tidyEnd = t => {
+  t = (t||"").trim().replace(/\s+\d+[.)]\s*$/,"").trim();  // drop a dangling "4." step marker
+  if(!t || /[.!?]["')\]]?$/.test(t)) return t;
+  const m = t.match(/^[\s\S]*[.!?]["')\]]?(?=\s)/);
+  return (m ? m[0].trim() : t).replace(/\s+\d+[.)]$/,"").trim();
+};
 const preview = t => {
   t=oneLine(t);
   if(t.length<=170) return t;
@@ -169,7 +177,7 @@ const preview = t => {
   return (cut>=60 ? t.slice(0,cut) : t.slice(0,170).replace(/\s\S*$/,"")).trim();
 };
 function thinkHTML(text){
-  const full=oneLine(text), prev=preview(full);
+  const full=tidyEnd(oneLine(text)), prev=preview(full);
   if(full.length<=prev.length+1) return `<div class="think">${esc(full)}</div>`;
   return `<div class="think exp collapsed" onclick="this.classList.toggle('collapsed')">`
     + `<span class="prev">${esc(prev)} <span class="more">[…]</span></span>`
@@ -287,8 +295,10 @@ async function replay(){
     `<b>Honest note.</b> This replays a <b>logged run</b>. Starting on ${badge(m.cheap).label} and upgrading to
      ${badge(m.mutate).label} (vs the ${badge(m.high).label} baseline), the cheap agent escalated <b>and</b>
      finished correctly in <b>${s.money_path}/${s.trials}</b>
-     trials (${pct}%); the rest it muddled through on its own. Rates vary by model and prompt — this is a toy
-     example chosen so the mechanism is visible, not a benchmark.`;
+     trials (${pct}%); the rest it muddled through on its own. On this hard task the self-upgrade costs about
+     the <b>same</b> as using ${badge(m.high).label} outright — the win is autonomy across vendors, not
+     undercutting it here. Rates vary by model and prompt — this is a toy example chosen so the mechanism is
+     visible, not a benchmark.`;
 }());
 
 drawChart();
