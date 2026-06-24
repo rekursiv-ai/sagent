@@ -212,6 +212,24 @@ is free and keyless.
 
 ---
 
+### Design notes from review (incorporate)
+
+- **Fairness — NOT turn-capped (avoid the rigged setup).** Agents are async (no
+  "1 message per turn" cap), so broadcast isn't a free win. A `broadcast` is N
+  fan-out `say`s — counted as N real messages (the `CommsTool` already counts them).
+  The tree relays the same fact for ~N messages too (worker→hub + hub→each peer). So
+  the mesh edge is NOT message count; it's **latency** (1 hop vs 2), **hub
+  serialization** (one LLM must absorb every report and emit every relay), and **hub
+  context-bloat** (the coordinator drowns in chatter and slows/dumbs under churn while
+  workers stay focused). Win metric = ticks-to-solve + coordination quality, shown
+  alongside hops and the hub's growing context. Balance knob if the mesh wins *too*
+  easily: charge each message against the shared budget.
+- **Retain full transcripts.** Capture every agent's COMPLETE history (reasoning text
+  + tool calls + received messages) into `data.js`, tied to the tick timeline — so the
+  webpage shows per-agent reasoning panels (demo-1 style, collapsible) and the run is
+  fully inspectable. The driver dumps `agent.history` per agent; the webpage renders
+  "what agent X was thinking when it broadcast Y".
+
 ## 10. Build plan (de-risk order — each phase lands runnable + verified)
 
 0. **[DONE]** Confirm primitives (spike) — §1. ✅
@@ -240,6 +258,24 @@ is free and keyless.
   participants must be persistent. (`bob → AgentSend(to='lead')` → "Unknown agent: 'lead'".)
 - Cost ~$0.0023/decision (haiku). Two transient `ReadError`s auto-retried by sagent's retry.
 - Artifacts: `scratchpad/spike_mesh.py` (+ `spike_mesh.log`, `spike_mesh2.log`).
+
+### 2026-06-24 — Phase 1 (world engine) + Phase 2 (agent↔world + live preempt) landed
+- World engine (`world.py`): deterministic grid / fog / items / dig / plates / BFS /
+  budget / per-tick trace. 8 unit tests.
+- Sim coordinator (`sim.py`): a LOGICAL clock that ticks only on movement/actions —
+  LLM thinking-time makes no dead animation frames and the tick count measures real
+  work. `WorldTool` is the shared perceive+act tool; `go_to` awaits the coordinator
+  walking the body there, which is what makes a moving agent "busy" → preemptible.
+- **Live preempt CONFIRMED (haiku):** one persistent agent mid-traverse to (13,1)
+  got a preempting `AgentSendMessage` redirect → the in-flight `go_to` detached, the
+  agent re-planned, and it physically walked to the new target (1,9). go_to calls
+  `[(13,1),(1,9)]`; final pos == redirect target. ~$0.0035.
+- **Gotchas fixed:** (a) custom tools MUST implement the full sagent contract —
+  missing `prompt()` → AttributeError in `_build_system`; now covered by an
+  offline-Agent contract test. (b) under `serve_forever`, `agent_label_var` ≠ the
+  construction-time `default_id`; `WorldTool._aid` now resolves label → default_id →
+  sole-agent fallback.
+- Artifacts: `scratchpad/spike_p2.py` (+ logs).
 
 ---
 
