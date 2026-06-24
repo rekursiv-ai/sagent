@@ -296,6 +296,19 @@ ignore = [
     "S301",    # Pickle usage.
     "T201",    # Print found.
 ]
+"examples/self_escalating_solver/**" = [
+    # A runnable CLI demo: prints progress + URLs, runs a sandboxed subprocess
+    # (the agent's run_python), uses a marker token, and lazy-imports providers.
+    "PLC0415", # Import not at top level (lazy provider imports).
+    "PLW1510", # subprocess.run without explicit check (output is captured).
+    "Q001",    # Single-quote multiline (the injected grader source).
+    "S105",    # Marker token, not a secret.
+    "S110",    # try-except-pass (headless: webbrowser.open may fail).
+    "S603",    # subprocess call (the sandboxed run_python tool).
+    "S607",    # Partial executable path ("uv" is on PATH).
+    "SIM105",  # try-except-pass (explicit for the headless fallback).
+    "T201",    # Print found (CLI output).
+]
 
 [tool.ruff.lint.isort]
 case-sensitive = false

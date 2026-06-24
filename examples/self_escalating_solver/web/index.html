@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Self-escalating solver — cross-vendor model mutation</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141925; --line:#272d3a; --fg:#e6edf3; --dim:#8b949e;
+    --google:#5b9bf3; --anthropic:#e0855f; --pass:#3fb950; --fail:#f85149; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}
+  a{color:var(--google)}
+  header{padding:20px 26px 8px}
+  h1{margin:0 0 6px;font-size:19px}
+  h1 .g{color:var(--google)} h1 .a{color:var(--anthropic)}
+  .sub{color:var(--dim);font-size:12.5px;max-width:980px}
+  .badges{display:flex;gap:9px;flex-wrap:wrap;margin:13px 0 2px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 12px;font-size:12px}
+  .stat b{font-size:14px}
+  .stat .pass{color:var(--pass)} .stat .fail{color:var(--fail)}
+  .controls{display:flex;gap:12px;align-items:center;padding:6px 26px}
+  button{background:#1d2330;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+         padding:7px 16px;cursor:pointer;font:inherit}
+  button:hover{border-color:#5b6470}
+  .pad{padding:6px 26px 30px}
+  /* ---- top: the problem (text | figure) ---- */
+  .problem{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:center;
+           background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin-bottom:16px}
+  @media(max-width:880px){.problem{grid-template-columns:1fr}}
+  .qh{font-size:12px;color:var(--warn);text-transform:uppercase;letter-spacing:.06em;margin:14px 0 6px}
+  .qh:first-child{margin-top:0}
+  .qtext p{font-size:13px;margin:0 0 6px}
+  .qtext code{color:#9fd0ff;background:#0d1220;padding:1px 5px;border-radius:4px;font-size:12.5px}
+  .qnote{color:var(--dim);font-size:12px;border-top:1px solid var(--line);padding-top:10px;margin-top:12px!important}
+  svg{width:100%;height:230px;display:block}
+  .legend{display:flex;gap:18px;font-size:12px;margin-top:8px;justify-content:center}
+  /* ---- the timelines (full width) ---- */
+  .viz h2{margin:0 0 10px;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1.25fr;gap:14px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .col.hero{border-color:#3a3140;box-shadow:0 0 0 1px #2a2230,0 8px 30px rgba(224,133,95,.06)}
+  .chead{padding:11px 13px;border-bottom:1px solid var(--line)}
+  .ctitle{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px}
+  .mbadge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;border:1px solid var(--line);
+          border-radius:20px;padding:2px 9px;margin:2px 3px 2px 0}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .verdict{float:right;font-size:11px;border-radius:6px;padding:2px 8px;border:1px solid}
+  .vp{color:var(--pass);border-color:#1d3a23;background:#10261680}
+  .vf{color:var(--fail);border-color:#3a1d1d;background:#26101080}
+  .steps{padding:9px 11px;flex:1;min-height:230px}
+  .step{opacity:0;transform:translateY(6px);transition:opacity .35s,transform .35s;margin-bottom:8px}
+  .step.show{opacity:1;transform:none}
+  .step .who{font-size:11px;color:var(--dim);margin-bottom:3px;display:flex;align-items:center;gap:6px}
+  .think{border-left:2px solid var(--line);padding:1px 0 1px 9px;color:#c9d1d9;font-size:12px;white-space:pre-wrap}
+  .think.exp{cursor:pointer}
+  .think.exp.collapsed .fulltext{display:none}
+  .think.exp:not(.collapsed) .prev{display:none}
+  .more{color:var(--google);font-weight:700}
+  .think.exp:not(.collapsed)::after{content:" ▲ less";color:var(--google);font-size:10.5px}
+  .run{border:1px solid var(--line);border-radius:7px;padding:6px 9px;background:#0d1220;font-size:12px}
+  .pill{display:inline-block;border-radius:5px;padding:1px 7px;font-size:11px;font-weight:600;margin-left:6px}
+  .pill.pass{color:var(--pass);background:#10261650;border:1px solid #1d3a23}
+  .pill.fail{color:var(--fail);background:#26101050;border:1px solid #3a1d1d}
+  .swap{margin:11px 0;border-radius:10px;padding:12px;text-align:center;font-size:12.5px;
+        background:linear-gradient(90deg,#13243d,#2a1f24);border:1px solid #3a3140;
+        box-shadow:0 0 22px rgba(224,133,95,.14)}
+  .swap b{font-size:14px}
+  .swap .arrow{color:var(--warn);margin:0 7px;font-size:15px}
+  .swap .tag{display:block;color:var(--warn);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;margin-top:4px}
+  footer{color:var(--dim);font-size:12px;padding:0 26px 30px;max-width:1100px}
+  .warnc{color:var(--warn)}
+  /* ---- bottom: why this needs sagent + honest note ---- */
+  .why{margin:18px 26px 36px;background:linear-gradient(180deg,#171c2b,#11141d);
+       border:1px solid #34406a;border-radius:14px;padding:20px 24px}
+  .why h3{margin:0 0 13px;font-size:15px}
+  .why .s{color:#b692f6}
+  .why .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;font-size:12.5px;line-height:1.6}
+  @media(max-width:880px){.why .cols{grid-template-columns:1fr;gap:14px}}
+  .why .cols b{color:var(--fg)}
+  .honest{margin-top:18px;border-top:1px solid var(--line);padding-top:13px;color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Self-escalating solver — an agent that re-homes itself <span class="g">Google</span> → <span class="a">Anthropic</span> mid-task</h1>
+  <div class="sub">One agent starts on a cheap Gemini model. When it gets genuinely stuck it calls
+    <code>AgentSelf</code> to <b>upgrade its own model across vendors</b> to Claude — carrying all of its
+    work — and finishes. A black-box grader replies only PASS/FAIL; the agent is never told the answer.</div>
+  <div class="badges" id="stats"></div>
+</header>
+<div class="controls">
+  <button id="play">▶ replay</button>
+  <span class="sub" id="progress"></span>
+</div>
+<div class="pad">
+  <section class="problem">
+    <div class="qtext">
+      <div class="qh">The task</div>
+      <p>Draw samples from the distribution with unnormalized density
+         <code>f(x) = x·e^(−x/2)</code> for x&nbsp;&gt;&nbsp;0 — a <b>Gamma</b>, true mean&nbsp;<b>4</b> — using a
+         Metropolis-Hastings sampler whose proposal is <b>multiplicative</b>: <code>x′ = x·e^ε</code>.
+         Then submit the samples to a grader that replies only <b>PASS</b> / <b>FAIL</b>.</p>
+      <div class="qh">Why it's a trap <span style="color:var(--dim);text-transform:none;letter-spacing:0">(semi-hard)</span></div>
+      <p>The textbook rule — accept with <code>min(1, f(x′)/f(x))</code> — is <b>wrong here</b>. A multiplicative
+         proposal is <b>asymmetric</b>, so a correct sampler needs the Metropolis-<b>Hastings</b> correction
+         (the <code>x′/x</code> Jacobian). Omit it and you <b>silently sample the wrong distribution</b> — an
+         Exponential (mean&nbsp;≈&nbsp;2), not the Gamma (mean&nbsp;4). The result looks plausible; it's a classic
+         trap that catches non-experts.</p>
+      <p class="qnote">The grader gives <b>no hints</b> — just PASS/FAIL — so a model has to <i>know</i> the fix,
+         not be tutored to it. Watch which one can.</p>
+    </div>
+    <div class="qfig">
+      <svg id="chart" viewBox="0 0 480 200" preserveAspectRatio="none"></svg>
+      <div class="legend">
+        <span style="color:var(--fail)">▦ buggy → Exponential (wrong)</span>
+        <span style="color:var(--pass)">▦ fixed → Gamma (target)</span>
+      </div>
+    </div>
+  </section>
+  <section class="viz">
+    <h2>Watch them solve it (or fail)</h2>
+    <div class="grid">
+      <div class="col" id="col-low_tier"></div>
+      <div class="col" id="col-high_tier"></div>
+      <div class="col hero" id="col-self_mutate"></div>
+    </div>
+  </section>
+</div>
+<section class="why">
+  <h3>Why this needs <span class="s">sagent</span></h3>
+  <div class="cols">
+    <div><b>One agent that keeps its memory.</b> The upgrade isn't a hand-off to a fresh expert — the
+      stronger model inherits the entire working context (the task, the failed sampler, every grader
+      verdict) and continues from there, instead of starting cold.</div>
+    <div><b>It crosses vendors mid-task.</b> A Google model promotes <i>itself</i> to an Anthropic model
+      while it's running. No other agent stack lets a live agent re-home to a different company's model
+      on the fly.</div>
+    <div><b>The agent decides for itself.</b> Nobody pre-routed this to the expensive model. The agent
+      discovered it was stuck — the grader kept failing — and upgraded itself, and only as far as it
+      needed (Sonnet, not Opus).</div>
+  </div>
+  <div class="honest" id="footer"></div>
+</section>
+
+<script src="data.js"></script>
+<script>
+const D = window.DEMO || {panels:{},success:{},meta:{},hist:{}};
+const NAMES = {
+  "gemini-2.5-flash-lite":{label:"Gemini 2.5 Flash-Lite",prov:"Google",color:"var(--google)"},
+  "gemini-3.1-pro-preview":{label:"Gemini 3.1 Pro",prov:"Google",color:"var(--google)"},
+  "gemini-3-flash-preview":{label:"Gemini 3 Flash",prov:"Google",color:"var(--google)"},
+  "claude-sonnet-4-6":{label:"Claude Sonnet 4.6",prov:"Anthropic",color:"var(--anthropic)"},
+  "claude-opus-4-8":{label:"Claude Opus 4.8",prov:"Anthropic",color:"var(--anthropic)"},
+  "claude-haiku-4-5":{label:"Claude Haiku 4.5",prov:"Anthropic",color:"var(--anthropic)"},
+};
+const badge = id => NAMES[id] || {label:id||"?",prov:"",color:"var(--dim)"};
+const esc = s => (s||"").replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+// Reasoning collapses to a one-line preview; click "[…]" to expand the full text.
+const oneLine = t => (t||"").replace(/\s+/g," ").trim();
+const preview = t => {
+  t=oneLine(t);
+  if(t.length<=170) return t;
+  let cut=-1, re=/[.!?]["')\]]?\s/g, m;
+  while((m=re.exec(t)) && m.index<200) cut=m.index+1;
+  return (cut>=60 ? t.slice(0,cut) : t.slice(0,170).replace(/\s\S*$/,"")).trim();
+};
+function thinkHTML(text){
+  const full=oneLine(text), prev=preview(full);
+  if(full.length<=prev.length+1) return `<div class="think">${esc(full)}</div>`;
+  return `<div class="think exp collapsed" onclick="this.classList.toggle('collapsed')">`
+    + `<span class="prev">${esc(prev)} <span class="more">[…]</span></span>`
+    + `<span class="fulltext">${esc(full)}</span></div>`;
+}
+
+(function(){
+  const m=D.meta||{}, s=D.success||{};
+  const pct = s.trials? Math.round(100*s.money_path/s.trials):0;
+  const lo=D.panels.low_tier||{}, hi=D.panels.high_tier||{};
+  document.getElementById('stats').innerHTML = `
+    <div class="stat">cheap&nbsp; <b style="color:var(--google)">${badge(m.cheap).label}</b></div>
+    <div class="stat">high-tier baseline <b style="color:var(--anthropic)">${badge(m.high).label}</b></div>
+    <div class="stat">self-mutate upgrades to <b style="color:var(--anthropic)">${badge(m.mutate).label}</b></div>
+    <div class="stat">self-upgrade success <b>${s.money_path}/${s.trials}</b> <span class="sub">(${pct}%)</span></div>
+    <div class="stat">low-tier <b class="${lo.correct?'pass':'fail'}">${lo.correct?'PASS':'FAIL'}</b>
+        &nbsp;·&nbsp; high-tier <b class="${hi.correct?'pass':'fail'}">${hi.correct?'PASS':'FAIL'}</b></div>`;
+}());
+
+function drawChart(){
+  const h=D.hist||{}; const xs=h.centers||[]; if(!xs.length){return;}
+  const W=480,H=200,padL=4,padR=4,padT=10,padB=16;
+  const maxY=Math.max(...(h.true_gamma||[0]),...(h.exp_ref||[0]),0.001)*1.1;
+  const X=i=> padL+(xs[i]/xs[xs.length-1])*(W-padL-padR);
+  const Y=v=> (H-padB)-(v/maxY)*(H-padB-padT);
+  const path=arr=> arr.map((v,i)=>`${i?'L':'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ');
+  const bars=(arr,col)=> arr.map((v,i)=>{const x=X(i),y=Y(v),bw=(W-padL-padR)/arr.length*0.9;
+      return `<rect x="${x-bw/2}" y="${y}" width="${bw}" height="${(H-padB)-y}" fill="${col}" opacity="0.15"/>`;}).join('');
+  let s=`<line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="var(--line)"/>`;
+  s+=bars(h.biased||[], 'var(--fail)')+bars(h.fixed||[], 'var(--pass)');
+  s+=`<path d="${path(h.exp_ref||[])}" fill="none" stroke="var(--fail)" stroke-width="2" stroke-dasharray="5 4"/>`;
+  s+=`<path d="${path(h.true_gamma||[])}" fill="none" stroke="var(--pass)" stroke-width="2.5"/>`;
+  document.getElementById('chart').innerHTML=s;
+}
+
+function chead(key){
+  const p=D.panels[key]||{}; const titles={low_tier:"Low tier",high_tier:"High tier",self_mutate:"Self-mutate"};
+  const uniq=[...new Set(p.models||[])];
+  const ms=uniq.map(id=>{const b=badge(id);
+     return `<span class="mbadge"><span class="dot" style="background:${b.color}"></span>${b.label}</span>`;})
+     .join(uniq.length>1?' <span style="color:var(--warn)">→</span> ':'');
+  const v=p.correct?'<span class="verdict vp">PASS</span>':'<span class="verdict vf">FAIL</span>';
+  const sub = key==='self_mutate' ? 'cheap → upgrades itself across vendors' :
+              key==='low_tier' ? 'cheap model, pinned' : 'strong model, pinned';
+  return `<div class="chead"><div class="ctitle">${titles[key]} — ${sub} ${v}</div>${ms||'<span class="sub">—</span>'}
+            <div class="sub" style="margin-top:6px">cost $${(p.cost_usd||0).toFixed(4)}</div></div>
+          <div class="steps" id="steps-${key}"></div>`;
+}
+function stepHTML(s){
+  if(s.kind==='more'){
+    return `<div class="step"><div class="run" style="border-style:dashed;color:var(--dim)">↻ tried ${s.count} more time${s.count>1?'s':''} — all <span style="color:var(--fail)">FAIL</span></div></div>`;
+  }
+  const b=badge(s.model);
+  const who=`<div class="who"><span class="dot" style="background:${b.color}"></span>${b.label}</div>`;
+  if(s.kind==='swap'){
+    const f=badge(s.from), t=badge(s.to);
+    return `<div class="step swap"><b style="color:${f.color}">${f.label}</b>
+        <span class="arrow">⚡→</span><b style="color:${t.color}">${t.label}</b>
+        <span class="tag">self-upgrade · ${f.prov} → ${t.prov} · cross-vendor</span></div>`;
+  }
+  if(s.kind==='run'){
+    const pill = s.verdict==='PASS'?'<span class="pill pass">grader: PASS</span>'
+                                   :'<span class="pill fail">grader: FAIL</span>';
+    return `<div class="step">${who}<div class="run">ran sampler${pill}</div></div>`;
+  }
+  return `<div class="step">${who}${thinkHTML(s.text)}</div>`;
+}
+
+// Condense for readability: drop filler 'think' steps (keep the intro + the ones
+// around the swap), show the first few FAIL runs, collapse the rest into "+N more".
+function condense(tl){
+  const keepThink = tl.map((s,i)=> s.kind==='think' &&
+      (i===0 || (tl[i+1]&&tl[i+1].kind==='swap') || (tl[i-1]&&tl[i-1].kind==='swap')));
+  const out=[]; let fails=[];
+  const flush=()=>{ if(!fails.length)return;
+    fails.slice(0,3).forEach(s=>out.push(s));
+    if(fails.length>3) out.push({kind:'more',count:fails.length-3});
+    fails=[]; };
+  tl.forEach((s,i)=>{
+    if(s.kind==='think' && !keepThink[i]) return;  // drop filler think first, so it can't break the FAIL streak
+    if(s.kind==='run' && s.verdict!=='PASS'){ fails.push({kind:'run',verdict:'FAIL',model:s.model}); return; }
+    flush();
+    out.push(s);
+  });
+  flush();
+  return out;
+}
+const KEYS=['low_tier','high_tier','self_mutate'];
+const COND={};
+KEYS.forEach(k=>{ COND[k]=condense((D.panels[k]||{}).timeline||[]);
+  document.getElementById('col-'+k).innerHTML=chead(k); });
+
+function reveal(upto){
+  KEYS.forEach(k=>{
+    const box=document.getElementById('steps-'+k);
+    box.innerHTML = COND[k].slice(0,upto).map(stepHTML).join('');
+    box.querySelectorAll('.step').forEach(e=>e.classList.add('show'));
+  });
+}
+async function replay(){
+  const maxLen=Math.max(...KEYS.map(k=>COND[k].length),0);
+  KEYS.forEach(k=>document.getElementById('steps-'+k).innerHTML='');
+  for(let i=1;i<=maxLen;i++){
+    reveal(i);
+    const anySwap=KEYS.some(k=>COND[k][i-1]&&COND[k][i-1].kind==='swap');
+    document.getElementById('progress').textContent=`step ${i} / ${maxLen}`;
+    await new Promise(r=>setTimeout(r, anySwap?1100:480));
+  }
+  document.getElementById('progress').textContent='done';
+}
+
+(function(){
+  const m=D.meta||{}, s=D.success||{}; const pct=s.trials?Math.round(100*s.money_path/s.trials):0;
+  document.getElementById('footer').innerHTML =
+    `<b>Honest note.</b> This replays a <b>logged run</b>. Starting on ${badge(m.cheap).label} and upgrading to
+     ${badge(m.mutate).label} (vs the ${badge(m.high).label} baseline), the cheap agent escalated <b>and</b>
+     finished correctly in <b>${s.money_path}/${s.trials}</b>
+     trials (${pct}%); the rest it muddled through on its own. Rates vary by model and prompt — this is a toy
+     example chosen so the mechanism is visible, not a benchmark.`;
+}());
+
+drawChart();
+document.getElementById('play').onclick=replay;
+replay();
+</script>
+</body>
+</html>
