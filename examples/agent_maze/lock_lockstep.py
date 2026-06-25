@@ -186,6 +186,7 @@ async def run_spawn_arm(
     inbox: dict[str, list[str]] = {seed: []}
     nmsg = dropped = nxt = 0
     trace: list[dict[str, Any]] = []
+    lineage: dict[str, str] = {}  # child aid -> parent aid that spawned it
 
     def can_msg(src: str, dst: str) -> bool:
         if topology == "mesh":
@@ -242,6 +243,7 @@ async def run_spawn_arm(
                         nid = f"a{nxt}"
                         world.add_agent(nid, (x, y))
                         spawned.append((nid, (x, y)))
+                        lineage[nid] = aid
                     else:
                         new_inbox[aid].append(
                             f"[world] spawn failed: {why} — turn wasted"
@@ -303,6 +305,27 @@ async def run_spawn_arm(
         inbox = new_inbox
 
     await model.close()
+    # Prepend a seed-alone frame so the timeline starts at 1 agent: the first
+    # frame above is already post-turn-0, by which time a0 may have spawned.
+    if trace:
+        f0 = trace[0]
+        trace = [
+            {
+                "tick": 0,
+                "agents": {seed: list(f0["agents"][seed])},
+                "spawned": [],
+                "pressed": [],
+                "armed": [],
+                "messages": [],
+                "locks": [
+                    {"plates": lk["plates"], "open": False} for lk in f0["locks"]
+                ],
+                "locks_open": 0,
+            },
+            *trace,
+        ]
+        for i, fr in enumerate(trace):
+            fr["tick"] = i
     return {
         "topology": topology,
         "told": told,
@@ -317,6 +340,7 @@ async def run_spawn_arm(
         "messages": nmsg,
         "dropped": dropped,
         "roster": roster,
+        "lineage": lineage,
         "pairs": [[p["letter"]] for p in meta["plates"]],
         "trace": trace,
         "transcripts": {
