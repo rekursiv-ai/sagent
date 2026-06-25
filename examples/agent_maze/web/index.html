@@ -75,6 +75,7 @@
   section.why { margin:8px 24px 40px; background:var(--panel); border:1px solid var(--line);
                 border-radius:12px; padding:18px 22px; }
   section.why h2 { margin:0 0 10px; font-size:16px; }
+  #gSpawn { display:block; max-width:100%; height:auto; margin:2px 0 8px; }
   .why-grid { display:grid; grid-template-columns:1fr 1fr 1.1fr; gap:22px; align-items:center; }
   .why-grid figcaption { text-align:center; color:var(--muted); font-size:12px; margin-top:4px; }
   .why p { color:#48505f; } .why b.m { color:var(--mesh); } .why b.t { color:var(--tree); }
@@ -148,6 +149,17 @@
   </span>
   <button id="syncBtn" class="on">▶ play both in sync</button>
 </div>
+
+<section class="why">
+  <h2>How the team grows — agents spawned over turns</h2>
+  <canvas id="gSpawn" width="680" height="170"></canvas>
+  <p>Each agent appears the turn it's spawned. <b style="color:var(--mesh)">Decentralized:</b>
+    any agent can spawn, so the team <b>keeps growing</b> and fields more hands.
+    <b style="color:var(--tree)">Centralized:</b> only the coordinator can spawn, so the team
+    <b>plateaus early</b> — it stops growing while the lone coordinator is busy relaying, and
+    never gets enough hands to cover the locks. (Reflects the run above — toggle told/discover to
+    compare; the line ends where that team finished.)</p>
+</section>
 
 <section class="why">
   <h2>Why the centralized team chokes and the decentralized one scales</h2>
@@ -314,6 +326,32 @@ function loadMode(mode){
   document.getElementById('modeTag').textContent = mode==='told' ? 'topology told' : 'topology discovered';
   document.getElementById('modehint').textContent = HINT[mode];
   document.querySelectorAll('.modeBtn').forEach(b=>b.classList.toggle('on', b.dataset.mode===mode));
+  drawSpawn();
+}
+function drawSpawn(){
+  const cv=document.getElementById('gSpawn'); if(!cv) return;
+  const ctx=hidpi(cv,680,170);
+  const sz=a=>M.modes[MODE][a].trace.map(fr=>Object.keys(fr.agents).length);
+  const mesh=sz('mesh'), tree=sz('tree');
+  const maxT=Math.max(mesh.length,tree.length)-1, maxN=Math.max(...mesh,...tree,1);
+  const x0=28,y0=140,x1=560,y1=34;
+  const X=t=>x0+(x1-x0)*(maxT?t/maxT:0), Y=n=>y0+(y1-y0)*(n/maxN);
+  ctx.clearRect(0,0,680,170);
+  ctx.font='10px sans-serif';
+  for(let n=0;n<=maxN;n++){ const yy=Y(n); ctx.strokeStyle='#eef1f5'; ctx.beginPath(); ctx.moveTo(x0,yy); ctx.lineTo(x1,yy); ctx.stroke();
+    ctx.fillStyle='#9aa4b2'; ctx.textAlign='right'; ctx.fillText(n,x0-5,yy+3); }
+  ctx.textAlign='left'; ctx.fillStyle='#9aa4b2'; ctx.fillText('turn →',x1-40,y0+15);
+  function step(arr,col){
+    ctx.strokeStyle=col; ctx.lineWidth=2.4; ctx.beginPath();
+    arr.forEach((n,t)=>{ if(t===0)ctx.moveTo(X(0),Y(n)); else { ctx.lineTo(X(t),Y(arr[t-1])); ctx.lineTo(X(t),Y(n)); } });
+    ctx.stroke(); ctx.fillStyle=col;
+    arr.forEach((n,t)=>{ if(t>0&&n>arr[t-1]){ ctx.beginPath(); ctx.arc(X(t),Y(n),3.2,0,7); ctx.fill(); } });
+    ctx.fillText(arr[arr.length-1]+' agents', Math.min(X(arr.length-1)+6, 600), Y(arr[arr.length-1])+3);
+  }
+  step(tree,getCss('--tree')); step(mesh,getCss('--mesh'));
+  ctx.font='11px sans-serif';
+  ctx.fillStyle=getCss('--mesh'); ctx.fillText('● decentralized', x0+4, y1-14);
+  ctx.fillStyle=getCss('--tree'); ctx.fillText('● centralized', x0+120, y1-14);
 }
 document.querySelectorAll('.modeBtn').forEach(b=> b.onclick=()=>loadMode(b.dataset.mode));
 function unsync(){ if(synced){ synced=false; syncBtn.classList.remove('on'); syncBtn.textContent='▶ resume sync'; } }
