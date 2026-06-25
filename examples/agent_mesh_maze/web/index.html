@@ -26,6 +26,8 @@
   .intro-grid .sell { background:#f2f8f4; border:1px solid #dbede3; border-radius:9px;
                       padding:10px 12px; }
   .intro-grid .sell h3 { color:var(--mesh); }
+  .legend { margin-top:12px; padding-top:10px; border-top:1px solid var(--line);
+            font-size:12px; color:var(--muted); }
   @media (max-width:880px){ .intro-grid{grid-template-columns:1fr 1fr;} }
   .mode-tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px;
               background:#eef1f5; color:var(--muted); margin-left:8px; vertical-align:middle; }
@@ -41,6 +43,10 @@
   .status { display:flex; gap:14px; padding:8px 14px; font-variant-numeric:tabular-nums;
             border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
   .status b { font-weight:600; } .status .lab { color:var(--muted); }
+  .status .drop { color:var(--drop); } .status .big { font-size:18px; line-height:1; }
+  .badge { margin-left:auto; padding:3px 11px; border-radius:8px; font-weight:700; font-size:12px; }
+  .badge.ok { background:#e6f4ec; color:var(--mesh); }
+  .badge.stuck { background:#fbe9e7; color:var(--drop); }
   .ctrls { display:flex; align-items:center; gap:8px; padding:8px 14px; }
   .ctrls button { border:1px solid var(--line); background:#fff; border-radius:7px;
                   padding:4px 9px; cursor:pointer; font-size:13px; }
@@ -77,36 +83,42 @@
 </head>
 <body>
 <header>
-  <h1>Decentralized vs Centralized coordination
+  <h1>Decentralized agent teams win — centralized ones choke
     <span class="mode-tag" id="modelTag"></span>
     <span class="mode-tag" id="modeTag"></span></h1>
 </header>
 
 <section class="intro">
   <p class="lede">Both runs start with a <b>single agent</b> that must <b>spawn a team</b> (it
-    doesn't know how big) and coordinate to open every lock. The <b>only</b> difference between
-    the two runs is the agent <b>topology</b> — watch the mesh grow and coordinate in parallel
-    while the tree's lone seed bottlenecks.</p>
+    doesn't know how big) and coordinate to open every lock. The <b>only</b> difference is the
+    team <b>topology</b> — watch the <b style="color:var(--mesh)">decentralized</b> team grow and
+    coordinate in parallel and finish, while the <b style="color:var(--tree)">centralized</b>
+    team funnels everything through one agent and stalls.</p>
   <div class="intro-grid">
     <div><h3>The puzzle</h3><p>A foggy maze of corridors. Each <b>lock</b> is two plates sharing
       a letter, placed in <b>different corridors, out of sight</b> of each other. Some corridors
       are <b>dead-ends</b> with no plate.</p></div>
     <div><h3>The goal</h3><p>Open <b>every</b> lock. A lock opens only when its two plates are
-      <b>PRESSED on the same turn</b> by two different agents — so the team must explore, find
-      each other, and synchronize. Each turn an agent does one of MOVE / SPAWN / PRESS / SEND.</p></div>
-    <div><h3>Mesh vs Tree</h3><p><b style="color:var(--mesh)">Mesh:</b> <i>any</i> agent can
-      spawn (recursive) and message anyone, or broadcast. <b style="color:var(--tree)">Tree:</b>
-      only the <i>seed</i> spawns (serial), and workers route every message through it.</p></div>
+      <b>pressed on the same turn</b> by two different agents — so the team must explore, find
+      each other, and synchronize.</p></div>
+    <div><h3>Decentralized vs Centralized</h3><p><b style="color:var(--mesh)">Decentralized:</b>
+      <i>any</i> agent can spawn more agents and message anyone, or broadcast.
+      <b style="color:var(--tree)">Centralized:</b> only the <i>coordinator</i> spawns, and every
+      message routes through it.</p></div>
     <div class="sell"><h3>What sagent makes easy</h3><p><b>Recursive budgeted spawn + any-to-any
       messaging + broadcast</b>, native and composable in one model — so the decentralized
       strategy is <b>actually available</b> and trivial to wire, not three subsystems bolted
       together.</p></div>
   </div>
+  <div class="legend"><b>watch for:</b> ● an agent &nbsp;·&nbsp; ▣ a plate — <b>glows</b> when
+    pressed, <b>fills</b> when its lock opens &nbsp;·&nbsp;
+    <span style="color:var(--ok)">▬ a delivered message</span> &nbsp;·&nbsp;
+    <span style="color:var(--drop)">▭ a dropped message</span></div>
 </section>
 
 <div class="arms">
   <div class="arm mesh" id="arm-mesh">
-    <h2><span class="dot"></span>MESH <small>— any agent talks to any agent</small></h2>
+    <h2><span class="dot"></span>DECENTRALIZED <small>— any agent spawns + messages anyone</small></h2>
     <canvas></canvas>
     <div class="status"></div>
     <div class="ctrls">
@@ -117,7 +129,7 @@
     <div class="convo"></div>
   </div>
   <div class="arm tree" id="arm-tree">
-    <h2><span class="dot"></span>TREE <small>— workers talk only to the coordinator</small></h2>
+    <h2><span class="dot"></span>CENTRALIZED <small>— only the coordinator spawns + relays</small></h2>
     <canvas></canvas>
     <div class="status"></div>
     <div class="ctrls">
@@ -137,30 +149,31 @@
 </div>
 
 <section class="why">
-  <h2>Why the tree chokes and the mesh scales</h2>
+  <h2>Why the centralized team chokes and the decentralized one scales</h2>
   <div class="why-grid">
     <figure><canvas id="gMesh" width="220" height="180"></canvas>
-      <figcaption>mesh — every pair coordinates directly, in parallel</figcaption></figure>
+      <figcaption>decentralized — every pair coordinates directly, in parallel</figcaption></figure>
     <figure><canvas id="gTree" width="220" height="180"></canvas>
-      <figcaption>tree — every pair routes through one coordinator</figcaption></figure>
+      <figcaption>centralized — every pair routes through one coordinator</figcaption></figure>
     <figure><canvas id="gScale" width="320" height="180"></canvas>
-      <figcaption>messages to coordinate K locks (abstract test)</figcaption></figure>
+      <figcaption>messages to coordinate K locks</figcaption></figure>
   </div>
-  <p>Two things funnel through the tree's single seed, and both serialize. <b>Spawning:</b> only
-    the seed can grow the team, one agent per turn, so it can't field enough hands in time — in
-    the run above it spawned 3 and stalled while the mesh (any agent spawns) reached 6 and
-    finished. <b>Coordination:</b> each lock is an <b>independent</b> pairing; the mesh resolves
-    them in parallel (<b class="m">O(1)</b> rounds) while the seed mediates every one in turn
-    (<b class="t">O(K)</b>). That is the whole story — no single sagent primitive is exotic;
-    sagent just makes the decentralized wiring (recursive spawn + any-to-any messaging) as easy
-    as the centralized one, so the strategy that actually scales is available at all.</p>
+  <p>Two things funnel through the centralized team's single coordinator, and both serialize.
+    <b>Spawning:</b> only the coordinator can grow the team, one agent per turn, so it can't
+    field enough hands in time. <b>Coordination:</b> each lock is an <b>independent</b> pairing;
+    the decentralized team resolves them in parallel (<b class="m">O(1)</b> rounds) while the
+    coordinator mediates every one in turn (<b class="t">O(K)</b>). That is the whole story — no
+    single sagent primitive is exotic; sagent just makes the decentralized wiring (recursive
+    spawn + any-to-any messaging) as easy as the centralized one, so the strategy that actually
+    scales is available at all.</p>
 </section>
 
 <script src="data.js"></script>
 <script>
 const M = window.MAZE;
 const LCOL = ['#3b82c4','#8a63d2','#cf5aa0','#46a06a','#d98a32'];
-document.getElementById('modelTag').textContent = 'model: ' + (M.meta.model || '?');
+const MNAME = (M.meta.model||'?').replace('claude-','Claude ').replace('sonnet-4-6','Sonnet 4.6').replace('haiku-4-5','Haiku 4.5');
+document.getElementById('modelTag').textContent = 'model: ' + MNAME;
 
 class Arm {
   constructor(id, arm){
@@ -237,15 +250,26 @@ class Arm {
       ctx.fillStyle='#fff'; ctx.font='9px sans-serif'; ctx.textAlign='center';
       ctx.fillText(aid==='lead'?'L':aid.slice(1), p[0]*c+c/2, p[1]*c+c/2+3);
     });
+    const ti=Math.floor(this.t), drop=this.dropUpto(ti);
+    const ended = ti >= this.trace.length-1;
+    let badge='';
+    if(ended){
+      badge = this.arm.solved
+        ? `<span class="badge ok">✓ all locks open · ${this.arm.ticks} ticks</span>`
+        : `<span class="badge stuck">✗ STUCK · ${this.arm.locks_open}/${this.arm.locks_total} locks · ${this.arm.dropped} dropped</span>`;
+    }
     this.statusEl.innerHTML =
       `<span><span class="lab">locks</span> <b>${fr.locks_open}/${fr.locks.length}</b></span>`+
-      `<span><span class="lab">tick</span> <b>${fr.tick}</b></span>`+
-      `<span><span class="lab">messages</span> <b>${this.msgCountUpto(Math.floor(this.t))}</b></span>`;
+      `<span><span class="lab">tick</span> <b class="big">${fr.tick}</b></span>`+
+      `<span><span class="lab">msgs</span> <b>${this.msgCountUpto(ti)}</b></span>`+
+      (drop?`<span><span class="lab">dropped</span> <b class="drop">${drop}</b></span>`:'')+
+      badge;
     this.tcount.textContent = `${Math.floor(this.t)}/${this.trace.length-1}`;
     this.slider.value = this.t;
     this.highlightConvo(Math.floor(this.t));
   }
   msgCountUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>m.delivered).length; return n; }
+  dropUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>!m.delivered).length; return n; }
   buildConvo(){
     let html='';
     this.trace.forEach((fr,ti)=>{
@@ -278,8 +302,8 @@ function getCss(v){ return getComputedStyle(document.documentElement).getPropert
 let arms = {}, MODE = 'discover', synced = true;
 const syncBtn=document.getElementById('syncBtn');
 const HINT = {
-  discover: "Topology is HIDDEN — the agents must work out who they can talk to. Watch the TREE break: its workers keep messaging each other (red ✗ dropped) and never learn they must route through the seed. ▶ Toggle to ‘told’ to see the other side — when the structure is given, both finish, but the mesh is clearly faster.",
-  told: "Topology is GIVEN to each agent. Both topologies solve it, but the MESH finishes faster — the tree's lone seed serializes spawning and relaying. ▶ Toggle to ‘discover’ to watch the tree actually fail."
+  discover: "Topology is HIDDEN — agents must work out who they can talk to. Watch the CENTRALIZED team break: its workers keep messaging each other (red ✗ dropped) and never learn they must route through the coordinator. ▶ Toggle to ‘told’ for the other side — when the structure is given, both finish, but the decentralized team is clearly faster.",
+  told: "Topology is GIVEN to each agent. Both finish, but the DECENTRALIZED team is faster — the centralized team's lone coordinator serializes spawning and relaying. ▶ Toggle to ‘discover’ to watch the centralized team actually fail."
 };
 function loadMode(mode){
   MODE = mode;
