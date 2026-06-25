@@ -101,10 +101,11 @@
     <div><h3>The goal</h3><p>Open <b>every</b> lock. A lock opens only when its two plates are
       <b>pressed on the same turn</b> by two different agents — so the team must explore, find
       each other, and synchronize.</p></div>
-    <div><h3>Decentralized vs Centralized</h3><p><b style="color:var(--mesh)">Decentralized:</b>
-      <i>any</i> agent can spawn more agents and message anyone, or broadcast.
-      <b style="color:var(--tree)">Centralized:</b> only the <i>coordinator</i> spawns, and every
-      message routes through it.</p></div>
+    <div><h3>Decentralized vs Centralized</h3><p>Both start with one <i>first agent</i>.
+      <b style="color:var(--mesh)">Decentralized:</b> <i>any</i> agent can spawn more agents and
+      message anyone — the first agent is just a peer.
+      <b style="color:var(--tree)">Centralized:</b> only the first agent may spawn, and every
+      message routes through it — it's the team's lone <i>coordinator</i>.</p></div>
     <div class="sell"><h3>What sagent makes easy</h3><p><b>Recursive budgeted spawn + any-to-any
       messaging + broadcast</b>, native and composable in one model — so the decentralized
       strategy is <b>actually available</b> and trivial to wire, not three subsystems bolted

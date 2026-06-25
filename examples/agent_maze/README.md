@@ -8,7 +8,7 @@ supervisor→worker tree.
 **One agent** is dropped into a foggy 2D maze that it cannot solve alone: there are several
 **locks**, and a lock opens only when its **two same-letter plates** (in different corridors,
 out of sight of each other) are **pressed on the same turn** by two different agents. So the
-seed must **spawn a team** — it doesn't know how many it needs — explore (some corridors are
+first agent must **spawn a team** — it doesn't know how many it needs — explore (some corridors are
 dead-ends), pair plates up by talking, and synchronize the presses.
 
 The *same maze, same task* runs two ways; only the **topology** differs:
@@ -16,7 +16,7 @@ The *same maze, same task* runs two ways; only the **topology** differs:
 | arm | spawn | messaging |
 |---|---|---|
 | **mesh** (decentralized) | **any** agent may spawn (recursive, parallel team growth) | any agent → any agent, plus broadcast |
-| **tree** (centralized) | **only the seed** may spawn (serial, one per turn) | workers may message only the seed, which relays one at a time |
+| **tree** (centralized) | **only the first agent** may spawn (serial, one per turn) | workers may message only the first agent, which relays one at a time |
 
 Each turn an agent does **one** of `MOVE` / `SPAWN` / `PRESS` / `SEND` (messaging costs a
 whole turn — comms is a real resource). The webpage replays both arms side by side, with the
@@ -35,7 +35,7 @@ recursive-budgeted-spawn + any-to-any + broadcast + detached mid-execution preem
 native and compose in one model — so the *decentralized strategy is actually available* and
 easy to wire, instead of being three subsystems stitched from three places. This demo makes
 that visible: the mesh's recursive spawn grows a team fast and its broadcasts pair plates in
-parallel, while the tree's lone seed serializes **both** the spawning **and** the relaying and
+parallel, while the tree's lone first agent serializes **both** the spawning **and** the relaying and
 falls behind. We explicitly do **not** claim "decentralization is sagent-only" (it isn't).
 
 ## Why it's a fair contrast (not a strawman)
@@ -63,9 +63,9 @@ uv run python -m examples.agent_maze.run
 uv run python -m examples.agent_maze.run --live   # needs ~/.config/sagent/anthropic_api_key
 ```
 
-You'll see two mazes animate: agents **appear as the seed spawns them**, spread through the
+You'll see two mazes animate: agents **appear as the first agent spawns them**, spread through the
 fog (dead-ends included), **broadcast to find their plate-partner**, and press together — while
-the tree's seed visibly bottlenecks. Each arm has its own scrubber (synced by default; grab
+the tree's first agent visibly bottlenecks. Each arm has its own scrubber (synced by default; grab
 either to control them independently), a terse synced conversation, and `[…]` to expand any
 agent's full reasoning.
 
@@ -76,7 +76,7 @@ A capture stores **both** modes, so the page has a told/discover toggle — no r
 - **told**: each agent's prompt states its topology (the human designer picked the structure).
   The contrast is **speed** — the mesh opens both locks faster than the tree's serial relay.
 - **discover**: the topology is hidden; illegal sends are silently dropped and an agent must
-  *infer* it ("my peer-messages aren't landing — I must route through the seed"). The mesh
+  *infer* it ("my peer-messages aren't landing — I must route through the first agent"). The mesh
   adapts; the tree often **fails**, its workers burning turns on dropped peer-messages (the
   recognition tax, visible as red dropped-arrows).
 
