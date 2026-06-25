@@ -16,6 +16,17 @@
   header { padding:20px 24px 8px; }
   h1 { font-size:21px; margin:0 0 4px; }
   .thesis { color:var(--muted); max-width:880px; }
+  .intro { margin:6px 24px 4px; background:var(--panel); border:1px solid var(--line);
+           border-radius:12px; padding:16px 20px; }
+  .intro .lede { margin:0 0 14px; color:#48505f; max-width:940px; }
+  .intro-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }
+  .intro-grid h3 { margin:0 0 5px; font-size:11px; text-transform:uppercase;
+                   letter-spacing:.05em; color:var(--muted); }
+  .intro-grid p { margin:0; font-size:12.5px; color:#48505f; }
+  .intro-grid .sell { background:#f2f8f4; border:1px solid #dbede3; border-radius:9px;
+                      padding:10px 12px; }
+  .intro-grid .sell h3 { color:var(--mesh); }
+  @media (max-width:880px){ .intro-grid{grid-template-columns:1fr 1fr;} }
   .mode-tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px;
               background:#eef1f5; color:var(--muted); margin-left:8px; vertical-align:middle; }
   .arms { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:8px 24px; }
@@ -45,10 +56,16 @@
   .arm.tree .msg .exp { color:#b86; }
   .reason { background:#f7f9fb; border-left:2px solid var(--line); margin:4px 0 4px 4px;
             padding:5px 8px; color:var(--muted); white-space:pre-wrap; font-size:11.5px; display:none; }
-  .syncbar { text-align:center; padding:4px 0 14px; }
+  .syncbar { text-align:center; padding:4px 0 14px; display:flex; gap:14px; justify-content:center; align-items:center; }
   .syncbar button { border:1px solid var(--line); background:#fff; border-radius:8px;
                     padding:6px 14px; cursor:pointer; }
-  .syncbar .on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .syncbar #syncBtn.on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .modeswitch { color:var(--muted); font-size:13px; }
+  .modehint { display:block; margin-top:6px; font-size:12px; color:#5a6473; max-width:560px; }
+  .modeBtn { padding:4px 12px !important; border-radius:0 !important; }
+  .modeBtn:first-of-type { border-radius:8px 0 0 8px !important; }
+  .modeBtn:last-of-type { border-radius:0 8px 8px 0 !important; border-left:none !important; }
+  .modeBtn.on { background:var(--ink); color:#fff; border-color:var(--ink); }
   section.why { margin:8px 24px 40px; background:var(--panel); border:1px solid var(--line);
                 border-radius:12px; padding:18px 22px; }
   section.why h2 { margin:0 0 10px; font-size:16px; }
@@ -60,14 +77,32 @@
 </head>
 <body>
 <header>
-  <h1>Decentralized vs Centralized coordination <span class="mode-tag" id="modeTag"></span></h1>
-  <div class="thesis">Both runs start with a <b>single agent</b> that must <b>spawn a team</b>
-    (it doesn't know how big) and coordinate to open every <b>lock</b> — each needs two agents
-    pressing matching plates together. The only difference is the <b>topology</b>: in the mesh
-    any agent can spawn and message anyone; in the tree only the seed spawns and every message
-    routes through it. Watch the mesh grow and coordinate in parallel while the tree's lone seed
-    bottlenecks.</div>
+  <h1>Decentralized vs Centralized coordination
+    <span class="mode-tag" id="modelTag"></span>
+    <span class="mode-tag" id="modeTag"></span></h1>
 </header>
+
+<section class="intro">
+  <p class="lede">Both runs start with a <b>single agent</b> that must <b>spawn a team</b> (it
+    doesn't know how big) and coordinate to open every lock. The <b>only</b> difference between
+    the two runs is the agent <b>topology</b> — watch the mesh grow and coordinate in parallel
+    while the tree's lone seed bottlenecks.</p>
+  <div class="intro-grid">
+    <div><h3>The puzzle</h3><p>A foggy maze of corridors. Each <b>lock</b> is two plates sharing
+      a letter, placed in <b>different corridors, out of sight</b> of each other. Some corridors
+      are <b>dead-ends</b> with no plate.</p></div>
+    <div><h3>The goal</h3><p>Open <b>every</b> lock. A lock opens only when its two plates are
+      <b>PRESSED on the same turn</b> by two different agents — so the team must explore, find
+      each other, and synchronize. Each turn an agent does one of MOVE / SPAWN / PRESS / SEND.</p></div>
+    <div><h3>Mesh vs Tree</h3><p><b style="color:var(--mesh)">Mesh:</b> <i>any</i> agent can
+      spawn (recursive) and message anyone, or broadcast. <b style="color:var(--tree)">Tree:</b>
+      only the <i>seed</i> spawns (serial), and workers route every message through it.</p></div>
+    <div class="sell"><h3>What sagent makes easy</h3><p><b>Recursive budgeted spawn + any-to-any
+      messaging + broadcast</b>, native and composable in one model — so the decentralized
+      strategy is <b>actually available</b> and trivial to wire, not three subsystems bolted
+      together.</p></div>
+  </div>
+</section>
 
 <div class="arms">
   <div class="arm mesh" id="arm-mesh">
@@ -93,7 +128,13 @@
     <div class="convo"></div>
   </div>
 </div>
-<div class="syncbar"><button id="syncBtn" class="on">▶ play both in sync</button></div>
+<div class="syncbar">
+  <span class="modeswitch">view:
+    <button class="modeBtn" data-mode="told">told</button><button class="modeBtn on" data-mode="discover">discover</button>
+    <span class="modehint" id="modehint"></span>
+  </span>
+  <button id="syncBtn" class="on">▶ play both in sync</button>
+</div>
 
 <section class="why">
   <h2>Why the tree chokes and the mesh scales</h2>
@@ -119,7 +160,7 @@
 <script>
 const M = window.MAZE;
 const LCOL = ['#3b82c4','#8a63d2','#cf5aa0','#46a06a','#d98a32'];
-document.getElementById('modeTag').textContent = M.meta.told ? 'topology told' : 'topology discovered';
+document.getElementById('modelTag').textContent = 'model: ' + (M.meta.model || '?');
 
 class Arm {
   constructor(id, arm){
@@ -127,7 +168,10 @@ class Arm {
     this.grid = M.meta.grid; this.W = M.meta.width; this.H = M.meta.height;
     this.trace = arm.trace; this.roster = arm.roster; this.transcripts = arm.transcripts;
     this.cv = this.el.querySelector('canvas'); this.ctx = this.cv.getContext('2d');
-    this.cell = 26; this.cv.width = this.W*this.cell; this.cv.height = this.H*this.cell;
+    this.cell = 30;
+    const DPR = Math.max(2, window.devicePixelRatio || 1);  // crisp on hi-DPI + CSS upscale
+    this.cv.width = this.W*this.cell*DPR; this.cv.height = this.H*this.cell*DPR;
+    this.ctx.scale(DPR, DPR);  // draw in logical (cell) units; backing store is DPR× bigger
     this.statusEl = this.el.querySelector('.status');
     this.slider = this.el.querySelector('input[type=range]');
     this.slider.max = this.trace.length-1; this.slider.step = 0.02;
@@ -155,7 +199,7 @@ class Arm {
   }
   render(){
     const ctx=this.ctx, c=this.cell, fr=this.frame();
-    ctx.clearRect(0,0,this.cv.width,this.cv.height);
+    ctx.clearRect(0,0,this.W*this.cell,this.H*this.cell);
     for(let y=0;y<this.H;y++) for(let x=0;x<this.W;x++){
       const ch=this.grid[y][x];
       ctx.fillStyle = ch==='#' ? getCss('--wall') : getCss('--floor');
@@ -231,9 +275,22 @@ class Arm {
 function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-const arms = { mesh:new Arm('arm-mesh',M.arms.mesh), tree:new Arm('arm-tree',M.arms.tree) };
-let synced=true;
+let arms = {}, MODE = 'discover', synced = true;
 const syncBtn=document.getElementById('syncBtn');
+const HINT = {
+  discover: "Topology is HIDDEN — the agents must work out who they can talk to. Watch the TREE break: its workers keep messaging each other (red ✗ dropped) and never learn they must route through the seed. ▶ Toggle to ‘told’ to see the other side — when the structure is given, both finish, but the mesh is clearly faster.",
+  told: "Topology is GIVEN to each agent. Both topologies solve it, but the MESH finishes faster — the tree's lone seed serializes spawning and relaying. ▶ Toggle to ‘discover’ to watch the tree actually fail."
+};
+function loadMode(mode){
+  MODE = mode;
+  arms.mesh = new Arm('arm-mesh', M.modes[mode].mesh);
+  arms.tree = new Arm('arm-tree', M.modes[mode].tree);
+  arms.mesh.render(); arms.tree.render();
+  document.getElementById('modeTag').textContent = mode==='told' ? 'topology told' : 'topology discovered';
+  document.getElementById('modehint').textContent = HINT[mode];
+  document.querySelectorAll('.modeBtn').forEach(b=>b.classList.toggle('on', b.dataset.mode===mode));
+}
+document.querySelectorAll('.modeBtn').forEach(b=> b.onclick=()=>loadMode(b.dataset.mode));
 function unsync(){ if(synced){ synced=false; syncBtn.classList.remove('on'); syncBtn.textContent='▶ resume sync'; } }
 syncBtn.onclick=()=>{
   synced=true; syncBtn.classList.add('on'); syncBtn.textContent='⏸ syncing';
@@ -251,11 +308,16 @@ function loop(now){
   }
   requestAnimationFrame(loop);
 }
-for(const k in arms) arms[k].render();
+loadMode('discover');
 requestAnimationFrame(loop);
 
+function hidpi(cv, w, h){
+  const DPR=Math.max(2, window.devicePixelRatio||1);
+  cv.width=w*DPR; cv.height=h*DPR; cv.style.width=w+'px'; cv.style.height=h+'px';
+  const ctx=cv.getContext('2d'); ctx.scale(DPR,DPR); return ctx;
+}
 function commGraph(cid, star){
-  const ctx=document.getElementById(cid).getContext('2d'), cx=110,cy=90,R=62,n=6;
+  const ctx=hidpi(document.getElementById(cid), 220, 180), cx=110,cy=90,R=62,n=6;
   ctx.clearRect(0,0,220,180);
   const pts=[]; for(let i=0;i<n;i++){ const a=-Math.PI/2+i*2*Math.PI/n; pts.push([cx+R*Math.cos(a),cy+R*Math.sin(a)]); }
   ctx.strokeStyle='#c9d2dd'; ctx.lineWidth=1.2;
@@ -269,7 +331,7 @@ function commGraph(cid, star){
 }
 commGraph('gMesh',false); commGraph('gTree',true);
 (function scaling(){
-  const ctx=document.getElementById('gScale').getContext('2d'), x0=38,y0=150,x1=300,y1=20;
+  const ctx=hidpi(document.getElementById('gScale'), 320, 180), x0=38,y0=150,x1=300,y1=20;
   const Ks=[2,4,6,8,10,12], mesh=Ks.map(_=>6), tree=[8,16,24,32,40,48], xmax=12, ymax=50;
   const X=k=>x0+(x1-x0)*(k-2)/(xmax-2), Y=v=>y0+(y1-y0)*v/ymax;
   ctx.clearRect(0,0,320,180);

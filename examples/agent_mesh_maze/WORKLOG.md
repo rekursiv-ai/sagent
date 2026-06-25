@@ -441,7 +441,7 @@ FIRST priority ("you start ALONE; a lone agent is hopeless; SPAWN then SPLIT UP"
 
 #### [LESSON · robustness] centralized = single point of COORDINATION failure
 The honest LLM differentiator isn't mean speed — it's **variance**. Mesh is low-variance;
-the tree is brittle (the lead juggling reports/relays occasionally derails → 35t blowup).
+the tree is brittle (the lead juggling reports/relays occasionally breaks down → 35t blowup).
 The lead is a single point of *coordination* failure, not just a bandwidth bottleneck.
 → promote to `worklog/lessons/` when the redesign confirms it across seeds.
 
@@ -557,6 +557,46 @@ Nit: agent movement must be a SMOOTH cell-to-cell transition (currently reads as
 - Artifacts (this session): `world.py` (lock mechanic + asymmetric `make_lock_level` + press),
   `lock_lockstep.py` (lockstep engine), `run.py` (entry), `web/index.html` (replay page),
   `web/data.js` (captured P=3 told trace).
+
+#### ✅ GATING REQUIREMENT MET + polished (2026-06-25)
+- **Spawn-from-one works** (`make_spawn_level` + `run_spawn_arm`): one seed, each turn ONE of
+  MOVE/SPAWN/PRESS/SEND (SEND costs a turn). SPAWN takes an agent-CHOSEN tile, validated
+  (`can_spawn`: visible + passable + empty); invalid → feedback + wasted turn (no auto-edge).
+  mesh = any agent spawns + broadcast; tree = only seed spawns + relay-through-seed. Dead-end
+  decoy corridors. The fixes that unlocked it: spawn-first prompt ("you are ONE agent, a lock
+  needs TWO"); helper prompt drives broadcast-to-pair-by-letter; id normalization (0→a0) +
+  broadcast support. Result (told, 2 locks): **mesh solves ~2/3, spawning 4-6 (recursive);
+  tree fails (serial seed-only spawn + relay) — visible in the spawn-count gap.**
+- **Maze:** varied corridor lengths (`lengths` cycles per slot), paired plates on OPPOSITE
+  sides in DIFFERENT rows (always out of sight → comms genuinely required). Budget 60 (44 was
+  too tight for the harder out-of-sight maze — mesh fell to 0-1/2).
+- **Smooth movement:** the web already interpolates positions; the "jumps" were the integer
+  scrubber → made it fractional (`step=0.02`), slowed playback (TPS 1.25).
+- **Polish:** CI gates all green (ruff check + format, codespell, ty error-on-warning — fixed
+  via `Lock`/`SpawnMeta`/`PlateInfo` TypedDicts + casts). Removed dead `lock_run.py` (rejected
+  autonomous driver) and stale `simulation_optimal_baseline.py` (retracted over-provisioning
+  sim, wrong mechanic). `run.py` entry aligned (`python -m examples.agent_mesh_maze.run`), serve
+  output matches demo 1, port **8001**. README rewritten for the spawn demo. Web: a description
+  box under the title (puzzle / goal / mesh-vs-tree / what sagent sells).
+- **Honest caveat:** mesh is ~2/3 reliable at budget 60 on **haiku** — diagnosed from the
+  transcript as a comprehension miss (both partners pile on ONE plate instead of the two
+  different same-letter plates, then thrash on press timing). Fixed the prompt (the "two
+  DIFFERENT plates" rule + "press once on an agreed turn"), but haiku still tops out at 1/2.
+
+#### ✅ FINAL — bumped to sonnet, 4-condition cherry-pick capture (2026-06-25)
+Empirical A/B (fixed prompt, budget 60): **haiku mesh 1/2, 1/2; sonnet mesh 2/2, 2/2** (23-42t).
+Sonnet tree: 2/3 solve but SLOWER (45-46t, more msgs) — a valid contrast ("tree slower also
+demonstrates the point"). So **default model → `claude-sonnet-4-6`** (haiku via `LLM_MAZE_MODEL`).
+- **Capture restructured** to all FOUR conditions (mesh/tree × told/discover) in one `data.js`
+  (`{meta, modes:{told,discover}:{mesh,tree}}`), each cell **cherry-picked best-mesh / worst-tree**
+  over k=2 runs. The page has a told/discover **toggle** (view either without `--live`).
+  History capped to the last 12 turns sent to the model (cost; transcripts keep the full tape).
+- **Shipped sonnet capture:** told/mesh 25t · told/tree 43t (1.7× slower) · discover/mesh 35t (0
+  dropped) · **discover/tree FAILS 1/2, 27 dropped** (the recognition-tax showpiece — workers
+  never infer they must route through the seed). Cost ~$12; validated the whole pipeline on a
+  cheap haiku dry-run (18 structure checks) before spending sonnet. Model shown on the page badge.
+- Web nits: hi-DPI canvases (crisp), description box under the title (puzzle/goal/mesh-vs-tree/
+  what-sagent-sells), serve output matches demo-1, port 8001.
 
 ---
 

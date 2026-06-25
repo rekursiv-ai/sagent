@@ -18,10 +18,32 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TypedDict
 
 
 CellType = Literal["wall", "floor", "diggable", "exit", "plate"]
+
+
+class Lock(TypedDict):
+    """A paired-plate lock: both tiles must be pressed together to open it."""
+
+    plates: list[tuple[int, int]]
+    open: bool
+
+
+class PlateInfo(TypedDict):
+    letter: str
+    a: tuple[int, int]
+    b: tuple[int, int]
+
+
+class SpawnMeta(TypedDict):
+    locks: int
+    decoys: int
+    hall_col: int
+    seed_spawn: tuple[int, int]
+    plates: list[PlateInfo]
+
 
 _CHAR_TO_CELL: dict[str, CellType] = {
     "#": "wall",
@@ -124,7 +146,7 @@ class World:
         by_lock: dict[int, list[tuple[int, int]]] = {}
         for xy, li in self._plate_lock.items():
             by_lock.setdefault(li, []).append(xy)
-        self.locks: list[dict[str, object]] = [
+        self.locks: list[Lock] = [
             {"plates": sorted(by_lock[li]), "open": False} for li in sorted(by_lock)
         ]
 
@@ -233,11 +255,17 @@ class World:
             "visible_items": items,
             "visible_agents": others,
             "on_plate": a.xy in self._plate_lock,
-            "on_plate_letter": (PLATE_LETTERS[self._plate_lock[a.xy]]
-                                if a.xy in self._plate_lock else None),
+            "on_plate_letter": (
+                PLATE_LETTERS[self._plate_lock[a.xy]]
+                if a.xy in self._plate_lock
+                else None
+            ),
             "visible_plates": [
-                {"xy": [px, py], "lock": PLATE_LETTERS[li],
-                 "open": bool(self.locks[li]["open"])}
+                {
+                    "xy": [px, py],
+                    "lock": PLATE_LETTERS[li],
+                    "open": bool(self.locks[li]["open"]),
+                }
                 for (px, py), li in self._plate_lock.items()
                 if self._within_sight(a, (px, py))
             ],
@@ -365,8 +393,11 @@ class World:
         a.presses_left -= 1
         a.armed_until = self.tick + PRESS_WINDOW
         return {
-            "kind": "press", "id": agent_id, "at": list(a.xy),
-            "result": "armed", "charges_left": a.presses_left,
+            "kind": "press",
+            "id": agent_id,
+            "at": list(a.xy),
+            "result": "armed",
+            "charges_left": a.presses_left,
         }
 
     def extract(self, agent_id: str) -> bool:
@@ -464,7 +495,7 @@ class World:
             "plates_armed": [list(p) for p in sorted(self.armed_plates())],
             "vault_open": self.vault_open(),
             "locks": [
-                {"plates": [list(p) for p in lk["plates"]], "open": lk["open"]}  # type: ignore[union-attr]
+                {"plates": [list(p) for p in lk["plates"]], "open": lk["open"]}
                 for lk in self.locks
             ],
             "locks_open": self.locks_open(),
@@ -552,7 +583,9 @@ def make_lock_level(
     workers: list[dict[str, object]] = []
     for i in range(P):
         ry = 2 * i + 1
-        ls, rs = (long, short) if i % 2 == 0 else (short, long)  # alternate the long side
+        ls, rs = (
+            (long, short) if i % 2 == 0 else (short, long)
+        )  # alternate the long side
         lp, rp = cx - ls, cx + rs  # left / right plate columns
         for x in range(lp, rp + 1):
             g[ry][x] = "."
@@ -580,40 +613,50 @@ LEVEL_LOCKS, LOCK_META = make_lock_level(num_locks=3, short=3, long=6)
 
 
 def make_spawn_level(
-    num_locks: int = 3, decoys: int = 2, clen: int = 4
-) -> tuple[list[str], dict[str, object]]:
+    num_locks: int = 2, decoys: int = 2, lengths: tuple[int, ...] = (3, 6, 4, 5, 5, 3)
+) -> tuple[list[str], SpawnMeta]:
     """Build a level for the SPAWN demo: a single seed must explore + grow a team.
 
-    A central vertical hall with horizontal corridors branching to rooms at the two ends
-    of each row. Each lock is a pair of same-letter plates placed in DIFFERENT corridors
-    (out of sight), so opening one needs two spawned agents pressing together. ``decoys``
-    rooms are left EMPTY -- dead-ends the team explores and finds nothing, so the seed must
-    map the maze and cannot know up-front how many helpers it will need. One agent starts
-    at the hall top; everyone else is SPAWNED. Returns ``(rows, meta)``.
+    A central vertical hall; each row has a LEFT and a RIGHT corridor of DIFFERENT lengths
+    (``lengths`` cycles per slot, so no two arms are alike). Each lock's two same-letter
+    plates sit on OPPOSITE sides in DIFFERENT rows -> always out of each other's sight, so
+    opening one needs two spawned agents who found each other by talking. ``decoys`` rooms
+    are left EMPTY -- dead-ends the team explores and finds nothing, so the seed must map
+    the maze and cannot know up-front how many helpers it needs. One agent starts at the
+    hall top; everyone else is SPAWNED. Returns ``(rows, meta)``.
     """
     rooms = 2 * num_locks + decoys
     nrows = (rooms + 1) // 2
-    cx = clen + 1
-    width = 2 * clen + 3
+    maxlen = max(lengths)
+    cx = maxlen + 1
+    width = 2 * maxlen + 3
     height = 2 * nrows + 1
     g = [["#"] * width for _ in range(height)]
-    room_pos: list[tuple[int, int]] = []
+    slots: list[tuple[int, int]] = []  # room (col,row) for slot 2r (left), 2r+1 (right)
     for r in range(nrows):
         ry = 2 * r + 1
-        for x in range(1, width - 1):
+        ll, rl = lengths[(2 * r) % len(lengths)], lengths[(2 * r + 1) % len(lengths)]
+        lp, rp = cx - ll, cx + rl
+        for x in range(lp, rp + 1):
             g[ry][x] = "."
-        room_pos.append((1, ry))
-        room_pos.append((width - 2, ry))
+        slots.append((lp, ry))
+        slots.append((rp, ry))
     for y in range(1, height - 1):
         g[y][cx] = "."  # vertical hall
-    plates: list[dict[str, object]] = []
-    for i in range(num_locks):  # lock i -> room i and room i+num_locks (different rows)
-        a, b = room_pos[i], room_pos[i + num_locks]
+    plates: list[PlateInfo] = []
+    for i in range(
+        num_locks
+    ):  # lock i: LEFT of row i + RIGHT of row (i+1) -> opposite + apart
+        ai, bi = 2 * i, 2 * ((i + 1) % nrows) + 1
+        a, b = slots[ai], slots[bi]
         g[a[1]][a[0]] = PLATE_LETTERS[i]
         g[b[1]][b[0]] = PLATE_LETTERS[i]
         plates.append({"letter": PLATE_LETTERS[i], "a": a, "b": b})
-    meta: dict[str, object] = {
-        "locks": num_locks, "decoys": decoys, "hall_col": cx,
-        "seed_spawn": (cx, 1), "plates": plates,
+    meta: SpawnMeta = {
+        "locks": num_locks,
+        "decoys": decoys,
+        "hall_col": cx,
+        "seed_spawn": (cx, 1),
+        "plates": plates,
     }
     return ["".join(r) for r in g], meta

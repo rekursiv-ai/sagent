@@ -14,16 +14,18 @@ differs (mesh = any-to-any, tree = hub-and-spoke). The capture engine + mechanic
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import argparse
 import asyncio
 import contextlib
 import os
-from pathlib import Path
 
 from examples.agent_mesh_maze.lock_lockstep import _key, capture
 
+
 HERE = Path(__file__).parent
-PORT = 8011
+PORT = 8001
 
 
 def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
@@ -38,8 +40,12 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
     )
     httpd = http.server.HTTPServer((host, port), handler)
     url = f"http://localhost:{port}/index.html"
-    print(f"serving {HERE / 'web'} at {url}")
-    print(f"remote? forward with:  ssh -L {port}:localhost:{port} {socket.gethostname()}")
+    host_name = socket.gethostname()
+    print(f"\n  ▶  Report served on this machine at:  {url}\n")
+    print("  Viewing over SSH? Forward the port from your laptop:")
+    print(f"      ssh -L {port}:localhost:{port}  {host_name}   # or  <user>@<host>")
+    print(f"  then open  {url}  in your LOCAL browser.\n")
+    print("  (replaying the captured run — press Ctrl-C to stop)")
     with contextlib.suppress(Exception):
         webbrowser.open(url)
     try:
@@ -50,8 +56,11 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="agent-mesh maze coordination demo")
-    ap.add_argument("--live", action="store_true", help="re-run both arms, then serve")
-    ap.add_argument("--discover", action="store_true", help="hide topology (discover mode)")
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="re-capture all 4 conditions (mesh/tree x told/discover), then serve",
+    )
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-serve", action="store_true")
@@ -59,7 +68,7 @@ def main() -> None:
 
     if args.live:
         os.environ["ANTHROPIC_API_KEY"] = _key()
-        asyncio.run(capture(told=not args.discover))
+        asyncio.run(capture())
     elif not (HERE / "web" / "data.js").exists():
         print("no web/data.js yet — run with --live to capture one.")
         return
