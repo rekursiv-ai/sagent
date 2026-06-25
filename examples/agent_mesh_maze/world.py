@@ -233,12 +233,30 @@ class World:
             "visible_items": items,
             "visible_agents": others,
             "on_plate": a.xy in self._plate_lock,
+            "on_plate_letter": (PLATE_LETTERS[self._plate_lock[a.xy]]
+                                if a.xy in self._plate_lock else None),
+            "visible_plates": [
+                {"xy": [px, py], "lock": PLATE_LETTERS[li],
+                 "open": bool(self.locks[li]["open"])}
+                for (px, py), li in self._plate_lock.items()
+                if self._within_sight(a, (px, py))
+            ],
             "presses_left": a.presses_left,
             "locks_open": self.locks_open(),
-            "locks_total": len(self.locks),
             "budget_left": self.budget - self.tick,
             "tick": self.tick,
         }
+
+    def can_spawn(self, spawner_id: str, x: int, y: int) -> tuple[bool, str]:
+        """Validate a chosen spawn tile: visible to the spawner, passable, unoccupied."""
+        a = self.agents[spawner_id]
+        if not self._within_sight(a, (x, y)):
+            return (False, "that tile is out of your sight")
+        if not self.passable(x, y):
+            return (False, "that tile is a wall / not passable")
+        if any(o.alive and o.xy == (x, y) for o in self.agents.values()):
+            return (False, "that tile is already occupied")
+        return (True, "")
 
     def _within_sight(self, a: Agent, xy: tuple[int, int]) -> bool:
         return max(abs(a.x - xy[0]), abs(a.y - xy[1])) <= self.sight
@@ -559,3 +577,43 @@ def make_lock_level(
 # Default lock level for the mesh-vs-tree coordination demo: 3 independent locks
 # (6 plates, 6 workers + 1 coordinator), partners staggered so coordination is real.
 LEVEL_LOCKS, LOCK_META = make_lock_level(num_locks=3, short=3, long=6)
+
+
+def make_spawn_level(
+    num_locks: int = 3, decoys: int = 2, clen: int = 4
+) -> tuple[list[str], dict[str, object]]:
+    """Build a level for the SPAWN demo: a single seed must explore + grow a team.
+
+    A central vertical hall with horizontal corridors branching to rooms at the two ends
+    of each row. Each lock is a pair of same-letter plates placed in DIFFERENT corridors
+    (out of sight), so opening one needs two spawned agents pressing together. ``decoys``
+    rooms are left EMPTY -- dead-ends the team explores and finds nothing, so the seed must
+    map the maze and cannot know up-front how many helpers it will need. One agent starts
+    at the hall top; everyone else is SPAWNED. Returns ``(rows, meta)``.
+    """
+    rooms = 2 * num_locks + decoys
+    nrows = (rooms + 1) // 2
+    cx = clen + 1
+    width = 2 * clen + 3
+    height = 2 * nrows + 1
+    g = [["#"] * width for _ in range(height)]
+    room_pos: list[tuple[int, int]] = []
+    for r in range(nrows):
+        ry = 2 * r + 1
+        for x in range(1, width - 1):
+            g[ry][x] = "."
+        room_pos.append((1, ry))
+        room_pos.append((width - 2, ry))
+    for y in range(1, height - 1):
+        g[y][cx] = "."  # vertical hall
+    plates: list[dict[str, object]] = []
+    for i in range(num_locks):  # lock i -> room i and room i+num_locks (different rows)
+        a, b = room_pos[i], room_pos[i + num_locks]
+        g[a[1]][a[0]] = PLATE_LETTERS[i]
+        g[b[1]][b[0]] = PLATE_LETTERS[i]
+        plates.append({"letter": PLATE_LETTERS[i], "a": a, "b": b})
+    meta: dict[str, object] = {
+        "locks": num_locks, "decoys": decoys, "hall_col": cx,
+        "seed_spawn": (cx, 1), "plates": plates,
+    }
+    return ["".join(r) for r in g], meta

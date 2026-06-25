@@ -61,10 +61,12 @@
 <body>
 <header>
   <h1>Decentralized vs Centralized coordination <span class="mode-tag" id="modeTag"></span></h1>
-  <div class="thesis">Same maze, same task: open every <b>lock</b> — each needs its two
-    out-of-sight partners to <b>press together</b>, so they must communicate. The only
-    difference between the two runs is the <b>comms topology</b>. Watch the mesh coordinate
-    in parallel while the tree funnels everything through one coordinator.</div>
+  <div class="thesis">Both runs start with a <b>single agent</b> that must <b>spawn a team</b>
+    (it doesn't know how big) and coordinate to open every <b>lock</b> — each needs two agents
+    pressing matching plates together. The only difference is the <b>topology</b>: in the mesh
+    any agent can spawn and message anyone; in the tree only the seed spawns and every message
+    routes through it. Watch the mesh grow and coordinate in parallel while the tree's lone seed
+    bottlenecks.</div>
 </header>
 
 <div class="arms">
@@ -103,13 +105,14 @@
     <figure><canvas id="gScale" width="320" height="180"></canvas>
       <figcaption>messages to coordinate K locks (abstract test)</figcaption></figure>
   </div>
-  <p>Each lock is an <b>independent</b> coordination. The mesh handles all of them at once —
-    every agent is in exactly one pair, so the work parallelizes (<b class="m">O(1)</b> rounds).
-    The tree puts a single coordinator on the critical path of <i>every</i> pair, so it
-    serializes them (<b class="t">O(K)</b>): it relays to one worker at a time, and as the
-    number of locks grows it falls further behind. That is the whole story — no single sagent
-    primitive is exotic; sagent just makes the mesh wiring as easy as the tree's, so the
-    decentralized strategy is actually available.</p>
+  <p>Two things funnel through the tree's single seed, and both serialize. <b>Spawning:</b> only
+    the seed can grow the team, one agent per turn, so it can't field enough hands in time — in
+    the run above it spawned 3 and stalled while the mesh (any agent spawns) reached 6 and
+    finished. <b>Coordination:</b> each lock is an <b>independent</b> pairing; the mesh resolves
+    them in parallel (<b class="m">O(1)</b> rounds) while the seed mediates every one in turn
+    (<b class="t">O(K)</b>). That is the whole story — no single sagent primitive is exotic;
+    sagent just makes the decentralized wiring (recursive spawn + any-to-any messaging) as easy
+    as the centralized one, so the strategy that actually scales is available at all.</p>
 </section>
 
 <script src="data.js"></script>
@@ -127,7 +130,7 @@ class Arm {
     this.cell = 26; this.cv.width = this.W*this.cell; this.cv.height = this.H*this.cell;
     this.statusEl = this.el.querySelector('.status');
     this.slider = this.el.querySelector('input[type=range]');
-    this.slider.max = this.trace.length-1;
+    this.slider.max = this.trace.length-1; this.slider.step = 0.02;
     this.tcount = this.el.querySelector('.tcount');
     this.convoEl = this.el.querySelector('.convo');
     this.t = 0; this.playing = false;
@@ -173,11 +176,14 @@ class Arm {
       });
     });
     fr.messages.forEach(m=>{
-      const s=this.pos(m.src,Math.floor(this.t)), d=this.pos(m.dst,Math.floor(this.t));
-      if(!s||!d) return;
+      const s=this.pos(m.src,Math.floor(this.t)); if(!s) return;
+      const dests = (m.dst==='all') ? this.roster.filter(a=>a!==m.src) : [m.dst];
       ctx.strokeStyle = m.delivered?getCss('--ok'):getCss('--drop');
-      ctx.lineWidth=1.6; ctx.globalAlpha=0.55; ctx.setLineDash(m.delivered?[]:[4,3]);
-      ctx.beginPath(); ctx.moveTo(s[0]*c+c/2,s[1]*c+c/2); ctx.lineTo(d[0]*c+c/2,d[1]*c+c/2); ctx.stroke();
+      ctx.lineWidth=1.6; ctx.globalAlpha=0.5; ctx.setLineDash(m.delivered?[]:[4,3]);
+      dests.forEach(dn=>{
+        const d=this.pos(dn,Math.floor(this.t)); if(!d) return;
+        ctx.beginPath(); ctx.moveTo(s[0]*c+c/2,s[1]*c+c/2); ctx.lineTo(d[0]*c+c/2,d[1]*c+c/2); ctx.stroke();
+      });
       ctx.setLineDash([]); ctx.globalAlpha=1;
     });
     this.roster.forEach(aid=>{
@@ -192,7 +198,7 @@ class Arm {
       `<span><span class="lab">tick</span> <b>${fr.tick}</b></span>`+
       `<span><span class="lab">messages</span> <b>${this.msgCountUpto(Math.floor(this.t))}</b></span>`;
     this.tcount.textContent = `${Math.floor(this.t)}/${this.trace.length-1}`;
-    this.slider.value = Math.floor(this.t);
+    this.slider.value = this.t;
     this.highlightConvo(Math.floor(this.t));
   }
   msgCountUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>m.delivered).length; return n; }
@@ -234,7 +240,7 @@ syncBtn.onclick=()=>{
   for(const k in arms){ arms[k].setT(0); arms[k].play(); }
 };
 let last=performance.now();
-const TPS=1.6;
+const TPS=1.25;
 function loop(now){
   const dt=(now-last)/1000; last=now;
   for(const k in arms){ const a=arms[k];
