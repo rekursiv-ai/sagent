@@ -6,9 +6,9 @@
 <title>Agent-mesh maze — peer mesh vs hub-and-spoke</title>
 <style>
   :root{
-    --bg:#0d1017; --panel:#151a24; --line:#252c3a; --fg:#e6edf3; --dim:#8b97a8;
-    --wall:#1b2030; --floor:#222a3a; --exit:#1f6f43; --diamond:#34d3e0; --junk:#6b7280;
-    --a1:#5b9bf3; --a2:#e0855f; --a3:#67c98c; --hub:#b692f6;
+    --bg:#f3f6fb; --panel:#ffffff; --line:#dde3ec; --fg:#1b2230; --dim:#5b6678;
+    --wall:#33415c; --floor:#e7edf6; --exit:#2e9e5b; --diamond:#0f9fb3; --junk:#9aa3b2;
+    --a1:#2f6fd0; --a2:#d56a3c; --a3:#2f9e63; --hub:#7c52c4;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
@@ -17,9 +17,9 @@
   h1{margin:0;font-size:20px}
   .sub{color:var(--dim);max-width:980px;margin:6px 0 0}
   .controls{display:flex;gap:12px;align-items:center;padding:10px 26px}
-  button{background:var(--a1);color:#06121f;border:0;border-radius:7px;
+  button{background:var(--a1);color:#fff;border:0;border-radius:7px;
     padding:7px 16px;font-weight:700;cursor:pointer}
-  button.ghost{background:#202736;color:var(--fg)}
+  button.ghost{background:#e7ecf4;color:var(--fg)}
   input[type=range]{flex:1;max-width:520px}
   .arena{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:8px 26px 20px}
   @media(max-width:980px){.arena{grid-template-columns:1fr}}
@@ -27,12 +27,12 @@
     padding:14px 16px 16px;overflow:hidden}
   .arm h2{margin:0 0 2px;font-size:15px}
   .arm .tag{font-size:12px;color:var(--dim);margin-bottom:10px}
-  .arm svg{width:100%;height:auto;display:block;background:#0a0d14;border-radius:8px}
+  .arm svg{width:100%;height:auto;display:block;background:#eef2f8;border-radius:8px}
   .stats{display:flex;gap:16px;margin-top:10px;font-size:13px;flex-wrap:wrap}
   .stats b{font-variant-numeric:tabular-nums}
   .pill{padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700}
-  .win{background:#16341f;color:#67c98c}
-  .lose{background:#3a1d1d;color:#e0855f}
+  .win{background:#dcf3e4;color:#1d7a43}
+  .lose{background:#fbe3da;color:#b8502a}
   .cgcap{font-size:11px;color:var(--dim);margin:12px 0 2px}
   .cgraph{width:210px;height:auto;display:block;margin:2px auto 0}
   .agent-dot{transition:cx .35s linear,cy .35s linear}
@@ -50,12 +50,12 @@
     margin-bottom:8px;padding:6px 12px}
   summary{cursor:pointer;font-weight:600}
   .step{border-left:2px solid var(--line);margin:6px 0 6px 4px;padding:2px 0 2px 10px;
-    font-size:12.5px;color:#cbd5e1}
-  .step .call{color:#9bb8e8;font-family:ui-monospace,monospace;font-size:11.5px}
-  .step.inbox{border-left-color:#7c5cbf;color:#c4b5e8}
-  .why{margin:10px 26px 36px;background:linear-gradient(180deg,#171c2b,#11141d);
+    font-size:12.5px;color:#3c4658}
+  .step .call{color:#3a5fa8;font-family:ui-monospace,monospace;font-size:11.5px}
+  .step.inbox{border-left-color:#7c5cbf;color:#6b4ea3}
+  .why{margin:10px 26px 36px;background:#eef2f8;
     border:1px solid var(--line);border-radius:12px;padding:16px 20px}
-  .why h3{margin:0 0 8px}.why p{margin:6px 0;color:#c3ccd9}
+  .why h3{margin:0 0 8px}.why p{margin:6px 0;color:#3c4658}
 </style>
 </head>
 <body>
@@ -188,7 +188,7 @@ function renderFrame(R_, t){
       if(!fa||!ta)continue;
       const[x1,y1]=center(fa.xy),[x2,y2]=center(ta.xy);
       const ln=el("line",{x1,y1,x2,y2,
-        stroke:ev.urgent?"#e0855f":(COL[ev.frm]||"#9bb8e8"),
+        stroke:ev.urgent?"#e0855f":(COL[ev.frm]||"#7b93c4"),
         "stroke-width":age<4?2.4:1.2,
         opacity:age<5?Math.max(0.2,0.9*(1-age/6)):0.16});
       R_.msgLayer.appendChild(ln);
@@ -212,7 +212,7 @@ function renderFrame(R_, t){
   for(const key in cnt){const[p,q]=key.split("-");
     if(!NP[p]||!NP[q])continue;
     const[x1,y1]=NP[p],[x2,y2]=NP[q];
-    R_.cg.appendChild(el("line",{x1,y1,x2,y2,stroke:"#9bb8e8",
+    R_.cg.appendChild(el("line",{x1,y1,x2,y2,stroke:"#7b93c4",
       "stroke-width":1+Math.min(7,cnt[key]*0.8),opacity:0.75,"stroke-linecap":"round"}));
   }
   for(const id of M.ids){const p=NP[id]; if(!p)continue;

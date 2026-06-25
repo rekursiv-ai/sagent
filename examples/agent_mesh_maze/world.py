@@ -38,9 +38,10 @@ class Item:
     """A pickup sitting on a tile or carried by an agent."""
 
     name: str
-    kind: Literal["diamond", "junk"]
-    xy: tuple[int, int] | None  # None when held
+    kind: Literal["diamond", "junk", "treasure"]
+    xy: tuple[int, int] | None  # None when held / collected
     holder: str | None = None
+    collected: bool = False  # treasures: banked, not carried
 
 
 @dataclass
@@ -96,6 +97,8 @@ class World:
                 cells.append("floor")
                 if ch == "*":
                     self.items["diamond"] = Item("diamond", "diamond", (x, y))
+                elif ch == "$":
+                    self.items[f"t_{x}_{y}"] = Item(f"t_{x}_{y}", "treasure", (x, y))
                 elif ch == "k":
                     self.items[f"key_{x}_{y}"] = Item(f"key_{x}_{y}", "junk", (x, y))
                 elif ch.isdigit() and ch != "0":
@@ -244,15 +247,20 @@ class World:
         }
 
     def pick(self, agent_id: str) -> dict[str, object]:
-        """Pick up every item on the agent's tile."""
+        """Pick up items on the agent's tile (treasures BANK; others are carried)."""
         a = self.agents[agent_id]
         got: list[str] = []
         for it in self.items.values():
-            if it.xy == a.xy and it.holder is None:
+            if it.xy != a.xy or it.holder is not None or it.collected:
+                continue
+            if it.kind == "treasure":
+                it.collected = True
+                it.xy = None
+            else:
                 it.xy = None
                 it.holder = agent_id
                 a.inventory.append(it.name)
-                got.append(it.name)
+            got.append(it.name)
         return {"kind": "pick", "id": agent_id, "got": got}
 
     def drop(self, agent_id: str, at_exit: bool = False) -> dict[str, object]:
@@ -355,6 +363,7 @@ class World:
                     "kind": it.kind,
                     "xy": list(it.xy) if it.xy else None,
                     "holder": it.holder,
+                    "collected": it.collected,
                 }
                 for it in self.items.values()
             },
@@ -375,6 +384,18 @@ class World:
     def all_extracted(self) -> bool:
         return all(a.extracted for a in self.agents.values())
 
+    def treasures_total(self) -> int:
+        return sum(1 for it in self.items.values() if it.kind == "treasure")
+
+    def treasures_collected(self) -> int:
+        return sum(
+            1 for it in self.items.values() if it.kind == "treasure" and it.collected
+        )
+
+    def all_treasures_collected(self) -> bool:
+        ts = [it for it in self.items.values() if it.kind == "treasure"]
+        return bool(ts) and all(it.collected for it in ts)
+
 
 # v1 level: an OPEN maze (the three horizontal corridors connect at columns 1, 7
 # and 13) so three foggy explorers can realistically cover it. The diamond (`*`)
@@ -388,5 +409,22 @@ LEVEL_V1 = [
     "#2.....*.....3#",
     "#.#####.#####.#",
     "#k...........E#",
+    "###############",
+]
+
+# Treasure-collection level: 8 treasures (`$`) scattered across an OPEN grid with
+# three spawns spread to the corners/centre. Navigation is trivial (no maze walls)
+# so the only thing that matters is COORDINATION: agents must divide the treasures
+# and not re-visit a collected spot. Poor claim-propagation -> wasted trips. Used to
+# test whether the hub-and-spoke tree wastes moves vs the peer mesh.
+LEVEL_TREASURE = [
+    "###############",
+    "#1.$.....$...2#",
+    "#.............#",
+    "#...$.....$...#",
+    "#......3......#",
+    "#...$.....$...#",
+    "#.............#",
+    "#..$.......$..#",
     "###############",
 ]

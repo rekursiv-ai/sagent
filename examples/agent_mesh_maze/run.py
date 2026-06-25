@@ -182,7 +182,7 @@ async def capture(model_id: str) -> dict[str, Any]:
     return data
 
 
-def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
+def serve(port: int = 8001, host: str = "127.0.0.1") -> None:
     """Serve web/ and open the replay (prints an ssh -L line for remote viewing)."""
     import functools
     import http.server
@@ -210,7 +210,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="agent-mesh maze demo (mesh vs tree)")
     ap.add_argument("--live", action="store_true", help="re-run both arms, then serve")
     ap.add_argument("--model", default=MODEL)
-    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--port", type=int, default=8001)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-serve", action="store_true")
     args = ap.parse_args()
