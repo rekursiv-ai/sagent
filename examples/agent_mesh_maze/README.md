@@ -17,6 +17,29 @@ The webpage replays both side by side. The tell is the **comm graph** under each
 the mesh draws a **full triangle** (everyone talks to everyone); the tree draws a
 **Λ-star** through the hub — there is no worker↔worker edge.
 
+## What's actually unique here (honest)
+
+We stress-tested this against the field (OpenAI Agents SDK / Swarm, AutoGen, LangGraph,
+CrewAI). The honest finding: **no single one of these primitives is unique to sagent** —
+they're loosely sprinkled across frameworks. AutoGen's core already has any-to-any pub/sub
+messaging; runtime spawning exists in a few places; OpenAI's handoffs even share context
+*better* than sagent does (sagent's spawned child boots empty by design).
+
+**Two things are genuinely hard to get elsewhere:**
+1. **Mid-execution preemption that preserves in-flight work.** Interrupt a busy agent and its
+   running tool keeps going *detached*, then splices its result back. Every other framework
+   **cancels** the work (AutoGen), **blocks** on it, or **replays it from scratch**
+   (LangGraph). No clean equivalent anywhere — hard even in hand-rolled code.
+2. **Budgeted recursive spawn as a first-class primitive** (`AgentSpawn` + `max_depth`,
+   children inherit the spawn tool). Elsewhere it's roll-your-own.
+
+**The real differentiator is the seamless *combination*:** sagent is the only stack where
+recursive-budgeted-spawn + any-to-any + broadcast + detached-preemption are all native and
+compose in one model. Everywhere else you'd stitch three subsystems from three places. This
+demo is built to make that combination visible. We explicitly do **not** claim
+"decentralization is sagent-only" (it isn't) or "spawned agents inherit memory" (sagent is
+weaker there).
+
 ## Run it
 
 ```bash

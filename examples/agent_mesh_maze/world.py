@@ -175,6 +175,14 @@ class World:
             x, y = self._spawn_xy[i % len(self._spawn_xy)]
             self.agents[aid] = Agent(id=aid, x=x, y=y)
 
+    def add_agent(self, aid: str, xy: tuple[int, int]) -> None:
+        """Add a dynamically-spawned agent's body at a tile (the spawner's tile).
+
+        This is the crux of the spawn-location contrast: a mesh agent spawns at the
+        fork it is standing on; the centralized coordinator spawns at the entrance.
+        """
+        self.agents[aid] = Agent(id=aid, x=xy[0], y=xy[1])
+
     # -- perception (fog of war) -------------------------------------------
 
     def view(self, agent_id: str) -> dict[str, object]:

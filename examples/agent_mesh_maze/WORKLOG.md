@@ -35,6 +35,79 @@ agents extracted. Not just success/fail.
 
 ---
 
+## 0.5 ADVERSARIAL REVIEW — what is *actually* sagent-unique? (2026-06-25)
+
+We stress-tested the thesis against the competitive landscape (web-researched: OpenAI
+Agents SDK / Swarm, Microsoft AutoGen v0.4 / AG2, LangGraph, CrewAI, plain code). The
+honest verdict reshaped the whole demo:
+
+**No single ingredient is unique to sagent — they are loosely sprinkled across other
+frameworks:**
+- **Recursive runtime spawn:** near-impossible in OpenAI SDK / LangGraph / CrewAI (static,
+  pre-declared topology); moderate in AutoGen (runtime factories) — but **no framework
+  except sagent has a depth-*budget* concept**. A budgeted recursive spawn exists in the
+  wild only in OpenAI *Codex* (a product, not a library) and sagent.
+- **Any-to-any + broadcast:** AutoGen v0.4 core genuinely HAS it (`send_message` +
+  `publish_message` pub/sub, no supervisor). So **this is NOT sagent-only — do not claim it
+  is** (a knowledgeable reviewer rebuts instantly the moment you say it).
+- **Context inheritance on spawn:** sagent is *weaker* — its child boots empty with a
+  parent-written prompt; OpenAI's handoff shares full history *by default*. **Do NOT claim
+  this as a sagent advantage; it is backwards.**
+- **"Spawn at the fork / no travel":** a property of *our maze world*, not any framework
+  (none has a spatial concept). **STRAWMAN — cut it.**
+
+**The one genuinely hard-to-replicate capability:** mid-execution **preemption with a
+DETACHED background continuation + result splice-back**. Every mainstream framework cancels
+(AutoGen `future.cancel()` → lost work), awaits, or suspend-and-replays (LangGraph re-runs
+the node from the top). sagent interrupts the busy agent, lets its in-flight tool keep
+running detached, and splices the result back. **No equivalent anywhere; hard even in
+hand-rolled code.** Lead with this.
+
+**The honest differentiator = the SEAMLESS COMBINATION.** sagent is the only stack where
+recursive-*budgeted*-spawn + any-to-any + broadcast + **detached-preemption** coexist as
+native, composable primitives in one model. Elsewhere you bolt AutoGen-core pub/sub onto a
+roll-your-own budgeted-recursive-spawn onto a hand-rolled detach-splice protocol — three
+subsystems from three places that do not compose. The demo's job is to make that seamless
+composition VISIBLE, and to lead with **detached-preemption**, NOT "decentralization beats
+hubs" (mostly ergonomics — AutoGen core is decentralized too).
+
+- **DO claim:** detached-preemption (the capability moat); budgeted recursive spawn
+  (first-class vs roll-your-own); the seamless one-model composition of all four.
+- **Do NOT claim:** spawn-at-location, context-inheritance, "only sagent does any-to-any".
+
+Sources: OpenAI handoffs/multi_agent docs + issue #329 (mid-run interrupt → wontfix); Codex
+subagents; AutoGen messaging + tools/cancellation; LangGraph interrupts/Send; langgraph-swarm;
+CrewAI source. (Full review in the session transcript.)
+
+## 0.6 REDESIGN — the puzzle that needs all four AT ONCE (lead with the moat)
+
+Scenario: a **BUDGETED PARALLEL HYPOTHESIS SEARCH** (the scientific-discovery parallel from
+the design notes below).
+
+- A forking tree of branches (hypotheses); **most are dead-ends (failure modes)**; one deep
+  leaf holds the discovery. Probing a branch is a LONG, multi-step action ( = compute ).
+- A finite **COMPUTE BUDGET** (spawns + probe-steps). The run starts from ONE lead.
+- Winning within budget requires all four, seamlessly:
+  1. **Recursive budgeted spawn** — fan out across the tree; a serial search blows the
+     budget. `max_depth` IS the compute allocation.
+  2. **Broadcast** — the instant a probe finds the discovery OR proves a subtree dead, it
+     tells EVERYONE, so nobody burns budget on a now-irrelevant branch.
+  3. **Detached preemption** — peers are mid-probe (long actions) when that broadcast lands;
+     interrupt them to stop wasting budget, but their in-flight probe's partial findings
+     ("this sub-branch is also dead") are PRESERVED (detach + splice back) and feed the
+     pruning — not thrown away. ← the moat, made visible.
+  4. (any-to-any messaging underlies 2+3 — framed as *ergonomics*, not a unique claim.)
+- **Seamlessness is the point:** a few simple tools, and the swarm behaviour emerges.
+- **Honest contrast (no strawman):** sagent's detach-splice vs the *universal*
+  cancel-on-interrupt (faithfully what AutoGen/LangGraph actually do) → quantify the compute
+  WASTED re-doing cancelled probes. Or skip the head-to-head and SHOWCASE the sagent swarm
+  plus an honest "to assemble this elsewhere you'd need …" panel.
+- **Closing statement** (AI-for-science) carries over from the design notes below.
+
+> NOTE: this supersedes the find-the-diamond demo (committed, phases 1-5) as the headline.
+> The world engine / Sim / comms / webpage substrate is reused; the *task* and the *claim*
+> change to the budgeted hypothesis search led by detached-preemption.
+
 ## 1. Capability confirmation — sagent CAN do all of this (spike-verified 2026-06-24)
 
 The whole demo rides real, first-class sagent tools (like demo 1 rode `AgentSelf`). Built-in
