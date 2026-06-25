@@ -56,11 +56,11 @@ the lab notebook (`WORKLOG.md`) has the receipts:
 
 ```bash
 # Replay the captured run in a local webpage (no API key needed):
-uv run python -m examples.agent_mesh_maze.run
+uv run python -m examples.agent_maze.run
 #   -> serves http://localhost:8001 (prints an `ssh -L` line for remote viewing)
 
 # Re-capture all four conditions (mesh/tree x told/discover) and write data.js:
-uv run python -m examples.agent_mesh_maze.run --live   # needs ~/.config/sagent/anthropic_api_key
+uv run python -m examples.agent_maze.run --live   # needs ~/.config/sagent/anthropic_api_key
 ```
 
 You'll see two mazes animate: agents **appear as the seed spawns them**, spread through the

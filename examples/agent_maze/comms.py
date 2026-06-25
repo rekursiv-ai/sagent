@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from examples.agent_mesh_maze.sim import Sim
-from examples.agent_mesh_maze.world import World
+from examples.agent_maze.sim import Sim
+from examples.agent_maze.world import World
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import agent_label_var, agent_registry
 from sagent.types.runtime import (

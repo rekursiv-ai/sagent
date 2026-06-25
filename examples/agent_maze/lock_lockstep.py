@@ -29,7 +29,7 @@ import json
 import os
 import re
 
-from examples.agent_mesh_maze.world import PLATE_LETTERS, World, make_spawn_level
+from examples.agent_maze.world import PLATE_LETTERS, World, make_spawn_level
 from sagent.providers import Anthropic
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import AssistantMessage, UserMessage

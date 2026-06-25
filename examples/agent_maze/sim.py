@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 import asyncio
 import json
 
-from examples.agent_mesh_maze.world import World
+from examples.agent_maze.world import World
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import agent_label_var
 from sagent.types.runtime import ToolResult

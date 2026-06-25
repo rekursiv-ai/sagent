@@ -3,9 +3,9 @@
 Default is **replay** — it serves the webpage, which replays a captured run from
 ``web/data.js`` (two arms side by side, no API key needed):
 
-    uv run python -m examples.agent_mesh_maze.run             # replay (serves web/)
-    uv run python -m examples.agent_mesh_maze.run --live      # re-capture both arms, then serve
-    uv run python -m examples.agent_mesh_maze.run --live --discover   # hide the topology
+    uv run python -m examples.agent_maze.run             # replay (serves web/)
+    uv run python -m examples.agent_maze.run --live      # re-capture both arms, then serve
+    uv run python -m examples.agent_maze.run --live --discover   # hide the topology
 
 Same maze, same paired-lock coordination task, same agents — only the comms topology
 differs (mesh = any-to-any, tree = hub-and-spoke). The capture engine + mechanic live in
@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import os
 
-from examples.agent_mesh_maze.lock_lockstep import _key, capture
+from examples.agent_maze.lock_lockstep import _key, capture
 
 
 HERE = Path(__file__).parent

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from examples.agent_mesh_maze.sim import Sim, WorldTool
-from examples.agent_mesh_maze.world import LEVEL_V1, World
+from examples.agent_maze.sim import Sim, WorldTool
+from examples.agent_maze.world import LEVEL_V1, World
 from examples.offline_custom_tool import ScriptedModel
 from sagent.agent import Agent
 from sagent.types.runtime import ToolResult

@@ -539,7 +539,7 @@ Folded the validated pairwise mechanic into the grid (`world.py`, `lock_lockstep
 - **LOCKSTEP** (every agent acts once/tick, presses resolve together) → clean. mesh 8t/34msg,
   tree 9t/56msg (told, P=3). Spatial scaling (P2-5): tree always more messages (the relay tax),
   but with generous budget both solve — the *failure* story lives in the abstract test; the
-  spatial page is the visceral view. `run.py` aligned to `uv run python -m examples.agent_mesh_maze.run`.
+  spatial page is the visceral view. `run.py` aligned to `uv run python -m examples.agent_maze.run`.
   Web: two-zone (hero side-by-side mazes + terse synced convo + independent scrubbers / sync-default;
   explainer comm-graph + scaling). `lock_run.py` = the rejected autonomous driver (kept for history).
 
@@ -575,7 +575,7 @@ Nit: agent movement must be a SMOOTH cell-to-cell transition (currently reads as
 - **Polish:** CI gates all green (ruff check + format, codespell, ty error-on-warning — fixed
   via `Lock`/`SpawnMeta`/`PlateInfo` TypedDicts + casts). Removed dead `lock_run.py` (rejected
   autonomous driver) and stale `simulation_optimal_baseline.py` (retracted over-provisioning
-  sim, wrong mechanic). `run.py` entry aligned (`python -m examples.agent_mesh_maze.run`), serve
+  sim, wrong mechanic). `run.py` entry aligned (`python -m examples.agent_maze.run`), serve
   output matches demo 1, port **8001**. README rewritten for the spawn demo. Web: a description
   box under the title (puzzle / goal / mesh-vs-tree / what sagent sells).
 - **Honest caveat:** mesh is ~2/3 reliable at budget 60 on **haiku** — diagnosed from the
@@ -604,12 +604,12 @@ demonstrates the point"). So **default model → `claude-sonnet-4-6`** (haiku vi
 
 - Branch `demo/agent-mesh-maze` (off demo-1 HEAD; rebase onto sagent main before the PR).
 - Keys: `~/.config/sagent/anthropic_api_key` (file-based). haiku default (~$0.07/arm).
-- Replay (no key):  `uv run python -m examples.agent_mesh_maze.run`
-- Re-capture both arms:  `uv run python -m examples.agent_mesh_maze.run --live`
-- Tests:  `uv run pytest examples/agent_mesh_maze/ -q` (15, all green; ruff + ty + codespell clean)
+- Replay (no key):  `uv run python -m examples.agent_maze.run`
+- Re-capture both arms:  `uv run python -m examples.agent_maze.run --live`
+- Tests:  `uv run pytest examples/agent_maze/ -q` (15, all green; ruff + ty + codespell clean)
 
 - Branch: `demo/agent-mesh-maze` (off demo-1 HEAD; rebase onto sagent main before the PR so
   demo 2 is independent).
 - Keys: `~/.config/sagent/anthropic_api_key` (file-based, never exported to a CLI subscription —
   demo-1 discipline). haiku default.
-- Run (planned): `uv run python -m examples.agent_mesh_maze.run` (replay) / `--live` (recapture).
+- Run (planned): `uv run python -m examples.agent_maze.run` (replay) / `--live` (recapture).

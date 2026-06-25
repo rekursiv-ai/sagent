@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from examples.agent_mesh_maze.world import LEVEL_V1, World
+from examples.agent_maze.world import LEVEL_V1, World
 
 
 def _nav(w: World, aid: str, goal: tuple[int, int], limit: int = 200) -> bool:

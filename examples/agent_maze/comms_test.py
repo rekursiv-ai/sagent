@@ -7,9 +7,9 @@ from typing import Any, cast
 import asyncio
 import types
 
-from examples.agent_mesh_maze.comms import CommsTool
-from examples.agent_mesh_maze.sim import Sim
-from examples.agent_mesh_maze.world import LEVEL_V1, World
+from examples.agent_maze.comms import CommsTool
+from examples.agent_maze.sim import Sim
+from examples.agent_maze.world import LEVEL_V1, World
 from sagent.tools.core import agent_label_var, agent_registry
 
 
