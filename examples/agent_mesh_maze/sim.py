@@ -102,6 +102,9 @@ class WorldTool:
             "- pick: pick up every item on your tile.\n"
             "- drop: drop everything you carry on your tile (use at the exit to "
             "deliver).\n"
+            "- press: press the plate you are standing on. It stays armed ~2 ticks; a "
+            "lock opens only when BOTH its plates are armed together, and you have very "
+            "few presses -- so coordinate the moment with your partner before pressing.\n"
             "- wait: pass one tick.\n"
             "Coordinates are [x,y]; (0,0) is top-left."
         )
@@ -112,7 +115,7 @@ class WorldTool:
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["look", "go_to", "pick", "drop", "wait"],
+                    "enum": ["look", "go_to", "pick", "drop", "press", "wait"],
                 },
                 "x": {"type": "integer"},
                 "y": {"type": "integer"},
@@ -168,6 +171,15 @@ class WorldTool:
         if action == "wait":
             self.sim.mark_dirty()
             return ToolResult(call_id="", content=self._view_json(aid))
+
+        if action == "press":
+            res = self.world.press(aid)
+            self.sim.mark_dirty()
+            left = res.get("charges_left", "-")
+            return ToolResult(
+                call_id="",
+                content=f"press: {res['result']} (charges_left={left})\n{self._view_json(aid)}",
+            )
 
         if action == "pick":
             got = self.world.pick(aid)

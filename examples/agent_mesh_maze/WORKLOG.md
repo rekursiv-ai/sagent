@@ -411,6 +411,153 @@ call with the user — they flagged "too obvious an advantage" so it must stay f
   universal — same honesty discipline as demo 1's cost caveat.
 - Artifacts: `scratchpad/spike_p3.py`, `capture1.log`, `shot_p5.py`.
 
+### 2026-06-25 — no-LLM validation CORRECTED + first LLM sweep + redesign call
+**The "mesh 1.25× faster, maze validated" claim was an artifact — retracted.** It only
+holds when BOTH arms are forced to a 12-agent team (mesh's best case, the tree's worst:
+serial lead-spawn + herd 12 bodies to the exit). Letting **each paradigm pick its own
+turn-optimal team size** collapses it: the tree's optimum is a lean ~6-agent team and the
+arms ~tie.
+
+| maze | TREE\* | MESH\* | mesh turns | mesh compute |
+|---|---|---|---|---|
+| arm4/wall8  | 23.2t | 20.0t | 1.16× | **0.46×** (mesh uses ~2× compute) |
+| arm8/wall16 | 38.0t | 34.0t | 1.12× | 0.81× |
+| arm10/wall20| 45.5t | 41.0t | 1.11× | 0.93× |
+
+True structural edge ≈ **1.1–1.16× turns at a compute PREMIUM** — a latency/cost tradeoff,
+not a free win. Two deeper flaws: (1) `simulation_optimal_baseline` is **not optimal** —
+the LLM beat it (lean teams exit faster; "all must exit" punishes over-spawning), so the
+name oversells it. (2) The **no-fog sim gives every agent GLOBAL knowledge → it tests spawn
+mechanics, NOT communication.** The comms thesis lives only in the fog sim, and the current
+fog model barely amplifies (1.16→1.18×: one relay-hop of staleness on one discovery event).
+
+**First LLM sweep (haiku, 4 exits, arm4/wall8, n=1/cell):**
+`MESH 18.0t (4/4)` vs `TREE 23.0t (4/4)`. Mesh tight (16–21t); tree volatile (19,19,**35**,19
+— a catastrophic blowup at exit=2; at exit=3 tree even beat mesh). Mesh agents reliably
+self-organize once prompted spawn-first: **spawn a team → split by corridor → broadcast the
+exit on sight → peers redirect next turn → gang-break + converge** (the broadcast→redirect IS
+the comms thesis, observed live). Prompt fix that unlocked it: make team-building the explicit
+FIRST priority ("you start ALONE; a lone agent is hopeless; SPAWN then SPLIT UP").
+
+#### [LESSON · robustness] centralized = single point of COORDINATION failure
+The honest LLM differentiator isn't mean speed — it's **variance**. Mesh is low-variance;
+the tree is brittle (the lead juggling reports/relays occasionally derails → 35t blowup).
+The lead is a single point of *coordination* failure, not just a bandwidth bottleneck.
+→ promote to `worklog/lessons/` when the redesign confirms it across seeds.
+
+#### DESIGN CALL (user, 2026-06-25) — back to Python land before more agent tests
+1. **Make the sim genuinely optimal** per paradigm (optimize team size + strategy → a real
+   frontier, so "baseline" means what it says).
+2. **Make COMMUNICATION the objective bottleneck for the tree.** Default to LOCAL knowledge
+   (kill the global cheat); model the lead's relay as bounded bandwidth (≤ b msgs/turn) so
+   tree info-throughput is O(1) in team size while mesh broadcast is O(W). The maze must make
+   the optimal plan depend on DISTRIBUTED local discoveries that must be shared — then the
+   tree only ties IF its lead already holds precise optimal-strategy knowledge a priori
+   (unrealistic). Hypothesis: widen the problem (more fronts K) → mesh advantage GROWS with K.
+3. **Then** the agent test on the real dynamic: how an agent REASONS once it understands its
+   own spawn topology ("am I in a tree or a graph?") and strategizes accordingly.
+- Artifacts: `scratchpad/llm_maze.py` (turn-based controller), `scratchpad/llm_sweep.log`,
+  team-size + hardness + fog sweeps (this session).
+
+### 2026-06-25 (cont.) — comms-bottleneck sim: one artifact caught, one FAIR result
+Per the design call, rebuilt the sim in Python land to make COMMUNICATION the bottleneck.
+Two iterations, the first wrong — caught by an adversarial fairness check:
+
+- **Attempt A — argmax aggregation (`scratchpad/comms_maze.py`): ARTIFACT, rejected.**
+  K corridors, each room a token, exit = argmax(tokens) so no agent knows the exit alone.
+  Naive run looked great (mesh flat 17t, tree 1.12×→1.65× with K). But it required GLOBAL
+  aggregation — *every* agent needs all K tokens — so when I bandwidth-matched the mesh
+  agents to the lead, **the gap collapsed to exactly 1.00× at every K.** The "win" was only
+  from letting mesh aggregate for free while throttling the lead. Lesson: a task where
+  everyone needs everything is topology-invariant; mesh has no fair advantage there.
+
+- **Attempt B — independent pairwise coordination (`scratchpad/pair_maze.py`): FAIR, kept.**
+  K corridors paired into K/2 LOCKS; lock p opens only if the agents at corridors 2p and
+  2p+1 break ON THE SAME TURN. Partners are out of sight -> synchronizing REQUIRES comms.
+  Model is intrinsically fair: every decider finalizes <= b lock-syncs/turn. A mesh agent
+  decides its ONE lock (b never binds); the hub decides ALL K/2 (serializes at (K/2)/b).
+  Result (b=1, L=5), and it SURVIVES the fairness check because the asymmetry is structural:
+
+  | K  | locks | TREE | MESH | mesh× |
+  |----|-------|------|------|-------|
+  | 4  | 2     | 11   | 11   | 1.10× |
+  | 8  | 4     | 13   | 11   | 1.18× |
+  | 12 | 6     | 15   | 11   | 1.36× |
+  | 16 | 8     | 17   | 11   | 1.55× |
+  | 24 | 12    | 21   | 11   | 1.91× |
+
+  **MESH flat (O(1), all locks sync in parallel); TREE linear (O(K/b)); gap unbounded in K.**
+  b-sweep at K=16: b=1→1.55×, b=4→1.09×, b≥8→**1.00× tie** — the gap is purely one hub
+  serializing many independent coordinations. b=inf == "the lead already holds the optimal
+  joint plan" -> tie, exactly the user's caveat. This is the N-plates/simultaneity instinct,
+  validated and fair. The honest claim is now SCALING ("centralized coordination doesn't
+  scale with the number of independent coordinations"), not a fixed multiplier.
+- NEXT: fold the pairwise-lock mechanic into the grid world for the LLM test; then the
+  topology-aware agent test (does an agent that learns "I'm a hub-worker vs a mesh-peer"
+  strategize accordingly?).
+- Artifacts: `scratchpad/comms_maze.py` (argmax, rejected — keep as the cautionary case),
+  `scratchpad/pair_maze.py` (the fair pairwise sim).
+
+### 2026-06-25 (cont.) — abstract LLM topology test: the dynamic is REAL and vivid
+`scratchpad/abstract_llm.py` — text-only LLM agents (haiku) on the pairwise-sync task, no
+grid/web. Fair rule: every agent sends ONE targeted message/turn; topology restricts only
+WHO you may message (mesh: anyone; tree: workers↔lead only, lead relays one worker/turn).
+4 conditions × topology {mesh,tree} × mode {told,discover}. P=3 (3 locks), n=1:
+
+| condition      | solved | turns | msgs | note |
+|----------------|--------|-------|------|------|
+| mesh / told    | yes    | 9     | 11   | peers coordinate directly, in parallel |
+| mesh / discover| yes    | 8     | 9    | discovery ~free: try partner, it works |
+| tree / told    | yes    | 16(cap)| **73** | lead serializes ONE pair at a time |
+| tree / discover| **NO (2/3)** | 16 | 28 | 26 sends DROPPED — agents fight their topology |
+
+Qualitative gold (the point of the whole demo):
+- **tree/told**: the lead orchestrates pair (1,2)→lock@t3, (3,4)→lock@t8 (re-proposed 5×),
+  (5,6)→never cleanly within cap. One coordinator, one pair at a time = O(K) + 73 msgs of
+  round-trips. The lead is both a serial bottleneck AND a single point of confusion.
+- **mesh/discover**: peers immediately try their partner, it works, confirm, BREAK together
+  — parallel, ~free recognition.
+- **tree/discover (the showpiece)**: agents START by messaging their partner directly (all
+  DROPPED in a tree). SOME infer the topology and adapt — `a3→lead: "haven't reached agent 4
+  ... can you relay to agent 4?"` — others NEVER do (a5↔a6 keep messaging each other every
+  turn, both dropped, lock never opens → run FAILS). The recognition tax is real and here
+  fatal. This is exactly the user's two framings: (told) the human picked the structure;
+  (discover) the agent recognizes its structure and — the hook — could ask to be re-wired,
+  "sagent offers both topologies and the right one is optimizable."
+- Caveats: n=1, noisy; tree/told only barely solved at the cap; a P-sweep + seeds to confirm
+  the SCALING for real agents is running (`abstract_sweep.log`). Build-order decision (user):
+  abstract-first to de-risk → CONFIRMED, greenlight the grid build. Topology-awareness: run
+  BOTH told + discover arms (user: both are good stories).
+- Artifacts: `scratchpad/abstract_llm.py`, `abstract_p3b.log` (transcripts), `abstract_sweep.log`.
+
+### 2026-06-25 (cont.) — spatial demo built; mechanic finalized; entry aligned
+Folded the validated pairwise mechanic into the grid (`world.py`, `lock_lockstep.py`, `run.py`,
+`web/index.html`). Mechanic journey (all empirically gated):
+- sustained co-presence → too weak (camping: 27t/5msg vs 30t/11msg; comms NOT load-bearing).
+- instantaneous press + charges, AUTONOMOUS serve_forever → too fiddly (logical clock jumps on
+  every agent action; "press within a window" unreliable even with 56 mesh msgs → both fail).
+- **LOCKSTEP** (every agent acts once/tick, presses resolve together) → clean. mesh 8t/34msg,
+  tree 9t/56msg (told, P=3). Spatial scaling (P2-5): tree always more messages (the relay tax),
+  but with generous budget both solve — the *failure* story lives in the abstract test; the
+  spatial page is the visceral view. `run.py` aligned to `uv run python -m examples.agent_mesh_maze.run`.
+  Web: two-zone (hero side-by-side mazes + terse synced convo + independent scrubbers / sync-default;
+  explainer comm-graph + scaling). `lock_run.py` = the rejected autonomous driver (kept for history).
+
+#### ⛔ GATING REQUIREMENT (user, 2026-06-25) — must showcase RECURSIVE SPAWN
+The demo currently pre-places all 2P workers — it does NOT show sagent's first-class
+budgeted/recursive spawn. MUST change to:
+1. **Start with a SINGLE agent.** It understands it cannot solve alone and must SPAWN a team —
+   but does NOT know how many; it discovers the count by exploring.
+2. **Empty/dead-end paths**: corridors it explores that have NO lock — so exploration is real and
+   the agent must map the maze (and not waste spawns) before knowing the team size.
+3. The spawn itself is the topology contrast: mesh = ANY agent spawns (recursive, parallel team
+   growth, peers are any-to-any); tree = only the lead spawns (serial growth, children are workers
+   that talk only to the lead). This is the genuinely-hard-elsewhere capability.
+Nit: agent movement must be a SMOOTH cell-to-cell transition (currently reads as jumps).
+- Artifacts (this session): `world.py` (lock mechanic + asymmetric `make_lock_level` + press),
+  `lock_lockstep.py` (lockstep engine), `run.py` (entry), `web/index.html` (replay page),
+  `web/data.js` (captured P=3 told trace).
+
 ---
 
 ## 12. Environment & how to run

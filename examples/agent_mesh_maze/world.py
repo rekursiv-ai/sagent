@@ -31,6 +31,9 @@ _CHAR_TO_CELL: dict[str, CellType] = {
     "P": "plate",
 }
 _DIG_HP = 2  # ticks of digging to break a diggable wall
+PLATE_LETTERS = "abcdefgh"  # a paired-plate lock: two tiles sharing a letter
+PRESS_WINDOW = 10  # a press stays "armed" this many ticks (absorbs multi-agent jitter)
+PRESS_CHARGES = 6  # presses each agent gets -> can't spam; must time it (=> comms)
 
 
 @dataclass
@@ -55,6 +58,8 @@ class Agent:
     target: tuple[int, int] | None = None
     alive: bool = True
     extracted: bool = False
+    presses_left: int = PRESS_CHARGES
+    armed_until: int = -1  # plate-press stays counted while tick <= armed_until
 
     @property
     def xy(self) -> tuple[int, int]:
@@ -76,6 +81,7 @@ class World:
         self.width = max(len(r) for r in rows)
         self.grid: list[list[CellType]] = []
         self.dig_hp: dict[tuple[int, int], int] = {}
+        self._plate_lock: dict[tuple[int, int], int] = {}  # plate tile -> lock index
         self.items: dict[str, Item] = {}
         self.agents: dict[str, Agent] = {}
         self.exit_xy: tuple[int, int] = (0, 0)
@@ -93,6 +99,10 @@ class World:
                     if ch == "E":
                         self.exit_xy = (x, y)
                     continue
+                if ch in PLATE_LETTERS:  # a paired-lock plate (two share a letter)
+                    cells.append("plate")
+                    self._plate_lock[(x, y)] = PLATE_LETTERS.index(ch)
+                    continue
                 # Non-terrain glyphs (items, spawns) sit on floor.
                 cells.append("floor")
                 if ch == "*":
@@ -109,6 +119,14 @@ class World:
         for name, kind in kinds.items():
             if name in self.items:
                 self.items[name].kind = kind
+
+        # Group plate tiles into locks (each lock = the tiles sharing a letter).
+        by_lock: dict[int, list[tuple[int, int]]] = {}
+        for xy, li in self._plate_lock.items():
+            by_lock.setdefault(li, []).append(xy)
+        self.locks: list[dict[str, object]] = [
+            {"plates": sorted(by_lock[li]), "open": False} for li in sorted(by_lock)
+        ]
 
         self._spawns = [xy for _, xy in sorted(spawns)]
         self._spawn_xy: list[tuple[int, int]] = []
@@ -214,6 +232,10 @@ class World:
             "visible_cells": cells,
             "visible_items": items,
             "visible_agents": others,
+            "on_plate": a.xy in self._plate_lock,
+            "presses_left": a.presses_left,
+            "locks_open": self.locks_open(),
+            "locks_total": len(self.locks),
             "budget_left": self.budget - self.tick,
             "tick": self.tick,
         }
@@ -311,6 +333,24 @@ class World:
             "result": "broke" if broke else "chipped",
         }
 
+    def press(self, agent_id: str) -> dict[str, object]:
+        """Press the plate under you: arms it for PRESS_WINDOW ticks, spends one charge.
+
+        A lock needs BOTH its plates armed in the same tick, so a solo or mistimed press
+        is a wasted charge -- partners must coordinate the moment (hence: communicate).
+        """
+        a = self.agents[agent_id]
+        if a.xy not in self._plate_lock:
+            return {"kind": "press", "id": agent_id, "result": "not_on_a_plate"}
+        if a.presses_left <= 0:
+            return {"kind": "press", "id": agent_id, "result": "out_of_charges"}
+        a.presses_left -= 1
+        a.armed_until = self.tick + PRESS_WINDOW
+        return {
+            "kind": "press", "id": agent_id, "at": list(a.xy),
+            "result": "armed", "charges_left": a.presses_left,
+        }
+
     def extract(self, agent_id: str) -> bool:
         """Mark an agent extracted if it is standing on the exit."""
         a = self.agents[agent_id]
@@ -347,6 +387,33 @@ class World:
         plates = self.all_plates()
         return bool(plates) and self.pressed_plates() == plates
 
+    def armed_plates(self) -> set[tuple[int, int]]:
+        """Plate tiles whose occupant has an ACTIVE press (within PRESS_WINDOW)."""
+        return {
+            a.xy
+            for a in self.agents.values()
+            if a.alive and a.xy in self._plate_lock and a.armed_until >= self.tick
+        }
+
+    def check_locks(self) -> None:
+        """Latch open any paired lock whose BOTH plates are ARMED this tick.
+
+        Each lock is independent: its two out-of-sight partners must PRESS within the
+        same window. Standing alone or mistiming does nothing -- they must coordinate.
+        """
+        armed = self.armed_plates()
+        for lk in self.locks:
+            plates = lk["plates"]
+            assert isinstance(plates, list)
+            if not lk["open"] and all(p in armed for p in plates):
+                lk["open"] = True
+
+    def locks_open(self) -> int:
+        return sum(1 for lk in self.locks if lk["open"])
+
+    def all_locks_open(self) -> bool:
+        return bool(self.locks) and all(lk["open"] for lk in self.locks)
+
     def diamond_at_exit(self) -> bool:
         for it in self.items.values():
             if it.kind == "diamond" and it.xy == self.exit_xy and it.holder is None:
@@ -376,12 +443,19 @@ class World:
                 for it in self.items.values()
             },
             "plates_pressed": [list(p) for p in sorted(self.pressed_plates())],
+            "plates_armed": [list(p) for p in sorted(self.armed_plates())],
             "vault_open": self.vault_open(),
+            "locks": [
+                {"plates": [list(p) for p in lk["plates"]], "open": lk["open"]}  # type: ignore[union-attr]
+                for lk in self.locks
+            ],
+            "locks_open": self.locks_open(),
             "events": self._events,
         }
 
     def end_tick(self) -> None:
-        """Close the current tick: snapshot a frame and advance the clock."""
+        """Close the current tick: latch locks, snapshot a frame, advance the clock."""
+        self.check_locks()
         self.trace.append(self.frame())
         self._events = []
         self.tick += 1
@@ -436,3 +510,52 @@ LEVEL_TREASURE = [
     "#..$.......$..#",
     "###############",
 ]
+
+
+def make_lock_level(
+    num_locks: int = 3, short: int = 3, long: int = 6
+) -> tuple[list[str], dict[str, object]]:
+    """Build a paired-plate LOCK maze (the validated pairwise-coordination mechanic).
+
+    ``num_locks`` horizontal corridors stacked vertically; corridor *i* holds lock *i*'s
+    two plates at its far ends (``short+long`` apart -> out of each other's sight). The two
+    sides are ASYMMETRIC (one ``short`` corridor, one ``long``) and the long side ALTERNATES
+    per lock, so a lock's two partners arrive at their plates on DIFFERENT ticks. That kills
+    the degenerate "both walk out and press the same tick by coincidence" path: the early
+    arriver is alone and must actually coordinate ("I'm here -- come now") to sync the press.
+    A central vertical hall connects every corridor; workers spawn flanking it; the tree's
+    coordinator spawns at the hall centre. Returns ``(rows, meta)`` driving placement.
+    """
+    P = num_locks
+    cx = long + 1  # hall column (room for the long side on either flank)
+    width = 2 * long + 3
+    height = 2 * P + 1
+    g = [["#"] * width for _ in range(height)]
+    workers: list[dict[str, object]] = []
+    for i in range(P):
+        ry = 2 * i + 1
+        ls, rs = (long, short) if i % 2 == 0 else (short, long)  # alternate the long side
+        lp, rp = cx - ls, cx + rs  # left / right plate columns
+        for x in range(lp, rp + 1):
+            g[ry][x] = "."
+        g[ry][lp] = PLATE_LETTERS[i]
+        g[ry][rp] = PLATE_LETTERS[i]
+        workers.append({"spawn": (cx - 1, ry), "plate": (lp, ry), "lock": i})
+        workers.append({"spawn": (cx + 1, ry), "plate": (rp, ry), "lock": i})
+    for y in range(1, height - 1):
+        g[y][cx] = "."  # vertical hall connecting the corridors
+    for i in range(P):  # partners are the two workers of a lock
+        workers[2 * i]["partner"] = 2 * i + 1
+        workers[2 * i + 1]["partner"] = 2 * i
+    meta: dict[str, object] = {
+        "locks": P,
+        "hall_col": cx,
+        "workers": workers,
+        "lead_spawn": (cx, height // 2),
+    }
+    return ["".join(r) for r in g], meta
+
+
+# Default lock level for the mesh-vs-tree coordination demo: 3 independent locks
+# (6 plates, 6 workers + 1 coordinator), partners staggered so coordination is real.
+LEVEL_LOCKS, LOCK_META = make_lock_level(num_locks=3, short=3, long=6)

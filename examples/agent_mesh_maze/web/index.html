@@ -3,269 +3,278 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Agent-mesh maze — peer mesh vs hub-and-spoke</title>
+<title>Decentralized vs Centralized coordination</title>
 <style>
-  :root{
-    --bg:#f3f6fb; --panel:#ffffff; --line:#dde3ec; --fg:#1b2230; --dim:#5b6678;
-    --wall:#33415c; --floor:#e7edf6; --exit:#2e9e5b; --diamond:#0f9fb3; --junk:#9aa3b2;
-    --a1:#2f6fd0; --a2:#d56a3c; --a3:#2f9e63; --hub:#7c52c4;
+  :root {
+    --bg:#f6f7f9; --panel:#fff; --ink:#1c2230; --muted:#7a8699; --line:#e4e8ee;
+    --mesh:#2f9e6f; --tree:#c2603a; --wall:#cdd4de; --floor:#fbfcfe;
+    --ok:#2f9e6f; --drop:#d24a4a; --armed:#f1b73d;
   }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-  header{padding:18px 26px 6px}
-  h1{margin:0;font-size:20px}
-  .sub{color:var(--dim);max-width:980px;margin:6px 0 0}
-  .controls{display:flex;gap:12px;align-items:center;padding:10px 26px}
-  button{background:var(--a1);color:#fff;border:0;border-radius:7px;
-    padding:7px 16px;font-weight:700;cursor:pointer}
-  button.ghost{background:#e7ecf4;color:var(--fg)}
-  input[type=range]{flex:1;max-width:520px}
-  .arena{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:8px 26px 20px}
-  @media(max-width:980px){.arena{grid-template-columns:1fr}}
-  .arm{background:var(--panel);border:1px solid var(--line);border-radius:12px;
-    padding:14px 16px 16px;overflow:hidden}
-  .arm h2{margin:0 0 2px;font-size:15px}
-  .arm .tag{font-size:12px;color:var(--dim);margin-bottom:10px}
-  .arm svg{width:100%;height:auto;display:block;background:#eef2f8;border-radius:8px}
-  .stats{display:flex;gap:16px;margin-top:10px;font-size:13px;flex-wrap:wrap}
-  .stats b{font-variant-numeric:tabular-nums}
-  .pill{padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:700}
-  .win{background:#dcf3e4;color:#1d7a43}
-  .lose{background:#fbe3da;color:#b8502a}
-  .cgcap{font-size:11px;color:var(--dim);margin:12px 0 2px}
-  .cgraph{width:210px;height:auto;display:block;margin:2px auto 0}
-  .agent-dot{transition:cx .35s linear,cy .35s linear}
-  .msg{stroke-linecap:round;opacity:0;transition:opacity .25s}
-  .msg.on{opacity:.9}
-  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:12px;
-    padding:0 26px 8px}
-  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;
-    margin-right:4px;vertical-align:-1px}
-  .scripts{padding:6px 26px 40px}
-  .scripts h3{font-size:14px;margin:18px 0 8px}
-  .tcols{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-  @media(max-width:980px){.tcols{grid-template-columns:1fr}}
-  details{background:var(--panel);border:1px solid var(--line);border-radius:9px;
-    margin-bottom:8px;padding:6px 12px}
-  summary{cursor:pointer;font-weight:600}
-  .step{border-left:2px solid var(--line);margin:6px 0 6px 4px;padding:2px 0 2px 10px;
-    font-size:12.5px;color:#3c4658}
-  .step .call{color:#3a5fa8;font-family:ui-monospace,monospace;font-size:11.5px}
-  .step.inbox{border-left-color:#7c5cbf;color:#6b4ea3}
-  .why{margin:10px 26px 36px;background:#eef2f8;
-    border:1px solid var(--line);border-radius:12px;padding:16px 20px}
-  .why h3{margin:0 0 8px}.why p{margin:6px 0;color:#3c4658}
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { padding:20px 24px 8px; }
+  h1 { font-size:21px; margin:0 0 4px; }
+  .thesis { color:var(--muted); max-width:880px; }
+  .mode-tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px;
+              background:#eef1f5; color:var(--muted); margin-left:8px; vertical-align:middle; }
+  .arms { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:8px 24px; }
+  .arm { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+         overflow:hidden; display:flex; flex-direction:column; }
+  .arm h2 { margin:0; padding:12px 14px 8px; font-size:14px; display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:50%; }
+  .arm.mesh h2 .dot { background:var(--mesh); }
+  .arm.tree h2 .dot { background:var(--tree); }
+  .arm h2 small { color:var(--muted); font-weight:400; }
+  canvas { width:100%; display:block; background:var(--floor); }
+  .status { display:flex; gap:14px; padding:8px 14px; font-variant-numeric:tabular-nums;
+            border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  .status b { font-weight:600; } .status .lab { color:var(--muted); }
+  .ctrls { display:flex; align-items:center; gap:8px; padding:8px 14px; }
+  .ctrls button { border:1px solid var(--line); background:#fff; border-radius:7px;
+                  padding:4px 9px; cursor:pointer; font-size:13px; }
+  .ctrls button:hover { background:#f0f3f7; }
+  .ctrls input[type=range] { flex:1; }
+  .convo { height:200px; overflow-y:auto; padding:6px 12px 12px; border-top:1px solid var(--line);
+           font-size:12.5px; }
+  .msg { padding:3px 0; border-bottom:1px solid #f1f3f7; }
+  .msg .who { font-weight:600; } .msg.dropped { color:var(--drop); }
+  .msg.dropped .who::after { content:" ✗ dropped"; font-weight:400; font-size:11px; }
+  .msg .tk { color:var(--muted); font-size:11px; }
+  .msg .exp { color:#5b7; cursor:pointer; font-size:11px; margin-left:6px; user-select:none; }
+  .arm.tree .msg .exp { color:#b86; }
+  .reason { background:#f7f9fb; border-left:2px solid var(--line); margin:4px 0 4px 4px;
+            padding:5px 8px; color:var(--muted); white-space:pre-wrap; font-size:11.5px; display:none; }
+  .syncbar { text-align:center; padding:4px 0 14px; }
+  .syncbar button { border:1px solid var(--line); background:#fff; border-radius:8px;
+                    padding:6px 14px; cursor:pointer; }
+  .syncbar .on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  section.why { margin:8px 24px 40px; background:var(--panel); border:1px solid var(--line);
+                border-radius:12px; padding:18px 22px; }
+  section.why h2 { margin:0 0 10px; font-size:16px; }
+  .why-grid { display:grid; grid-template-columns:1fr 1fr 1.1fr; gap:22px; align-items:center; }
+  .why-grid figcaption { text-align:center; color:var(--muted); font-size:12px; margin-top:4px; }
+  .why p { color:#48505f; } .why b.m { color:var(--mesh); } .why b.t { color:var(--tree); }
+  @media (max-width:880px){ .arms{grid-template-columns:1fr;} .why-grid{grid-template-columns:1fr;} }
 </style>
 </head>
 <body>
 <header>
-  <h1>One task, two ways to wire a team</h1>
-  <p class="sub">Three sagent agents must find a diamond in a foggy maze and carry it
-  to the exit. Left: a <b>peer mesh</b> — any agent broadcasts/messages any other
-  (<code>AgentSend</code>). Right: a <b>hub-and-spoke tree</b> — workers may only
-  message a coordinator, which relays. Same maze, same prompt; watch the
-  <b>message arrows</b>: a web vs a star.</p>
+  <h1>Decentralized vs Centralized coordination <span class="mode-tag" id="modeTag"></span></h1>
+  <div class="thesis">Same maze, same task: open every <b>lock</b> — each needs its two
+    out-of-sight partners to <b>press together</b>, so they must communicate. The only
+    difference between the two runs is the <b>comms topology</b>. Watch the mesh coordinate
+    in parallel while the tree funnels everything through one coordinator.</div>
 </header>
 
-<div class="controls">
-  <button id="play">▶ play</button>
-  <button id="restart" class="ghost">↻ restart</button>
-  <input id="scrub" type="range" min="0" value="0" />
-  <span id="clock" class="dim" style="color:var(--dim);font-variant-numeric:tabular-nums"></span>
+<div class="arms">
+  <div class="arm mesh" id="arm-mesh">
+    <h2><span class="dot"></span>MESH <small>— any agent talks to any agent</small></h2>
+    <canvas></canvas>
+    <div class="status"></div>
+    <div class="ctrls">
+      <button data-act="play">▶</button><button data-act="step">⏭</button>
+      <input type="range" min="0" value="0" />
+      <span class="tcount"></span>
+    </div>
+    <div class="convo"></div>
+  </div>
+  <div class="arm tree" id="arm-tree">
+    <h2><span class="dot"></span>TREE <small>— workers talk only to the coordinator</small></h2>
+    <canvas></canvas>
+    <div class="status"></div>
+    <div class="ctrls">
+      <button data-act="play">▶</button><button data-act="step">⏭</button>
+      <input type="range" min="0" value="0" />
+      <span class="tcount"></span>
+    </div>
+    <div class="convo"></div>
+  </div>
 </div>
-<div class="legend">
-  <span><i style="background:var(--a1)"></i>a1</span>
-  <span><i style="background:var(--a2)"></i>a2</span>
-  <span><i style="background:var(--a3)"></i>a3</span>
-  <span><i style="background:var(--diamond)"></i>diamond</span>
-  <span><i style="background:var(--junk)"></i>junk key (useless)</span>
-  <span><i style="background:var(--exit)"></i>exit</span>
-</div>
-
-<div class="arena" id="arena"></div>
-
-<div class="scripts">
-  <h3>What each agent was thinking (full transcripts)</h3>
-  <div class="tcols" id="scripts"></div>
-</div>
+<div class="syncbar"><button id="syncBtn" class="on">▶ play both in sync</button></div>
 
 <section class="why">
-  <h3>Why this needs <span style="color:#b692f6">sagent</span></h3>
-  <p><b>Agents spawn agents and talk in every direction.</b> Each maze runner is a
-  persistent <code>AgentSpawn</code> peer with its own inbox; they coordinate with
-  <code>AgentSend</code> — any-to-any, plus fan-out broadcast — and a routine message
-  is read at the recipient's next decision while an <i>urgent</i> one preempts a move
-  mid-step.</p>
-  <p><b>The wiring is the only difference.</b> Both teams get the identical task and
-  tools; the mesh lets discoveries reach everyone in one hop, while the tree funnels
-  every update through one coordinator. The honest gap shows up under churn (and
-  scale) — see the worklog.</p>
+  <h2>Why the tree chokes and the mesh scales</h2>
+  <div class="why-grid">
+    <figure><canvas id="gMesh" width="220" height="180"></canvas>
+      <figcaption>mesh — every pair coordinates directly, in parallel</figcaption></figure>
+    <figure><canvas id="gTree" width="220" height="180"></canvas>
+      <figcaption>tree — every pair routes through one coordinator</figcaption></figure>
+    <figure><canvas id="gScale" width="320" height="180"></canvas>
+      <figcaption>messages to coordinate K locks (abstract test)</figcaption></figure>
+  </div>
+  <p>Each lock is an <b>independent</b> coordination. The mesh handles all of them at once —
+    every agent is in exactly one pair, so the work parallelizes (<b class="m">O(1)</b> rounds).
+    The tree puts a single coordinator on the critical path of <i>every</i> pair, so it
+    serializes them (<b class="t">O(K)</b>): it relays to one worker at a time, and as the
+    number of locks grows it falls further behind. That is the whole story — no single sagent
+    primitive is exotic; sagent just makes the mesh wiring as easy as the tree's, so the
+    decentralized strategy is actually available.</p>
 </section>
 
 <script src="data.js"></script>
 <script>
-const D = window.MAZE || {meta:{grid:[]},arms:{}};
-const M = D.meta, ARMS = D.arms;
-const CELL = 26, R = 8;
-const COL = {a1:"var(--a1)",a2:"var(--a2)",a3:"var(--a3)"};
-const SVGNS = "http://www.w3.org/2000/svg";
-function el(n,a){const e=document.createElementNS(SVGNS,n);for(const k in a)e.setAttribute(k,a[k]);return e;}
-function gridChar(x,y){const r=M.grid[y]||"";return r[x]||"#";}
+const M = window.MAZE;
+const LCOL = ['#3b82c4','#8a63d2','#cf5aa0','#46a06a','#d98a32'];
+document.getElementById('modeTag').textContent = M.meta.told ? 'topology told' : 'topology discovered';
 
-// Build one arm's SVG + element handles. Returns a renderer state object.
-function buildArm(armKey, arm){
-  const w=M.width*CELL, h=M.height*CELL;
-  const svg=el("svg",{viewBox:`0 0 ${w} ${h}`});
-  // terrain
-  for(let y=0;y<M.height;y++)for(let x=0;x<M.width;x++){
-    const c=gridChar(x,y);
-    let fill="var(--floor)";
-    if(c==="#")fill="var(--wall)";
-    else if(c==="E")fill="var(--exit)";
-    else if(c==="P")fill="#3a3450";
-    svg.appendChild(el("rect",{x:x*CELL+1,y:y*CELL+1,width:CELL-2,height:CELL-2,rx:3,fill}));
-    if(c==="E"){const t=el("text",{x:x*CELL+CELL/2,y:y*CELL+CELL/2+4,"text-anchor":"middle","font-size":11,fill:"#bff0d0"});t.textContent="exit";svg.appendChild(t);}
+class Arm {
+  constructor(id, arm){
+    this.el = document.getElementById(id); this.arm = arm;
+    this.grid = M.meta.grid; this.W = M.meta.width; this.H = M.meta.height;
+    this.trace = arm.trace; this.roster = arm.roster; this.transcripts = arm.transcripts;
+    this.cv = this.el.querySelector('canvas'); this.ctx = this.cv.getContext('2d');
+    this.cell = 26; this.cv.width = this.W*this.cell; this.cv.height = this.H*this.cell;
+    this.statusEl = this.el.querySelector('.status');
+    this.slider = this.el.querySelector('input[type=range]');
+    this.slider.max = this.trace.length-1;
+    this.tcount = this.el.querySelector('.tcount');
+    this.convoEl = this.el.querySelector('.convo');
+    this.t = 0; this.playing = false;
+    this.el.querySelector('[data-act=play]').onclick = ()=>{ unsync(); this.toggle(); };
+    this.el.querySelector('[data-act=step]').onclick = ()=>{ unsync(); this.pause(); this.setT(Math.min(this.trace.length-1, Math.floor(this.t)+1)); };
+    this.slider.oninput = ()=>{ unsync(); this.pause(); this.setT(+this.slider.value); };
+    this.agentColor = {};
+    this.roster.forEach((a,i)=>{ this.agentColor[a] = a==='lead' ? '#444' : LCOL[Math.floor(i/2)%LCOL.length]; });
+    this.buildConvo();
   }
-  const msgLayer=el("g",{}); svg.appendChild(msgLayer);
-  const itemLayer=el("g",{}); svg.appendChild(itemLayer);
-  const agentLayer=el("g",{}); svg.appendChild(agentLayer);
-  // item + agent handles built lazily per frame
-  const wrap=document.createElement("div"); wrap.className="arm";
-  const isMesh=arm.mesh;
-  wrap.innerHTML=`<h2>${isMesh?"Peer mesh":"Hub-and-spoke tree"}</h2>
-    <div class="tag">${isMesh?"any agent → any agent + broadcast":"workers → coordinator <b>"+arm.coordinator+"</b> → workers"}</div>`;
-  wrap.appendChild(svg);
-  const stats=document.createElement("div"); stats.className="stats"; wrap.appendChild(stats);
-  const cgCap=document.createElement("div"); cgCap.className="cgcap";
-  cgCap.textContent="messages so far — who talked to whom:";
-  wrap.appendChild(cgCap);
-  const cg=el("svg",{viewBox:"0 0 300 96",class:"cgraph"}); wrap.appendChild(cg);
-  return {arm,wrap,svg,msgLayer,itemLayer,agentLayer,stats,cg,agentEls:{},itemEls:{}};
-}
-
-function center(xy){return [xy[0]*CELL+CELL/2, xy[1]*CELL+CELL/2];}
-
-function renderFrame(R_, t){
-  const arm=R_.arm, frames=arm.trace, f=frames[Math.min(t,frames.length-1)];
-  if(!f)return;
-  // items
-  for(const name in f.items){
-    const it=f.items[name];
-    let e=R_.itemEls[name];
-    if(!e){e=el("circle",{r:5}); R_.itemLayer.appendChild(e); R_.itemEls[name]=e;}
-    if(it.xy && !it.holder){const[cx,cy]=center(it.xy);
-      e.setAttribute("cx",cx);e.setAttribute("cy",cy);
-      e.setAttribute("fill",it.kind==="diamond"?"var(--diamond)":"var(--junk)");
-      e.setAttribute("opacity",1);
-    } else { e.setAttribute("opacity",0); } // carried items hide (shown on the agent)
+  toggle(){ this.playing?this.pause():this.play(); }
+  play(){ this.playing=true; this.el.querySelector('[data-act=play]').textContent='⏸'; }
+  pause(){ this.playing=false; this.el.querySelector('[data-act=play]').textContent='▶'; }
+  setT(t){ this.t=t; this.slider.value=Math.floor(t); this.render(); }
+  frame(){ return this.trace[Math.min(this.trace.length-1, Math.floor(this.t))]; }
+  pos(aid, t){
+    const i=Math.floor(t), f=t-i;
+    const a=this.trace[Math.min(i,this.trace.length-1)].agents[aid];
+    const b=this.trace[Math.min(i+1,this.trace.length-1)].agents[aid];
+    if(!a) return null; if(!b) return a;
+    return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f];
   }
-  // agents
-  for(const id in f.agents){
-    const a=f.agents[id];const[cx,cy]=center(a.xy);
-    let g=R_.agentEls[id];
-    if(!g){g={};
-      g.c=el("circle",{r:R,class:"agent-dot",fill:COL[id]||"#fff","stroke":"#0a0d14","stroke-width":2});
-      g.t=el("text",{class:"agent-dot","text-anchor":"middle","font-size":10,"font-weight":700,fill:"#06121f"});
-      g.d=el("circle",{r:3.5,fill:"var(--diamond)","stroke":"#06121f","stroke-width":1,class:"agent-dot"}); // carried-diamond badge
-      R_.agentLayer.appendChild(g.c);R_.agentLayer.appendChild(g.t);R_.agentLayer.appendChild(g.d);
-      R_.agentEls[id]=g;
+  render(){
+    const ctx=this.ctx, c=this.cell, fr=this.frame();
+    ctx.clearRect(0,0,this.cv.width,this.cv.height);
+    for(let y=0;y<this.H;y++) for(let x=0;x<this.W;x++){
+      const ch=this.grid[y][x];
+      ctx.fillStyle = ch==='#' ? getCss('--wall') : getCss('--floor');
+      ctx.fillRect(x*c,y*c,c-1,c-1);
     }
-    g.c.setAttribute("cx",cx);g.c.setAttribute("cy",cy);
-    g.t.setAttribute("x",cx);g.t.setAttribute("y",cy+3);g.t.textContent=id.replace("a","");
-    const carries=(a.inv||[]).some(n=>n.includes("diamond"));
-    g.d.setAttribute("cx",cx+8);g.d.setAttribute("cy",cy-8);g.d.setAttribute("opacity",carries?1:0);
+    const armed = new Set(fr.armed.map(p=>p[0]+','+p[1]));
+    fr.locks.forEach((lk,li)=>{
+      lk.plates.forEach(p=>{
+        const [x,y]=p, k=x+','+y;
+        ctx.save();
+        if(armed.has(k)){ ctx.shadowColor=getCss('--armed'); ctx.shadowBlur=16; }
+        ctx.fillStyle = lk.open ? LCOL[li%LCOL.length] : '#dfe4ea';
+        ctx.strokeStyle = LCOL[li%LCOL.length]; ctx.lineWidth=2;
+        ctx.fillRect(x*c+4,y*c+4,c-9,c-9); ctx.strokeRect(x*c+4,y*c+4,c-9,c-9);
+        ctx.restore();
+        ctx.fillStyle = lk.open?'#fff':LCOL[li%LCOL.length]; ctx.font='bold 11px sans-serif';
+        ctx.textAlign='center'; ctx.fillText(String.fromCharCode(97+li), x*c+c/2, y*c+c/2+4);
+      });
+    });
+    fr.messages.forEach(m=>{
+      const s=this.pos(m.src,Math.floor(this.t)), d=this.pos(m.dst,Math.floor(this.t));
+      if(!s||!d) return;
+      ctx.strokeStyle = m.delivered?getCss('--ok'):getCss('--drop');
+      ctx.lineWidth=1.6; ctx.globalAlpha=0.55; ctx.setLineDash(m.delivered?[]:[4,3]);
+      ctx.beginPath(); ctx.moveTo(s[0]*c+c/2,s[1]*c+c/2); ctx.lineTo(d[0]*c+c/2,d[1]*c+c/2); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha=1;
+    });
+    this.roster.forEach(aid=>{
+      const p=this.pos(aid,this.t); if(!p) return;
+      ctx.fillStyle=this.agentColor[aid];
+      ctx.beginPath(); ctx.arc(p[0]*c+c/2,p[1]*c+c/2,c*0.32,0,7); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.font='9px sans-serif'; ctx.textAlign='center';
+      ctx.fillText(aid==='lead'?'L':aid.slice(1), p[0]*c+c/2, p[1]*c+c/2+3);
+    });
+    this.statusEl.innerHTML =
+      `<span><span class="lab">locks</span> <b>${fr.locks_open}/${fr.locks.length}</b></span>`+
+      `<span><span class="lab">tick</span> <b>${fr.tick}</b></span>`+
+      `<span><span class="lab">messages</span> <b>${this.msgCountUpto(Math.floor(this.t))}</b></span>`;
+    this.tcount.textContent = `${Math.floor(this.t)}/${this.trace.length-1}`;
+    this.slider.value = Math.floor(this.t);
+    this.highlightConvo(Math.floor(this.t));
   }
-  // message arrows: accumulate every message so far (faint lines = the topology
-  // map building up), with the last few frames bright. Endpoints are the agents'
-  // positions at send time. The mesh draws a web; the tree draws a star on the hub.
-  R_.msgLayer.innerHTML="";
-  for(let k=0;k<=t;k++){
-    const fr=frames[Math.min(k,frames.length-1)]; const age=t-k;
-    for(const ev of (fr.events||[])){
-      if(ev.kind!=="msg")continue;
-      const fa=fr.agents[ev.frm], ta=fr.agents[ev.to];
-      if(!fa||!ta)continue;
-      const[x1,y1]=center(fa.xy),[x2,y2]=center(ta.xy);
-      const ln=el("line",{x1,y1,x2,y2,
-        stroke:ev.urgent?"#e0855f":(COL[ev.frm]||"#7b93c4"),
-        "stroke-width":age<4?2.4:1.2,
-        opacity:age<5?Math.max(0.2,0.9*(1-age/6)):0.16});
-      R_.msgLayer.appendChild(ln);
+  msgCountUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>m.delivered).length; return n; }
+  buildConvo(){
+    let html='';
+    this.trace.forEach((fr,ti)=>{
+      fr.messages.forEach(m=>{
+        const cls = m.delivered?'':' dropped';
+        html += `<div class="msg${cls}" data-tick="${ti}">`+
+          `<span class="tk">t${ti}</span> <span class="who">${m.src}→${m.dst}</span>: ${esc(m.text)}`+
+          `<span class="exp" data-a="${m.src}" data-t="${ti}">[…]</span>`+
+          `<div class="reason"></div></div>`;
+      });
+    });
+    this.convoEl.innerHTML = html || '<div class="msg"><span class="tk">no messages</span></div>';
+    this.convoEl.querySelectorAll('.exp').forEach(e=>{
+      e.onclick=()=>{ const r=e.parentElement.querySelector('.reason');
+        if(r.style.display==='block'){ r.style.display='none'; return; }
+        const tx=(this.transcripts[e.dataset.a]||[])[+e.dataset.t] || '(no reasoning recorded)';
+        r.textContent=tx; r.style.display='block'; };
+    });
+  }
+  highlightConvo(t){
+    this.convoEl.querySelectorAll('.msg').forEach(el=>{
+      const tk=+el.dataset.tick; el.style.opacity = (tk<=t?1:0.32);
+      if(tk===t){ el.scrollIntoView({block:'nearest'}); }
+    });
+  }
+}
+function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+const arms = { mesh:new Arm('arm-mesh',M.arms.mesh), tree:new Arm('arm-tree',M.arms.tree) };
+let synced=true;
+const syncBtn=document.getElementById('syncBtn');
+function unsync(){ if(synced){ synced=false; syncBtn.classList.remove('on'); syncBtn.textContent='▶ resume sync'; } }
+syncBtn.onclick=()=>{
+  synced=true; syncBtn.classList.add('on'); syncBtn.textContent='⏸ syncing';
+  for(const k in arms){ arms[k].setT(0); arms[k].play(); }
+};
+let last=performance.now();
+const TPS=1.6;
+function loop(now){
+  const dt=(now-last)/1000; last=now;
+  for(const k in arms){ const a=arms[k];
+    if(a.playing){ a.t=Math.min(a.trace.length-1, a.t+dt*TPS);
+      if(a.t>=a.trace.length-1){ a.pause(); }
+      a.render();
     }
   }
-  // stats
-  const msgsSoFar=frames.slice(0,t+1).reduce((s,fr)=>s+(fr.events||[]).filter(e=>e.kind==="msg").length,0);
-  R_.stats.innerHTML=
-    `<span>tick <b>${f.tick}</b></span>`+
-    `<span>messages <b>${msgsSoFar}</b></span>`+
-    `<span>budget <b>${f.budget_left}</b></span>`+
-    (t>=frames.length-1?`<span class="pill ${arm.solved?"win":"lose"}">${arm.solved?"✓ delivered in "+arm.ticks+" ticks":"✗ ran out"}</span>`:"");
-  // comm graph: cumulative unordered message counts up to t (tree=star, mesh=web)
-  const NP={a1:[150,20],a2:[48,78],a3:[252,78]};
-  const cnt={};
-  for(let k=0;k<=t;k++)for(const ev of (frames[Math.min(k,frames.length-1)].events||[])){
-    if(ev.kind!=="msg")continue;
-    const key=[ev.frm,ev.to].sort().join("-"); cnt[key]=(cnt[key]||0)+1;
-  }
-  R_.cg.innerHTML="";
-  for(const key in cnt){const[p,q]=key.split("-");
-    if(!NP[p]||!NP[q])continue;
-    const[x1,y1]=NP[p],[x2,y2]=NP[q];
-    R_.cg.appendChild(el("line",{x1,y1,x2,y2,stroke:"#7b93c4",
-      "stroke-width":1+Math.min(7,cnt[key]*0.8),opacity:0.75,"stroke-linecap":"round"}));
-  }
-  for(const id of M.ids){const p=NP[id]; if(!p)continue;
-    R_.cg.appendChild(el("circle",{cx:p[0],cy:p[1],r:14,fill:COL[id]||"#fff",stroke:"#0a0d14","stroke-width":2}));
-    const tx=el("text",{x:p[0],y:p[1]+4,"text-anchor":"middle","font-size":12,"font-weight":700,fill:"#06121f"});
-    tx.textContent=id; R_.cg.appendChild(tx);
-  }
+  requestAnimationFrame(loop);
 }
+for(const k in arms) arms[k].render();
+requestAnimationFrame(loop);
 
-// ---- transcripts ----
-function scriptsHTML(armKey,arm){
-  const box=document.createElement("div");
-  const head=document.createElement("div"); head.innerHTML=`<b>${armKey==="mesh"?"Peer mesh":"Hub-and-spoke"}</b>`; box.appendChild(head);
-  for(const id of M.ids){
-    const steps=(arm.transcripts||{})[id]||[];
-    const d=document.createElement("details");
-    const sum=document.createElement("summary");
-    sum.innerHTML=`<span style="color:${COL[id]}">●</span> ${id} — ${steps.length} steps`;
-    d.appendChild(sum);
-    for(const s of steps){
-      const div=document.createElement("div"); div.className="step"+(s.role==="inbox"?" inbox":"");
-      if(s.role==="inbox"){div.innerHTML=`📨 <b>${s.frm}→</b> ${esc(s.text)}`;}
-      else{
-        const calls=(s.calls||[]).map(c=>`${c.name}(${esc(JSON.stringify(c.args))})`).join(" ");
-        div.innerHTML=(s.text?esc(s.text):"")+(calls?` <span class="call">${calls}</span>`:"");
-      }
-      d.appendChild(div);
-    }
-    box.appendChild(d);
+function commGraph(cid, star){
+  const ctx=document.getElementById(cid).getContext('2d'), cx=110,cy=90,R=62,n=6;
+  ctx.clearRect(0,0,220,180);
+  const pts=[]; for(let i=0;i<n;i++){ const a=-Math.PI/2+i*2*Math.PI/n; pts.push([cx+R*Math.cos(a),cy+R*Math.sin(a)]); }
+  ctx.strokeStyle='#c9d2dd'; ctx.lineWidth=1.2;
+  if(star){
+    ctx.fillStyle='#888'; ctx.beginPath(); ctx.arc(cx,cy,9,0,7); ctx.fill();
+    pts.forEach(p=>{ ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(p[0],p[1]); ctx.stroke(); });
+  } else {
+    for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){ ctx.beginPath(); ctx.moveTo(pts[i][0],pts[i][1]); ctx.lineTo(pts[j][0],pts[j][1]); ctx.stroke(); }
   }
-  return box;
+  pts.forEach((p,i)=>{ ctx.fillStyle=LCOL[Math.floor(i/2)%LCOL.length]; ctx.beginPath(); ctx.arc(p[0],p[1],8,0,7); ctx.fill(); });
 }
-function esc(s){return (s||"").replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));}
-
-// ---- wire up ----
-const arena=document.getElementById("arena"), scripts=document.getElementById("scripts");
-const renderers={};
-for(const k of ["mesh","tree"]){ if(!ARMS[k])continue;
-  const R_=buildArm(k,ARMS[k]); renderers[k]=R_; arena.appendChild(R_.wrap);
-  scripts.appendChild(scriptsHTML(k,ARMS[k]));
-}
-const maxLen=Math.max(...Object.values(renderers).map(R_=>R_.arm.trace.length),1);
-const scrub=document.getElementById("scrub"); scrub.max=maxLen-1;
-const clock=document.getElementById("clock");
-let t=0, playing=false, timer=null;
-function draw(){ for(const k in renderers) renderFrame(renderers[k],t); scrub.value=t; clock.textContent=`step ${t} / ${maxLen-1}`; }
-function step(){ if(t<maxLen-1){t++;draw();} else stop(); }
-function play(){ if(playing)return; playing=true; document.getElementById("play").textContent="⏸ pause"; timer=setInterval(step,480); }
-function stop(){ playing=false; document.getElementById("play").textContent="▶ play"; if(timer)clearInterval(timer); }
-document.getElementById("play").onclick=()=>playing?stop():play();
-document.getElementById("restart").onclick=()=>{stop();t=0;draw();};
-scrub.oninput=()=>{stop();t=+scrub.value;draw();};
-draw();
+commGraph('gMesh',false); commGraph('gTree',true);
+(function scaling(){
+  const ctx=document.getElementById('gScale').getContext('2d'), x0=38,y0=150,x1=300,y1=20;
+  const Ks=[2,4,6,8,10,12], mesh=Ks.map(_=>6), tree=[8,16,24,32,40,48], xmax=12, ymax=50;
+  const X=k=>x0+(x1-x0)*(k-2)/(xmax-2), Y=v=>y0+(y1-y0)*v/ymax;
+  ctx.clearRect(0,0,320,180);
+  ctx.strokeStyle='#dde2e9'; ctx.beginPath(); ctx.moveTo(x0,y1); ctx.lineTo(x0,y0); ctx.lineTo(x1,y0); ctx.stroke();
+  ctx.fillStyle='#9aa4b2'; ctx.font='10px sans-serif'; ctx.fillText('locks (K)',x1-50,y0+16); ctx.fillText('msgs',6,y1+6);
+  function line(arr,col){ ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath();
+    Ks.forEach((k,i)=>{ const px=X(k),py=Y(arr[i]); i?ctx.lineTo(px,py):ctx.moveTo(px,py); }); ctx.stroke(); }
+  line(mesh,getCss('--mesh')); line(tree,getCss('--tree'));
+  ctx.fillStyle=getCss('--mesh'); ctx.fillText('mesh O(1)',X(8)-6,Y(6)-8);
+  ctx.fillStyle=getCss('--tree'); ctx.fillText('tree O(K)',X(9),Y(36));
+})();
 </script>
 </body>
 </html>
