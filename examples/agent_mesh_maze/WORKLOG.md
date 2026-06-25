@@ -108,6 +108,35 @@ the design notes below).
 > The world engine / Sim / comms / webpage substrate is reused; the *task* and the *claim*
 > change to the budgeted hypothesis search led by detached-preemption.
 
+## 0.7 No-LLM validation — `simulation_optimal_baseline.py` (2026-06-25)
+
+Before spending a token, we validated the breakable-wall escape maze with TWO faithful
+pure-Python strategies (no LLM) — a centralized TREE (only the lead spawns, at the hub →
+helpers ferry; serial) and a decentralized MESH (any agent spawns in place, parallel) —
+and scored them on the same hub maze (4 arms, thick breakable walls, the exit hidden
+behind one, all agents must escape; collaborative breaking: k agents on a wall = −k/turn).
+
+- **Result: the maze is structurally sound.** MESH wins every exit position: **21 turns /
+  187 compute vs TREE 26.2 / 249 — ~1.25× faster, 1.33× cheaper.** Never loses. (A real
+  `_adj_cell` bug that made S/E walls unreachable was found + fixed during this — exactly
+  what the validation is for.)
+- **Honest nuance — the win is from SPAWN STRUCTURE, not communication.** Adding fog +
+  comms-lag (mesh broadcast = 1-turn, tree relay-via-lead = 2-turn) did **not** widen the
+  gap. Why: the two solvers coordinate via a *shared algorithm* (round-robin "agent i takes
+  wall i%4"), which needs zero communication, and the optimal play is "break all walls in
+  parallel" — there is no redundant work to avoid by talking. So the sim measures each
+  paradigm's **efficiency CEILING**, and that ceiling already favors decentralized ~1.25×.
+- **Where communication actually lives: the ACHIEVABILITY GAP = the LLM test.** Real agents
+  don't share a round-robin rule; they coordinate by talking. So the mesh team (broadcast)
+  can *reach* its ceiling, while the tree team (everything via the lead, 2-hop) falls
+  *short* of its ceiling — it can't divide work / prune dead-ends fast enough. **The comms
+  advantage IS that shortfall**, and it only shows once real LLM agents play.
+- → `simulation_optimal_baseline.py` therefore serves double duty: (1) proof the maze is
+  fair + structurally biased to decentralized, and (2) the **optimal-baseline benchmark**
+  the LLM arms are scored against — mesh should reach ~ceiling, tree should fall short, and
+  if an arm underperforms its ceiling we read off *why* (redundant exploration? hub stall?)
+  and tune that arm's prompt.
+
 ## 1. Capability confirmation — sagent CAN do all of this (spike-verified 2026-06-24)
 
 The whole demo rides real, first-class sagent tools (like demo 1 rode `AgentSelf`). Built-in
