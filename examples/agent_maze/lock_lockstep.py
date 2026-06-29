@@ -374,7 +374,7 @@ async def capture(num_locks: int = 2, decoys: int = 2, k: int = 2) -> dict[str, 
             r = await run_spawn_arm(
                 topology=topo, told=told, num_locks=num_locks, decoys=decoys
             )
-            print(f"  {lbl}/{topo} #{i + 1}: {_line(r)}", flush=True)
+            print(f"  {lbl}/{topo} #{i + 1}: {_line(r)}", flush=True)  # noqa: T201
             runs.append(r)
         if want == "best":  # mesh: prefer solved, then fewest ticks
             return min(runs, key=lambda r: (not r["solved"], r["ticks"]))
@@ -385,10 +385,10 @@ async def capture(num_locks: int = 2, decoys: int = 2, k: int = 2) -> dict[str, 
     grid: list[str] = []
     for told in (True, False):
         lbl = "told" if told else "discover"
-        print(f"=== {lbl} ===", flush=True)
+        print(f"=== {lbl} ===", flush=True)  # noqa: T201
         mesh = await pick("mesh", told, "best")
         tree = await pick("tree", told, "worst")
-        print(
+        print(  # noqa: T201
             f"  -> kept mesh: {_line(mesh)}\n  -> kept tree: {_line(tree)}", flush=True
         )
         modes[lbl] = {"mesh": mesh, "tree": tree}
@@ -406,7 +406,7 @@ async def capture(num_locks: int = 2, decoys: int = 2, k: int = 2) -> dict[str, 
     out = HERE / "web" / "data.js"
     out.parent.mkdir(exist_ok=True)
     out.write_text("window.MAZE = " + json.dumps(data) + ";\n", encoding="utf-8")
-    print(f"wrote {out}")
+    print(f"wrote {out}")  # noqa: T201
     return data
 
 

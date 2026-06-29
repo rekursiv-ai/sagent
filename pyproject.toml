@@ -296,11 +296,6 @@ ignore = [
     "S301",    # Pickle usage.
     "T201",    # Print found.
 ]
-"examples/agent_maze/**" = [
-    # A runnable CLI demo: prints progress + URLs and lazy-imports the http server.
-    "PLC0415", # Import not at top level (lazy http.server/webbrowser in serve()).
-    "T201",    # Print found (CLI output).
-]
 
 [tool.ruff.lint.isort]
 case-sensitive = false
