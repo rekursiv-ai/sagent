@@ -29,6 +29,7 @@ import webbrowser
 
 from examples.agent_maze.capture import _key, capture
 
+
 HERE = Path(__file__).parent
 PORT = 8001
 

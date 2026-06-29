@@ -175,7 +175,7 @@ def test_spawn_blocked_at_capacity() -> None:
     eng.add_agent("a0", (7, 1))
     tok = agent_label_var.set("a0")
 
-    def fake(parent: str, xy: tuple[int, int]) -> str:
+    def fake(_parent: str, _xy: tuple[int, int]) -> str:
         return "a1"
 
     try:

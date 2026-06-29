@@ -133,8 +133,8 @@ async def capture(
             chosen = pick(engs, best=best)
             arms[arm] = arm_payload(chosen)
             m = chosen.world.locks_open()
-            print(
-                f"  {label}/{arm}: kept {m}/{num_locks} locks, "  # noqa: T201
+            print(  # noqa: T201
+                f"  {label}/{arm}: kept {m}/{num_locks} locks, "
                 f"interactions={_interactions(chosen)} (of {k} runs)",
                 flush=True,
             )
