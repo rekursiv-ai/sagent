@@ -665,3 +665,38 @@ vs **tree ✗ STUCK 0/3 in BOTH** — a robust, binary contrast. Nice detail: `d
 branches, e.g. a3<-a1; tree flat a*<-a0); shutdown clean (no "Task was destroyed" leaks);
 event-stream replay renders the contrast + cost-per-lock headline + genealogy. ruff/ty/codespell +
 21 tests green.
+
+### Failure path — dead-ends a cold session should NOT re-walk
+
+The autonomous rebuild was *not* a straight line. Each of these was tried, observed to fail, and
+fixed; the fix is in the code, but the reason lives here (and in the per-step commit messages
+`3d20733`…`66ef3b0`). If you find yourself reaching for one of the ✗ options, this is why not.
+
+1. **✗ Wall-clock press TTL (~20s).** The intuitive design. The adversarial design review proved it
+   *unsatisfiable*: it cannot be simultaneously short enough to force a real-time "press now"
+   handshake and long enough to absorb the 5–20s LLM latency tail — the identical failure that
+   killed the very first (pre-lockstep) `serve_forever` attempt. **→ logical interaction clock**
+   (`PRESS_WINDOW` counts decisions, not seconds): latency-independent and reproducible.
+2. **✗ Binding partner-naming to "must have messaged me."** Looked like the way to force comms.
+   The 2× verify refuted it: in the **tree** arm workers can't DM each other, so it makes that arm
+   *unsolvable by construction*. **→ comms is forced instead by out-of-sight partner *discovery***
+   (you can't know which agent is on the matching plate without asking) + the logical window.
+   (Also refuted: "press once and walk off opens it" — co-presence at latch is required.)
+3. **✗ First multi-agent run: 158 messages, stuck at 1/2.** Agents chattered every round and ran
+   out of the per-agent round budget before covering both locks. **→ terser prompts** (a couple of
+   coordinating messages, then ACT) + the seed **assigns pairs explicitly** + round cap 20→28.
+   Result: 2/2 at 57 msgs (`a44b3b9`).
+4. **✗ Shipping K=2.** A k=2 cherry-pick at 2 locks produced a `discover/tree` that *solved 3/3 and
+   cheaper than mesh* — actively anti-thesis, because at 2 locks the hub's serial relay keeps up.
+   This is exactly the variance-fragility the review warned about. **→ K=3** (the floor where the
+   hub reliably chokes; see the scale-call paragraph above).
+5. **✗ K=3 at max_agents=10.** Mesh over-spawned to the cap (team 10), ~487 messages, and a storm of
+   API ReadErrors from 10 concurrent agents. **→ cap max_agents=8** (6 plates need ~6–7 workers;
+   the cap stops the over-spawn without starving the team).
+6. **✗ Cancelling drive tasks bare.** The step-2 driver cancelled agent tasks without quiescing
+   their internal awaits → "Task was destroyed but it is pending" leaks, and (per the review) any
+   persistent peer would keep billing *after* the win. **→ shutdown barrier** in `arena.py`:
+   `agent.shutdown()` on each, then cancel + `gen.aclose()`, before serializing the log.
+
+**If reviving K=2 or a wall-clock window, re-read this section first.** Both were real, reasonable
+attempts that the data/review killed; the current K=3 + logical-clock design is the response.
