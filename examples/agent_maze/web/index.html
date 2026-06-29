@@ -3,425 +3,242 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Decentralized vs Centralized coordination</title>
+<title>Decentralized vs centralized agent teams — a maze</title>
 <style>
-  :root {
-    --bg:#f6f7f9; --panel:#fff; --ink:#1c2230; --muted:#7a8699; --line:#e4e8ee;
-    --mesh:#2f9e6f; --tree:#c2603a; --wall:#cdd4de; --floor:#fbfcfe;
-    --ok:#2f9e6f; --drop:#d24a4a; --armed:#f1b73d;
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --fg:#1c2430; --muted:#6b7686;
+    --mesh:#2f9e6f; --tree:#c2603a; --wall:#2b2f3a; --floor:#eef1f5;
+    --ok:#2f9e6f; --bad:#d2483f; --warn:#c8941d;
   }
-  * { box-sizing:border-box; }
-  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
-         background:var(--bg); color:var(--ink); }
-  header { padding:20px 24px 8px; }
-  h1 { font-size:21px; margin:0 0 4px; }
-  .thesis { color:var(--muted); max-width:880px; }
-  .intro { margin:6px 24px 4px; background:var(--panel); border:1px solid var(--line);
-           border-radius:12px; padding:16px 20px; }
-  .intro .lede { margin:0 0 14px; color:#48505f; max-width:940px; }
-  .intro-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }
-  .intro-grid h3 { margin:0 0 5px; font-size:11px; text-transform:uppercase;
-                   letter-spacing:.05em; color:var(--muted); }
-  .intro-grid p { margin:0; font-size:12.5px; color:#48505f; }
-  .intro-grid .sell { background:#f2f8f4; border:1px solid #dbede3; border-radius:9px;
-                      padding:10px 12px; }
-  .intro-grid .sell h3 { color:var(--mesh); }
-  .legend { margin-top:12px; padding-top:10px; border-top:1px solid var(--line);
-            font-size:12px; color:var(--muted); }
-  @media (max-width:880px){ .intro-grid{grid-template-columns:1fr 1fr;} }
-  .mode-tag { display:inline-block; font-size:11px; padding:2px 8px; border-radius:10px;
-              background:#eef1f5; color:var(--muted); margin-left:8px; vertical-align:middle; }
-  .arms { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:8px 24px; }
-  .arm { background:var(--panel); border:1px solid var(--line); border-radius:12px;
-         overflow:hidden; display:flex; flex-direction:column; }
-  .arm h2 { margin:0; padding:12px 14px 8px; font-size:14px; display:flex; align-items:center; gap:8px; }
-  .dot { width:9px; height:9px; border-radius:50%; }
-  .arm.mesh h2 .dot { background:var(--mesh); }
-  .arm.tree h2 .dot { background:var(--tree); }
-  .arm h2 small { color:var(--muted); font-weight:400; }
-  canvas { width:100%; display:block; background:var(--floor); }
-  .status { display:flex; gap:14px; padding:8px 14px; font-variant-numeric:tabular-nums;
-            border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-  .status b { font-weight:600; } .status .lab { color:var(--muted); }
-  .status .drop { color:var(--drop); } .status .big { font-size:18px; line-height:1; }
-  .badge { margin-left:auto; padding:3px 11px; border-radius:8px; font-weight:700; font-size:12px; }
-  .badge.ok { background:#e6f4ec; color:var(--mesh); }
-  .badge.stuck { background:#fbe9e7; color:var(--drop); }
-  .ctrls { display:flex; align-items:center; gap:8px; padding:8px 14px; }
-  .ctrls button { border:1px solid var(--line); background:#fff; border-radius:7px;
-                  padding:4px 9px; cursor:pointer; font-size:13px; }
-  .ctrls button:hover { background:#f0f3f7; }
-  .ctrls input[type=range] { flex:1; }
-  .convo { height:200px; overflow-y:auto; padding:6px 12px 12px; border-top:1px solid var(--line);
-           font-size:12.5px; }
-  .msg { padding:3px 0; border-bottom:1px solid #f1f3f7; }
-  .msg .who { font-weight:600; } .msg.dropped { color:var(--drop); }
-  .msg.dropped .who::after { content:" ✗ dropped"; font-weight:400; font-size:11px; }
-  .msg .tk { color:var(--muted); font-size:11px; }
-  .msg .exp { color:#5b7; cursor:pointer; font-size:11px; margin-left:6px; user-select:none; }
-  .arm.tree .msg .exp { color:#b86; }
-  .reason { background:#f7f9fb; border-left:2px solid var(--line); margin:4px 0 4px 4px;
-            padding:5px 8px; color:var(--muted); white-space:pre-wrap; font-size:11.5px; display:none; }
-  .syncbar { text-align:center; padding:4px 0 14px; display:flex; gap:14px; justify-content:center; align-items:center; }
-  .syncbar button { border:1px solid var(--line); background:#fff; border-radius:8px;
-                    padding:6px 14px; cursor:pointer; }
-  .syncbar #syncBtn.on { background:var(--ink); color:#fff; border-color:var(--ink); }
-  .modeswitch { color:var(--muted); font-size:13px; }
-  .modehint { display:block; margin-top:6px; font-size:12px; color:#5a6473; max-width:560px; }
-  .modeBtn { padding:4px 12px !important; border-radius:0 !important; }
-  .modeBtn:first-of-type { border-radius:8px 0 0 8px !important; }
-  .modeBtn:last-of-type { border-radius:0 8px 8px 0 !important; border-left:none !important; }
-  .modeBtn.on { background:var(--ink); color:#fff; border-color:var(--ink); }
-  section.why { margin:8px 24px 40px; background:var(--panel); border:1px solid var(--line);
-                border-radius:12px; padding:18px 22px; }
-  section.why h2 { margin:0 0 10px; font-size:16px; }
-  .gene-grid { display:grid; grid-template-columns:1fr 1fr; gap:22px; margin:4px 0 10px; }
-  .gene-grid canvas { display:block; max-width:100%; height:auto; }
-  .gene-grid figcaption { text-align:center; color:var(--muted); font-size:12px; margin-top:2px; }
-  @media (max-width:760px){ .gene-grid{grid-template-columns:1fr;} }
-  .why-grid { display:grid; grid-template-columns:1fr 1fr 1.1fr; gap:22px; align-items:center; }
-  .why-grid figcaption { text-align:center; color:var(--muted); font-size:12px; margin-top:4px; }
-  .why p { color:#48505f; } .why b.m { color:var(--mesh); } .why b.t { color:var(--tree); }
-  @media (max-width:880px){ .arms{grid-template-columns:1fr;} .why-grid{grid-template-columns:1fr;} }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:22px 26px 6px;max-width:1180px;margin:0 auto}
+  h1{margin:0 0 6px;font-size:23px;letter-spacing:-.01em}
+  h1 .m{color:var(--mesh)} h1 .t{color:var(--tree)}
+  .sub{color:var(--muted);max-width:880px;font-size:13.5px}
+  .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0 4px}
+  button{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+         padding:7px 14px;cursor:pointer;font:inherit;color:var(--fg)}
+  button:hover{border-color:#aab2bd}
+  .toggle button.on{background:var(--fg);color:#fff;border-color:var(--fg)}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 26px 40px}
+  .arms{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:8px}
+  .arm{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .arm h2{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .arm h2 small{color:var(--muted);font-weight:400;font-size:12px}
+  .dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+  #arm-mesh .dot{background:var(--mesh)} #arm-tree .dot{background:var(--tree)}
+  .arm canvas{display:block;width:100%;height:auto;border-radius:8px;background:var(--floor)}
+  .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .stat{background:#f1f3f6;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px}
+  .stat b{font-size:15px} .stat .u{color:var(--muted)}
+  .badge{font-weight:600;border-radius:6px;padding:2px 8px;font-size:12px}
+  .badge.ok{background:#e7f5ee;color:var(--ok)} .badge.bad{background:#fbeae9;color:var(--bad)}
+  .head{font-size:13px;font-weight:700}
+  .why{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-top:18px}
+  .why h2{margin:0 0 10px;font-size:16px}
+  .gene-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+  .gene-grid canvas{display:block;max-width:100%;height:auto}
+  .gene-grid figcaption{text-align:center;color:var(--muted);font-size:12px;margin-top:2px}
+  .why p{color:#39414e;font-size:13.5px}
+  @media (max-width:820px){.arms,.gene-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <header>
-  <h1>Decentralized agent teams win — centralized ones choke
-    <span class="mode-tag" id="modelTag"></span>
-    <span class="mode-tag" id="modeTag"></span></h1>
+  <h1><span class="m">Decentralized</span> agent teams win — <span class="t">centralized</span> ones choke</h1>
+  <p class="sub">The same foggy maze, solved by two agent-team topologies built on sagent primitives.
+    A lock opens only when two different agents press its two far-apart plates, each naming the other,
+    within a short window — so the team must <b>spawn</b>, explore, and <b>coordinate by message</b>.
+    <b class="m">Decentralized</b>: any agent spawns helpers and messages anyone. <b class="t">Centralized</b>:
+    only the coordinator spawns, and every message relays through it.</p>
+  <div class="controls">
+    <span class="toggle" id="modeToggle">
+      <button data-mode="told">told the topology</button>
+      <button data-mode="discover">must discover it</button>
+    </span>
+    <button id="play">▶ play</button>
+    <button id="restart">⟲ restart</button>
+    <span class="u" id="seqlabel" style="color:var(--muted);font-size:12px"></span>
+  </div>
 </header>
-
-<section class="intro">
-  <p class="lede">Both runs start with a <b>single agent</b> that must <b>spawn a team</b> (it
-    doesn't know how big) and coordinate to open every lock. The <b>only</b> difference is the
-    team <b>topology</b> — watch the <b style="color:var(--mesh)">decentralized</b> team grow and
-    coordinate in parallel and finish, while the <b style="color:var(--tree)">centralized</b>
-    team funnels everything through one agent and stalls.</p>
-  <div class="intro-grid">
-    <div><h3>The puzzle</h3><p>A foggy maze of corridors. Each <b>lock</b> is two plates sharing
-      a letter, placed in <b>different corridors, out of sight</b> of each other. Some corridors
-      are <b>dead-ends</b> with no plate.</p></div>
-    <div><h3>The goal</h3><p>Open <b>every</b> lock. A lock opens only when its two plates are
-      <b>pressed on the same turn</b> by two different agents — so the team must explore, find
-      each other, and synchronize.</p></div>
-    <div><h3>Decentralized vs Centralized</h3><p>Both start with one <i>first agent</i>.
-      <b style="color:var(--mesh)">Decentralized:</b> <i>any</i> agent can spawn more agents and
-      message anyone — the first agent is just a peer.
-      <b style="color:var(--tree)">Centralized:</b> only the first agent may spawn, and every
-      message routes through it — it's the team's lone <i>coordinator</i>.</p></div>
-    <div class="sell"><h3>What sagent makes easy</h3><p><b>Recursive budgeted spawn + any-to-any
-      messaging + broadcast</b>, native and composable in one model — so the decentralized
-      strategy is <b>actually available</b> and trivial to wire, not three subsystems bolted
-      together.</p></div>
-  </div>
-  <div class="legend"><b>watch for:</b> ● an agent &nbsp;·&nbsp; ▣ a plate — <b>glows</b> when
-    pressed, <b>fills</b> when its lock opens &nbsp;·&nbsp;
-    <span style="color:var(--ok)">▬ a delivered message</span> &nbsp;·&nbsp;
-    <span style="color:var(--drop)">▭ a dropped message</span></div>
-</section>
-
-<div class="arms">
-  <div class="arm mesh" id="arm-mesh">
-    <h2><span class="dot"></span>DECENTRALIZED <small>— any agent spawns + messages anyone</small></h2>
-    <canvas></canvas>
-    <div class="status"></div>
-    <div class="ctrls">
-      <button data-act="play">▶</button><button data-act="step">⏭</button>
-      <input type="range" min="0" value="0" />
-      <span class="tcount"></span>
+<div class="wrap">
+  <section class="arms">
+    <div class="arm" id="arm-mesh">
+      <h2><span class="dot"></span>DECENTRALIZED <small>— mesh: any-to-any + broadcast, anyone spawns</small></h2>
+      <canvas></canvas>
+      <div class="metrics"></div>
     </div>
-    <div class="convo"></div>
-  </div>
-  <div class="arm tree" id="arm-tree">
-    <h2><span class="dot"></span>CENTRALIZED <small>— only the coordinator spawns + relays</small></h2>
-    <canvas></canvas>
-    <div class="status"></div>
-    <div class="ctrls">
-      <button data-act="play">▶</button><button data-act="step">⏭</button>
-      <input type="range" min="0" value="0" />
-      <span class="tcount"></span>
+    <div class="arm" id="arm-tree">
+      <h2><span class="dot"></span>CENTRALIZED <small>— tree: workers relay through the hub, only it spawns</small></h2>
+      <canvas></canvas>
+      <div class="metrics"></div>
     </div>
-    <div class="convo"></div>
-  </div>
-</div>
-<div class="syncbar">
-  <span class="modeswitch">view:
-    <button class="modeBtn" data-mode="told">told</button><button class="modeBtn on" data-mode="discover">discover</button>
-    <span class="modehint" id="modehint"></span>
-  </span>
-  <button id="syncBtn" class="on">▶ play both in sync</button>
-</div>
+  </section>
 
-<section class="why">
-  <h2>How the team is spawned — who spawns whom, and when</h2>
-  <div class="gene-grid">
-    <figure><canvas id="gGeneMesh"></canvas>
-      <figcaption>decentralized — drops fall from many lanes (recursion)</figcaption></figure>
-    <figure><canvas id="gGeneTree"></canvas>
-      <figcaption>centralized — every drop from the first agent (flat star)</figcaption></figure>
-  </div>
-  <p>One row per agent (<b>a0</b> = the first agent, on top). Each is born at its dot; a <b>solid</b>
-    line marks the turns it is actively spawning, and a vertical drop links a parent to each child it
-    spawns. <b style="color:var(--mesh)">Decentralized:</b> spawned agents spawn more, so solid lanes
-    appear all the way down. <b style="color:var(--tree)">Centralized:</b> only the first agent ever
-    spawns — one solid lane, a flat star. (Tracks the told/discover toggle.)</p>
-</section>
+  <section class="why">
+    <h2>How the team is spawned — who spawns whom, and when</h2>
+    <div class="gene-grid">
+      <figure><canvas id="gGeneMesh"></canvas>
+        <figcaption>decentralized — drops fall from many lanes (recursion)</figcaption></figure>
+      <figure><canvas id="gGeneTree"></canvas>
+        <figcaption>centralized — every drop from the coordinator (flat star)</figcaption></figure>
+    </div>
+    <p>One row per agent (<b>a0</b> = the first agent, on top). Each is born at its dot; a vertical drop
+      links a parent to each child it spawns. <b class="m">Decentralized:</b> spawned agents spawn more, so
+      the tree branches. <b class="t">Centralized:</b> only the coordinator ever spawns — one lane, a flat star.</p>
+  </section>
 
-<section class="why">
-  <h2>Why the centralized team chokes and the decentralized one scales</h2>
-  <div class="why-grid">
-    <figure><canvas id="gMesh" width="220" height="180"></canvas>
-      <figcaption>decentralized — every pair coordinates directly, in parallel</figcaption></figure>
-    <figure><canvas id="gTree" width="220" height="180"></canvas>
-      <figcaption>centralized — every pair routes through one coordinator</figcaption></figure>
-    <figure><canvas id="gScale" width="320" height="180"></canvas>
-      <figcaption>messages to coordinate K locks</figcaption></figure>
-  </div>
-  <p>Two things funnel through the centralized team's single coordinator, and both serialize.
-    <b>Spawning:</b> only the coordinator can grow the team, one agent per turn, so it can't
-    field enough hands in time. <b>Coordination:</b> each lock is an <b>independent</b> pairing;
-    the decentralized team resolves them in parallel (<b class="m">O(1)</b> rounds) while the
-    coordinator mediates every one in turn (<b class="t">O(K)</b>). That is the whole story — no
-    single sagent primitive is exotic; sagent just makes the decentralized wiring (recursive
-    spawn + any-to-any messaging) as easy as the centralized one, so the strategy that actually
-    scales is available at all.</p>
-</section>
+  <section class="why">
+    <h2>Why centralized chokes</h2>
+    <p>Each lock is an independent two-agent rendezvous: find your partner's identity, agree the pairing, and
+      co-press. Over <b>any-to-any</b> messaging each of those is one hop, and locks are coordinated in parallel.
+      Through a <b>single hub</b> every fact double-hops and the coordinator serializes K independent
+      coordinations — so the cost-per-lock climbs and, when the topology is hidden, the centralized team often
+      never converges at all. The headline below is <b>coordination cost per lock opened</b> (delivered messages
+      ÷ locks opened); a stuck arm reads as high cost at a low solved fraction, never as a tie.</p>
+  </section>
+</div>
 
 <script src="data.js"></script>
 <script>
 const M = window.MAZE;
-const LCOL = ['#3b82c4','#8a63d2','#cf5aa0','#46a06a','#d98a32'];
-const MNAME = (M.meta.model||'?').replace('claude-','Claude ').replace('sonnet-4-6','Sonnet 4.6').replace('haiku-4-5','Haiku 4.5');
-document.getElementById('modelTag').textContent = 'model: ' + MNAME;
+const PAL = ['#3b6fd4','#2f9e6f','#c2603a','#9457c4','#c8941d','#2ba0a0','#d2483f','#6b7686','#7a8b3a','#b14d8e'];
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function hidpi(cv,w,h){ const d=Math.min(2,window.devicePixelRatio||1);
+  cv.width=w*d; cv.height=h*d; cv.style.width=w+'px'; cv.style.height=h+'px';
+  const ctx=cv.getContext('2d'); ctx.setTransform(d,0,0,d,0,0); return ctx; }
+const key=(x,y)=>x+','+y;
 
 class Arm {
-  constructor(id, arm){
-    this.el = document.getElementById(id); this.arm = arm;
-    this.grid = M.meta.grid; this.W = M.meta.width; this.H = M.meta.height;
-    this.trace = arm.trace; this.roster = arm.roster; this.transcripts = arm.transcripts;
-    this.cv = this.el.querySelector('canvas'); this.ctx = this.cv.getContext('2d');
-    this.cell = 30;
-    const DPR = Math.max(2, window.devicePixelRatio || 1);  // crisp on hi-DPI + CSS upscale
-    this.cv.width = this.W*this.cell*DPR; this.cv.height = this.H*this.cell*DPR;
-    this.ctx.scale(DPR, DPR);  // draw in logical (cell) units; backing store is DPR× bigger
-    this.statusEl = this.el.querySelector('.status');
-    this.slider = this.el.querySelector('input[type=range]');
-    this.slider.max = this.trace.length-1; this.slider.step = 0.02;
-    this.tcount = this.el.querySelector('.tcount');
-    this.convoEl = this.el.querySelector('.convo');
-    this.t = 0; this.playing = false;
-    this.el.querySelector('[data-act=play]').onclick = ()=>{ unsync(); this.toggle(); };
-    this.el.querySelector('[data-act=step]').onclick = ()=>{ unsync(); this.pause(); this.setT(Math.min(this.trace.length-1, Math.floor(this.t)+1)); };
-    this.slider.oninput = ()=>{ unsync(); this.pause(); this.setT(+this.slider.value); };
-    this.agentColor = {};
-    this.roster.forEach((a,i)=>{ this.agentColor[a] = a==='lead' ? '#444' : LCOL[Math.floor(i/2)%LCOL.length]; });
-    this.buildConvo();
+  constructor(rootId, arm){
+    this.root=document.getElementById(rootId);
+    this.cv=this.root.querySelector('canvas');
+    this.metricsEl=this.root.querySelector('.metrics');
+    this.scene=arm.scene; this.events=arm.events; this.roster=arm.roster;
+    this.metrics=arm.metrics; this.col=rootId==='arm-mesh'?getCss('--mesh'):getCss('--tree');
+    this.W=this.scene.width; this.H=this.scene.height;
+    this.cell=Math.max(16, Math.min(30, Math.floor(520/this.W)));
+    this.pw=this.W*this.cell; this.ph=this.H*this.cell;
+    this.ctx=hidpi(this.cv,this.pw,this.ph);
+    this.aidColor={}; this.roster.forEach((id,i)=>this.aidColor[id]=PAL[i%PAL.length]);
+    this.renderMetrics();
   }
-  toggle(){ this.playing?this.pause():this.play(); }
-  play(){ this.playing=true; this.el.querySelector('[data-act=play]').textContent='⏸'; }
-  pause(){ this.playing=false; this.el.querySelector('[data-act=play]').textContent='▶'; }
-  setT(t){ this.t=t; this.slider.value=Math.floor(t); this.render(); }
-  frame(){ return this.trace[Math.min(this.trace.length-1, Math.floor(this.t))]; }
-  pos(aid, t){
-    const i=Math.floor(t), f=t-i;
-    const a=this.trace[Math.min(i,this.trace.length-1)].agents[aid];
-    const b=this.trace[Math.min(i+1,this.trace.length-1)].agents[aid];
-    if(!a) return null; if(!b) return a;
-    return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f];
-  }
-  render(){
-    const ctx=this.ctx, c=this.cell, fr=this.frame();
-    ctx.clearRect(0,0,this.W*this.cell,this.H*this.cell);
-    for(let y=0;y<this.H;y++) for(let x=0;x<this.W;x++){
-      const ch=this.grid[y][x];
-      ctx.fillStyle = ch==='#' ? getCss('--wall') : getCss('--floor');
-      ctx.fillRect(x*c,y*c,c-1,c-1);
+  stateUpTo(i){
+    const pos={}, born=new Set(), armed=new Map(), open=new Set();
+    for(let j=0;j<=i && j<this.events.length;j++){
+      const e=this.events[j];
+      if(e.kind==='spawn' && e.child){ pos[e.child]=e.xy.slice(); born.add(e.child); }
+      else if(e.kind==='move'){ pos[e.agent]=e.to.slice(); }
+      else if(e.kind==='press' && e.outcome==='armed'){
+        const a=pos[e.agent]; if(a) armed.set(key(a[0],a[1]),{by:e.agent,until:e.t_expiry,partner:e.partner}); }
+      else if(e.kind==='lock_open'){ open.add(e.lock); (e.plates||[]).forEach(p=>armed.delete(key(p[0],p[1]))); }
     }
-    const armed = new Set(fr.armed.map(p=>p[0]+','+p[1]));
-    fr.locks.forEach((lk,li)=>{
-      lk.plates.forEach(p=>{
-        const [x,y]=p, k=x+','+y;
-        ctx.save();
-        if(armed.has(k)){ ctx.shadowColor=getCss('--armed'); ctx.shadowBlur=16; }
-        ctx.fillStyle = lk.open ? LCOL[li%LCOL.length] : '#dfe4ea';
-        ctx.strokeStyle = LCOL[li%LCOL.length]; ctx.lineWidth=2;
-        ctx.fillRect(x*c+4,y*c+4,c-9,c-9); ctx.strokeRect(x*c+4,y*c+4,c-9,c-9);
-        ctx.restore();
-        ctx.fillStyle = lk.open?'#fff':LCOL[li%LCOL.length]; ctx.font='bold 11px sans-serif';
-        ctx.textAlign='center'; ctx.fillText(String.fromCharCode(97+li), x*c+c/2, y*c+c/2+4);
-      });
-    });
-    fr.messages.forEach(m=>{
-      const s=this.pos(m.src,Math.floor(this.t)); if(!s) return;
-      const dests = (m.dst==='all') ? this.roster.filter(a=>a!==m.src) : [m.dst];
-      ctx.strokeStyle = m.delivered?getCss('--ok'):getCss('--drop');
-      ctx.lineWidth=1.6; ctx.globalAlpha=0.5; ctx.setLineDash(m.delivered?[]:[4,3]);
-      dests.forEach(dn=>{
-        const d=this.pos(dn,Math.floor(this.t)); if(!d) return;
-        ctx.beginPath(); ctx.moveTo(s[0]*c+c/2,s[1]*c+c/2); ctx.lineTo(d[0]*c+c/2,d[1]*c+c/2); ctx.stroke();
-      });
-      ctx.setLineDash([]); ctx.globalAlpha=1;
-    });
-    this.roster.forEach(aid=>{
-      const p=this.pos(aid,this.t); if(!p) return;
-      ctx.fillStyle=this.agentColor[aid];
-      ctx.beginPath(); ctx.arc(p[0]*c+c/2,p[1]*c+c/2,c*0.32,0,7); ctx.fill();
-      ctx.fillStyle='#fff'; ctx.font='9px sans-serif'; ctx.textAlign='center';
-      ctx.fillText(aid==='lead'?'L':aid.slice(1), p[0]*c+c/2, p[1]*c+c/2+3);
-    });
-    const ti=Math.floor(this.t), drop=this.dropUpto(ti);
-    const ended = ti >= this.trace.length-1;
-    let badge='';
-    if(ended){
-      badge = this.arm.solved
-        ? `<span class="badge ok">✓ all locks open · ${this.arm.ticks} ticks</span>`
-        : `<span class="badge stuck">✗ STUCK · ${this.arm.locks_open}/${this.arm.locks_total} locks · ${this.arm.dropped} dropped</span>`;
-    }
-    this.statusEl.innerHTML =
-      `<span><span class="lab">locks</span> <b>${fr.locks_open}/${fr.locks.length}</b></span>`+
-      `<span><span class="lab">tick</span> <b class="big">${fr.tick}</b></span>`+
-      `<span><span class="lab">msgs</span> <b>${this.msgCountUpto(ti)}</b></span>`+
-      (drop?`<span><span class="lab">dropped</span> <b class="drop">${drop}</b></span>`:'')+
-      badge;
-    this.tcount.textContent = `${Math.floor(this.t)}/${this.trace.length-1}`;
-    this.slider.value = this.t;
-    this.highlightConvo(Math.floor(this.t));
+    return {pos,born,armed,open};
   }
-  msgCountUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>m.delivered).length; return n; }
-  dropUpto(t){ let n=0; for(let i=0;i<=t;i++) n+=this.trace[i].messages.filter(m=>!m.delivered).length; return n; }
-  buildConvo(){
-    let html='';
-    this.trace.forEach((fr,ti)=>{
-      fr.messages.forEach(m=>{
-        const cls = m.delivered?'':' dropped';
-        html += `<div class="msg${cls}" data-tick="${ti}">`+
-          `<span class="tk">t${ti}</span> <span class="who">${m.src}→${m.dst}</span>: ${esc(m.text)}`+
-          `<span class="exp" data-a="${m.src}" data-t="${ti}">[…]</span>`+
-          `<div class="reason"></div></div>`;
-      });
-    });
-    this.convoEl.innerHTML = html || '<div class="msg"><span class="tk">no messages</span></div>';
-    this.convoEl.querySelectorAll('.exp').forEach(e=>{
-      e.onclick=()=>{ const r=e.parentElement.querySelector('.reason');
-        if(r.style.display==='block'){ r.style.display='none'; return; }
-        const tx=(this.transcripts[e.dataset.a]||[])[+e.dataset.t] || '(no reasoning recorded)';
-        r.textContent=tx; r.style.display='block'; };
-    });
+  draw(i,frac){
+    const ctx=this.ctx, C=this.cell; ctx.clearRect(0,0,this.pw,this.ph);
+    const base=this.stateUpTo(i-1), cur=this.events[Math.min(i,this.events.length-1)];
+    for(let y=0;y<this.H;y++){ const row=this.scene.grid[y]||''; for(let x=0;x<this.W;x++){
+      const ch=row[x]||'#'; ctx.fillStyle = ch==='#'?getCss('--wall'):getCss('--floor');
+      ctx.fillRect(x*C,y*C,C-1,C-1); } }
+    this.scene.plates.forEach(p=>{ const [x,y]=p.xy, pc=PAL[p.lock%PAL.length];
+      const isOpen=base.open.has(p.lock); const isArmed=base.armed.has(key(x,y));
+      ctx.lineWidth=2; ctx.strokeStyle=pc;
+      if(isOpen){ ctx.fillStyle=pc; ctx.globalAlpha=.85; ctx.fillRect(x*C+2,y*C+2,C-5,C-5); ctx.globalAlpha=1; }
+      else { ctx.fillStyle=isArmed?pc:'#fff'; ctx.globalAlpha=isArmed?.4:1; ctx.fillRect(x*C+3,y*C+3,C-7,C-7); ctx.globalAlpha=1;
+             ctx.strokeRect(x*C+3,y*C+3,C-7,C-7); }
+      ctx.fillStyle=isOpen?'#fff':pc; ctx.font=`bold ${C*0.5}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(p.letter.toUpperCase(), x*C+C/2, y*C+C/2); });
+    if(cur && cur.kind==='message' && cur.to!=='all'){
+      const s=base.pos[cur.agent], d=base.pos[cur.to];
+      if(s&&d){ ctx.strokeStyle=cur.status==='delivered'?getCss('--mesh'):getCss('--bad');
+        ctx.globalAlpha=0.8*(1-frac*0.5); ctx.lineWidth=2; ctx.beginPath();
+        ctx.moveTo(s[0]*C+C/2,s[1]*C+C/2); ctx.lineTo(d[0]*C+C/2,d[1]*C+C/2); ctx.stroke(); ctx.globalAlpha=1; } }
+    const pos=Object.assign({},base.pos);
+    if(cur && cur.kind==='move'){ const f=base.pos[cur.agent]||cur.from;
+      pos[cur.agent]=[f[0]+(cur.to[0]-f[0])*frac, f[1]+(cur.to[1]-f[1])*frac]; }
+    if(cur && cur.kind==='spawn' && cur.child) pos[cur.child]=cur.xy;
+    for(const id in pos){ const [x,y]=pos[id]; const c=this.aidColor[id]||'#555';
+      ctx.fillStyle=c; ctx.beginPath(); ctx.arc(x*C+C/2,y*C+C/2,C*0.32,0,7); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.font=`bold ${C*0.34}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(id.replace('a',''), x*C+C/2, y*C+C/2); }
   }
-  highlightConvo(t){
-    this.convoEl.querySelectorAll('.msg').forEach(el=>{
-      const tk=+el.dataset.tick; el.style.opacity = (tk<=t?1:0.32);
-      if(tk===t){ el.scrollIntoView({block:'nearest'}); }
-    });
+  renderMetrics(){
+    const m=this.metrics; const solved=m.solved;
+    const badge=solved?`<span class="badge ok">✓ solved ${m.locks_open}/${m.locks_total}</span>`
+                      :`<span class="badge bad">✗ STUCK ${m.locks_open}/${m.locks_total}</span>`;
+    const cpl=m.msgs_per_lock==null?'—':m.msgs_per_lock;
+    this.metricsEl.innerHTML =
+      `${badge}`
+      +`<span class="stat"><span class="head">cost/lock</span> <b>${cpl}</b> <span class="u">msgs</span></span>`
+      +`<span class="stat">messages <b>${m.messages}</b></span>`
+      +`<span class="stat">failed press <b>${m.failed_press}</b></span>`
+      +`<span class="stat">team <b>${m.team_size}</b></span>`
+      +`<span class="stat">interactions <b>${m.interactions}</b></span>`;
   }
 }
-function esc(s){ return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
-function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
-let arms = {}, MODE = 'discover', synced = true;
-const syncBtn=document.getElementById('syncBtn');
-const HINT = {
-  discover: "Topology is HIDDEN — agents must work out who they can talk to. Watch the CENTRALIZED team break: its workers keep messaging each other (red ✗ dropped) and never learn they must route through the coordinator. ▶ Toggle to ‘told’ for the other side — when the structure is given, both finish, but the decentralized team is clearly faster.",
-  told: "Topology is GIVEN to each agent. Both finish, but the DECENTRALIZED team is faster — the centralized team's lone coordinator serializes spawning and relaying. ▶ Toggle to ‘discover’ to watch the centralized team actually fail."
-};
+let arms={}, MODE='told', playing=false, idx=0, raf=null, last=0;
+const SPEED=12;
+function maxLen(){ return Math.max(arms.mesh.events.length, arms.tree.events.length); }
 function loadMode(mode){
-  MODE = mode;
-  arms.mesh = new Arm('arm-mesh', M.modes[mode].mesh);
-  arms.tree = new Arm('arm-tree', M.modes[mode].tree);
-  arms.mesh.render(); arms.tree.render();
-  document.getElementById('modeTag').textContent = mode==='told' ? 'topology told' : 'topology discovered';
-  document.getElementById('modehint').textContent = HINT[mode];
-  document.querySelectorAll('.modeBtn').forEach(b=>b.classList.toggle('on', b.dataset.mode===mode));
+  MODE=mode;
+  document.querySelectorAll('#modeToggle button').forEach(b=>b.classList.toggle('on',b.dataset.mode===mode));
+  arms.mesh=new Arm('arm-mesh', M.modes[mode].mesh);
+  arms.tree=new Arm('arm-tree', M.modes[mode].tree);
+  idx=0; redraw(0);
   drawGenealogy('mesh','gGeneMesh'); drawGenealogy('tree','gGeneTree');
 }
-function drawGenealogy(arm, cid){
+function redraw(frac){
+  arms.mesh.draw(Math.min(idx,arms.mesh.events.length-1), frac);
+  arms.tree.draw(Math.min(idx,arms.tree.events.length-1), frac);
+  document.getElementById('seqlabel').textContent=`event ${idx}/${maxLen()-1}`;
+}
+function loop(now){
+  if(!playing) return;
+  const dt=(now-last)/1000; last=now;
+  const fidx=idx+dt*SPEED; idx=Math.floor(fidx); const frac=fidx-idx;
+  if(idx>=maxLen()-1){ idx=maxLen()-1; redraw(1); playing=false; document.getElementById('play').textContent='▶ play'; return; }
+  redraw(frac);
+  raf=requestAnimationFrame(loop);
+}
+document.getElementById('play').onclick=()=>{
+  if(idx>=maxLen()-1) idx=0;
+  playing=!playing; document.getElementById('play').textContent=playing?'❚❚ pause':'▶ play';
+  if(playing){ last=performance.now(); raf=requestAnimationFrame(loop); }
+};
+document.getElementById('restart').onclick=()=>{ idx=0; playing=false;
+  document.getElementById('play').textContent='▶ play'; redraw(0); };
+document.querySelectorAll('#modeToggle button').forEach(b=>b.onclick=()=>{ playing=false;
+  document.getElementById('play').textContent='▶ play'; loadMode(b.dataset.mode); });
+
+function drawGenealogy(arm,cid){
   const cv=document.getElementById(cid); if(!cv) return;
   const a=M.modes[MODE][arm], roster=a.roster, lin=a.lineage||{};
-  const st={}, seen=new Set();
-  a.trace.forEach((fr,t)=>{ for(const id in fr.agents){ if(!seen.has(id)){ seen.add(id); st[id]=t; } } });
+  const birth={}, seen=new Set();
+  a.events.forEach(e=>{ if(e.kind==='spawn'&&e.child&&!seen.has(e.child)){ seen.add(e.child); birth[e.child]=e.t; } });
   const row={}; roster.forEach((id,i)=>row[id]=i);
-  const last={}; roster.forEach(id=>last[id]=st[id]);
-  for(const c in lin){ const p=lin[c]; if(p in last) last[p]=Math.max(last[p], st[c]); }
-  const maxT=Math.max(1, ...Object.values(st));
-  const col=(arm==='mesh')?getCss('--mesh'):getCss('--tree');
-  const rowH=24, padL=32, padR=18, padT=8, padB=20, W=440, H=padT+roster.length*rowH+padB;
-  const ctx=hidpi(cv,W,H);
-  const x0=padL, x1=W-padR;
+  const maxT=Math.max(1,...Object.values(birth));
+  const col=arm==='mesh'?getCss('--mesh'):getCss('--tree');
+  const rowH=24,padL=34,padR=16,padT=8,padB=20,W=440,Hc=padT+roster.length*rowH+padB;
+  const ctx=hidpi(cv,W,Hc); const x0=padL,x1=W-padR;
   const X=t=>x0+(x1-x0)*(t/maxT), Y=i=>padT+rowH/2+i*rowH;
-  ctx.clearRect(0,0,W,H); ctx.font='11px sans-serif';
-  roster.forEach(id=>{
-    const y=Y(row[id]), b=X(st[id]), ls=X(last[id]), e=X(maxT);
-    if(last[id]>st[id]){ ctx.setLineDash([]); ctx.strokeStyle=col; ctx.lineWidth=2.6; ctx.globalAlpha=.55;
-      ctx.beginPath(); ctx.moveTo(b,y); ctx.lineTo(ls,y); ctx.stroke(); }
-    ctx.setLineDash([2,3]); ctx.strokeStyle=col; ctx.lineWidth=1.1; ctx.globalAlpha=.3;
-    ctx.beginPath(); ctx.moveTo(ls,y); ctx.lineTo(e,y); ctx.stroke();
-    ctx.setLineDash([]); ctx.globalAlpha=1;
-  });
-  ctx.lineWidth=1.8; ctx.globalAlpha=.9; ctx.strokeStyle=col;
-  for(const c in lin){ const p=lin[c]; if(!(p in row)) continue; const x=X(st[c]);
+  ctx.clearRect(0,0,W,Hc); ctx.font='11px sans-serif';
+  roster.forEach(id=>{ const y=Y(row[id]); ctx.strokeStyle=col; ctx.globalAlpha=.18; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(X(birth[id]),y); ctx.lineTo(x1,y); ctx.stroke(); ctx.globalAlpha=1; });
+  ctx.strokeStyle=col; ctx.lineWidth=1.8; ctx.globalAlpha=.9;
+  for(const c in lin){ const p=lin[c]; if(!(p in row)) continue; const x=X(birth[c]);
     ctx.beginPath(); ctx.moveTo(x,Y(row[p])); ctx.lineTo(x,Y(row[c])); ctx.stroke(); }
   ctx.globalAlpha=1;
-  roster.forEach(id=>{
-    const y=Y(row[id]), x=X(st[id]);
-    ctx.fillStyle=col; ctx.beginPath(); ctx.arc(x,y,5,0,7); ctx.fill();
-    ctx.fillStyle='#7a8699'; ctx.textAlign='right'; ctx.fillText(id, x0-6, y+3);
-  });
-  ctx.fillStyle='#9aa4b2'; ctx.textAlign='left'; ctx.fillText('turn →', x1-36, H-5);
+  roster.forEach(id=>{ const y=Y(row[id]),x=X(birth[id]); ctx.fillStyle=col;
+    ctx.beginPath(); ctx.arc(x,y,5,0,7); ctx.fill();
+    ctx.fillStyle='#7a8699'; ctx.textAlign='right'; ctx.fillText(id,x0-6,y+3); });
+  ctx.fillStyle='#9aa4b2'; ctx.textAlign='left'; ctx.fillText('spawn time →',x1-70,Hc-5);
 }
-document.querySelectorAll('.modeBtn').forEach(b=> b.onclick=()=>loadMode(b.dataset.mode));
-function unsync(){ if(synced){ synced=false; syncBtn.classList.remove('on'); syncBtn.textContent='▶ resume sync'; } }
-syncBtn.onclick=()=>{
-  synced=true; syncBtn.classList.add('on'); syncBtn.textContent='⏸ syncing';
-  for(const k in arms){ arms[k].setT(0); arms[k].play(); }
-};
-let last=performance.now();
-const TPS=1.25;
-function loop(now){
-  const dt=(now-last)/1000; last=now;
-  for(const k in arms){ const a=arms[k];
-    if(a.playing){ a.t=Math.min(a.trace.length-1, a.t+dt*TPS);
-      if(a.t>=a.trace.length-1){ a.pause(); }
-      a.render();
-    }
-  }
-  requestAnimationFrame(loop);
-}
-loadMode('discover');
-requestAnimationFrame(loop);
 
-function hidpi(cv, w, h){
-  const DPR=Math.max(2, window.devicePixelRatio||1);
-  cv.width=w*DPR; cv.height=h*DPR; cv.style.width=w+'px'; cv.style.height=h+'px';
-  const ctx=cv.getContext('2d'); ctx.scale(DPR,DPR); return ctx;
-}
-function commGraph(cid, star){
-  const ctx=hidpi(document.getElementById(cid), 220, 180), cx=110,cy=90,R=62,n=6;
-  ctx.clearRect(0,0,220,180);
-  const pts=[]; for(let i=0;i<n;i++){ const a=-Math.PI/2+i*2*Math.PI/n; pts.push([cx+R*Math.cos(a),cy+R*Math.sin(a)]); }
-  ctx.strokeStyle='#c9d2dd'; ctx.lineWidth=1.2;
-  if(star){
-    ctx.fillStyle='#888'; ctx.beginPath(); ctx.arc(cx,cy,9,0,7); ctx.fill();
-    pts.forEach(p=>{ ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(p[0],p[1]); ctx.stroke(); });
-  } else {
-    for(let i=0;i<n;i++) for(let j=i+1;j<n;j++){ ctx.beginPath(); ctx.moveTo(pts[i][0],pts[i][1]); ctx.lineTo(pts[j][0],pts[j][1]); ctx.stroke(); }
-  }
-  pts.forEach((p,i)=>{ ctx.fillStyle=LCOL[Math.floor(i/2)%LCOL.length]; ctx.beginPath(); ctx.arc(p[0],p[1],8,0,7); ctx.fill(); });
-}
-commGraph('gMesh',false); commGraph('gTree',true);
-(function scaling(){
-  const ctx=hidpi(document.getElementById('gScale'), 320, 180), x0=38,y0=150,x1=300,y1=20;
-  const Ks=[2,4,6,8,10,12], mesh=Ks.map(_=>6), tree=[8,16,24,32,40,48], xmax=12, ymax=50;
-  const X=k=>x0+(x1-x0)*(k-2)/(xmax-2), Y=v=>y0+(y1-y0)*v/ymax;
-  ctx.clearRect(0,0,320,180);
-  ctx.strokeStyle='#dde2e9'; ctx.beginPath(); ctx.moveTo(x0,y1); ctx.lineTo(x0,y0); ctx.lineTo(x1,y0); ctx.stroke();
-  ctx.fillStyle='#9aa4b2'; ctx.font='10px sans-serif'; ctx.fillText('locks (K)',x1-50,y0+16); ctx.fillText('msgs',6,y1+6);
-  function line(arr,col){ ctx.strokeStyle=col; ctx.lineWidth=2; ctx.beginPath();
-    Ks.forEach((k,i)=>{ const px=X(k),py=Y(arr[i]); i?ctx.lineTo(px,py):ctx.moveTo(px,py); }); ctx.stroke(); }
-  line(mesh,getCss('--mesh')); line(tree,getCss('--tree'));
-  ctx.fillStyle=getCss('--mesh'); ctx.fillText('mesh O(1)',X(8)-6,Y(6)-8);
-  ctx.fillStyle=getCss('--tree'); ctx.fillText('tree O(K)',X(9),Y(36));
-})();
+loadMode('told');
 </script>
 </body>
 </html>
