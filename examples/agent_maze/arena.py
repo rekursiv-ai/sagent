@@ -45,7 +45,9 @@ def _system(label: str, role: str, *, mesh: bool, told: bool, coordinator: str) 
         core += (
             "You are the FIRST agent, ALONE — you can open nothing by yourself. Your very "
             "first job is to SPAWN several helpers on empty tiles next to you, then spread "
-            "the team out to find plates and pair up. "
+            "the team out to find plates and pair up. ASSIGN pairs explicitly (e.g. 'a1 & "
+            "a2 take lock a; a3 & a4 take lock b') so exactly two agents converge on each "
+            "lock. "
         )
     else:
         core += (
@@ -67,7 +69,9 @@ def _system(label: str, role: str, *, mesh: bool, told: bool, coordinator: str) 
     else:
         core += "Work out who you can reach and whether you can spawn.\n"
     core += (
-        "Keep acting until ALL locks are open; do not stop early while locks remain."
+        "Be TERSE: a couple of short messages to coordinate, then ACT (move/press) — "
+        "don't narrate or chat. Keep acting until ALL locks are open; do not stop early "
+        "while any lock remains."
     )
     return core
 
@@ -85,7 +89,7 @@ class Arena:
         told: bool = True,
         model_id: str = "",
         max_agents: int = 8,
-        rounds: int = 20,
+        rounds: int = 28,
         budget_t: int = 140,
     ) -> None:
         self.engine = Engine(rows, model=model_id)
