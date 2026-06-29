@@ -700,3 +700,28 @@ fixed; the fix is in the code, but the reason lives here (and in the per-step co
 
 **If reviving K=2 or a wall-clock window, re-read this section first.** Both were real, reasonable
 attempts that the data/review killed; the current K=3 + logical-clock design is the response.
+
+### Post-merge adversarial gap-hunt (2026-06-29) — 12 confirmed fixes
+
+A bounded 4-lens × 2×-verify gap-hunt on the merged autonomous code (44 agents) confirmed 12
+issues and refuted 8 — including two where the 2× verify caught that the *fix* was unsafe
+(switching to `serve_forever` would break the engine-side latch; eager pre-registering a spawned
+child's label would mis-resolve its body). Fixed:
+
+- **HIGH** — the shutdown "freeze" was never actually enforced: other agents kept emitting after the
+  solving event, so the replay showed post-win activity AND `pick(best)` (fewest interactions) was
+  skewed by the noise. Engine now HARD-FREEZES on solve — `_frozen()` no-ops every action once
+  `solved_seq` is set. Verified in the shipped capture: `events_after_final_open == 0`.
+- **MED** — one shared `Model` handed to every Agent, but `Agent.shutdown()` closes it, so the first
+  agent to finish tore down the SDK its siblings were mid-request on (the `ReadError` storms) →
+  per-agent model factory. `pick(best)` now ranks partial progress (most locks, then fewest
+  interactions) so a do-nothing run can't win. Press-arm is bound to the plate it was pressed on
+  (a single move to another plate can't relocate the charge). Replay: expire lapsed armed plates;
+  freeze an arm that has already ended (no stutter). `_shutdown` re-gathers spawn-during-shutdown
+  tasks so none escape the barrier.
+- **LOW** — removed dead `solved_seq` (now read by the freeze), `max_agents` attr, `born` set,
+  `default_id` param, `os.environ` line; unified the dropped-message path through `_deliver`;
+  refreshed the stale "build step 1/2" docstring.
+
+Re-captured at K=3; the contrast holds (mesh ✓ 3/3 in told+discover, tree ✗ STUCK 0/3) and the
+event log is now clean. +2 engine tests (arm-not-relocated, frozen-after-solve); 23 tests green.

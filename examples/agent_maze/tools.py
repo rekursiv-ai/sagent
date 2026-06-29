@@ -24,9 +24,8 @@ class WorldTool:
     clearable_results: bool = True
     emit_tool_summary: bool = False
 
-    def __init__(self, engine: Engine, default_id: str | None = None) -> None:
+    def __init__(self, engine: Engine) -> None:
         self.engine = engine
-        self._default_id = default_id
 
     @property
     def description(self) -> str:
@@ -83,8 +82,6 @@ class WorldTool:
         label = agent_label_var.get("")
         if label and label in self.engine.world.agents:
             return label
-        if self._default_id and self._default_id in self.engine.world.agents:
-            return self._default_id
         if len(self.engine.world.agents) == 1:
             return next(iter(self.engine.world.agents))
         return None
@@ -238,9 +235,9 @@ class CommsTool:
                     is_error=True,
                 )
             if to not in agent_registry:
-                self.engine.emit(
-                    me, "message", to=to, text=content[:160], status="dropped"
-                )
+                self._deliver(
+                    me, to, content, status="dropped"
+                )  # no target → logs only
                 return ToolResult(
                     call_id="",
                     content=f"unknown agent {to!r}; reachable: {sorted(agent_registry)}",

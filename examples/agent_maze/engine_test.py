@@ -80,3 +80,31 @@ def test_move_emits_per_cell_events_and_logical_clock() -> None:
     moves = [e for e in eng.events if e["kind"] == "move"]
     assert len(moves) >= 2  # several cells stepped
     assert all(e["seq"] == i for i, e in enumerate(eng.events))  # contiguous order
+
+
+def test_arm_not_relocated_to_another_plate() -> None:
+    eng, a_xy, b_xy = _engine()
+    eng.add_agent("a0", a_xy)
+    eng.press("a0", "a1")  # arm on lock-0 plate A
+    eng.move("a0", *b_xy)  # walk to lock-0 plate B (also a plate)
+    assert "a0" not in eng.armed  # the arm is bound to plate A, not relocated to B
+
+
+def test_frozen_after_solve_drops_post_win_actions() -> None:
+    rows, _meta = make_spawn_level(
+        num_locks=1, decoys=1
+    )  # one lock => solvable outright
+    eng = Engine(rows, model="test")
+    p = [pl for pl in eng.scene["plates"] if pl["lock"] == 0]
+    a_xy, b_xy = tuple(p[0]["xy"]), tuple(p[1]["xy"])
+    eng.add_agent("a0", a_xy)
+    eng.add_agent("a1", b_xy)
+    eng.press("a0", "a1")
+    eng.press("a1", "a0")  # solves the only lock
+    assert eng.solved_seq is not None
+    t_at_win, n_events = eng.t, len(eng.events)
+    eng.look("a0")
+    eng.move("a1", *a_xy)
+    eng.press("a0", "a1")
+    assert eng.t == t_at_win  # frozen: no further ticks
+    assert len(eng.events) == n_events  # frozen: no further events

@@ -30,6 +30,11 @@ def _key() -> str:
     )
 
 
+def _make_model() -> Model:
+    """Fresh provider+model per call → each Agent owns its own SDK (isolated shutdown)."""
+    return Anthropic.from_key(_key()).model(MODEL)
+
+
 def _lineage(eng: Engine) -> dict[str, str]:
     return {
         e["child"]: e["agent"]
@@ -81,14 +86,13 @@ def arm_payload(eng: Engine) -> dict[str, Any]:
 async def run_arm(
     rows: list[str],
     meta: Any,
-    model: Model,
     *,
     mesh: bool,
     told: bool,
     wall_s: float = 300.0,
     **kw: Any,
 ) -> Engine:
-    arena = Arena(rows, meta, model, mesh=mesh, told=told, model_id=MODEL, **kw)
+    arena = Arena(rows, meta, _make_model, mesh=mesh, told=told, model_id=MODEL, **kw)
     return await arena.run(wall_s=wall_s)
 
 
@@ -98,9 +102,18 @@ def _interactions(eng: Engine) -> int:
 
 
 def pick(engs: list[Engine], *, best: bool) -> Engine:
-    """Best mesh: solved then fewest interactions; worst tree: least-solved then most."""
+    """Best mesh: solved, then MOST locks opened, then fewest interactions.
+    Worst tree: least locks opened, then most interactions.
+    """
     if best:
-        return min(engs, key=lambda e: (not e.all_locks_open(), _interactions(e)))
+        return min(
+            engs,
+            key=lambda e: (
+                not e.all_locks_open(),
+                -e.world.locks_open(),
+                _interactions(e),
+            ),
+        )
     return min(engs, key=lambda e: (e.world.locks_open(), -_interactions(e)))
 
 
@@ -122,14 +135,10 @@ async def capture(
         label = "told" if told else "discover"
         arms: dict[str, Any] = {}
         for arm, best in (("mesh", True), ("tree", False)):
-            engs: list[Engine] = []
-            for _i in range(k):
-                model = Anthropic.from_key(_key()).model(MODEL)
-                engs.append(
-                    await run_arm(
-                        rows, meta, model, mesh=arm == "mesh", told=told, **kw
-                    )
-                )
+            engs: list[Engine] = [
+                await run_arm(rows, meta, mesh=arm == "mesh", told=told, **kw)
+                for _i in range(k)
+            ]
             chosen = pick(engs, best=best)
             arms[arm] = arm_payload(chosen)
             m = chosen.world.locks_open()

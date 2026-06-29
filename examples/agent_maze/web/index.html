@@ -126,16 +126,16 @@ class Arm {
     this.renderMetrics();
   }
   stateUpTo(i){
-    const pos={}, born=new Set(), armed=new Map(), open=new Set();
+    const pos={}, armed=new Map(), open=new Set();
     for(let j=0;j<=i && j<this.events.length;j++){
       const e=this.events[j];
-      if(e.kind==='spawn' && e.child){ pos[e.child]=e.xy.slice(); born.add(e.child); }
+      if(e.kind==='spawn' && e.child){ pos[e.child]=e.xy.slice(); }
       else if(e.kind==='move'){ pos[e.agent]=e.to.slice(); }
       else if(e.kind==='press' && e.outcome==='armed'){
         const a=pos[e.agent]; if(a) armed.set(key(a[0],a[1]),{by:e.agent,until:e.t_expiry,partner:e.partner}); }
       else if(e.kind==='lock_open'){ open.add(e.lock); (e.plates||[]).forEach(p=>armed.delete(key(p[0],p[1]))); }
     }
-    return {pos,born,armed,open};
+    return {pos,armed,open};
   }
   draw(i,frac){
     const ctx=this.ctx, C=this.cell; ctx.clearRect(0,0,this.pw,this.ph);
@@ -144,7 +144,8 @@ class Arm {
       const ch=row[x]||'#'; ctx.fillStyle = ch==='#'?getCss('--wall'):getCss('--floor');
       ctx.fillRect(x*C,y*C,C-1,C-1); } }
     this.scene.plates.forEach(p=>{ const [x,y]=p.xy, pc=PAL[p.lock%PAL.length];
-      const isOpen=base.open.has(p.lock); const isArmed=base.armed.has(key(x,y));
+      const isOpen=base.open.has(p.lock);
+      const am=base.armed.get(key(x,y)); const isArmed = !!am && am.until >= (cur?cur.t:0);
       ctx.lineWidth=2; ctx.strokeStyle=pc;
       if(isOpen){ ctx.fillStyle=pc; ctx.globalAlpha=.85; ctx.fillRect(x*C+2,y*C+2,C-5,C-5); ctx.globalAlpha=1; }
       else { ctx.fillStyle=isArmed?pc:'#fff'; ctx.globalAlpha=isArmed?.4:1; ctx.fillRect(x*C+3,y*C+3,C-7,C-7); ctx.globalAlpha=1;
@@ -192,8 +193,10 @@ function loadMode(mode){
   drawGenealogy('mesh','gGeneMesh'); drawGenealogy('tree','gGeneTree');
 }
 function redraw(frac){
-  arms.mesh.draw(Math.min(idx,arms.mesh.events.length-1), frac);
-  arms.tree.draw(Math.min(idx,arms.tree.events.length-1), frac);
+  for(const a of [arms.mesh, arms.tree]){
+    const last=a.events.length-1, done=idx>=last;   // a finished arm freezes (no stutter)
+    a.draw(Math.min(idx,last), done?1:frac);
+  }
   document.getElementById('seqlabel').textContent=`event ${idx}/${maxLen()-1}`;
 }
 function loop(now){

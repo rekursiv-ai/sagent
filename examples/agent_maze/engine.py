@@ -10,9 +10,9 @@ The one coordination point is the lock-press. ``press(partner=<label>)`` arms th
 under you, *naming* a partner, live for ``PRESS_WINDOW`` logical interactions. A lock
 opens only when **both** of its plates are armed, **each naming the other**, with the
 two (distinct) agents standing on the two **different** same-letter plates, within
-overlapping windows. Everything else (look / move / — later — message / spawn) is free
-and asynchronous. This is build step 1 (move + perceive + event log); the rendezvous is
-validated in step 2.
+overlapping windows. Everything else (look / move / message / spawn) is free and
+asynchronous. Once every lock is open the engine FREEZES (``solved_seq`` set): further
+actions no-op, so nothing lands in the event log after the win.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from examples.agent_maze.world import PLATE_LETTERS, World
 
 # A press stays live this many LOGICAL interactions. Short enough that an un-signalled
 # partner's natural (staggered) arrival misses it — so you must coordinate "press now" —
-# yet not wall-clock, so it's immune to model latency. Tuned for real in build step 2.
+# yet not wall-clock, so it's immune to model latency.
 PRESS_WINDOW = 8
 
 
@@ -64,7 +64,8 @@ class Engine:
         self.seq = 0  # total event order
         self.events: list[dict[str, Any]] = []
         self.lock = asyncio.Lock()  # serialize state mutations across concurrent agents
-        self.armed: dict[str, tuple[int, str]] = {}  # aid -> (expiry_t, partner_label)
+        # aid -> (expiry_t, partner_label, plate_xy the arm is bound to)
+        self.armed: dict[str, tuple[int, str, tuple[int, int]]] = {}
         self.solved_seq: int | None = None
         self.scene = self._build_scene(model)
 
@@ -117,13 +118,21 @@ class Engine:
 
     # -- actions (called under self.lock by the WorldTool) -----------------
 
+    def _frozen(self) -> bool:
+        """Once solved, every action no-ops — no post-win events, ticks, or mutation."""
+        return self.solved_seq is not None
+
     def look(self, aid: str) -> str:
+        if self._frozen():
+            return "the maze is already solved — stop."
         self.t += 1
         self.emit(aid, "look")
         return "You look around."
 
     def move(self, aid: str, x: int, y: int) -> str:
         """Walk the body along a shortest path toward (x,y); one move event per cell."""
+        if self._frozen():
+            return "the maze is already solved — stop."
         self.t += 1
         a = self.world.agents[aid]
         if not self.world.passable(x, y):
@@ -139,8 +148,9 @@ class Engine:
             a.x, a.y = nxt
             self.emit(aid, "move", **{"from": list(frm), "to": list(a.xy)})
             steps += 1
-        # Leaving a plate drops any pending arm (you must stay to hold it).
-        if aid in self.armed and a.xy not in self.world._plate_lock:  # noqa: SLF001
+        # An arm is bound to the exact plate it was pressed on; moving off it AT ALL
+        # (even onto another plate) drops it, so a press can't be relocated to a new lock.
+        if aid in self.armed and self.armed[aid][2] != a.xy:
             del self.armed[aid]
         # Arriving onto a plate may complete a pair whose partner is already armed.
         self._check_open(aid)
@@ -149,6 +159,8 @@ class Engine:
 
     def press(self, aid: str, partner: str) -> str:
         """Arm the plate under you, naming a partner; latch the lock if the pair is live."""
+        if self._frozen():
+            return "the maze is already solved — stop."
         self.t += 1
         a = self.world.agents[aid]
         if a.xy not in self.world._plate_lock:  # noqa: SLF001
@@ -162,7 +174,7 @@ class Engine:
             return "press failed: name your PARTNER (a different agent), not yourself."
         a.presses_left -= 1
         until = self.t + PRESS_WINDOW
-        self.armed[aid] = (until, partner)
+        self.armed[aid] = (until, partner, a.xy)  # bound to THIS plate
         li = self.world._plate_lock[a.xy]  # noqa: SLF001
         self.emit(
             aid,
@@ -196,8 +208,8 @@ class Engine:
         for o in self.world.agents.values():
             if not o.alive or o.xy not in tiles or o.id not in self.armed:
                 continue
-            until, partner = self.armed[o.id]
-            if until >= self.t:
+            until, partner, plate = self.armed[o.id]
+            if until >= self.t and plate == o.xy:
                 holder[o.xy] = (o.id, partner)
         if len(holder) < 2 or any(t not in holder for t in tiles):
             return None
@@ -234,7 +246,7 @@ class Engine:
         onp = f" — ON plate '{v['on_plate_letter']}'" if v["on_plate"] else ""
         armed = ""
         if aid in self.armed:
-            until, partner = self.armed[aid]
+            until, partner, _plate = self.armed[aid]
             if until >= self.t:
                 armed = f" [armed→{partner}, ~{until - self.t} interactions left]"
         prefix = f"{head}\n" if head else ""

@@ -23,11 +23,10 @@ import asyncio
 import contextlib
 import functools
 import http.server
-import os
 import socket
 import webbrowser
 
-from examples.agent_maze.capture import _key, capture
+from examples.agent_maze.capture import capture
 
 
 HERE = Path(__file__).parent
@@ -74,7 +73,6 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.live:
-        os.environ["ANTHROPIC_API_KEY"] = _key()
         asyncio.run(capture(num_locks=args.locks, k=args.k))
     elif not (HERE / "web" / "data.js").exists():
         print("no web/data.js yet — run with --live to capture one.")  # noqa: T201

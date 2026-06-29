@@ -14,6 +14,7 @@ told   : the system prompt states the topology.   discover : it doesn't (illegal
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import asyncio
@@ -83,7 +84,7 @@ class Arena:
         self,
         rows: list[str],
         meta: SpawnMeta,
-        model: Model,
+        make_model: Callable[[], Model],
         *,
         mesh: bool = True,
         told: bool = True,
@@ -94,10 +95,11 @@ class Arena:
     ) -> None:
         self.engine = Engine(rows, model=model_id)
         self.meta = meta
-        self.model = model
+        # A FRESH model (its own provider/SDK) per agent: Agent.shutdown() closes the
+        # agent's own model, so one agent finishing must not tear down a sibling's SDK.
+        self.make_model = make_model
         self.mesh = mesh
         self.told = told
-        self.max_agents = max_agents
         self.rounds = rounds
         self.budget_t = budget_t
         self.world = WorldTool(self.engine)
@@ -121,7 +123,7 @@ class Arena:
 
     def _launch(self, label: str, role: str) -> None:
         agent = Agent(
-            model=self.model,
+            model=self.make_model(),
             system=_system(
                 label, role, mesh=self.mesh, told=self.told, coordinator=SEED
             ),
@@ -173,12 +175,17 @@ class Arena:
         return self.engine
 
     async def _shutdown(self) -> None:
-        """Stop every agent cleanly, then freeze the log (nothing lands after the win)."""
-        for agent in self.agents.values():
-            with contextlib.suppress(Exception):
-                agent.shutdown()  # sync: tears down the agent's runtime/background jobs
-        for task in self.tasks.values():
-            task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
-        with contextlib.suppress(Exception):
-            await self.model.close()
+        """Quiesce every agent. The engine froze on solve (no post-win events), so this
+        just stops the tasks; each agent closes its OWN model. Re-gather in a loop because
+        a task mid-spawn can create a new drive task after the first cancel sweep.
+        """
+        for _ in range(5):
+            tasks = list(self.tasks.values())
+            for agent in self.agents.values():
+                with contextlib.suppress(Exception):
+                    agent.shutdown()  # sync: closes the agent's own model + bg jobs
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if all(t.done() for t in self.tasks.values()):
+                break
