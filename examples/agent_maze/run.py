@@ -1,15 +1,17 @@
-"""Entry point for the agent-mesh maze coordination demo (mesh vs tree topology).
+"""Entry point for the agent-maze coordination demo (decentralized vs centralized).
 
 Default is **replay** — it serves the webpage, which replays a captured run from
 ``web/data.js`` (two arms side by side, no API key needed):
 
-    uv run python -m examples.agent_maze.run             # replay (serves web/)
-    uv run python -m examples.agent_maze.run --live      # re-capture both arms, then serve
-    uv run python -m examples.agent_maze.run --live --discover   # hide the topology
+    uv run python -m examples.agent_maze.run              # replay (serves web/)
+    uv run python -m examples.agent_maze.run --live       # re-capture all 4 conditions
+    uv run python -m examples.agent_maze.run --live --locks 4 --k 2
 
-Same maze, same paired-lock coordination task, same agents — only the comms topology
-differs (mesh = any-to-any, tree = hub-and-spoke). The capture engine + mechanic live in
-``lock_lockstep.py`` and ``world.py``.
+Same foggy maze, same paired-lock coordination task — only the comms topology differs
+(mesh = any-to-any + broadcast + anyone spawns; tree = hub-and-spoke relay, only the
+coordinator spawns). The agents are autonomous sagent ``Agent``s acting through tools;
+the World is a reactive feedback service on a logical clock. Engine + mechanic live in
+``engine.py`` / ``world.py``; one arm in ``arena.py``; capture + metrics in ``capture.py``.
 """
 
 from __future__ import annotations
@@ -25,8 +27,7 @@ import os
 import socket
 import webbrowser
 
-from examples.agent_maze.lock_lockstep import _key, capture
-
+from examples.agent_maze.capture import _key, capture
 
 HERE = Path(__file__).parent
 PORT = 8001
@@ -54,12 +55,14 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="agent-mesh maze coordination demo")
+    ap = argparse.ArgumentParser(description="agent-maze coordination demo (mesh vs tree)")
     ap.add_argument(
         "--live",
         action="store_true",
         help="re-capture all 4 conditions (mesh/tree x told/discover), then serve",
     )
+    ap.add_argument("--locks", type=int, default=4, help="locks per maze (--live)")
+    ap.add_argument("--k", type=int, default=2, help="runs per cell to cherry-pick (--live)")
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-serve", action="store_true")
@@ -67,7 +70,7 @@ def main() -> None:
 
     if args.live:
         os.environ["ANTHROPIC_API_KEY"] = _key()
-        asyncio.run(capture())
+        asyncio.run(capture(num_locks=args.locks, k=args.k))
     elif not (HERE / "web" / "data.js").exists():
         print("no web/data.js yet — run with --live to capture one.")  # noqa: T201
         return
