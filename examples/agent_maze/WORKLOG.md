@@ -613,3 +613,55 @@ demonstrates the point"). So **default model → `claude-sonnet-4-6`** (haiku vi
 - Keys: `~/.config/sagent/anthropic_api_key` (file-based, never exported to a CLI subscription —
   demo-1 discipline). haiku default.
 - Run (planned): `uv run python -m examples.agent_maze.run` (replay) / `--live` (recapture).
+
+## 13. AUTONOMOUS REFACTOR — from lockstep to real sagent Agents (2026-06-29)
+
+PR #230 (the lockstep demo) was approved, but the maintainer's review comment #2 asked the
+load-bearing question: *drive agents via `Agent` + tools instead of a hand-rolled `ModelRequest`
+lockstep.* That's the right call — the lockstep version reads as "a sim with an LLM in the loop,"
+not "sagent agents." This section logs the rebuild (branch `demo/agent-maze-autonomous`).
+
+**The pivot (user, 2026-06-29):** drop the global turn entirely. Agents are autonomous sagent
+`Agent`s acting through tools; the World is a *reactive feedback service*. The only thing that ever
+needed synchronization was the simultaneous press — so make *that* the one designed mechanic and
+let everything else (look/move/message/spawn) be free and async.
+
+**ADVERSARIAL DESIGN REVIEW (4 lenses × 2 "are-you-sure" verifies, run before building).** It
+caught real holes and — importantly — the verification *refuted* two attractive-but-wrong fixes:
+- ✗ "press once and walk off = zero comms" — refuted: co-presence at latch is required.
+- ✗ "only let an agent name a partner who messaged it" — refuted: that makes the TREE arm
+  *unsolvable* (tree workers can't DM each other). Instead the comms-requirement comes from
+  out-of-sight partner *discovery* + the timing window.
+- ✓ KEYSTONE: a wall-clock TTL is unsatisfiable (can't be both short enough to force a handshake
+  and long enough to absorb LLM latency — the exact thing that sank the first autonomous attempt).
+  Fix: a **logical interaction clock**. Latency-independent, reproducible.
+- ✓ Headline must NOT be "total interactions" (diluted by topology-invariant moves; undefined on
+  the failure arm). Use **coordination cost per lock opened** + a ✓solved/✗STUCK badge.
+- ✓ Recording gaps (scene header, per-cell moves, every-press-attempt, parent-keyed spawn) and the
+  **shutdown barrier** (persistent peers are exempt from parent shutdown → leak/cost after solve).
+
+**The mechanic that shipped:** `press(partner=<label>)` arms a plate naming a partner, live
+`PRESS_WINDOW` *logical* interactions; a lock opens when both plates are armed, each naming the
+other, two distinct agents on the two different same-letter plates, within overlapping windows.
+
+**Build (each step runnable + tested):** engine.py (reactive engine + event log) → tools.py
+(WorldTool/CommsTool/SpawnTool) → arena.py (concurrent agent tasks + shutdown barrier) →
+event-stream web/index.html → capture.py (4 arms + metrics + data.js). The 2-agent rendezvous
+gate: **6/6 live solve-rate**. SpawnTool is a thin demo tool (not sagent's `AgentSpawn`): the
+tick-free bodies run as concurrent tasks that must keep exploring, which `AgentSpawn`'s bundled
+run-loop (run-to-completion / serve_forever) can't model.
+
+**Scale call (K) — the review was right.** First tried to ship **K=2** (clean, 5-agent maze). But
+the k=2 cherry-pick exposed the exact fragility the design review warned about: the captured
+`discover/tree` *solved 3/3 and CHEAPER than mesh* (13.5 vs 22.5 cost/lock) — at 2 locks the hub's
+serial relay can still keep up, so "tree fails" was partly luck, and that arm read as anti-thesis.
+Bumped to **K=3** (3 locks / 6 plates, agent cap 8 to avoid the over-spawn the K=3 probe hit at cap
+10). At K=3 the hub reliably chokes: the shipped capture is **mesh ✓ 3/3 in BOTH told and discover**
+vs **tree ✗ STUCK 0/3 in BOTH** — a robust, binary contrast. Nice detail: `discover/tree` spawned
+**8 agents and opened 0 locks** (the hub can't coordinate them) next to mesh's **4 agents solving
+3/3**. Lesson re-confirmed: at small K the contrast is variance-dominated; K≥3 is the floor.
+
+**Validated:** mesh ✓3/3 vs tree ✗STUCK 0/3 (told + discover); recursion shown (mesh lineage
+branches, e.g. a3<-a1; tree flat a*<-a0); shutdown clean (no "Task was destroyed" leaks);
+event-stream replay renders the contrast + cost-per-lock headline + genealogy. ruff/ty/codespell +
+21 tests green.

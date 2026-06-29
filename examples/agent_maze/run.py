@@ -55,14 +55,18 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="agent-maze coordination demo (mesh vs tree)")
+    ap = argparse.ArgumentParser(
+        description="agent-maze coordination demo (mesh vs tree)"
+    )
     ap.add_argument(
         "--live",
         action="store_true",
         help="re-capture all 4 conditions (mesh/tree x told/discover), then serve",
     )
-    ap.add_argument("--locks", type=int, default=4, help="locks per maze (--live)")
-    ap.add_argument("--k", type=int, default=2, help="runs per cell to cherry-pick (--live)")
+    ap.add_argument("--locks", type=int, default=3, help="locks per maze (--live)")
+    ap.add_argument(
+        "--k", type=int, default=2, help="runs per cell to cherry-pick (--live)"
+    )
     ap.add_argument("--port", type=int, default=PORT)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-serve", action="store_true")
