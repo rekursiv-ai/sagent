@@ -8,7 +8,7 @@ run under the Engine's lock so concurrent agents never interleave a half-resolve
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from examples.agent_maze.engine import Engine
 from sagent.lib.custom_json import JSON, json_freeze
@@ -252,3 +252,102 @@ class CommsTool:
         return ToolResult(
             call_id="", content=f"unknown action {action!r}", is_error=True
         )
+
+
+class SpawnTool:
+    """Grow the team: spawn a helper on a visible empty tile (the recursion primitive).
+
+    Thin by design. The autonomous demo runs each agent as its own concurrent task, so
+    the harness — not this tool — owns the child's lifecycle (it builds the child Agent,
+    embodies it, registers its label, and launches its drive task). That's why we don't
+    use sagent's ``AgentSpawn`` here: AgentSpawn bundles its own run-loop (run-to-
+    completion or a persistent serve_forever peer), neither of which fits a tick-free
+    body that must keep exploring and coordinating concurrently. In ``tree`` mode only
+    the coordinator may spawn; in ``mesh`` any agent may (so the tree stays a flat star
+    and the mesh grows a recursive tree).
+    """
+
+    name: str = "spawn"
+    tool_id: str = "application/x-tool-maze-spawn"
+    clearable_results: bool = False
+    emit_tool_summary: bool = False
+
+    def __init__(
+        self,
+        engine: Engine,
+        spawn_child: Callable[[str, tuple[int, int]], str],
+        *,
+        mesh: bool = True,
+        coordinator: str | None = None,
+        max_agents: int = 10,
+    ) -> None:
+        self.engine = engine
+        self._spawn_child = spawn_child
+        self.mesh = mesh
+        self.coordinator = coordinator
+        self.max_agents = max_agents
+
+    @property
+    def description(self) -> str:
+        return (
+            "Spawn a NEW teammate on an empty floor tile next to you that you can see "
+            "(needs x,y). A lock needs two different agents pressing two plates at once, "
+            "so a lone agent can open nothing — spawn helpers early, then spread out to "
+            "find plates and pair up. The newcomer starts exploring on its own."
+        )
+
+    directive_schema: JSON = json_freeze(
+        {
+            "type": "object",
+            "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+            "required": ["x", "y"],
+        }
+    )
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        return f"spawn ({args.get('x')},{args.get('y')})"
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        del result
+        return None
+
+    def prompt(self) -> str:
+        return ""
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        async with self.engine.lock:
+            me = agent_label_var.get("")
+            if not me or me not in self.engine.world.agents:
+                return ToolResult(
+                    call_id="", content="you have no body.", is_error=True
+                )
+            if not self.mesh and me != self.coordinator:
+                self.engine.emit(me, "spawn", outcome="not_allowed")
+                return ToolResult(
+                    call_id="",
+                    content=f"only the coordinator '{self.coordinator}' may spawn here.",
+                    is_error=True,
+                )
+            if len(self.engine.world.agents) >= self.max_agents:
+                return ToolResult(
+                    call_id="", content="team is at capacity.", is_error=True
+                )
+            x, y = args.get("x"), args.get("y")
+            if not isinstance(x, int) or not isinstance(y, int):
+                return ToolResult(
+                    call_id="", content="spawn needs integer x,y.", is_error=True
+                )
+            ok, why = self.engine.world.can_spawn(me, x, y)
+            if not ok:
+                return ToolResult(
+                    call_id="", content=f"can't spawn there: {why}", is_error=True
+                )
+            child = self._spawn_child(me, (x, y))
+            return ToolResult(
+                call_id="",
+                content=f"spawned '{child}' at ({x},{y}); it is now exploring.",
+            )

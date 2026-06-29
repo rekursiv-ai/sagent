@@ -12,7 +12,7 @@ from typing import Any, cast
 import asyncio
 
 from examples.agent_maze.engine import Engine
-from examples.agent_maze.tools import CommsTool
+from examples.agent_maze.tools import CommsTool, SpawnTool
 from examples.agent_maze.world import make_spawn_level
 from sagent.tools.core import agent_label_var, agent_registry
 
@@ -124,6 +124,65 @@ def test_say_unknown_agent_is_dropped() -> None:
         )
         assert res.is_error
         assert _msgs(eng)[-1]["status"] == "dropped"
+    finally:
+        agent_label_var.reset(tok)
+        _clear(["a0"])
+
+
+def test_spawn_tree_blocks_non_coordinator() -> None:
+    eng = _engine()
+    eng.add_agent("a0", (7, 1))
+    eng.add_agent("w1", (7, 3))
+    tok = agent_label_var.set("w1")
+    calls: list[tuple[str, tuple[int, int]]] = []
+
+    def fake(parent: str, xy: tuple[int, int]) -> str:
+        calls.append((parent, xy))
+        return "cX"
+
+    try:
+        tool = SpawnTool(eng, fake, mesh=False, coordinator="a0", max_agents=8)
+        res = _run(tool.run({"x": 7, "y": 4}))
+        assert res.is_error
+        assert not calls  # a worker cannot spawn in tree mode
+    finally:
+        agent_label_var.reset(tok)
+        _clear(["a0", "w1"])
+
+
+def test_spawn_mesh_creates_child() -> None:
+    eng = _engine()
+    eng.add_agent("a0", (7, 1))
+    tok = agent_label_var.set("a0")
+    calls: list[tuple[str, tuple[int, int]]] = []
+
+    def fake(parent: str, xy: tuple[int, int]) -> str:
+        calls.append((parent, xy))
+        return "a1"
+
+    try:
+        tool = SpawnTool(eng, fake, mesh=True, coordinator="a0", max_agents=8)
+        res = _run(tool.run({"x": 7, "y": 2}))
+        assert not res.is_error
+        assert calls == [("a0", (7, 2))]
+    finally:
+        agent_label_var.reset(tok)
+        _clear(["a0"])
+
+
+def test_spawn_blocked_at_capacity() -> None:
+    eng = _engine()
+    eng.add_agent("a0", (7, 1))
+    tok = agent_label_var.set("a0")
+
+    def fake(parent: str, xy: tuple[int, int]) -> str:
+        return "a1"
+
+    try:
+        tool = SpawnTool(eng, fake, mesh=True, coordinator="a0", max_agents=1)
+        res = _run(tool.run({"x": 7, "y": 2}))
+        assert res.is_error
+        assert "capacity" in res.content
     finally:
         agent_label_var.reset(tok)
         _clear(["a0"])
