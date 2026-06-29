@@ -12,8 +12,8 @@ from collections.abc import Mapping
 
 from examples.agent_maze.engine import Engine
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.tools.core import agent_label_var
-from sagent.types.runtime import ToolResult
+from sagent.tools.core import agent_label_var, agent_registry
+from sagent.types.runtime import AgentSendQueuedMessage, ToolResult
 
 
 class WorldTool:
@@ -116,3 +116,139 @@ class WorldTool:
             return ToolResult(
                 call_id="", content=f"unknown action {action!r}", is_error=True
             )
+
+
+class CommsTool:
+    """Talk to teammates. mesh = any-to-any + broadcast; tree = coordinator-only relay.
+
+    Built on sagent's real inbox primitive: a message is pushed onto the target's
+    runtime inbox (read at the recipient's next decision point, never mid-action) and
+    logged to the engine event stream for the replay arrows + the coordination metrics.
+    A broadcast fans out to N peers and is counted as N delivered sends (so blasting
+    everyone self-penalises on the interaction metric).
+    """
+
+    name: str = "comms"
+    tool_id: str = "application/x-tool-maze-comms"
+    clearable_results: bool = False
+    emit_tool_summary: bool = False
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        mesh: bool = True,
+        coordinator: str | None = None,
+    ) -> None:
+        self.engine = engine
+        self.mesh = mesh
+        self.coordinator = coordinator
+
+    @property
+    def description(self) -> str:
+        if self.mesh:
+            return (
+                "Talk to teammates. action='say' (needs to, content) messages ONE agent "
+                "by label; action='broadcast' (needs content) tells EVERYONE at once. "
+                "You cannot see other agents' labels until they message you or you read "
+                "them here, so SAY who you are and which plate/lock you're on, then agree "
+                "who pairs with whom and exactly when to press."
+            )
+        return (
+            "Coordinate via action='say' (needs to, content). In this team, workers may "
+            f"message ONLY the coordinator '{self.coordinator}', which relays to others "
+            "one at a time. No broadcast."
+        )
+
+    directive_schema: JSON = json_freeze(
+        {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["say", "broadcast"]},
+                "to": {"type": "string", "description": "Target label (for 'say')."},
+                "content": {"type": "string", "description": "Message text."},
+            },
+            "required": ["action", "content"],
+        }
+    )
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        if str(args.get("action")) == "say":
+            return f"comms say → {args.get('to')}"
+        return "comms broadcast"
+
+    def summary_result(self, result: ToolResult) -> str | None:
+        del result
+        return None
+
+    def prompt(self) -> str:
+        me = agent_label_var.get("")
+        peers = sorted(a for a in agent_registry if a != me)
+        if self.mesh:
+            return f"You are '{me}'. Teammates currently reachable: {peers or '(none yet)'}."
+        if me == self.coordinator:
+            return (
+                f"You are the COORDINATOR '{me}'. Relay facts between workers {peers}."
+            )
+        return f"You are '{me}'. You may only message the coordinator '{self.coordinator}'."
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+    def _deliver(
+        self, frm: str, to: str, content: str, *, status: str = "delivered"
+    ) -> None:
+        target = agent_registry.get(to)
+        if target is not None:
+            target.runtime.inbox.push_back(
+                AgentSendQueuedMessage(source=frm, text=content)
+            )
+        self.engine.emit(frm, "message", to=to, text=content[:160], status=status)
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        me = agent_label_var.get("")
+        if not me:
+            return ToolResult(call_id="", content="no identity.", is_error=True)
+        action = str(args.get("action", ""))
+        content = str(args.get("content", ""))
+        if not content:
+            return ToolResult(call_id="", content="content is required.", is_error=True)
+
+        if action == "broadcast":
+            if not self.mesh:
+                return ToolResult(
+                    call_id="",
+                    content=f"no broadcast here; say to '{self.coordinator}'.",
+                    is_error=True,
+                )
+            peers = [a for a in sorted(agent_registry) if a != me]
+            for p in peers:
+                self._deliver(me, p, content)  # broadcast = N delivered sends
+            return ToolResult(call_id="", content=f"broadcast to {peers}")
+
+        if action == "say":
+            to = str(args.get("to", ""))
+            if not to:
+                return ToolResult(call_id="", content="say needs 'to'.", is_error=True)
+            if not self.mesh and self.coordinator not in (me, to):
+                return ToolResult(
+                    call_id="",
+                    content=f"you may only message the coordinator '{self.coordinator}'.",
+                    is_error=True,
+                )
+            if to not in agent_registry:
+                self.engine.emit(
+                    me, "message", to=to, text=content[:160], status="dropped"
+                )
+                return ToolResult(
+                    call_id="",
+                    content=f"unknown agent {to!r}; reachable: {sorted(agent_registry)}",
+                    is_error=True,
+                )
+            self._deliver(me, to, content)
+            return ToolResult(call_id="", content=f"sent to {to}")
+
+        return ToolResult(
+            call_id="", content=f"unknown action {action!r}", is_error=True
+        )
