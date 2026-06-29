@@ -99,7 +99,7 @@ def system_for(*, allow_upgrade: bool, strong_model: str = "") -> str:
 # tokened verdict the agent can't easily forge. (Harder, mean-preserving bugs can
 # swap in an ESS / standard-error test here later.)
 # --------------------------------------------------------------------------
-_ORACLE_TOKEN = "ZK9Q7M"
+_ORACLE_TOKEN = "ZK9Q7M"  # noqa: S105 -- grader marker, not a secret
 _ORACLE_SRC = f"""
 import numpy as _np
 from scipy import stats as _stats
@@ -199,10 +199,11 @@ class RunPython:
             fh.write(_ORACLE_SRC + "\n" + code)
             path = fh.name
         try:
-            r = subprocess.run(
-                ["uv", "run", "--with", "numpy", "--with", "scipy", "python", path],
+            r = subprocess.run(  # noqa: S603
+                ["uv", "run", "--with", "numpy", "--with", "scipy", "python", path],  # noqa: S607
                 capture_output=True,
                 text=True,
+                check=False,
                 timeout=120,
             )
             tail = ("\n[stderr]\n" + r.stderr) if r.stderr.strip() else ""
@@ -322,12 +323,3 @@ async def run_condition(
         "cost_usd": round(float(agent.total_cost_usd), 5),
         "error": err,
     }
-
-
-# Provider is injected by run.py (keeps this module import-light / testable).
-_PROVIDER = None  # set via set_provider()
-
-
-def set_provider(provider) -> None:
-    global _PROVIDER  # noqa: PLW0603
-    _PROVIDER = provider

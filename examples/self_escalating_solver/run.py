@@ -14,6 +14,7 @@ the harness, measures the self-mutate success rate over ``--trials`` runs (defau
     uv run python -m examples.self_escalating_solver.run --live --provider google --trials 4
 """
 
+# ruff: noqa: T201 -- a CLI demo: progress + URLs print to stdout by design.
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,10 +22,16 @@ from typing import Any
 
 import argparse
 import asyncio
+import contextlib
+import functools
+import http.server
 import json
 import os
+import socket
+import socketserver
 import subprocess
 import tempfile
+import webbrowser
 
 from examples.self_escalating_solver import solver
 
@@ -74,7 +81,7 @@ def _read_key(provider_name: str) -> str | None:
 
 
 def _provider(provider_name: str):
-    from sagent.providers import Anthropic, Google
+    from sagent.providers import Anthropic, Google  # noqa: PLC0415
 
     key = _read_key(provider_name)
     if provider_name == "Google":
@@ -84,10 +91,18 @@ def _provider(provider_name: str):
 
 def build(provider_name: str, model_id: str):
     """Return (Model, ModelSpec) for one arm. The spec is what AgentSelf swaps from."""
-    from sagent.types.model import ModelSpec
+    from sagent.providers import default_auth_for_provider  # noqa: PLC0415
+    from sagent.types.model import ModelSpec  # noqa: PLC0415
 
     model = _provider(provider_name).model(model_id)
-    spec = ModelSpec(provider=provider_name, auth="api", model_id=model_id)
+    # auth must map to a real provider factory; "api" had no `from_api`. The
+    # provider's conventional auth (Anthropic/Google → "env") is what AgentSelf
+    # uses when it reconstructs the model to swap, so reuse that here.
+    spec = ModelSpec(
+        provider=provider_name,
+        auth=default_auth_for_provider(provider_name),
+        model_id=model_id,
+    )
     return model, spec
 
 
@@ -131,10 +146,11 @@ def canonical_histograms() -> dict[str, Any]:
         fh.write(_CANON_HIST)
         path = fh.name
     try:
-        r = subprocess.run(
-            ["uv", "run", "--with", "numpy", "--with", "scipy", "python", path],
+        r = subprocess.run(  # noqa: S603
+            ["uv", "run", "--with", "numpy", "--with", "scipy", "python", path],  # noqa: S607
             capture_output=True,
             text=True,
+            check=False,
             timeout=180,
         )
         for line in r.stdout.splitlines():
@@ -308,12 +324,6 @@ def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
     Binds a FIXED port (default 8000) so an SSH tunnel can be set up ahead of
     time. ``--host 0.0.0.0`` exposes it on the LAN instead (less secure).
     """
-    import functools
-    import http.server
-    import socket
-    import socketserver
-    import webbrowser
-
     web = HERE / "web"
     handler = functools.partial(
         http.server.SimpleHTTPRequestHandler, directory=str(web)
@@ -333,10 +343,8 @@ def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
     )
     print(f"  then open  {url}  in your LOCAL browser.")
     print("\n  (replaying the captured run — press Ctrl-C to stop)\n")
-    try:
+    with contextlib.suppress(Exception):  # headless/remote box: just print the URL
         webbrowser.open(url)
-    except Exception:  # noqa: BLE001 -- headless/remote box: just print the URL
-        pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
