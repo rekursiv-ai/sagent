@@ -1282,6 +1282,28 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     assert "Budget exhausted" in str(exc_info.value)
 
 
+def test_record_response_anchors_on_disjoint_token_pools() -> None:
+    """``_last_input_tokens`` sums the disjoint pools, not double-counting cache.
+
+    The compaction trigger anchors on this value. With the non-cached
+    ``input_tokens`` convention the three pools are disjoint, so the anchor is
+    their sum; a cache-inclusive ``input_tokens`` would inflate it and fire
+    compaction prematurely.
+    """
+    a = _build_agent()
+    a.record_response(
+        types.model.ModelResponse(
+            message=types.runtime.AssistantMessage(text="x"),
+            tokens=types.model.TokenCount(
+                input_tokens=100_000,
+                output_tokens=500,
+                cache_read_tokens=400_000,
+            ),
+        )
+    )
+    assert a._last_input_tokens == 500_000
+
+
 def test_record_response_surfaces_usage_warning_once() -> None:
     model = StubModel()
     a = Agent(model=model, tools=[])

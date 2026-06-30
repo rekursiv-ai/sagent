@@ -1580,10 +1580,11 @@ class Agent:
         target = cost_root_var.get(None) or self.cost_tracker
         target.record(response, model_id=self.model.model_id)
         # Anchor the proactive compaction trigger on the provider's exact
-        # input usage -- non-cached input plus both cache pools, which is the
-        # full prompt size the server actually counted. Recorded on ``self``
-        # (not ``target``) so a cost-rooted subagent still gates on its own
-        # last request.
+        # input usage. The three token pools are disjoint by the
+        # ``TokenCount`` convention (input is non-cached), so their sum is the
+        # full prompt size the server counted. Recorded on ``self`` (not
+        # ``target``) so a cost-rooted subagent still gates on its own last
+        # request.
         self._last_input_tokens = (
             response.tokens.input_tokens
             + response.tokens.cache_creation_tokens

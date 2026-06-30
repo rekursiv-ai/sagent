@@ -43,7 +43,7 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 | `--provider NAME` | Provider class from `sagent.providers`, such as `Anthropic` or `Google`. |
 | `--auth METHOD` | Calls `Provider.from_<METHOD>()`; default is `env`. |
 | `--account NAME` | Optional named credential slot for providers that support one. |
-| `--model ID` | Provider-specific model ID. Anthropic IDs may include `+1m` or `+200k`; SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
+| `--model ID` | Provider-specific model ID. Anthropic and OpenAI IDs may include `+1m` (OpenAI: `gpt-5.5`/`gpt-5.4` and their `-pro` variants; default is the `+1m` window); Anthropic IDs may also include `+200k`; SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
 | `--system TEXT` | Extra system prompt instructions appended to Sagent's default prompt. |
 | `--effort LEVEL` | Provider-specific reasoning effort. Anthropic accepts `low`, `medium`, `high`, `xhigh`, `max`. |
 | `--max-response-tokens N` | Limit response tokens for each model call. |

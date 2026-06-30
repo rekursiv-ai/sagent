@@ -114,11 +114,15 @@ def test_build_messages_empty_history_returns_empty_list() -> None:
     assert build_messages(_make_request(messages=[])) == []
 
 
-def test_extract_usage_splits_cache_read_out_of_input() -> None:
-    """``_extract_usage`` reports total input and the cached portion separately.
+def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
+    """``_extract_usage`` returns the cache-INCLUSIVE input and cache_read split.
 
-    Preserves the cache-accounting coverage formerly carried by the (now
-    deleted) non-streaming ``parse_response`` path.
+    ``_extract_usage`` does not subtract the cached portion: it returns the raw
+    ``prompt_tokens`` plus ``cached_tokens`` as separate values. The disjoint
+    split (input minus cache) happens later in ``consume_stream`` -- see
+    :func:`test_consume_stream_input_tokens_exclude_cache_read`. Preserves the
+    cache-accounting coverage formerly carried by the (now deleted) non-streaming
+    ``parse_response`` path.
     """
     usage = cast(
         MutableJSON,
@@ -132,6 +136,35 @@ def test_extract_usage_splits_cache_read_out_of_input() -> None:
     assert input_tokens == 1000
     assert output_tokens == 100
     assert cache_read == 400
+
+
+@pytest.mark.asyncio
+async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
+    """``TokenCount.input_tokens`` is the non-cached remainder of the prompt.
+
+    Guards against double-counting the cached portion: OpenAI reports a
+    cache-inclusive ``prompt_tokens``, so the stored ``input_tokens`` must drop
+    ``cached_tokens`` to stay disjoint from ``cache_read_tokens``.
+    """
+    events: list[MutableJSON] = [
+        {
+            "id": "stream-1",
+            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 400},
+            },
+        },
+    ]
+    resp = await consume_stream(
+        _sse_response(events),
+        publish=None,
+        pricing=Pricing(),
+        reasoning_field=None,
+    )
+    assert resp.tokens.input_tokens == 600
+    assert resp.tokens.cache_read_tokens == 400
 
 
 def _sse_response(events: list[MutableJSON]) -> httpx.Response:
@@ -330,7 +363,15 @@ class _DummyProvider(OpenAICompat):
             max_image_dim=2048,
             max_image_bytes=20 * 1024 * 1024,
             max_request_bytes=20 * 1024 * 1024,
-        )
+        ),
+        "stub-1+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=200,
+            pricing=Pricing(),
+            max_image_dim=2048,
+            max_image_bytes=20 * 1024 * 1024,
+            max_request_bytes=20 * 1024 * 1024,
+        ),
     }
 
 
@@ -597,6 +638,19 @@ async def test_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> 
     _, model = _make_provider_with_mock(transport)
     with pytest.raises(httpx.HTTPStatusError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+
+
+def test_build_body_strips_window_tag_from_wire_model() -> None:
+    """A ``+1m`` model sends the base id on the wire; the API rejects the tag."""
+    p = _DummyProvider.from_key("k")
+    m = p.model("stub-1+1m")
+    assert m.model_id == "stub-1+1m"
+    assert m.max_request_tokens == 1_000_000
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        stream=False,
+    )
+    assert body["model"] == "stub-1"
 
 
 def test_build_body_includes_max_tokens_when_set() -> None:

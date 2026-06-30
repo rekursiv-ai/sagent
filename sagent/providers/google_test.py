@@ -348,6 +348,9 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
         pricing=pricing,
     )
     assert resp.tokens.cache_read_tokens == 300
+    # ``promptTokenCount`` is cache-inclusive; stored input drops the cached
+    # portion so it stays disjoint from ``cache_read_tokens``.
+    assert resp.tokens.input_tokens == 700
     # (1000-300)*1 + 300*0.5 = 850 / 1M = 0.00085.
     assert resp.input_cost == pytest.approx(0.00085)
 
