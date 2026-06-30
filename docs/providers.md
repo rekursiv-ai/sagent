@@ -7,7 +7,7 @@ Sagent separates providers from models. A provider owns authentication and creat
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7+1m` | `claude-haiku-4-5` | Anthropic API-key provider. |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5` | `gpt-5.4-mini` | OpenAI API provider. |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5+1m` | `gpt-5.4-mini` | OpenAI API provider. `+1m` opts into the full 1M window; bare `gpt-5.5` caps at the 272K cheap tier. |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import ClassVar, override
 
+import dataclasses
+
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import (
     OpenAICompat,
@@ -68,12 +70,26 @@ _IMAGE_DIM = 2048
 _IMAGE_BYTES = 20 * 1024 * 1024
 _REQUEST_BYTES = 20 * 1024 * 1024
 
+# Cheap-tier input window for models OpenAI prices in two tiers. For gpt-5.5 /
+# gpt-5.4 (and their -pro variants) prompts above 272K input tokens bill at 2x
+# input / 1.5x output for the whole session, so the default profile caps the
+# window here; a ``+1m`` model id opts into the full window (and the 2x tier).
+# https://developers.openai.com/api/docs/models/gpt-5.5
+_TWO_TIER_TOKENS = 272_000
+
+
+def _with_window(profile: ModelProfile, max_request_tokens: int) -> ModelProfile:
+    """Clone a profile with a different input-token window."""
+    return dataclasses.replace(profile, max_request_tokens=max_request_tokens)
+
 
 class OpenAI(OpenAICompat):
     """OpenAI provider."""
 
-    # Current frontier default for API-key users.
-    DEFAULT_MODEL: ClassVar[str] = "gpt-5.5"
+    # Current frontier default for API-key users; ``+1m`` opts into the full 1M
+    # window (mirrors Anthropic's ``+1m`` default). Subscription auth clamps this
+    # back to its 272K contract, so the suffix is a no-op on that path.
+    DEFAULT_MODEL: ClassVar[str] = "gpt-5.5+1m"
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.4-mini"
 
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
@@ -90,10 +106,9 @@ class OpenAI(OpenAICompat):
     # pricing URL.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         "gpt-5.5": ModelProfile(
-            # 1M-token context window (922K input / 128K output) per
-            # https://developers.openai.com/api/docs/models/gpt-5.5 -- the
-            # 272K figure in OpenAI's docs is a pricing tier, not a hard cap.
-            max_request_tokens=1_000_000,
+            # Defaults to the 272K cheap tier; ``gpt-5.5+1m`` opts into the full
+            # 1M window (billed at the 2x tier above 272K). See ``_TWO_TIER_TOKENS``.
+            max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
             pricing=Pricing(
                 request=5.0,
@@ -105,7 +120,7 @@ class OpenAI(OpenAICompat):
             max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.5-pro": ModelProfile(
-            max_request_tokens=1_050_000,
+            max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
             pricing=Pricing(
                 request=30.0,
@@ -116,7 +131,7 @@ class OpenAI(OpenAICompat):
             max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4": ModelProfile(
-            max_request_tokens=1_050_000,
+            max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
             pricing=Pricing(
                 request=2.5,
@@ -128,7 +143,7 @@ class OpenAI(OpenAICompat):
             max_request_bytes=_REQUEST_BYTES,
         ),
         "gpt-5.4-pro": ModelProfile(
-            max_request_tokens=1_050_000,
+            max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
             pricing=Pricing(
                 request=30.0,
@@ -329,4 +344,19 @@ class OpenAI(OpenAICompat):
             max_request_bytes=_REQUEST_BYTES,
         ),
     }
+    # Long-context (``+1m``) variants. For the two-tier models the base id caps at
+    # ``_TWO_TIER_TOKENS`` and ``+1m`` opts into the model's full input window; for
+    # gpt-4.1 (single flat price, no tier cliff) ``+1m`` is an alias of the base,
+    # so both ids resolve to the same full window.
+    KNOWN_MODELS.update(
+        {
+            "gpt-5.5+1m": _with_window(KNOWN_MODELS["gpt-5.5"], 1_000_000),
+            "gpt-5.5-pro+1m": _with_window(KNOWN_MODELS["gpt-5.5-pro"], 1_050_000),
+            "gpt-5.4+1m": _with_window(KNOWN_MODELS["gpt-5.4"], 1_050_000),
+            "gpt-5.4-pro+1m": _with_window(KNOWN_MODELS["gpt-5.4-pro"], 1_050_000),
+            "gpt-4.1+1m": KNOWN_MODELS["gpt-4.1"],
+            "gpt-4.1-mini+1m": KNOWN_MODELS["gpt-4.1-mini"],
+            "gpt-4.1-nano+1m": KNOWN_MODELS["gpt-4.1-nano"],
+        }
+    )
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _OpenAIModel

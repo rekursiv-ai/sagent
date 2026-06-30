@@ -145,7 +145,14 @@ class TokenCount:
     """Immutable 4-tuple of token counts returned by a model request."""
 
     input_tokens: int = 0
-    """Input (prompt) tokens."""
+    """Non-cached prompt tokens.
+
+    Excludes ``cache_read_tokens`` and ``cache_creation_tokens``; the three
+    pools are disjoint, so the full prompt size the server counted is their
+    sum. Providers whose API reports a cache-inclusive total (OpenAI, Google)
+    must subtract the cached portion at construction so this convention holds
+    uniformly -- see ``providers/lib/cost.py``.
+    """
 
     output_tokens: int = 0
     """Output (response) tokens."""
