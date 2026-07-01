@@ -47,6 +47,58 @@ def test_openai_unknown_model_raises() -> None:
         _ = p.model("not-a-real-model")
 
 
+@pytest.mark.parametrize(
+    ("base_id", "full_tokens"),
+    [
+        ("gpt-5.5", 1_000_000),
+        ("gpt-5.5-pro", 1_050_000),
+        ("gpt-5.4", 1_050_000),
+        ("gpt-5.4-pro", 1_050_000),
+    ],
+)
+def test_openai_two_tier_default_caps_at_272k(base_id: str, full_tokens: int) -> None:
+    p = OpenAI.from_key("k")
+    base = p.model(base_id)
+    full = p.model(f"{base_id}+1m")
+    assert base.max_request_tokens == 272_000
+    assert full.max_request_tokens == full_tokens
+    assert full.model_id == f"{base_id}+1m"
+    # ``+1m`` only widens the window; pricing and other limits track the base.
+    assert full.pricing == base.pricing
+    assert full.max_request_bytes == base.max_request_bytes
+
+
+def test_openai_default_model_opts_into_full_window() -> None:
+    # API-key default is the ``+1m`` variant: full window out of the box.
+    p = OpenAI.from_key("k")
+    m = p.model()
+    assert m.model_id == "gpt-5.5+1m"
+    assert m.max_request_tokens == 1_000_000
+
+
+@pytest.mark.parametrize("base_id", ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"])
+def test_openai_no_cliff_model_plus1m_is_alias(base_id: str) -> None:
+    # gpt-4.1 has a single flat price (no 272K tier), so ``+1m`` is an alias:
+    # both ids resolve to the same full window.
+    p = OpenAI.from_key("k")
+    assert (
+        p.model(f"{base_id}+1m").max_request_tokens
+        == p.model(base_id).max_request_tokens
+        == 1_047_576
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["gpt-5.4-mini+1m", "gpt-5.4-nano+1m", "gpt-5.3-codex+1m", "gpt-5.2+1m"],
+)
+def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
+    # 400K-window models have no long-context mode; ``+1m`` must not resolve.
+    p = OpenAI.from_key("k")
+    with pytest.raises(ValueError, match="Unknown model"):
+        _ = p.model(model_id)
+
+
 def test_openai_utility_model_default() -> None:
     p = OpenAI.from_key("k")
     m = p.utility_model()

@@ -918,7 +918,7 @@ class _OpenAISubModel(_OpenAIModel):
             else openai.omit
         )
         create_kwargs: dict[str, object] = {
-            "model": self._model_id,
+            "model": self._wire_model_id,
             "input": _build_input(
                 request,
                 max_image_dim=self.max_image_dim,
@@ -936,7 +936,7 @@ class _OpenAISubModel(_OpenAIModel):
         debug_log.trace(
             "api_call",
             kind="openai_responses",
-            model=self._model_id,
+            model=self._wire_model_id,
             latency=request.latency,
             service_tier=tier,
         )
@@ -1286,9 +1286,13 @@ def _build_stream_response(
 ) -> ModelResponse:
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
+    # The Responses API reports a cache-inclusive prompt total; store the
+    # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from
+    # ``cache_read_tokens``.
+    non_cached_input = max(0, input_tokens - cache_read)
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
-        max(0, input_tokens - cache_read),
+        non_cached_input,
         output_tokens,
         cache_read=cache_read,
     )
@@ -1301,7 +1305,7 @@ def _build_stream_response(
             tool_calls=tuple(tool_calls),
         ),
         tokens=TokenCount(
-            input_tokens=input_tokens,
+            input_tokens=non_cached_input,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
         ),
