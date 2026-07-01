@@ -76,6 +76,7 @@ from sagent.types.model import (
     StreamInterruptedError,
     TokenCount,
     UsageSnapshot,
+    base_model_id,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -291,6 +292,16 @@ class OpenAICompatModel:
         return self._model_id
 
     @property
+    def _wire_model_id(self) -> str:
+        """Model id sent on the wire, stripped of any ``+1m``/``+200k`` tag.
+
+        The window suffix is a sagent-local budget selector; the OpenAI API
+        rejects it as an unknown model. Capability lookups and metadata key off
+        the base id too, so the wire name must drop the tag.
+        """
+        return base_model_id(self._model_id)
+
+    @property
     def max_response_tokens(self) -> int:
         """Maximum output tokens the model can generate."""
         return self._profile.max_response_tokens
@@ -441,7 +452,7 @@ class OpenAICompatModel:
     def _tiktoken_encoding(self) -> tiktoken.Encoding | None:
         """Return tiktoken's encoding for this model, or ``None`` if unknown."""
         try:
-            return tiktoken.encoding_for_model(self._model_id)
+            return tiktoken.encoding_for_model(self._wire_model_id)
         except KeyError:
             return None
 
@@ -523,7 +534,7 @@ class OpenAICompatModel:
         body: MutableJSON = cast(
             MutableJSON,
             {
-                "model": self._model_id,
+                "model": self._wire_model_id,
                 "messages": build_messages(
                     request, self.max_image_dim, self.max_image_bytes
                 ),
@@ -559,7 +570,7 @@ class OpenAICompatModel:
         debug_log.trace(
             "api_call",
             kind="openai_chat",
-            model=self._model_id,
+            model=self._wire_model_id,
             latency=request.latency,
             service_tier=tier,
         )
@@ -930,10 +941,14 @@ async def consume_stream(
         tool_calls=tuple(tool_calls),
     )
 
-    input_tokens, output_tokens, cache_read = _extract_usage(usage)
+    total_input, output_tokens, cache_read = _extract_usage(usage)
+    # OpenAI-compatible APIs report a cache-inclusive prompt total; store the
+    # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from the
+    # cache pools (the convention the cost contract and consumers rely on).
+    input_tokens = max(0, total_input - cache_read)
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
-        max(0, input_tokens - cache_read),
+        input_tokens,
         output_tokens,
         cache_read=cache_read,
     )

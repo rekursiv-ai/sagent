@@ -858,12 +858,14 @@ def _build_response(
     pricing: Pricing,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
-    input_tokens = int_val(usage.get("promptTokenCount"), 0)
     output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
     cache_read = int_val(usage.get("cachedContentTokenCount"), 0)
+    # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
+    # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
+    input_tokens = max(0, int_val(usage.get("promptTokenCount"), 0) - cache_read)
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
-        max(0, input_tokens - cache_read),
+        input_tokens,
         output_tokens,
         cache_read=cache_read,
     )
