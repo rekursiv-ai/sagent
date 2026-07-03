@@ -484,9 +484,9 @@ def datetime_val(value: object, default: datetime | None = None) -> datetime | N
 # driven by the *resolved* type hints (``get_type_hints``), never by string
 # matching, so aliases and forward refs work.
 
-_TYPE_TAG = "__type__"
-_SCALAR_TAG = "__scalar__"
-_VALUE_TAG = "__value__"
+_TYPE_TAG = "__type__"  # config-globals: ignore -- JSON wire tag.
+_SCALAR_TAG = "__scalar__"  # config-globals: ignore -- JSON wire tag.
+_VALUE_TAG = "__value__"  # config-globals: ignore -- JSON wire tag.
 
 # Scalar types JSON cannot represent natively; encoded as strings (Enum as its
 # value). A non-Optional union of two or more of these is ambiguous on decode.
