@@ -159,7 +159,10 @@ def test_min_pdf_bytes_threshold_check(tmp_path: Path) -> None:
     # Smaller than threshold: cache miss, falls through.
     _ = cache_file.write_bytes(b"%PDF-" + b"x" * (_MIN_PDF_BYTES - 10))
     err = FetchError(url="u", status=500, headers={}, body=b"")
-    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=err),
+        patch("sagent.tools.paper_fetch.fetch", side_effect=err),
+    ):
         result = asyncio.run(
             PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
@@ -176,7 +179,10 @@ def test_cache_rejects_non_pdf_file(tmp_path: Path) -> None:
     cache_file = tmp_path / "arxiv_1234.56789.pdf"
     _ = cache_file.write_bytes(b"<html>" + b"x" * 300)  # big but not a PDF
     err = FetchError(url="u", status=500, headers={}, body=b"")
-    with patch("sagent.tools.paper_fetch.fetch", side_effect=err):
+    with (
+        patch("sagent.tools.paper_common.fetch", side_effect=err),
+        patch("sagent.tools.paper_fetch.fetch", side_effect=err),
+    ):
         result = asyncio.run(
             PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
