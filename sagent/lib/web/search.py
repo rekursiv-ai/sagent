@@ -263,7 +263,7 @@ def _gsa_headers_for_query(query: str) -> dict[str, str]:
 # SearXNG
 # ---------------------------------------------------------------------------
 
-_SEARXNG_URL_ENV = "SEARXNG_URL"
+_SEARXNG_URL_ENV = "SEARXNG_URL"  # config-globals: ignore -- env var name.
 
 # SearXNG is a metasearch aggregator: one query fans out to several upstream
 # engines and the response returns only once they finish or hit SearXNG's own
@@ -273,7 +273,7 @@ _SEARXNG_URL_ENV = "SEARXNG_URL"
 # engine's latency: at 10s the multi-engine ``it``/``science`` tabs hit a
 # premature client-side timeout mid-aggregation (observed live). 15s clears the
 # common tail while still bounding an interactive turn.
-_SEARXNG_TIMEOUT_SEC = 15.0
+_SEARXNG_TIMEOUT_SEC = 15.0  # config-globals: ignore -- HTTP timeout default.
 
 # SearXNG result categories (tabs) -- the full set from ``categories_as_tabs``
 # in SearXNG's ``settings.yml``. Each maps to one or more result-template
@@ -647,8 +647,10 @@ def _searxng_url() -> str:
 # DuckDuckGo
 # ---------------------------------------------------------------------------
 
-_DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
-_DUCKDUCKGO_MAX_QUERY_CHARS = 499
+_DUCKDUCKGO_URL = (
+    "https://html.duckduckgo.com/html/"  # config-globals: ignore -- endpoint URL.
+)
+_DUCKDUCKGO_MAX_QUERY_CHARS = 499  # config-globals: ignore -- endpoint limit.
 
 
 def duckduckgo(
