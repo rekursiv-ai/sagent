@@ -60,6 +60,7 @@ _MODEL_INFO: dict[str, tuple[str, str]] = {
     "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
     "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
     "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
+    "claude-sonnet-5": ("Claude Sonnet 5", "unknown"),
     "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
     "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
     "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),

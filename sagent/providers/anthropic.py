@@ -16,20 +16,16 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast, override
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 import asyncio
 import base64
 import contextlib
 import contextvars
-import hashlib
 import json
 import logging
 import os
-import platform
 import re
-import subprocess
 import time
 
 
@@ -127,9 +123,6 @@ _CONTEXT_1M_BETA = "context-1m-2025-08-07"
 _CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
 _REDACT_THINKING_BETA = "redact-thinking-2026-02-12"
 _FAST_MODE_BETA = "fast-mode-2026-02-01"
-_CC_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-_CC_FINGERPRINT_SALT = "59cf53e54c78"
-_CC_VERSION = "2.1.201"
 _DEFAULT_API_TARGET_INPUT_TOKENS = 40_000
 
 # Models whose Pricing carries non-zero fast-mode rates AND whose API
@@ -142,7 +135,7 @@ _FAST_MODE_MODELS = frozenset(
         "claude-opus-4-6",
     }
 )
-_DEFAULT_1M_MODELS = frozenset({"claude-fable-5"})
+_DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5"})
 
 
 def supports_fast_mode(model_id: str) -> bool:
@@ -169,6 +162,7 @@ _CONTEXT_MANAGEMENT_MODELS = frozenset(
         "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-opus-4-5",
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-haiku-4-5",
@@ -473,6 +467,30 @@ class Anthropic:
             max_image_bytes=_IMAGE_BYTES,
             max_request_bytes=_REQUEST_BYTES,
         ),
+        "claude-sonnet-5": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_SONNET,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
+        "claude-sonnet-5+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_SONNET,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
         "claude-sonnet-4-6": ModelProfile(
             max_request_tokens=200_000,
             max_response_tokens=128_000,
@@ -597,20 +615,6 @@ class Anthropic:
             raise RuntimeError("Anthropic API key not configured.")
         return cls(
             api_key=key,
-            server_side_context_management=server_side_context_management,
-            redact_thinking=redact_thinking,
-        )
-
-    @classmethod
-    def from_claude_code(
-        cls,
-        *,
-        server_side_context_management: bool = False,
-        redact_thinking: bool = False,
-    ) -> Anthropic:
-        """Create provider from Claude Code's managed API key."""
-        return _AnthropicClaudeCode(
-            api_key=_load_claude_code_api_key(),
             server_side_context_management=server_side_context_management,
             redact_thinking=redact_thinking,
         )
@@ -766,116 +770,6 @@ class Anthropic:
     async def handle_auth_error(self) -> None:
         """Handle a 401 from the API. No-op for API-key auth."""
         return
-
-
-class _AnthropicClaudeCode(Anthropic):
-    """Anthropic API-key provider using Claude Code managed-key routing."""
-
-    @override
-    def build_system(
-        self,
-        system: str | None,
-        messages: list[anthropic.types.MessageParam] | None = None,
-        *,
-        cache_ttl: str = "5m",
-    ) -> list[anthropic.types.TextBlockParam]:
-        """Inject Claude Code attribution required by managed API keys."""
-        del cache_ttl
-        blocks: list[anthropic.types.TextBlockParam] = [
-            {
-                "type": "text",
-                "text": _claude_code_attribution_block(messages or []),
-            },
-            {"type": "text", "text": _CC_SYSTEM_PREFIX},
-        ]
-        if system is not None:
-            blocks.append({"type": "text", "text": system})
-        return blocks
-
-
-def _load_claude_code_api_key() -> str:
-    """Load the legacy Claude Code API key from local credential storage."""
-    key = _load_claude_code_macos_keychain_api_key()
-    if key:
-        return key
-    key = _load_claude_code_config_api_key()
-    if key:
-        return key
-    raise RuntimeError("Claude Code managed API key not configured.")
-
-
-def _load_claude_code_macos_keychain_api_key() -> str:
-    """Load Claude Code's macOS Keychain API key, if present."""
-    if platform.system() != "Darwin":
-        return ""
-    try:
-        result = subprocess.run(  # noqa: S603 -- fixed argv to macOS Keychain.
-            [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-a",
-                os.environ.get("USER", ""),
-                "-w",
-                "-s",
-                "Claude Code",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise RuntimeError("Claude Code API key lookup failed.") from e
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def _load_claude_code_config_api_key() -> str:
-    """Load Claude Code's plaintext fallback API key, if present."""
-    path = Path.home() / ".claude.json"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(data, dict):
-        return ""
-    config = cast(dict[str, object], data)
-    key = config.get("primaryApiKey")
-    return key if isinstance(key, str) and key.strip() else ""
-
-
-def _claude_code_attribution_block(
-    messages: list[anthropic.types.MessageParam],
-) -> str:
-    """Build Claude Code's billing-attribution system block."""
-    return (
-        "x-anthropic-billing-header:"
-        f" cc_version={_CC_VERSION}.{_claude_code_fingerprint(messages)};"
-        " cc_entrypoint=cli;"
-    )
-
-
-def _claude_code_fingerprint(
-    messages: list[anthropic.types.MessageParam],
-) -> str:
-    """Return Claude Code's three-character request fingerprint."""
-    text = ""
-    for message in messages:
-        if message["role"] != "user":
-            continue
-        content = message["content"]
-        if isinstance(content, str):
-            text = content
-            break
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                candidate = block.get("text", "")
-                text = candidate if isinstance(candidate, str) else ""
-                break
-        break
-    chars = "".join(text[i] if i < len(text) else "0" for i in (4, 7, 20))
-    return hashlib.sha256(
-        f"{_CC_FINGERPRINT_SALT}{chars}{_CC_VERSION}".encode()
-    ).hexdigest()[:3]
 
 
 _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")

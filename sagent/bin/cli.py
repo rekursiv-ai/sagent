@@ -617,6 +617,17 @@ def _build_provider_model(
     thinking_state: ThinkingState | None,
 ) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Build the provider/model pair requested by CLI flags."""
+    try:
+        return _build_provider_model_once(args, thinking_state)
+    except (FileNotFoundError, ValueError) as error:
+        return _build_provider_model_fallback(args, thinking_state, error)
+
+
+def _build_provider_model_once(
+    args: argparse.Namespace,
+    thinking_state: ThinkingState | None,
+) -> tuple[types.providers.Provider, types.model.Model, str]:
+    """Build one provider/model pair without fallback."""
     auth = str(args.auth)
     model_id = cast(str | None, args.model)
     model_lookup = model_id
@@ -642,6 +653,69 @@ def _build_provider_model(
     )
     model = provider.model(model_lookup)
     return provider, model, auth
+
+
+def _build_provider_model_fallback(
+    args: argparse.Namespace,
+    thinking_state: ThinkingState | None,
+    error: Exception,
+) -> tuple[types.providers.Provider, types.model.Model, str]:
+    """Try another subscription provider for implicit startup auth failures."""
+    if not _allow_implicit_provider_fallback(args):
+        raise RuntimeError(
+            _credential_error_message(str(args.provider), error)
+        ) from error
+    original_provider = str(args.provider)
+    for fallback_provider in _credential_fallback_providers(original_provider):
+        args.provider = fallback_provider
+        args.auth = "credentials"
+        args.model = None
+        try:
+            provider, model, auth = _build_provider_model_once(args, thinking_state)
+        except (FileNotFoundError, ValueError):
+            continue
+        sys.stderr.write(
+            f"[provider] {original_provider} unavailable: {error}\n"
+            f"[provider] falling back to {fallback_provider} ({model.model_id}).\n"
+            f"[provider] To use {original_provider}, run: "
+            f"sagent --provider {original_provider} login\n"
+        )
+        return provider, model, auth
+    args.provider = original_provider
+    raise RuntimeError(_credential_error_message(original_provider, error)) from error
+
+
+def _allow_implicit_provider_fallback(args: argparse.Namespace) -> bool:
+    """Return whether startup may change provider instead of failing."""
+    return not any(
+        bool(getattr(args, name, False))
+        for name in (
+            "provider_explicit",
+            "auth_explicit",
+            "account_explicit",
+            "model_explicit",
+        )
+    )
+
+
+def _credential_fallback_providers(provider_name: str) -> tuple[str, ...]:
+    """Return implicit subscription providers to try after ``provider_name``."""
+    candidates = ("OpenAISubscription",)
+    return tuple(p for p in candidates if p != provider_name and p in PROVIDER_NAMES)
+
+
+def _credential_error_message(provider_name: str, error: Exception) -> str:
+    """Return an actionable credential-startup error."""
+    lines = [
+        f"{provider_name} credentials are unavailable: {error}",
+        "Try one of:",
+        f"  sagent --provider {provider_name} login",
+    ]
+    lines.extend(
+        f"  sagent --provider {fallback_provider}"
+        for fallback_provider in _credential_fallback_providers(provider_name)
+    )
+    return "\n".join(lines)
 
 
 def _provider_kwargs(args: Mapping[str, object]) -> dict[str, object]:
@@ -1188,7 +1262,7 @@ def main() -> None:
         thinking_state = _resolve_cli_thinking_state(args)
         provider, model, resolved_auth = _build_provider_model(args, thinking_state)
         _validate_cli_thinking_state(model, thinking_state)
-    except (AttributeError, RuntimeError, ValueError) as e:
+    except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
     model_spec = types.model.ModelSpec(
