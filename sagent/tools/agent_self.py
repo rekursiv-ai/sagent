@@ -95,7 +95,10 @@ class AgentSelf:
                 },
                 "auth": {
                     "type": "string",
-                    "description": "Optional auth method suffix override.",
+                    "description": (
+                        "Optional auth method suffix override (e.g. 'env',"
+                        " 'credentials')."
+                    ),
                 },
                 "account": {
                     "type": "string",
@@ -118,8 +121,11 @@ class AgentSelf:
                 "model_options": {
                     "type": "object",
                     "description": (
-                        "Optional provider/model-specific settings."
-                        " Supported keys are reported by diagnostics."
+                        "Optional provider/model-specific settings:"
+                        " 'thinking', 'effort', 'cache_ttl', 'service_tier',"
+                        " 'latency'. Set 'latency': 'fast' for fast serving on"
+                        " supported models. Supported keys per model are"
+                        " reported by diagnostics."
                     ),
                     "additionalProperties": True,
                 },
@@ -338,7 +344,7 @@ def _build_patch_plan(
     status = _plan_status(d)
     if isinstance(status, types.runtime.ToolResult):
         return status
-    options_or_err = _plan_model_options(target_model, d)
+    options_or_err = plan_model_options(target_model, d)
     if isinstance(options_or_err, types.runtime.ToolResult):
         return options_or_err
     options = options_or_err
@@ -542,10 +548,14 @@ def _plan_model(
     )
 
 
-def _plan_model_options(
+def plan_model_options(
     model: types.model.Model, d: Mapping[str, object]
 ) -> dict[str, object] | types.runtime.ToolResult:
-    """Validate provider/model-specific options against the target model."""
+    """Validate provider/model-specific options against the target model.
+
+    Shared with :class:`AgentSpawn`, which applies the validated options
+    to a freshly built child agent.
+    """
     raw = d.get("model_options")
     if raw is None:
         return {}

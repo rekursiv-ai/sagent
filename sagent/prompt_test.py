@@ -157,6 +157,11 @@ def test_environment_section_fable_has_marketing_name() -> None:
     assert "Claude Fable 5" in out
 
 
+def test_environment_section_sonnet_5_has_marketing_name() -> None:
+    out = environment("claude-sonnet-5+1m")
+    assert "Claude Sonnet 5" in out
+
+
 def test_shell_name_recognizes_bash_and_zsh() -> None:
     assert _shell_name("/usr/bin/bash") == "bash"
     assert _shell_name("/bin/zsh") == "zsh"
