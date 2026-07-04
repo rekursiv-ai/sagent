@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from subprocess import CompletedProcess, TimeoutExpired
 from typing import cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -528,6 +529,137 @@ def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
     p = Anthropic.from_env()
     assert isinstance(p, Anthropic)
+
+
+def test_anthropic_from_claude_code_reads_macos_keychain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        cmd: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        timeout: int,
+    ) -> CompletedProcess[str]:
+        calls.append(cmd)
+        assert capture_output is True
+        assert text is True
+        assert check is False
+        assert timeout == 10
+        return CompletedProcess(cmd, 0, stdout="sk-ant-managed\n", stderr="")
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setenv("USER", "dan")
+
+    p = Anthropic.from_claude_code()
+    m = p.model("claude-opus-4-8")
+    kwargs = m._build_kwargs(
+        ModelRequest(messages=[UserMessage(text="Reply FAST_OK")], latency="fast"),
+        [{"role": "user", "content": "Reply FAST_OK"}],
+    )
+
+    assert isinstance(p, Anthropic)
+    system = cast(list[dict[str, str]], kwargs["system"])
+    assert system[0]["text"].startswith("x-anthropic-billing-header:")
+    assert (
+        system[1]["text"] == "You are Claude Code, Anthropic's official CLI for Claude."
+    )
+    headers = cast(dict[str, str], kwargs["extra_headers"])
+    assert "fast-mode-2026-02-01" in headers["anthropic-beta"].split(",")
+    assert calls == [
+        [
+            "/usr/bin/security",
+            "find-generic-password",
+            "-a",
+            "dan",
+            "-w",
+            "-s",
+            "Claude Code",
+        ],
+    ]
+
+
+def test_anthropic_from_claude_code_config_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePath:
+        def __truediv__(self, name: str) -> FakePath:
+            assert name == ".claude.json"
+            return self
+
+        def read_text(self) -> str:
+            return '{"primaryApiKey":"sk-ant-config"}'
+
+    def fake_home() -> FakePath:
+        return FakePath()
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("pathlib.Path.home", fake_home)
+
+    assert isinstance(Anthropic.from_claude_code(), Anthropic)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        CompletedProcess(["security"], 44, stdout="", stderr="missing"),
+        CompletedProcess(["security"], 0, stdout="\n", stderr=""),
+    ],
+)
+def test_anthropic_from_claude_code_missing_key_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    result: CompletedProcess[str],
+) -> None:
+    def fake_run(
+        cmd: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        timeout: int,
+    ) -> CompletedProcess[str]:
+        del cmd, capture_output, text, check, timeout
+        return result
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Claude Code managed API key"):
+        Anthropic.from_claude_code()
+
+
+def test_anthropic_from_claude_code_lookup_failure_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_timeout(
+        cmd: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        timeout: int,
+    ) -> CompletedProcess[str]:
+        del capture_output, text, check
+        raise TimeoutExpired(cmd, timeout=timeout)
+
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.run", raise_timeout)
+
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        Anthropic.from_claude_code()
+
+
+def test_anthropic_from_claude_code_rejects_non_macos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+
+    with pytest.raises(RuntimeError, match="Claude Code managed API key"):
+        Anthropic.from_claude_code()
 
 
 def test_anthropic_model_known_id_returns_backend() -> None:

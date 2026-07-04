@@ -130,6 +130,19 @@ def test_build_provider_from_env_dispatch(
     assert isinstance(p, Anthropic)
 
 
+def test_build_provider_anthropic_from_claude_code_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_read_text(self: object) -> str:
+        del self
+        return '{"primaryApiKey":"sk-ant-config"}'
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("pathlib.Path.read_text", fake_read_text)
+    p = build_provider("Anthropic", "claude_code")
+    assert isinstance(p, Anthropic)
+
+
 def test_build_provider_openai_compat_from_key_auth() -> None:
     p = build_provider("OpenAICompat", "key", api_key="any-key")
     assert isinstance(p, OpenAICompat)
