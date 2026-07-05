@@ -15,6 +15,8 @@ from sagent.types.model import (
     StreamInterruptedError,
     TokenCount,
     base_model_id,
+    latency_from_model_id,
+    split_model_id,
 )
 from sagent.types.runtime import AssistantMessage
 
@@ -274,6 +276,28 @@ def test_pricing_defaults_zero() -> None:
 )
 def test_base_model_id_strips_window_tag(model_id: str, base: str) -> None:
     assert base_model_id(model_id) == base
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base", "tags"),
+    [
+        ("claude-opus-4-8", "claude-opus-4-8", frozenset[str]()),
+        ("claude-opus-4-8+fast", "claude-opus-4-8", frozenset({"+fast"})),
+        ("claude-opus-4-8+1m+fast", "claude-opus-4-8", frozenset({"+1m", "+fast"})),
+        ("claude-opus-4-8+fast+1m", "claude-opus-4-8", frozenset({"+1m", "+fast"})),
+        ("Claude-Opus-4-8+FAST", "Claude-Opus-4-8", frozenset({"+fast"})),
+        ("model+unknown", "model+unknown", frozenset[str]()),
+    ],
+)
+def test_split_model_id(model_id: str, base: str, tags: frozenset[str]) -> None:
+    assert split_model_id(model_id) == (base, tags)
+
+
+def test_latency_from_model_id() -> None:
+    assert latency_from_model_id("claude-opus-4-8+fast") == "fast"
+    assert latency_from_model_id("claude-opus-4-8+1m+fast") == "fast"
+    assert latency_from_model_id("claude-opus-4-8+1m") is None
+    assert latency_from_model_id("claude-opus-4-8") is None
 
 
 if __name__ == "__main__":

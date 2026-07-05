@@ -583,16 +583,16 @@ class _ThinkingEffortModel(StubProviderModel):
     valid_efforts: tuple[str, ...] = ("low", "high")
 
 
-def test_build_child_applies_latency_from_model_options() -> None:
-    """``model_options.latency`` reaches the child via its setter."""
+def test_build_child_latency_derives_from_fast_model_tag() -> None:
+    """A ``+fast`` model-id tag on the child model sets its latency."""
     parent = _make_parent()
     child = AgentSpawn()._build_child(
         system=None,
-        child_model=_FastModel(),
+        child_model=_FastModel(model_id="stub-1+fast"),
         child_spec=None,
         child_tools=[],
         max_rounds=None,
-        model_options={"latency": "fast"},
+        model_options={},
         parent_agent=parent,
     )
     assert child.latency == "fast"
@@ -615,15 +615,15 @@ def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_rejects_latency_unsupported_by_child_model() -> None:
-    """Fast on a model without a fast path is rejected before spawn."""
-    parent = _make_parent()  # StubProviderModel.valid_latency_modes = ()
+async def test_run_redirects_latency_option_to_fast_model_tag() -> None:
+    """``model_options.latency`` is gone; the error points at ``+fast``."""
+    parent = _make_parent()
     with _parent_context(parent):
         result = await AgentSpawn().run(
             {"prompt": "p", "model_options": {"latency": "fast"}}
         )
     assert result.is_error
-    assert "latency" in result.content
+    assert "+fast" in result.content
 
 
 def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:

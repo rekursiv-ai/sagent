@@ -2,6 +2,28 @@
 
 All notable Sagent changes are documented here.
 
+## Unreleased
+
+- **Breaking:** removed the `--provider-arg Class.key=JSON` CLI flag and the
+  untyped `Agent(provider_args=...)` bag. Provider construction knobs are now
+  typed fields on `types.providers.ProviderOptions`
+  (`Agent(provider_options=...)`), validated against each provider class's
+  `supported_options` declaration -- an unsupported explicitly-set option
+  raises instead of being dropped with a warning. The
+  server-side-context-management opt-in moved to an explicit
+  `--server-side-context-management` flag, and the `Class.thinking=...`
+  pseudo-key is gone (use `--thinking`). Programmatic `from_key` construction
+  is unchanged (`Anthropic.from_key(...)`); `build_provider` no longer
+  forwards arbitrary kwargs. Legacy session records with `provider_args`
+  still load (known keys map onto `ProviderOptions`).
+- Added fast mode as a model-id option tag, mirroring `+1m`:
+  `claude-opus-4-8+fast` (composable: `claude-opus-4-8+1m+fast`) works
+  everywhere a model id does -- `--model`, `/model`, subagent specs,
+  session persistence. Providers validate the tag at `model()`
+  construction: models without a fast path (and the CLI-wrapping
+  provider) reject it with a `ValueError`. `Agent.latency` is now
+  read-only, derived from the model id.
+
 ## 0.1.3 - 2026-05-07
 
 - Fixed SelfHosted tool-call allowlist matching so CLI tool names such as

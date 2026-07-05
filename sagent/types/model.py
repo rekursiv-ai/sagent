@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONTEXT_TAGS",
+    "LATENCY_TAGS",
     "ContextBudget",
     "Model",
     "ModelRequest",
@@ -44,11 +45,17 @@ __all__ = [
     "UsageWindow",
     "base_model_id",
     "default_buffer_tokens",
+    "latency_from_model_id",
+    "split_model_id",
+    "strip_latency_tags",
 ]
 
 
 CONTEXT_TAGS = ("+1m", "+200k")
 """Window-size suffixes a sagent model id may carry (e.g. ``...+1m``)."""
+
+LATENCY_TAGS = ("+fast",)
+"""Latency suffixes a sagent model id may carry (e.g. ``...+fast``)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -88,25 +95,80 @@ class UsageSnapshot:
     """Per-window utilization, in provider declaration order (not sorted)."""
 
 
-def base_model_id(model_id: str) -> str:
-    """Strip a trailing context-window tag, yielding the canonical model id.
+def split_model_id(model_id: str) -> tuple[str, frozenset[str]]:
+    """Split a model id into its base id and trailing option tags.
 
-    A sagent model id may carry a ``+1m`` / ``+200k`` window suffix, but the
-    wire id, capability lookups, and metadata tables all key off the base id.
-    Matching is case-insensitive; an id with no known tag is returned as-is.
+    A sagent model id may carry ``+``-suffixed option tags -- a
+    ``+1m`` / ``+200k`` context window and/or ``+fast`` latency -- in
+    any order (e.g. ``claude-opus-4-8+1m+fast``). Matching is
+    case-insensitive; unknown suffixes stay part of the base id.
 
     Args:
-      model_id: Model id, possibly with a trailing window tag.
+      model_id: Model id, possibly with trailing option tags.
 
     Returns:
-      base_id: ``model_id`` without its window tag.
+      base_id: ``model_id`` without its option tags.
+      tags: The stripped tags, lowercased (e.g. ``{"+1m", "+fast"}``).
 
     """
-    lower = model_id.lower()
-    for tag in CONTEXT_TAGS:
-        if lower.endswith(tag):
-            return model_id[: -len(tag)]
-    return model_id
+    known = CONTEXT_TAGS + LATENCY_TAGS
+    tags: set[str] = set()
+    base = model_id
+    while True:
+        lower = base.lower()
+        tag = next((t for t in known if lower.endswith(t)), None)
+        if tag is None:
+            return base, frozenset(tags)
+        tags.add(tag)
+        base = base[: -len(tag)]
+
+
+def base_model_id(model_id: str) -> str:
+    """Strip trailing option tags, yielding the canonical model id.
+
+    The wire id, capability lookups, and metadata tables all key off
+    the base id.
+
+    Args:
+      model_id: Model id, possibly with trailing option tags.
+
+    Returns:
+      base_id: ``model_id`` without its option tags.
+
+    """
+    return split_model_id(model_id)[0]
+
+
+def latency_from_model_id(model_id: str) -> str | None:
+    """Return the latency hint encoded in a model id's option tags.
+
+    Args:
+      model_id: Model id, possibly with trailing option tags.
+
+    Returns:
+      latency: ``"fast"`` when the id carries a ``+fast`` tag, else ``None``.
+
+    """
+    return "fast" if "+fast" in split_model_id(model_id)[1] else None
+
+
+def strip_latency_tags(model_id: str) -> str:
+    """Drop latency tags, keeping the context-tagged id in canonical order.
+
+    Profile lookups use this: a ``+1m`` variant carries its own catalog
+    entry, so ``claude-opus-4-8+1m+fast`` must resolve
+    ``claude-opus-4-8+1m`` -- not the base id -- while providers whose
+    catalogs have no tagged entries keep rejecting foreign context tags.
+
+    Args:
+      model_id: Model id, possibly with trailing option tags.
+
+    Returns:
+      context_id: ``model_id`` without latency tags.
+
+    """
+    base, tags = split_model_id(model_id)
+    return base + "".join(t for t in CONTEXT_TAGS if t in tags)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -242,10 +304,11 @@ class ModelRequest:
     """Cross-provider latency hint; currently only ``"fast"`` is defined.
     Each provider maps it to its own wire field: Anthropic Opus 4.6/4.7/4.8
     to ``speed="fast"`` (fast mode), OpenAI to ``service_tier="priority"``.
-    Providers without a fast path reject it at the ``Agent``/``AgentSelf``
-    boundary (the setter validates against ``Model.valid_latency_modes``);
-    a request that still reaches such a provider has it dropped. ``None``
-    requests the default."""
+    The agent layer derives it from the model id's ``+fast`` option tag
+    (validated at ``Provider.model()`` construction against
+    ``Model.valid_latency_modes``); a request that still reaches a
+    provider without a fast path has it dropped. ``None`` requests the
+    default."""
 
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""

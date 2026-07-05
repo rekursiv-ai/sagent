@@ -181,8 +181,9 @@ def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
                     "description": (
                         "Provider/model-specific serving knobs:"
                         " ``thinking``, ``effort``, ``cache_ttl``,"
-                        " ``service_tier``, ``latency``. Set"
-                        " ``latency: 'fast'`` for fast serving on supported"
+                        " ``service_tier``. Fast serving is a model-id"
+                        " option tag: request it via ``model='...+fast'``"
+                        " on supported"
                         " models. Defaults to inheriting"
                         " the parent's options."
                     ),
@@ -568,8 +569,8 @@ class AgentSpawn:
 
         ``model_options`` (already validated against ``child_model``)
         override inherited defaults: ``thinking``/``effort`` feed the
-        constructor, while ``cache_ttl``/``service_tier``/``latency`` are
-        applied via the post-construction setters that validate them.
+        constructor, while ``cache_ttl``/``service_tier`` are applied
+        via the post-construction setters that validate them.
         """
         child_system = self._resolve_system(system, parent_agent)
         child_max_rounds = (
@@ -597,8 +598,6 @@ class AgentSpawn:
             child.cache_ttl = cast(Literal["5m", "1h"], model_options["cache_ttl"])
         if "service_tier" in model_options:
             child.service_tier = cast(str | None, model_options["service_tier"])
-        if "latency" in model_options:
-            child.latency = cast(str | None, model_options["latency"])
         return child
 
     async def _execute_child(
