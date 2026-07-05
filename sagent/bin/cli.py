@@ -48,7 +48,6 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
-import inspect
 import json
 import logging
 import os
@@ -78,11 +77,12 @@ from sagent.prompt import build_system
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
-    collect_provider_args,
+    supported_provider_options,
 )
 from sagent.repl import run_repl
 from sagent.thinking import (
     THINKING_COMMANDS,
+    THINKING_STATES,
     ThinkingState,
     resolve_thinking_command,
     should_redact_thinking,
@@ -338,20 +338,14 @@ def parse_agent_args(
         help="Automatic compaction (default: on; --no-compact to disable).",
     )
     parser.add_argument(
-        "--provider-arg",
-        dest="provider_args",
-        action="append",
-        default=[],
-        metavar="Class.key=JSON",
+        "--server-side-context-management",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help=(
-            "Provider-class-scoped kwarg, repeatable. Each value has shape"
-            " ``Class.key=JSON-value``. The class name is matched against"
-            " the chosen provider's MRO so a base-class spec applies to all"
-            " subclasses (e.g. ``OpenAI.server_side_context_management=true``"
-            " covers ``OpenAISubscription`` too). Kwargs the factory"
-            " doesn't accept are dropped with a warning. JSON values give"
-            " types for free; on JSON decode failure the raw string is"
-            " forwarded (so paths and bare identifiers work without quoting)."
+            "Opt in to the provider's server-side context management"
+            " (Anthropic's clear_tool_uses beta). Default: the provider's"
+            " own default (off). Rejected at startup by providers that do"
+            " not support it."
         ),
     )
     parser.add_argument(
@@ -635,21 +629,19 @@ def _build_provider_model_once(
         auth = model_id or "env"
         model_lookup = None
     provider_name = str(args.provider)
-    extra = _provider_kwargs(
-        collect_provider_args(
-            getattr(args, "provider_args", []) or [],
-            provider_name,
-        )
-    )
-    if thinking_state is not None and _provider_accepts_arg(
-        provider_name, auth, "redact_thinking"
+    options = _cli_provider_options(args)
+    if thinking_state is not None and "redact_thinking" in (
+        supported_provider_options(provider_name)
     ):
-        extra["redact_thinking"] = should_redact_thinking(thinking_state)
+        options = dataclasses.replace(
+            options,
+            redact_thinking=should_redact_thinking(thinking_state),
+        )
     provider = build_provider(
         provider_name,
         auth,
         account=args.account,
-        **extra,
+        options=options,
     )
     model = provider.model(model_lookup)
     return provider, model, auth
@@ -718,23 +710,20 @@ def _credential_error_message(provider_name: str, error: Exception) -> str:
     return "\n".join(lines)
 
 
-def _provider_kwargs(args: Mapping[str, object]) -> dict[str, object]:
-    """Return provider-constructor kwargs from scoped config args."""
-    return {k: v for k, v in args.items() if k != "thinking"}
+def _cli_provider_options(args: argparse.Namespace) -> types.providers.ProviderOptions:
+    """Return construction-time provider options from explicit CLI flags."""
+    return types.providers.ProviderOptions(
+        server_side_context_management=cast(
+            "bool | None", args.server_side_context_management
+        ),
+    )
 
 
 def _resolve_cli_thinking_state(args: argparse.Namespace) -> ThinkingState | None:
-    """Resolve CLI thinking flags to an Agent-level state override."""
-    provider_args = collect_provider_args(
-        getattr(args, "provider_args", []) or [],
-        str(args.provider),
-    )
+    """Resolve the ``--thinking`` flag to an Agent-level state override."""
     raw = str(args.thinking)
     if raw == "default":
-        scoped = provider_args.get("thinking")
-        if scoped is None:
-            return None
-        raw = str(scoped)
+        return None
     return resolve_thinking_command(raw)
 
 
@@ -752,20 +741,6 @@ def _validate_cli_thinking_state(
             f"thinking state {state!r} not supported by {model.model_id!r};"
             f" options: {options}"
         )
-
-
-def _provider_accepts_arg(provider_name: str, auth: str, key: str) -> bool:
-    """Return whether the provider factory accepts ``key``."""
-    cls = getattr(providers, provider_name, None)
-    if cls is None:
-        return False
-    factory = getattr(cls, f"from_{auth}", None)
-    if factory is None:
-        return False
-    try:
-        return key in inspect.signature(factory).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) -> None:
@@ -787,12 +762,20 @@ def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) ->
 
 
 def _provider_knows_model(provider_name: str, model_id: str) -> bool:
-    """Return True when the named provider's catalog includes ``model_id``."""
+    """Return True when the named provider's catalog includes ``model_id``.
+
+    Mirrors the providers' profile-lookup rule: latency tags (``+fast``)
+    ride on catalog ids and are stripped before the membership check,
+    while context tags stay -- ``+1m`` variants are catalog keys where
+    supported and must keep failing the check elsewhere.
+    """
     cls = getattr(providers, provider_name, None)
     if cls is None:
         return False
     known = getattr(cls, "KNOWN_MODELS", None)
-    return isinstance(known, dict) and model_id in known
+    if not isinstance(known, dict):
+        return False
+    return model_id in known or types.model.strip_latency_tags(model_id) in known
 
 
 async def _resume_persistent_agents(
@@ -844,10 +827,20 @@ def _build_persistent_child(
     parent_label: str,
 ) -> Agent:
     """Construct a persistent child from its lifecycle record."""
+    thinking_state = _persistent_thinking_state(record.thinking_state)
+    options = record.provider_options
+    if thinking_state is not None and "redact_thinking" in (
+        supported_provider_options(record.provider)
+    ):
+        options = dataclasses.replace(
+            options,
+            redact_thinking=should_redact_thinking(thinking_state),
+        )
     provider = build_provider(
         record.provider,
         record.auth,
         account=record.account or None,
+        options=options,
     )
     model = provider.model(record.model_id)
     agent = Agent(
@@ -864,10 +857,11 @@ def _build_persistent_child(
         session_dir=record.session_dir,
         max_tool_call_rounds=record.max_tool_call_rounds,
         thinking=record.thinking,
+        thinking_state=thinking_state,
         effort=record.effort,
         max_budget_usd=record.max_budget_usd,
         persistent_retry=record.persistent_retry,
-        provider_args=record.provider_args,
+        provider_options=record.provider_options,
     )
     if record.max_request_tokens is not None:
         agent.max_request_tokens = record.max_request_tokens
@@ -877,6 +871,14 @@ def _build_persistent_child(
         agent.service_tier = record.service_tier
     agent.cache_ttl = record.cache_ttl
     return agent
+
+
+def _persistent_thinking_state(raw: str | None) -> ThinkingState | None:
+    """Narrow a persisted thinking-state string to ``ThinkingState``."""
+    for state in THINKING_STATES:
+        if raw == state:
+            return state
+    return None
 
 
 def _resume_label(label: str) -> str:
@@ -1322,12 +1324,7 @@ def main() -> None:
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
         thinking_state=thinking_state,
-        provider_args=_provider_kwargs(
-            collect_provider_args(
-                getattr(args, "provider_args", []) or [],
-                model_spec.provider,
-            )
-        ),
+        provider_options=_cli_provider_options(args),
     )
     if args.max_request_tokens is not None:
         agent.max_request_tokens = args.max_request_tokens

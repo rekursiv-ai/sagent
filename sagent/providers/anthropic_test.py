@@ -555,6 +555,26 @@ def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
     assert m.max_request_tokens == 1_000_000
 
 
+def test_anthropic_model_accepts_fast_tag_on_supported_model() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8+fast")
+    assert m.model_id == "claude-opus-4-8+fast"
+    assert m.valid_latency_modes == ("fast",)
+
+
+def test_anthropic_model_fast_tag_keeps_context_profile() -> None:
+    """``+1m+fast`` resolves the ``+1m`` profile, not the base one."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8+1m+fast")
+    assert m.max_request_tokens == 1_000_000
+
+
+def test_anthropic_model_rejects_fast_tag_on_unsupported_model() -> None:
+    p = Anthropic.from_key("k")
+    with pytest.raises(ValueError, match="does not support fast mode"):
+        _ = p.model("claude-haiku-4-5+fast")
+
+
 def test_anthropic_default_model_resolves() -> None:
     p = Anthropic.from_key("k")
     m = p.model()

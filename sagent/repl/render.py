@@ -639,7 +639,7 @@ sagent commands
   /compact [hints]            compact history
   /recompact [hints]          alias for /compact
 
-  /model    [args]            switch model
+  /model    [args]            switch model; ids take option tags (+1m, +fast)
   /provider <name>            switch provider
   /thinking <state|partial>   adaptive/on/off/redact/show/hide
   /effort [level]             show or set effort; bare lists options

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -13,11 +14,16 @@ import subprocess
 
 import pytest
 
-from sagent.agent.session_io import SessionMeta
+from sagent.agent.session_io import (
+    PersistentAgentRecord,
+    SessionMeta,
+)
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     _apply_resume_model_defaults,
+    _build_persistent_child,
+    _cli_provider_options,
     _configure_logging,
     _event_to_json_record,
     _install_repl_logging,
@@ -25,7 +31,6 @@ from sagent.bin.cli import (
     _parse_allow_providers,
     _parse_cli_args,
     _parse_stream_json,
-    _provider_kwargs,
     _resolve_allow_providers,
     _resolve_cli_thinking_state,
     _resolve_session_dir,
@@ -34,6 +39,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.testing import FakeAgent
+from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -87,36 +93,115 @@ def test_parse_cli_args_thinking_full_state() -> None:
     assert _resolve_cli_thinking_state(ns) == "on-show"
 
 
-def test_parse_cli_args_thinking_precedes_provider_arg() -> None:
-    ns = _parse(
-        [
-            "--provider",
-            "OpenAISubscription",
-            "--thinking",
-            "adaptive-show",
-            "--provider-arg",
-            "OpenAISubscription.thinking=redact",
-        ]
-    )
-    assert _resolve_cli_thinking_state(ns) == "adaptive-show"
+def test_cli_provider_options_default_unset() -> None:
+    ns = _parse([])
+    assert ns.server_side_context_management is None
+    assert _cli_provider_options(ns).set_fields() == {}
 
 
-def test_parse_cli_args_provider_arg_thinking_when_cli_default() -> None:
-    ns = _parse(
-        [
-            "--provider",
-            "OpenAISubscription",
-            "--provider-arg",
-            "OpenAISubscription.thinking=redact",
-        ]
-    )
-    assert _resolve_cli_thinking_state(ns) == "redact-hide"
-
-
-def test_provider_kwargs_removes_thinking_pseudo_arg() -> None:
-    assert _provider_kwargs({"thinking": "redact", "redact_thinking": True}) == {
-        "redact_thinking": True
+def test_cli_provider_options_server_side_context_management_flag() -> None:
+    ns = _parse(["--server-side-context-management"])
+    assert _cli_provider_options(ns).set_fields() == {
+        "server_side_context_management": True,
     }
+
+
+def test_cli_provider_options_negated_flag_is_explicit_false() -> None:
+    ns = _parse(["--no-server-side-context-management"])
+    assert _cli_provider_options(ns).set_fields() == {
+        "server_side_context_management": False,
+    }
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class _ChildStubModel:
+    """Minimal rich-model stand-in for ``_build_persistent_child`` tests."""
+
+    model_id: str = "claude-opus-4-8"
+    max_request_tokens: int = 100_000
+    max_response_tokens: int = 1_024
+    supports_thinking: bool = True
+    supports_effort: bool = False
+    valid_efforts: tuple[str, ...] = ()
+    supports_cache_control: bool = False
+    valid_service_tiers: tuple[str, ...] = ()
+    valid_latency_modes: tuple[str, ...] = ()
+
+
+def _child_record(**overrides: object) -> PersistentAgentRecord:
+    record = PersistentAgentRecord(
+        label="fix-tools",
+        run_id="run-1",
+        session_dir="",
+        state="running",
+        provider="Anthropic",
+        auth="env",
+        account=None,
+        model_id="claude-opus-4-8",
+        tools=(),
+        system="system text",
+        notify_on_asleep=True,
+    )
+    return dataclasses.replace(record, **overrides)
+
+
+def _capture_build_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, ProviderOptions | None]:
+    """Stub ``cli.build_provider``; capture the forwarded ``options``."""
+    captured: dict[str, ProviderOptions | None] = {}
+
+    def fake_build_provider(
+        provider_name: str,
+        auth: str = "env",
+        *,
+        account: str | None = None,
+        options: ProviderOptions | None = None,
+    ) -> object:
+        del provider_name, auth, account
+        captured["options"] = options
+
+        class _Provider:
+            def model(self, model_id: str | None = None) -> _ChildStubModel:
+                return _ChildStubModel(model_id=model_id or "claude-opus-4-8")
+
+        return _Provider()
+
+    monkeypatch.setattr(
+        "sagent.bin.cli.build_provider",
+        fake_build_provider,
+    )
+    return captured
+
+
+def test_build_persistent_child_forwards_provider_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume must rebuild the provider with the record's construction options."""
+    captured = _capture_build_provider(monkeypatch)
+    record = _child_record(
+        provider_options=ProviderOptions(server_side_context_management=True),
+    )
+    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
+    assert captured["options"] == ProviderOptions(server_side_context_management=True)
+    assert child.provider_options == record.provider_options
+
+
+def test_build_persistent_child_restores_thinking_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical thinking state round-trips, including derived redaction."""
+    captured = _capture_build_provider(monkeypatch)
+    record = _child_record(thinking="adaptive", thinking_state="redact-hide")
+    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
+    assert child.thinking_state == "redact-hide"
+    assert child.show_thinking is False
+    assert child.thinking == "adaptive"
+    # Anthropic supports the redact option, so the provider rebuild
+    # derives it from the restored thinking state.
+    options = captured["options"]
+    assert options is not None
+    assert options.redact_thinking is True
 
 
 def test_parse_cli_args_session_paths() -> None:
@@ -199,6 +284,23 @@ def test_resume_model_defaults_explicit_model_overrides_session_meta() -> None:
     _apply_resume_model_defaults(ns, meta)
     assert ns.provider == "OpenAISubscription"
     assert ns.model == "gpt-5.5"
+
+
+def test_resume_model_defaults_explicit_provider_keeps_fast_tagged_model() -> None:
+    """A ``+fast`` id is not a catalog key; the check must strip it.
+
+    Regression: exact ``KNOWN_MODELS`` membership nulled the persisted
+    model on an explicit same-provider resume, silently dropping the
+    fast tag (and the model choice) in favor of the provider default.
+    """
+    ns = _parse(["--resume", "abc123", "--provider", "Anthropic"])
+    meta = SessionMeta(
+        provider="Anthropic",
+        auth="env",
+        model_id="claude-opus-4-8+1m+fast",
+    )
+    _apply_resume_model_defaults(ns, meta)
+    assert ns.model == "claude-opus-4-8+1m+fast"
 
 
 def test_parse_agent_args_known_unknown_split() -> None:

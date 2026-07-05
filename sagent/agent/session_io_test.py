@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import dataclasses
 import json
+import logging
 import os
 
 import pytest
@@ -47,6 +48,7 @@ from sagent.types.model import (
     Pricing,
     UsageSnapshot,
 )
+from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
@@ -1224,7 +1226,7 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         "service_tier": None,
         "max_budget_usd": None,
         "persistent_retry": False,
-        "provider_args": {},
+        "provider_options": {},
         "timestamp": record["timestamp"],
     }
 
@@ -1326,6 +1328,69 @@ def test_persistent_agent_legacy_notify_on_asleep_defaults_true(tmp_path: Path) 
     assert len(records) == 1
     assert records[0].notify_on_asleep is True
     assert records[0].account is None
+
+
+def test_persistent_agent_legacy_provider_args_maps_known_keys(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A pre-``provider_options`` record's bag decodes into typed fields."""
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {
+            "kind": "persistent_agent",
+            "label": "fix-tools",
+            "run_id": "run-1",
+            "session_dir": str(tmp_path / "children" / "run-1"),
+            "state": "running",
+            "provider": "Anthropic",
+            "auth": "env",
+            "account": None,
+            "model_id": "claude-opus-4-8",
+            "tools": ["Read"],
+            "system": "system text",
+            "notify_on_asleep": True,
+            "provider_args": {
+                "redact_thinking": True,
+                "server_side_context_management": "yes",
+                "mystery_knob": 42,
+            },
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        records = load_persistent_agents(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].provider_options == ProviderOptions(redact_thinking=True)
+    # Unknown keys AND known keys carrying non-bool values both warn.
+    assert any("mystery_knob" in rec.message for rec in caplog.records)
+    assert any(
+        "server_side_context_management" in rec.message for rec in caplog.records
+    )
+
+
+def test_persistent_agent_provider_options_round_trip(
+    tmp_path: Path,
+) -> None:
+    session_file = tmp_path / "session.jsonl"
+    record = PersistentAgentRecord(
+        label="fix-tools",
+        run_id="run-1",
+        session_dir=str(tmp_path / "children" / "run-1"),
+        state="running",
+        provider="Anthropic",
+        auth="env",
+        account=None,
+        model_id="claude-opus-4-8+fast",
+        tools=("Read",),
+        system="system text",
+        notify_on_asleep=True,
+        provider_options=ProviderOptions(server_side_context_management=True),
+    )
+    append_session(session_file, persistent_agents=[record])
+
+    assert load_persistent_agents(tmp_path) == [record]
 
 
 def test_session_meta_round_trip() -> None:

@@ -31,6 +31,7 @@ from sagent.agent.agent import (
     SystemPromptArg,
     _AgentCompactor,
     _AgentTool,
+    _provider_knows_model,
     _repair_compact_payload,
     _resolve_target_spec,
     _should_cancel_background,
@@ -1471,17 +1472,17 @@ def test_thinking_setter() -> None:
     assert a.thinking is None
 
 
-def test_thinking_state_sets_request_and_display_without_provider_arg() -> None:
+def test_thinking_state_sets_request_and_display_without_provider_option() -> None:
     a = _build_agent()
     a.set_thinking_state("on-show")
     assert a.thinking_state == "on-show"
     assert a.thinking == "enabled"
     assert a.show_thinking is True
-    assert "redact_thinking" not in a.provider_args
+    assert a.provider_options.redact_thinking is None
     a.set_thinking_state("redact-hide")
     assert a.thinking == "adaptive"
     assert a.show_thinking is False
-    assert "redact_thinking" not in a.provider_args
+    assert a.provider_options.redact_thinking is None
 
 
 def test_restore_thinking_state_writes_all_three_fields() -> None:
@@ -1510,7 +1511,7 @@ def test_change_model_derives_redact_thinking_from_state(
         "Anthropic",
         "api",
         account=None,
-        redact_thinking=True,
+        options=types.providers.ProviderOptions(redact_thinking=True),
     )
 
 
@@ -1592,31 +1593,22 @@ def test_service_tier_setter_accepts_when_model_supports() -> None:
     assert a.service_tier is None
 
 
-def test_latency_setter_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel.valid_latency_modes = ()
-    with pytest.raises(ValueError, match="does not support latency"):
-        a.latency = "fast"
-
-
-def test_latency_setter_rejects_unknown_value() -> None:
-    model = StubModel(valid_latency_modes=("fast",))
+def test_latency_derives_from_model_id_fast_tag() -> None:
+    model = StubModel(model_id="stub+fast", valid_latency_modes=("fast",))
     a = _build_agent(model=model)
-    with pytest.raises(ValueError, match="latency must be one of"):
-        a.latency = "turbo"
-
-
-def test_latency_setter_accepts_when_model_supports() -> None:
-    model = StubModel(valid_latency_modes=("fast",))
-    a = _build_agent(model=model)
-    a.latency = "fast"
     assert a.latency == "fast"
-    a.latency = None
+
+
+def test_latency_none_without_fast_tag() -> None:
+    a = _build_agent()
     assert a.latency is None
 
 
-def test_swap_model_clears_unsupported_latency() -> None:
-    a = _build_agent(model=StubModel(valid_latency_modes=("fast",)))
-    a.latency = "fast"
+def test_swap_model_latency_follows_model_id() -> None:
+    a = _build_agent(
+        model=StubModel(model_id="stub+fast", valid_latency_modes=("fast",))
+    )
+    assert a.latency == "fast"
     a.swap_model(StubModel(model_id="stub-2"))
     assert a.latency is None
 
@@ -2074,6 +2066,52 @@ def test_change_model_same_provider_new_model_queues_swap(
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
     switches = [m for m in items if isinstance(m, types.runtime.ModelSwitch)]
     assert len(switches) == 1
+
+
+def _drain_model_switches(a: Agent) -> list[types.runtime.ModelSwitch]:
+    items = a.runtime.inbox.drain_nowait()
+    return [m for m in items if isinstance(m, types.runtime.ModelSwitch)]
+
+
+def test_provider_build_options_masks_unsupported_fields_per_target() -> None:
+    """An Anthropic-only knob must not break cross-provider swaps.
+
+    Stored options are session state: masked for a target that lacks
+    the field, re-applied when a later swap returns to a supporting
+    provider (the class-scoped semantics of the old ``--provider-arg``).
+    """
+    a = Agent(
+        model=StubModel(),
+        tools=[],
+        provider_options=types.providers.ProviderOptions(
+            server_side_context_management=True,
+        ),
+    )
+    assert a._provider_build_options("Google") == types.providers.ProviderOptions()
+    assert a._provider_build_options("Anthropic") == types.providers.ProviderOptions(
+        server_side_context_management=True,
+    )
+
+
+def test_provider_knows_model_strips_latency_tag() -> None:
+    """Cross-provider ``change_model`` must not discard a ``+fast`` id."""
+    assert _provider_knows_model("Anthropic", "claude-opus-4-8+1m+fast")
+    assert _provider_knows_model("Anthropic", "claude-opus-4-8+fast")
+    assert not _provider_knows_model("Anthropic", "unknown-model+fast")
+
+
+def test_change_model_fast_tag_rides_the_model_id(
+    patched_build_provider: Mapping[str, object],
+) -> None:
+    """A ``+fast`` option tag flows through the swap; latency derives from it."""
+    del patched_build_provider
+    a = _build_agent_with_spec()
+    target = a.change_model(model_id="claude-opus-4-8+fast")
+    assert target.model_id == "claude-opus-4-8+fast"
+    switches = _drain_model_switches(a)
+    assert len(switches) == 1
+    switches[0].apply()
+    assert a.latency == "fast"
 
 
 def test_change_model_cross_provider_no_model_preserves_current(

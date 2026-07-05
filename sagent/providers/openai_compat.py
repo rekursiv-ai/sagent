@@ -77,6 +77,8 @@ from sagent.types.model import (
     TokenCount,
     UsageSnapshot,
     base_model_id,
+    latency_from_model_id,
+    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -175,18 +177,23 @@ class OpenAICompat:
           model: Chat-completions model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``.
+          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``, or it
+              carries a ``+fast`` tag the backend has no latency mode for.
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        profile = self.KNOWN_MODELS.get(mid)
+        # Strip only latency tags for the lookup: catalogs here carry no
+        # ``+1m`` variants, so a foreign context tag stays an error.
+        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
+            strip_latency_tags(mid),
+        )
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
             raise ValueError(
                 f"Unknown model {mid!r} for {type(self).__name__}."
                 f" Known models: {known}",
             )
-        return self.MODEL_CLASS(
+        model = self.MODEL_CLASS(
             provider=self,
             model_id=mid,
             profile=profile,
@@ -196,6 +203,15 @@ class OpenAICompat:
                 else profile.max_request_tokens
             ),
         )
+        if (
+            latency_from_model_id(mid) is not None
+            and "fast" not in model.valid_latency_modes
+        ):
+            raise ValueError(
+                f"Model {mid!r} for {type(self).__name__} does not support"
+                " fast mode (+fast)",
+            )
+        return model
 
     def utility_model(self) -> OpenAICompatModel:
         """Return the default utility (fast/cheap) model backend.

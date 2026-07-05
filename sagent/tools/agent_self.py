@@ -122,8 +122,9 @@ class AgentSelf:
                     "type": "object",
                     "description": (
                         "Optional provider/model-specific settings:"
-                        " 'thinking', 'effort', 'cache_ttl', 'service_tier',"
-                        " 'latency'. Set 'latency': 'fast' for fast serving on"
+                        " 'thinking', 'effort', 'cache_ttl', 'service_tier'."
+                        " Fast serving is a model-id option tag, not an"
+                        " option: request it via model='...+fast' on"
                         " supported models. Supported keys per model are"
                         " reported by diagnostics."
                     ),
@@ -262,9 +263,6 @@ class _PatchPlan:
     service_tier: str | None | object = _UNSET
     """OpenAI service-tier hint; ``_UNSET`` means leave unchanged."""
 
-    latency: str | None | object = _UNSET
-    """Cross-provider latency hint; ``_UNSET`` means leave unchanged."""
-
     max_request_tokens: int | None = None
     """New per-request input budget; ``None`` to keep."""
 
@@ -351,7 +349,6 @@ def _build_patch_plan(
     thinking = cast(bool | None, options.get("thinking"))
     cache_ttl = cast(str | None, options.get("cache_ttl"))
     service_tier = options.get("service_tier", _UNSET)
-    latency = options.get("latency", _UNSET)
     has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
     if has_explicit_limits:
         limits = _plan_limits(agent, target_model, d)
@@ -367,7 +364,6 @@ def _build_patch_plan(
         effort=options.get("effort", _UNSET),
         cache_ttl=cache_ttl,
         service_tier=service_tier,
-        latency=latency,
         max_request_tokens=limits.get("max_request_tokens"),
         max_response_tokens=limits.get("max_response_tokens"),
         context=context,
@@ -387,13 +383,13 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         # (whole-window budgets follow the new ceiling; pinned values clamp
         # down), so no explicit budget reset is needed here. Snapshot the
         # capability flags first: ``swap_model`` zeroes effort / thinking /
-        # service_tier / latency when the new model lacks support, so a
-        # post-swap check would never see them set. Compare pre vs post to
-        # emit the ``(unsupported)`` confirmation lines.
+        # service_tier when the new model lacks support, so a post-swap
+        # check would never see them set. Compare pre vs post to emit the
+        # ``(unsupported)`` confirmation lines. (Latency needs no clearing:
+        # it derives from the model id's ``+fast`` tag.)
         had_effort = agent.effort is not None
         had_thinking = agent.thinking is not None
         had_service_tier = agent.service_tier is not None
-        had_latency = agent.latency is not None
         agent.swap_model(plan.model.model, spec=plan.model.spec)
         parts.append(f"model={plan.model.label}")
         if not new_model.supports_effort and had_effort:
@@ -405,9 +401,6 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         if not new_model.valid_service_tiers and had_service_tier:
             agent.service_tier = None
             parts.append("service_tier=unset (unsupported)")
-        if not new_model.valid_latency_modes and had_latency:
-            agent.latency = None
-            parts.append("latency=unset (unsupported)")
     if plan.thinking is not None:
         agent.thinking = "adaptive" if plan.thinking else None
         parts.append(f"thinking={'on' if plan.thinking else 'off'}")
@@ -422,10 +415,6 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         service_tier = cast(str | None, plan.service_tier)
         agent.service_tier = service_tier
         parts.append(f"service_tier={service_tier or 'unset'}")
-    if plan.latency is not _UNSET:
-        latency = cast(str | None, plan.latency)
-        agent.latency = latency
-        parts.append(f"latency={latency or 'unset'}")
     if plan.max_request_tokens is not None:
         agent.max_request_tokens = plan.max_request_tokens
         parts.append(f"max_request_tokens={agent.max_request_tokens:,}")
@@ -523,7 +512,12 @@ def _plan_model(
     if prov_name != spec.provider and prov_name not in allow:
         return provider_not_allowed_result(prov_name, allow, spec.provider)
     try:
-        prov = build_provider(prov_name, auth, account=account)
+        prov = build_provider(
+            prov_name,
+            auth,
+            account=account,
+            options=agent._provider_build_options(prov_name),  # noqa: SLF001 -- the tool swaps the agent's own provider; reuse its scoped options exactly like ``change_model``
+        )
         new_model = prov.model(model_id)
     except (AttributeError, RuntimeError, ValueError) as exc:
         return types.runtime.ToolResult(
@@ -560,11 +554,22 @@ def plan_model_options(
     if raw is None:
         return {}
     options = cast(Mapping[str, object], raw)
+    if "latency" in options:
+        # Fast mode moved into the model id (like ``+1m``); a targeted
+        # redirect beats the generic unsupported-key error.
+        return types.runtime.ToolResult(
+            call_id="",
+            content=(
+                "model_options.latency was replaced by the '+fast' model-id"
+                " option tag (e.g. model='claude-opus-4-8+fast')."
+            ),
+            is_error=True,
+        )
     supported = _supported_model_options(model)
     # A key is unsupported only when it carries a *non-null* value the model
-    # can't honor. Clearing an option to ``null`` (e.g. latency/service_tier)
-    # is a valid request the per-field validation handles, so a null must
-    # never trip this capability gate.
+    # can't honor. Clearing an option to ``null`` (e.g. service_tier) is a
+    # valid request the per-field validation handles, so a null must never
+    # trip this capability gate.
     unknown = sorted(
         k for k in options if k not in supported and options[k] is not None
     )
@@ -627,20 +632,6 @@ def plan_model_options(
                 is_error=True,
             )
         planned["service_tier"] = value
-    if "latency" in options:
-        value = options["latency"]
-        valid = model.valid_latency_modes
-        if value is not None and value not in valid:
-            quoted = ", ".join(repr(t) for t in valid) or "(none)"
-            return types.runtime.ToolResult(
-                call_id="",
-                content=(
-                    f"model_options.latency for {model.model_id} must"
-                    f" be one of {quoted} or null, got {value!r}."
-                ),
-                is_error=True,
-            )
-        planned["latency"] = value
     return planned
 
 
@@ -659,9 +650,6 @@ def _supported_model_options(model: types.model.Model) -> dict[str, str]:
     tiers = model.valid_service_tiers
     if tiers:
         supported["service_tier"] = " | ".join(repr(t) for t in tiers)
-    modes = model.valid_latency_modes
-    if modes:
-        supported["latency"] = " | ".join(repr(m) for m in modes)
     return supported
 
 

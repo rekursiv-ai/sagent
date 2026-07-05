@@ -23,6 +23,7 @@ from sagent.types.model import (
     Pricing,
     TokenCount,
 )
+from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
     Clear,
@@ -547,56 +548,39 @@ class LatencyStubModel(StubProviderModel):
 
 
 @pytest.mark.asyncio
-async def test_latency_unsupported_when_model_lacks_capability() -> None:
-    agent = _make_agent()  # StubProviderModel.valid_latency_modes = ()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"latency": "fast"}})
-    assert result.is_error
-    assert "Unsupported model_options" in result.content
-
-
-@pytest.mark.asyncio
-async def test_latency_rejects_unknown_value() -> None:
+@pytest.mark.parametrize("value", ["fast", "turbo", None])
+async def test_latency_option_redirects_to_fast_model_tag(
+    value: str | None,
+) -> None:
+    """``model_options.latency`` was replaced by the ``+fast`` model-id tag."""
     agent = Agent(model=LatencyStubModel(), tools=[])
     t = AgentSelf()
     with _active(agent):
-        result = await t.run({"model_options": {"latency": "turbo"}})
+        result = await t.run({"model_options": {"latency": value}})
     assert result.is_error
-    assert "latency" in result.content
-    assert "must be one of" in result.content
+    assert "+fast" in result.content
 
 
 @pytest.mark.asyncio
-async def test_latency_fast_applied() -> None:
-    agent = Agent(model=LatencyStubModel(), tools=[])
+async def test_latency_derives_from_fast_model_tag() -> None:
+    agent = Agent(
+        model=LatencyStubModel(model_id="stub-1+fast"),
+        tools=[],
+    )
     t = AgentSelf()
     with _active(agent):
-        result = await t.run({"model_options": {"latency": "fast"}})
+        result = await t.run({"diagnostics": True})
     assert not result.is_error
     assert agent.latency == "fast"
-    assert "latency=fast" in result.content
+    assert "Latency:            fast" in result.content
 
 
 @pytest.mark.asyncio
-async def test_latency_null_clears() -> None:
-    agent = Agent(model=LatencyStubModel(), tools=[])
-    agent.latency = "fast"
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"latency": None}})
-    assert not result.is_error
-    assert agent.latency is None
-    assert "latency=unset" in result.content
-
-
-@pytest.mark.asyncio
-async def test_latency_listed_in_supported_diagnostics() -> None:
+async def test_latency_shown_in_diagnostics() -> None:
     agent = Agent(model=LatencyStubModel(), tools=[])
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"diagnostics": True})
-    assert "latency" in result.content
     assert "Latency:" in result.content
 
 
@@ -657,7 +641,9 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
         with _active(agent):
             result = await t.run({"provider": "Google", "model_id": "gemini-3-pro"})
     assert not result.is_error
-    build.assert_called_once_with("Google", "env", account="work")
+    build.assert_called_once_with(
+        "Google", "env", account="work", options=ProviderOptions()
+    )
 
 
 @pytest.mark.asyncio
@@ -680,7 +666,9 @@ async def test_account_default_string_is_preserved() -> None:
         with _active(agent):
             result = await t.run({"model_id": "gpt-5", "account": "default"})
     assert not result.is_error
-    build.assert_called_once_with("OpenAI", "env", account="default")
+    build.assert_called_once_with(
+        "OpenAI", "env", account="default", options=ProviderOptions()
+    )
 
 
 @pytest.mark.asyncio
@@ -867,15 +855,15 @@ async def test_token_limit_rejects_non_integer_float(attr: str) -> None:
 
 @pytest.mark.asyncio
 async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> None:
-    # Swap from a fully-capable model to a plain one: thinking / service_tier /
-    # latency must each be cleared AND reported "(unsupported)". The snapshot is
-    # read before swap, so a post-swap read would silence every report -- this
-    # guards the thinking/service_tier/latency axes the effort test does not.
+    # Swap from a fully-capable model to a plain one: thinking and
+    # service_tier must each be cleared AND reported "(unsupported)". The
+    # snapshot is read before swap, so a post-swap read would silence every
+    # report -- this guards the thinking/service_tier axes the effort test
+    # does not. (Latency needs no clearing: it derives from the model id.)
     @dataclass(slots=True, kw_only=True)
     class RichStubModel(StubProviderModel):
         supports_thinking: bool = True
         valid_service_tiers: tuple[str, ...] = ("priority",)
-        valid_latency_modes: tuple[str, ...] = ("fast",)
 
     agent = Agent(
         model=RichStubModel(model_id="rich-stub"),
@@ -889,7 +877,6 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     )
     agent.thinking = "adaptive"
     agent.service_tier = "priority"
-    agent.latency = "fast"
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
     with patch(
@@ -902,22 +889,8 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     assert not result.is_error, result.content
     assert agent.thinking is None
     assert agent.service_tier is None
-    assert agent.latency is None
     assert "thinking=off (unsupported)" in result.content
     assert "service_tier=unset (unsupported)" in result.content
-    assert "latency=unset (unsupported)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_options_latency_null_clear_accepted_without_fast_support() -> None:
-    # Clearing latency (null) must be accepted even on a model with no fast
-    # mode; only a non-null unsupported value should error. The unknown-key
-    # gate must recognize ``latency`` regardless of capability.
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"latency": None}})
-    assert not result.is_error, result.content
 
 
 if __name__ == "__main__":
