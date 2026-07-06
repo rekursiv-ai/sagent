@@ -567,6 +567,65 @@ def test_resolve_model_no_args_reuses_parent_model() -> None:
     assert model is parent.model
 
 
+@dataclass(slots=True, kw_only=True)
+class _FastModel(StubProviderModel):
+    """Stub model advertising a fast latency path."""
+
+    valid_latency_modes: tuple[str, ...] = ("fast",)
+
+
+@dataclass(slots=True, kw_only=True)
+class _ThinkingEffortModel(StubProviderModel):
+    """Stub model advertising thinking and graded effort."""
+
+    supports_thinking: bool = True
+    supports_effort: bool = True
+    valid_efforts: tuple[str, ...] = ("low", "high")
+
+
+def test_build_child_latency_derives_from_fast_model_tag() -> None:
+    """A ``+fast`` model-id tag on the child model sets its latency."""
+    parent = _make_parent()
+    child = AgentSpawn()._build_child(
+        system=None,
+        child_model=_FastModel(model_id="stub-1+fast"),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+    assert child.latency == "fast"
+
+
+def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
+    """``thinking``/``effort`` options feed the child constructor."""
+    parent = _make_parent()
+    child = AgentSpawn()._build_child(
+        system=None,
+        child_model=_ThinkingEffortModel(),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={"thinking": True, "effort": "high"},
+        parent_agent=parent,
+    )
+    assert child.thinking == "adaptive"
+    assert child.effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_run_redirects_latency_option_to_fast_model_tag() -> None:
+    """``model_options.latency`` is gone; the error points at ``+fast``."""
+    parent = _make_parent()
+    with _parent_context(parent):
+        result = await AgentSpawn().run(
+            {"prompt": "p", "model_options": {"latency": "fast"}}
+        )
+    assert result.is_error
+    assert "+fast" in result.content
+
+
 def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:
     parent = _make_parent()
     parent.model_spec = ModelSpec(

@@ -22,7 +22,6 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
-import inspect
 import logging
 import shlex
 import sys
@@ -37,7 +36,10 @@ from rich.console import Console
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import unpersisted_session_error
-from sagent.providers import infer_provider
+from sagent.providers import (
+    infer_provider,
+    supported_provider_options,
+)
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -368,34 +370,22 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
             f" options: {options}",
         )
         return
-    supports_redact = _provider_accepts_arg(agent, "redact_thinking")
-    if agent.thinking_state == state and (
-        supports_redact or "redact_thinking" not in agent.provider_args
-    ):
+    if agent.thinking_state == state:
         _write(printer, f"[/thinking] {state}")
         return
-    # Snapshot every mutable field touched below so the
-    # ``_rebuild_current_model`` failure branch can roll back
-    # transactionally. ``set_thinking_state`` writes three fields,
-    # ``clear_provider_arg`` writes one; both are pure attribute
-    # mutations (no exception path between them), so capturing the
-    # pre-state once is sufficient.
+    # Snapshot the thinking fields so the ``_rebuild_current_model``
+    # failure branch can roll back transactionally.
+    # ``set_thinking_state`` is a pure attribute mutation, so capturing
+    # the pre-state once is sufficient.
     old_state = agent.thinking_state
     old_thinking = agent.thinking
     old_show = agent.show_thinking
-    old_redact = agent.provider_args.get("redact_thinking", None)
     agent.set_thinking_state(state)
-    if not supports_redact:
-        agent.clear_provider_arg("redact_thinking")
-    # Only the redact-supporting path triggers a rebuild; the
-    # non-redact branch only adjusted local fields, no model swap
-    # required.
-    if supports_redact and not _rebuild_current_model(agent, printer):
+    # Only a redact-supporting provider needs a rebuild (redaction is a
+    # provider-construction knob derived from the thinking state); on
+    # other providers the state change is purely local.
+    if _provider_supports_redact(agent) and not _rebuild_current_model(agent, printer):
         agent.restore_thinking_state(old_state, old_thinking, old_show)
-        if old_redact is None:
-            agent.clear_provider_arg("redact_thinking")
-        else:
-            agent.set_provider_arg("redact_thinking", old_redact)
         return
     _write(printer, f"[/thinking] {state}")
 
@@ -440,29 +430,15 @@ def _infer_thinking_state(agent: Agent) -> ThinkingState:
     return "adaptive-show" if agent.show_thinking else "adaptive-hide"
 
 
-def _provider_accepts_arg(agent: Agent, key: str) -> bool:
-    """Return whether the current provider factory accepts ``key``.
-
-    A factory exposing ``**kwargs`` (``VAR_KEYWORD``) accepts every key
-    name; the named-parameter check alone would false-negative on those.
-    """
+def _provider_supports_redact(agent: Agent) -> bool:
+    """Return whether the current provider takes the redact-thinking option."""
     spec = agent.model_spec
     if spec is None:
         return False
-    providers_mod = sys.modules["sagent.providers"]
-    cls = getattr(providers_mod, spec.provider, None)
-    if cls is None:
-        return False
-    factory = getattr(cls, f"from_{spec.auth}", None)
-    if factory is None:
-        return False
     try:
-        parameters = inspect.signature(factory).parameters
-    except (TypeError, ValueError):
+        return "redact_thinking" in supported_provider_options(spec.provider)
+    except AttributeError:
         return False
-    if key in parameters:
-        return True
-    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 def _rebuild_current_model(agent: Agent, printer: Printer | None) -> bool:
@@ -689,7 +665,8 @@ def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
         return (
             "[/model] usage: /model [provider=P] [auth=A] [account=ACCT]"
             " [model=MODEL_ID]   (or --provider/--auth/--account flags,"
-            " or a bare model_id)"
+            " or a bare model_id, with option tags like"
+            " claude-opus-4-8+1m+fast)"
         )
     return _ParsedModelArgs(
         provider=provider,

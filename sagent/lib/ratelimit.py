@@ -103,7 +103,7 @@ class SystemClock:
         await asyncio.sleep(seconds)
 
 
-_STATE_BYTES = 16  # two packed little-endian doubles: (tokens, updated)
+_STATE_BYTES = 16  # config-globals: ignore -- binary state width.
 
 
 @runtime_checkable

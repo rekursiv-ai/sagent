@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
+from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict, cast, override
 
 import asyncio
 import base64
@@ -53,6 +53,7 @@ from sagent.types.model import (
     TokenCount,
     UsageSnapshot,
     base_model_id,
+    latency_from_model_id,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -249,6 +250,15 @@ class AnthropicCLI(Anthropic):
     the CLI emits on the terminal ``result`` event.
     """
 
+    supported_options: ClassVar[frozenset[str]] = frozenset()
+    """``from_credentials`` (the CLI wrapper) takes no construction options.
+
+    Declared for the class's primary (credentials) auth. ``from_key``
+    delegates to plain :class:`Anthropic` and technically accepts its
+    options, but that degenerate spelling is not worth an auth-scoped
+    capability surface -- use ``--provider Anthropic`` for key auth.
+    """
+
     def __init__(self, *, account: str | None = None) -> None:
         super().__init__(api_key="")
         self._account = account
@@ -358,7 +368,8 @@ class AnthropicCLI(Anthropic):
           model: Backend wrapping a managed ``claude`` subprocess.
 
         Raises:
-          ValueError: If the resolved id is not in ``KNOWN_MODELS``.
+          ValueError: If the resolved id is not in ``KNOWN_MODELS``, or
+              it carries a ``+fast`` tag (the CLI has no fast path).
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
@@ -369,6 +380,10 @@ class AnthropicCLI(Anthropic):
             known = ", ".join(sorted(self.KNOWN_MODELS))
             raise ValueError(
                 f"Unknown model {mid!r} for AnthropicCLI. Known models: {known}",
+            )
+        if latency_from_model_id(mid) is not None:
+            raise ValueError(
+                f"Model {mid!r}: fast mode (+fast) is unsupported via the CLI",
             )
         return _AnthropicCLIModel(
             provider=self,

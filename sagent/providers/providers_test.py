@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import argparse
-import logging
+import inspect
 import sys
 
 import pytest
@@ -17,13 +16,12 @@ from sagent.providers import (
     MiniMax,
     Moonshot,
     OpenAI,
-    OpenAICompat,
     SelfHosted,
     build_provider,
-    collect_provider_args,
     infer_provider,
-    parse_provider_arg,
+    supported_provider_options,
 )
+from sagent.types.providers import ProviderOptions
 
 
 def test_provider_names_contains_core_providers() -> None:
@@ -102,21 +100,6 @@ def test_infer_provider_other_local_paths(path: str) -> None:
     assert result == ("SelfHosted", path)
 
 
-def test_build_provider_anthropic_from_key_auth() -> None:
-    p = build_provider("Anthropic", "key", api_key="sk-ant-test")
-    assert isinstance(p, Anthropic)
-
-
-def test_build_provider_google_from_key_auth() -> None:
-    p = build_provider("Google", "key", api_key="AIzaTest")
-    assert isinstance(p, Google)
-
-
-def test_build_provider_openai_from_key_auth() -> None:
-    p = build_provider("OpenAI", "key", api_key="sk-test")
-    assert isinstance(p, OpenAI)
-
-
 def test_build_provider_unknown_provider_raises() -> None:
     with pytest.raises(AttributeError, match="unknown provider"):
         build_provider("DoesNotExist")
@@ -130,29 +113,31 @@ def test_build_provider_from_env_dispatch(
     assert isinstance(p, Anthropic)
 
 
-def test_build_provider_openai_compat_from_key_auth() -> None:
-    p = build_provider("OpenAICompat", "key", api_key="any-key")
-    assert isinstance(p, OpenAICompat)
+@pytest.mark.parametrize(
+    ("provider_name", "cls", "env_var"),
+    [
+        ("Google", Google, "GOOGLE_API_KEY"),
+        ("OpenAI", OpenAI, "OPENAI_API_KEY"),
+        ("DashScope", DashScope, "DASHSCOPE_API_KEY"),
+        ("MiniMax", MiniMax, "MINIMAX_API_KEY"),
+        ("Moonshot", Moonshot, "MOONSHOT_API_KEY"),
+    ],
+)
+def test_build_provider_from_env_dispatch_per_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    cls: type,
+    env_var: str,
+) -> None:
+    monkeypatch.setenv(env_var, "test-key")
+    p = build_provider(provider_name, "env")
+    assert isinstance(p, cls)
 
 
-def test_build_provider_dashscope_from_key_auth() -> None:
-    p = build_provider("DashScope", "key", api_key="sk-dash-test")
-    assert isinstance(p, DashScope)
-
-
-def test_build_provider_minimax_from_key_auth() -> None:
-    p = build_provider("MiniMax", "key", api_key="sk-mini-test")
-    assert isinstance(p, MiniMax)
-
-
-def test_build_provider_moonshot_from_key_auth() -> None:
-    p = build_provider("Moonshot", "key", api_key="sk-moon-test")
-    assert isinstance(p, Moonshot)
-
-
-def test_build_provider_llamacpp_from_key_auth() -> None:
-    p = build_provider("LlamaCpp", "key", api_key="local")
-    assert isinstance(p, LlamaCpp)
+def test_build_provider_llamacpp_from_key_direct() -> None:
+    # ``from_key`` factories take their key positionally at the class --
+    # ``build_provider`` dispatches auth methods, never credentials.
+    assert isinstance(LlamaCpp.from_key("local"), LlamaCpp)
 
 
 def test_build_provider_account_kw_threaded_when_accepted(
@@ -209,90 +194,108 @@ def test_self_hosted_imported_via_dispatch() -> None:
     assert SelfHosted.DEFAULT_MODEL
 
 
-# ---- ``--provider-arg`` mechanism --------------------------------------
+# ---- ``ProviderOptions`` mechanism --------------------------------------
 
 
-def test_parse_provider_arg_typed_json_values() -> None:
-    assert parse_provider_arg("Anthropic.flag=true") == (
-        "Anthropic",
-        "flag",
-        True,
-    )
-    assert parse_provider_arg("Anthropic.n=42") == ("Anthropic", "n", 42)
-    assert parse_provider_arg('Anthropic.s="hi"') == (
-        "Anthropic",
-        "s",
-        "hi",
-    )
-    assert parse_provider_arg("Anthropic.opt=null") == (
-        "Anthropic",
-        "opt",
-        None,
-    )
+def test_provider_options_set_fields_returns_only_non_none() -> None:
+    assert ProviderOptions().set_fields() == {}
+    assert ProviderOptions(redact_thinking=False).set_fields() == {
+        "redact_thinking": False,
+    }
+    assert ProviderOptions(
+        redact_thinking=True,
+        server_side_context_management=True,
+    ).set_fields() == {
+        "redact_thinking": True,
+        "server_side_context_management": True,
+    }
 
 
-def test_parse_provider_arg_falls_back_to_string_on_decode_failure() -> None:
-    """Bare identifiers and paths pass through as strings."""
-    assert parse_provider_arg("Anthropic.path=/var/foo") == (
-        "Anthropic",
-        "path",
-        "/var/foo",
-    )
-    assert parse_provider_arg("Anthropic.tag=production") == (
-        "Anthropic",
-        "tag",
-        "production",
-    )
+def test_supported_provider_options_declarations() -> None:
+    assert supported_provider_options("Anthropic") == {
+        "redact_thinking",
+        "server_side_context_management",
+    }
+    # The CLI wrapper's ``from_credentials`` takes no construction options.
+    assert supported_provider_options("AnthropicCLI") == frozenset()
+    # Providers without a declaration take no options.
+    assert supported_provider_options("Google") == frozenset()
 
 
-def test_parse_provider_arg_rejects_malformed() -> None:
-    err = r"expected Class\.key=value"
-    with pytest.raises(argparse.ArgumentTypeError, match=err):
-        parse_provider_arg("no-dot=value")
-    with pytest.raises(argparse.ArgumentTypeError, match=err):
-        parse_provider_arg("Class.key-without-eq")
-    with pytest.raises(argparse.ArgumentTypeError, match=err):
-        parse_provider_arg(".key=value")
-
-
-def test_collect_provider_args_walks_mro() -> None:
-    """A spec keyed on a base class applies to the subclass."""
-    # Use the real provider hierarchy: ``OpenAISubscription`` inherits
-    # from ``OpenAI``, so a spec keyed on ``OpenAI`` must flow.
-    args = [
-        "OpenAI.server_side_context_management=true",
-        "Google.something=ignored",
-    ]
-    merged = collect_provider_args(args, "OpenAISubscription")
-    assert merged == {"server_side_context_management": True}
-
-
-def test_collect_provider_args_leaf_wins_over_base_on_collision() -> None:
-    args = [
-        "OpenAI.knob=1",
-        "OpenAISubscription.knob=2",
-    ]
-    assert collect_provider_args(args, "OpenAISubscription") == {"knob": 2}
-
-
-def test_collect_provider_args_ignores_unrelated_classes() -> None:
-    args = ["OpenAI.k=1", "Google.k=2"]
-    assert collect_provider_args(args, "Anthropic") == {}
-
-
-def test_collect_provider_args_unknown_provider_raises() -> None:
+def test_supported_provider_options_unknown_provider_raises() -> None:
     with pytest.raises(AttributeError, match="unknown provider"):
-        collect_provider_args(["X.k=1"], "DoesNotExist")
+        supported_provider_options("DoesNotExist")
 
 
-def test_build_provider_warns_and_drops_unknown_kwargs(
-    caplog: pytest.LogCaptureFixture,
+def test_build_provider_forwards_supported_options(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unknown kwargs are dropped with a warning rather than raising."""
-    with caplog.at_level(logging.WARNING, logger="sagent.providers.providers"):
-        p = build_provider("Anthropic", "key", api_key="sk-test", does_not_exist=42)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key")
+    p = build_provider(
+        "Anthropic",
+        "env",
+        options=ProviderOptions(server_side_context_management=True),
+    )
     assert isinstance(p, Anthropic)
-    assert any("does_not_exist" in rec.message for rec in caplog.records)
+    assert p.server_side_context_management is True
+
+
+def test_build_provider_unset_options_defer_to_factory_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key")
+    p = build_provider("Anthropic", "env", options=ProviderOptions())
+    assert isinstance(p, Anthropic)
+    assert p.server_side_context_management is False
+
+
+def test_build_provider_unsupported_option_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly set option on a non-supporting provider fails fast."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    with pytest.raises(ValueError, match="does not support option"):
+        build_provider(
+            "Google",
+            "env",
+            options=ProviderOptions(redact_thinking=True),
+        )
+
+
+def test_build_provider_unsupported_option_names_the_offender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    with pytest.raises(ValueError, match="server_side_context_management"):
+        build_provider(
+            "Google",
+            "env",
+            options=ProviderOptions(server_side_context_management=True),
+        )
+
+
+def test_anthropic_cli_rejects_options_supported_by_base() -> None:
+    """The CLI wrapper's empty declaration overrides the inherited one."""
+    with pytest.raises(ValueError, match="does not support option"):
+        build_provider(
+            "AnthropicCLI",
+            "credentials",
+            options=ProviderOptions(redact_thinking=True),
+        )
+
+
+def test_anthropic_declarations_match_factory_signatures() -> None:
+    """Every declared option is a real keyword on every ``from_*`` factory.
+
+    Guards the declaration against drifting from the constructor
+    surface -- the failure mode the deleted reflection filter used to
+    paper over.
+    """
+    for auth in ("key", "env"):
+        factory = getattr(Anthropic, f"from_{auth}")
+        params = inspect.signature(factory).parameters
+        missing = Anthropic.supported_options - params.keys()
+        assert not missing, f"Anthropic.from_{auth} missing {missing}"
 
 
 if __name__ == "__main__":

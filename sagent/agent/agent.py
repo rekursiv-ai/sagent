@@ -215,7 +215,7 @@ class Agent:
         effort: str | None = None,
         max_budget_usd: float | None = None,
         persistent_retry: bool = False,
-        provider_args: Mapping[str, object] | None = None,
+        provider_options: types.providers.ProviderOptions | None = None,
         show_thinking: bool = True,
     ) -> None:
         if max_attempts < 1:
@@ -248,11 +248,10 @@ class Agent:
         self._show_thinking = (
             should_show_thinking(thinking_state) if thinking_state else show_thinking
         )
-        self._provider_args: dict[str, object] = dict(provider_args or {})
+        self._provider_options = provider_options or types.providers.ProviderOptions()
         self._effort = effort
         self._cache_ttl: Literal["5m", "1h"] = "5m"
         self._service_tier: str | None = None
-        self._latency: str | None = None
         self.persistent_retry = persistent_retry
         self._max_budget_usd = max_budget_usd
         self.last_compact_error: Exception | None = None
@@ -477,35 +476,47 @@ class Agent:
         self._show_thinking = value
 
     @property
-    def provider_args(self) -> Mapping[str, object]:
-        """Provider factory keyword arguments reused for model rebuilds."""
-        return self._provider_args
+    def provider_options(self) -> types.providers.ProviderOptions:
+        """Construction-time provider options reused for model rebuilds."""
+        return self._provider_options
 
-    def set_provider_arg(self, key: str, value: object) -> None:
-        """Set a provider factory argument for future model rebuilds.
+    def _provider_build_options(
+        self,
+        provider_name: str,
+    ) -> types.providers.ProviderOptions:
+        """Return provider options scoped to the target provider.
 
-        Args:
-          key: Provider factory keyword.
-          value: JSON-like value forwarded to ``build_provider``.
+        Stored options are session state, not a per-build request: a
+        field the target provider does not support is masked out (and
+        comes back when a later swap returns to a supporting provider),
+        mirroring the class-scoped semantics of the old
+        ``--provider-arg``. Without the mask, an Anthropic-only knob
+        would make every cross-provider ``change_model`` raise for the
+        rest of the session. Construction-time options passed directly
+        to ``build_provider`` (CLI startup, programmatic) still fail
+        fast on an unsupported provider.
 
+        ``redact_thinking`` is additionally derived from the canonical
+        thinking state at build time when the target supports it.
         """
-        self._provider_args[key] = value
-
-    def clear_provider_arg(self, key: str) -> None:
-        """Remove a provider factory argument from future model rebuilds.
-
-        Args:
-          key: Provider factory keyword.
-
-        """
-        self._provider_args.pop(key, None)
-
-    def _provider_build_args(self) -> dict[str, object]:
-        """Return provider args plus derived thinking redaction state."""
-        args = dict(self._provider_args)
-        if self._thinking_state is not None:
-            args["redact_thinking"] = should_redact_thinking(self._thinking_state)
-        return args
+        supported: frozenset[str]
+        try:
+            supported = providers.supported_provider_options(provider_name)
+        except AttributeError:
+            # Unknown provider class: no known capabilities, so send no
+            # options -- ``build_provider`` raises the canonical unknown-
+            # provider error itself (tests stub it with fake names).
+            supported = frozenset()
+        options = self._provider_options
+        masked = {name: None for name in options.set_fields() if name not in supported}
+        if masked:
+            options = dataclasses.replace(options, **masked)
+        if self._thinking_state is not None and "redact_thinking" in supported:
+            options = dataclasses.replace(
+                options,
+                redact_thinking=should_redact_thinking(self._thinking_state),
+            )
+        return options
 
     @property
     def effort(self) -> str | None:
@@ -595,34 +606,14 @@ class Agent:
 
     @property
     def latency(self) -> str | None:
-        """Cross-provider latency hint (``"fast"``), or ``None`` when unset."""
-        return self._latency
+        """Latency hint from the model id's ``+fast`` tag, or ``None``.
 
-    @latency.setter
-    def latency(self, value: str | None) -> None:
-        """Set the latency hint; rejected when the model lacks a fast path.
-
-        Args:
-          value: ``"fast"`` to request the provider's fast path, or
-              ``None`` to clear.
-
-        Raises:
-          ValueError: If the model exposes no latency modes or ``value``
-              is not one of the accepted modes.
-
+        Read-only: fast mode is a model-id option tag (like ``+1m``),
+        so it changes via :meth:`change_model` -- e.g.
+        ``claude-opus-4-8+fast`` -- and is validated at
+        ``Provider.model()`` construction.
         """
-        if value is not None:
-            valid = self.model.valid_latency_modes
-            if not valid:
-                raise ValueError(
-                    f"Model {self.model.model_id!r} does not support latency.",
-                )
-            if value not in valid:
-                quoted = ", ".join(repr(t) for t in valid)
-                raise ValueError(
-                    f"latency must be one of {quoted}, got {value!r}",
-                )
-        self._latency = value
+        return types.model.latency_from_model_id(self.model.model_id)
 
     @property
     def session_id(self) -> str:
@@ -837,12 +828,11 @@ class Agent:
             effort=self.effort,
             max_budget_usd=self.max_budget_usd,
             persistent_retry=self.persistent_retry,
-            provider_args=self.provider_args,
+            provider_options=self.provider_options,
             show_thinking=self.show_thinking,
         )
         rebuilt.cache_ttl = self.cache_ttl
         rebuilt.service_tier = self.service_tier
-        rebuilt.latency = self.latency
         rebuilt._persistent = persistent
         return rebuilt
 
@@ -940,8 +930,6 @@ class Agent:
             self._effort = None
         if not model.valid_service_tiers:
             self._service_tier = None
-        if not model.valid_latency_modes:
-            self._latency = None
         if not model.supports_cache_control:
             self._cache_ttl = "5m"
         if spec is not None:
@@ -1024,7 +1012,9 @@ class Agent:
         Args:
           provider: New provider class name, e.g. ``"AnthropicCLI"``.
           auth: New auth-method suffix.
-          model_id: New provider-specific model id.
+          model_id: New provider-specific model id. Option tags ride
+              along (e.g. ``claude-opus-4-8+1m+fast``); the provider's
+              ``model()`` validates them.
           account: New credential account override.
 
         Returns:
@@ -1050,7 +1040,7 @@ class Agent:
             target.provider,
             target.auth,
             account=target.account,
-            **self._provider_build_args(),
+            options=self._provider_build_options(target.provider),
         )
         new_model = provider_obj.model(target.model_id)
         if target.provider != spec.provider:
@@ -1135,7 +1125,9 @@ class Agent:
         return self._build_system()
 
     def _apply_model_change(
-        self, model: types.model.Model, spec: types.model.ModelSpec
+        self,
+        model: types.model.Model,
+        spec: types.model.ModelSpec,
     ) -> None:
         """Apply a high-level model change, resetting stale derived budgets.
 
@@ -2377,7 +2369,9 @@ def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     """Return True when the provider class's catalog includes ``model_id``.
 
     Reads ``cls.KNOWN_MODELS`` without instantiating so the probe is
-    side-effect-free (no credential lookup).
+    side-effect-free (no credential lookup). Latency tags (``+fast``)
+    ride on catalog ids and are stripped before the membership check,
+    mirroring the providers' own profile-lookup rule.
     """
     cls = getattr(providers, prov_name, None)
     if cls is None:
@@ -2385,7 +2379,7 @@ def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     known = getattr(cls, "KNOWN_MODELS", None)
     if not isinstance(known, dict):
         return False
-    return model_id in known
+    return model_id in known or types.model.strip_latency_tags(model_id) in known
 
 
 def _default_model_for(prov_name: str) -> str:

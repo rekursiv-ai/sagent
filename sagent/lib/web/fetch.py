@@ -76,8 +76,8 @@ ValidatedHosts = Callable[[str], ValidatedHost]
 # derived from a single major version so a bump touches one constant, and
 # "Linux" is hardcoded (rather than platform.system()) to keep the signature
 # reproducible across machines and matching the UA token.
-_CHROME_MAJOR = "125"
-_CHROME_PLATFORM = '"Linux"'
+_CHROME_MAJOR = "125"  # config-globals: ignore -- browser fingerprint literal.
+_CHROME_PLATFORM = '"Linux"'  # config-globals: ignore -- browser fingerprint literal.
 _CHROME_SEC_CH_UA = (
     f'"Chromium";v="{_CHROME_MAJOR}", "Not.A/Brand";v="24", '
     f'"Google Chrome";v="{_CHROME_MAJOR}"'
@@ -86,7 +86,7 @@ _CHROME_UA = (
     f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     f"(KHTML, like Gecko) Chrome/{_CHROME_MAJOR}.0.0.0 Safari/537.36"
 )
-_NAV_ACCEPT = (
+_NAV_ACCEPT = (  # config-globals: ignore -- HTTP Accept header literal.
     "text/html,application/xhtml+xml,application/xml;q=0.9,"
     "image/avif,image/webp,image/apng,*/*;q=0.8,"
     "application/signed-exchange;v=b3;q=0.7"
@@ -94,7 +94,7 @@ _NAV_ACCEPT = (
 
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
-_DEFAULT_MAX_REDIRECTS = 10
+_DEFAULT_MAX_REDIRECTS = 10  # config-globals: ignore -- fetch safety default.
 
 
 class FetchError(Exception):

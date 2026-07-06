@@ -430,7 +430,6 @@ class _FakeAgent:
     thinking_state: str | None = None
     thinking: str | None = "adaptive"
     show_thinking: bool = True
-    provider_args: dict[str, object] = field(default_factory=dict)
     background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
     _effort: str | None = None
 
@@ -459,18 +458,13 @@ class _FakeAgent:
     def set_thinking_state(self, state: str) -> None:
         # Delegate to the REAL derivation so these tests exercise
         # production logic, not a divergent copy. ``thinking`` /
-        # ``show_thinking`` mirror ``Agent.set_thinking_state``;
-        # ``redact_thinking`` mirrors the value ``Agent._provider_build_args``
-        # derives via ``should_redact_thinking`` (production computes it at
-        # provider-build time, not in ``set_thinking_state`` -- reflecting it
-        # here keeps the test assertion checking the real function).
+        # ``show_thinking`` mirror ``Agent.set_thinking_state``.
+        # (``redact_thinking`` is derived at provider-build time inside
+        # ``Agent._provider_build_options`` -- no bag to mirror here.)
         canonical = cast(thinking.ThinkingState, state)
         self.thinking_state = state
         self.thinking = thinking.request_thinking(canonical)
         self.show_thinking = thinking.should_show_thinking(canonical)
-        self.provider_args["redact_thinking"] = thinking.should_redact_thinking(
-            canonical
-        )
 
     def restore_thinking_state(
         self, state: str | None, thinking: str | None, show_thinking: bool
@@ -478,12 +472,6 @@ class _FakeAgent:
         self.thinking_state = state
         self.thinking = thinking
         self.show_thinking = show_thinking
-
-    def set_provider_arg(self, key: str, value: object) -> None:
-        self.provider_args[key] = value
-
-    def clear_provider_arg(self, key: str) -> None:
-        self.provider_args.pop(key, None)
 
     def swap_model(self, model: _FakeModel, *, spec: ModelSpec | None = None) -> None:
         self.swap_calls.append((model, spec))
@@ -657,7 +645,6 @@ def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
     assert agent.thinking_state == "adaptive-show"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is True
-    assert agent.provider_args["redact_thinking"] is False
     assert len(agent.change_model_calls) == 1
 
 
@@ -671,14 +658,12 @@ def test_do_switch_thinking_same_state_skips_model_change() -> None:
         thinking_state="adaptive-show",
         thinking="adaptive",
         show_thinking=True,
-        provider_args={"redact_thinking": False},
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
     assert agent.thinking_state == "adaptive-show"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is True
-    assert agent.provider_args["redact_thinking"] is False
     assert agent.change_model_calls == []
 
 
@@ -696,7 +681,6 @@ def test_do_switch_thinking_hide_preserves_adaptive_mode() -> None:
     assert agent.thinking_state == "adaptive-hide"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is False
-    assert agent.provider_args["redact_thinking"] is False
     assert len(agent.change_model_calls) == 1
 
 
@@ -713,7 +697,9 @@ def test_do_switch_thinking_redact_enables_redaction_and_hides() -> None:
     assert agent.thinking_state == "redact-hide"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is False
-    assert agent.provider_args["redact_thinking"] is True
+    # The redact-supporting provider triggers a rebuild; the redaction
+    # value itself is derived inside ``Agent._provider_build_options``
+    # (covered by agent_test.py).
     assert len(agent.change_model_calls) == 1
 
 
@@ -742,17 +728,16 @@ def test_do_switch_thinking_show_errors_from_off() -> None:
     assert agent.change_model_calls == []
 
 
-def test_do_switch_thinking_skips_redact_arg_without_provider_support() -> None:
+def test_do_switch_thinking_no_rebuild_without_provider_support() -> None:
+    """A provider without the redact option changes state locally, no rebuild."""
     agent = _FakeAgent(
         model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
-        provider_args={"redact_thinking": True},
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
     assert agent.thinking_state == "adaptive-show"
     assert agent.thinking == "adaptive"
     assert agent.show_thinking is True
-    assert "redact_thinking" not in agent.provider_args
     assert agent.change_model_calls == []
 
 
