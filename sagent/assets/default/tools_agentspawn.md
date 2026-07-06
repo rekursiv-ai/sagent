@@ -20,6 +20,7 @@ Recycle before spawning fresh. Every spawn reloads a full system prompt (expensi
 - `prompt` -- self-contained instruction. Child sees none of your messages, files read, or scratch state.
 - `system` -- override child system; defaults to inheriting.
 - `provider` / `auth` / `model_id` / `account` -- backend overrides; inherit by default. Prefer `*Subscription` (e.g. `OpenAISubscription`) -- no API keys needed.
+- `model_options` -- provider-specific serving knobs (`thinking`, `effort`, `cache_ttl`, `service_tier`, `latency`). `latency: "fast"` requests fast serving on supported models. Defaults to inheriting the parent's options.
 - `tools` -- whitelist; defaults to full toolset (incl. `AgentSpawn`). `[]` = pure text. For read-only work, restrict explicitly (see above).
 - `max_tool_call_rounds` -- rarely set; cap on child rounds (one round = one model response, regardless of parallel-tool fan-out). Inherits from parent/CLI default.
 - `max_depth` -- rarely set; cap on child sub-spawning (`0` = leaf i.e., child cannot sub-spawn). Inherits from parent/CLI default; `min`'d with ancestor caps.

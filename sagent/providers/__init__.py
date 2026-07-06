@@ -29,10 +29,9 @@ from sagent.providers.openai_compat import OpenAICompat
 from sagent.providers.openai_sub import OpenAISubscription
 from sagent.providers.providers import (
     build_provider,
-    collect_provider_args,
     default_auth_for_provider,
     infer_provider,
-    parse_provider_arg,
+    supported_provider_options,
 )
 from sagent.providers.selfhosted import SelfHosted, SelfHostedModel
 
@@ -71,8 +70,7 @@ __all__ = [
     "SelfHosted",
     "SelfHostedModel",
     "build_provider",
-    "collect_provider_args",
     "default_auth_for_provider",
     "infer_provider",
-    "parse_provider_arg",
+    "supported_provider_options",
 ]

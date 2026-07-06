@@ -8,6 +8,6 @@ All arguments optional:
 - `auth` -- optional auth method suffix, for example `env` or `credentials`.
 - `account` -- optional credential account name.
 - `max_request_tokens` / `max_response_tokens` -- per-call limits. Cannot exceed the active model's own window; raising this never unlocks a larger context (use a `+1m`/`+200k` `model_id` for that).
-- `model_options` -- provider-specific (`thinking`, `effort`, `cache_ttl`, `service_tier`). `diagnostics=true` lists supported keys.
+- `model_options` -- provider-specific (`thinking`, `effort`, `cache_ttl`, `service_tier`, `latency`). `latency: "fast"` selects fast serving on models that support it. `diagnostics=true` lists supported keys.
 - `diagnostics` -- current model, usage, limits, cache, options.
 - `catalog` -- `"providers"` or `"models"` (scoped by `catalog_provider`).

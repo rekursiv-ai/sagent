@@ -41,6 +41,7 @@ from sagent.providers import (
     default_auth_for_provider,
 )
 from sagent.thinking import ThinkingState
+from sagent.tools.agent_self import plan_model_options
 from sagent.tools.core import (
     agent_counter_var,
     agent_label_var,
@@ -160,9 +161,10 @@ def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
                         " a zero-argument ``<Provider>.from_<auth>()``"
                         " (for example, ``env`` for API-key environment"
                         " variables, ``credentials`` for subscription"
-                        " providers). Prefer ``credentials`` over ``env``"
-                        " when the chosen provider supports both. Defaults"
-                        " to inheriting the parent's auth."
+                        " providers). Prefer"
+                        " ``credentials`` over ``env`` when the chosen"
+                        " provider supports both. Defaults to inheriting"
+                        " the parent's auth."
                     ),
                 },
                 "model_id": {
@@ -173,6 +175,19 @@ def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
                         " ``gpt-5.5``). Defaults to inheriting the parent's"
                         " model id."
                     ),
+                },
+                "model_options": {
+                    "type": "object",
+                    "description": (
+                        "Provider/model-specific serving knobs:"
+                        " ``thinking``, ``effort``, ``cache_ttl``,"
+                        " ``service_tier``. Fast serving is a model-id"
+                        " option tag: request it via ``model='...+fast'``"
+                        " on supported"
+                        " models. Defaults to inheriting"
+                        " the parent's options."
+                    ),
+                    "additionalProperties": True,
                 },
                 "account": {
                     "type": "string",
@@ -504,12 +519,17 @@ class AgentSpawn:
         if isinstance(child_tools, ToolResult):
             return child_tools
 
+        options = plan_model_options(child_model, args)
+        if isinstance(options, ToolResult):
+            return options
+
         child = self._build_child(
             system=system,
             child_model=child_model,
             child_spec=child_spec,
             child_tools=child_tools,
             max_rounds=max_rounds,
+            model_options=options,
             parent_agent=parent_agent,
         )
 
@@ -542,9 +562,16 @@ class AgentSpawn:
         child_spec: ModelSpec | None,
         child_tools: list[Tool],
         max_rounds: int | None,
+        model_options: Mapping[str, object],
         parent_agent: _Agent | None,
     ) -> _Agent:
-        """Build a child Agent with inherited knobs."""
+        """Build a child Agent with inherited knobs and explicit options.
+
+        ``model_options`` (already validated against ``child_model``)
+        override inherited defaults: ``thinking``/``effort`` feed the
+        constructor, while ``cache_ttl``/``service_tier`` are applied
+        via the post-construction setters that validate them.
+        """
         child_system = self._resolve_system(system, parent_agent)
         child_max_rounds = (
             max_rounds if max_rounds is not None else self._max_tool_call_rounds
@@ -562,7 +589,16 @@ class AgentSpawn:
             resolved = self._inherit(name, parent_agent)
             if resolved is not None:
                 init_kwargs[name] = resolved
-        return _get_agent_class()(**init_kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs from directive
+        if "thinking" in model_options:
+            init_kwargs["thinking"] = "adaptive" if model_options["thinking"] else None
+        if "effort" in model_options:
+            init_kwargs["effort"] = model_options["effort"]
+        child = _get_agent_class()(**init_kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs from directive
+        if "cache_ttl" in model_options:
+            child.cache_ttl = cast(Literal["5m", "1h"], model_options["cache_ttl"])
+        if "service_tier" in model_options:
+            child.service_tier = cast(str | None, model_options["service_tier"])
+        return child
 
     async def _execute_child(
         self,

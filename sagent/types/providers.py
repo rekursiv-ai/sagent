@@ -2,11 +2,15 @@
 
 A ``Provider`` builds ``Model`` instances. ``AuthReloadable`` is the
 hot-reload-credentials Protocol opt-in for OAuth-backed providers.
+``ProviderOptions`` is the typed, exhaustive set of construction-time
+provider knobs.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+import dataclasses
 
 from sagent.types.model import Model
 
@@ -14,7 +18,41 @@ from sagent.types.model import Model
 __all__ = [
     "AuthReloadable",
     "Provider",
+    "ProviderOptions",
 ]
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderOptions:
+    """Construction-time provider knobs forwarded to provider factories.
+
+    Every knob a provider factory accepts beyond auth/account lives
+    here as a typed field -- there is no untyped passthrough. Each
+    field is tri-state: ``None`` (the default) defers to the factory's
+    own default, while an explicit value is forwarded and must be
+    declared in the target provider class's ``supported_options``
+    (``build_provider`` raises on an unsupported set field rather than
+    silently dropping it).
+    """
+
+    redact_thinking: bool | None = None
+    """Request redacted thinking blocks (Anthropic family)."""
+
+    server_side_context_management: bool | None = None
+    """Opt in to Anthropic's server-side ``clear_tool_uses`` beta."""
+
+    def set_fields(self) -> dict[str, bool]:
+        """Return the explicitly set (non-``None``) fields as factory kwargs.
+
+        Returns:
+          kwargs: ``{field_name: value}`` for every non-``None`` field.
+
+        """
+        return {
+            field.name: value
+            for field in dataclasses.fields(self)
+            if (value := getattr(self, field.name)) is not None
+        }
 
 
 @runtime_checkable

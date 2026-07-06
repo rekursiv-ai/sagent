@@ -214,6 +214,13 @@ def test_model_resolves_context_tag_to_profile() -> None:
     assert model.max_request_tokens == 1_000_000
 
 
+def test_model_rejects_fast_tag() -> None:
+    """The CLI wrapper has no fast path; a ``+fast`` id fails fast."""
+    provider = AnthropicCLI()
+    with pytest.raises(ValueError, match="unsupported via the CLI"):
+        _ = provider.model("claude-opus-4-8+fast")
+
+
 def test_default_model_inherits_from_anthropic() -> None:
     """``AnthropicCLI`` defers to ``Anthropic.DEFAULT_MODEL``.
 

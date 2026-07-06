@@ -129,6 +129,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -462,7 +463,10 @@ class OpenAISubscription(OpenAI):
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
         # Fail fast -- every supported model must be in KNOWN_MODELS.
-        profile = self.KNOWN_MODELS.get(mid)
+        # Strip only latency tags: no ``+1m`` variants exist here.
+        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
+            strip_latency_tags(mid),
+        )
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
             raise ValueError(

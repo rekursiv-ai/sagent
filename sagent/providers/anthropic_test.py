@@ -65,12 +65,14 @@ def test_context_betas_one_million_emits_beta() -> None:
 
 def test_context_betas_skip_one_million_beta_for_default_1m_model() -> None:
     assert "context-1m-2025-08-07" not in context_betas("claude-fable-5+1m")
+    assert "context-1m-2025-08-07" not in context_betas("claude-sonnet-5+1m")
 
 
 def test_context_betas_native_context_management_for_supported_models() -> None:
     assert "context-management-2025-06-27" in context_betas("claude-haiku-4-5")
     assert "context-management-2025-06-27" in context_betas("claude-opus-4-7+1m")
     assert "context-management-2025-06-27" in context_betas("claude-fable-5+1m")
+    assert "context-management-2025-06-27" in context_betas("claude-sonnet-5+1m")
 
 
 def test_context_betas_skip_native_context_management_for_unknown_models() -> None:
@@ -553,6 +555,26 @@ def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
     assert m.max_request_tokens == 1_000_000
 
 
+def test_anthropic_model_accepts_fast_tag_on_supported_model() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8+fast")
+    assert m.model_id == "claude-opus-4-8+fast"
+    assert m.valid_latency_modes == ("fast",)
+
+
+def test_anthropic_model_fast_tag_keeps_context_profile() -> None:
+    """``+1m+fast`` resolves the ``+1m`` profile, not the base one."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-8+1m+fast")
+    assert m.max_request_tokens == 1_000_000
+
+
+def test_anthropic_model_rejects_fast_tag_on_unsupported_model() -> None:
+    p = Anthropic.from_key("k")
+    with pytest.raises(ValueError, match="does not support fast mode"):
+        _ = p.model("claude-haiku-4-5+fast")
+
+
 def test_anthropic_default_model_resolves() -> None:
     p = Anthropic.from_key("k")
     m = p.model()
@@ -604,6 +626,23 @@ def test_anthropic_fable_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5+1m")
     assert m.model_id == "claude-fable-5+1m"
+    assert m.max_request_tokens == 1_000_000
+
+
+def test_anthropic_sonnet_5_model_profile() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-sonnet-5")
+    assert m.max_request_tokens == 1_000_000
+    assert m.max_response_tokens == 128_000
+    assert m.pricing.request == 3.0
+    assert m.pricing.response == 15.0
+    assert m.valid_efforts == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_anthropic_sonnet_5_one_million_alias() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-sonnet-5+1m")
+    assert m.model_id == "claude-sonnet-5+1m"
     assert m.max_request_tokens == 1_000_000
 
 
@@ -743,6 +782,7 @@ def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
     assert p.model("claude-opus-4-8").valid_latency_modes == ("fast",)
     assert p.model("claude-opus-4-8+1m").valid_latency_modes == ("fast",)
     assert p.model("claude-fable-5").valid_latency_modes == ()
+    assert p.model("claude-sonnet-5").valid_latency_modes == ()
     assert p.model("claude-haiku-4-5").valid_latency_modes == ()
 
 

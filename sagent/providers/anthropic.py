@@ -74,6 +74,9 @@ from sagent.types.model import (
     TokenCount,
     UsageSnapshot,
     base_model_id,
+    latency_from_model_id,
+    split_model_id,
+    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -135,7 +138,7 @@ _FAST_MODE_MODELS = frozenset(
         "claude-opus-4-6",
     }
 )
-_DEFAULT_1M_MODELS = frozenset({"claude-fable-5"})
+_DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5"})
 
 
 def supports_fast_mode(model_id: str) -> bool:
@@ -162,6 +165,7 @@ _CONTEXT_MANAGEMENT_MODELS = frozenset(
         "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-opus-4-5",
+        "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-haiku-4-5",
@@ -184,11 +188,9 @@ def context_betas(model_id: str) -> list[str]:
       betas: Beta header strings to include in the request.
 
     """
+    base, tags = split_model_id(model_id)
     betas: list[str] = []
-    if (
-        model_id.lower().endswith("+1m")
-        and base_model_id(model_id) not in _DEFAULT_1M_MODELS
-    ):
+    if "+1m" in tags and base not in _DEFAULT_1M_MODELS:
         betas.append(_CONTEXT_1M_BETA)
     if supports_native_context_management(model_id):
         betas.append(_CONTEXT_MANAGEMENT_BETA)
@@ -334,6 +336,11 @@ class Anthropic:
     DEFAULT_MODEL = "claude-opus-4-8+1m"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
+    supported_options: ClassVar[frozenset[str]] = frozenset(
+        {"redact_thinking", "server_side_context_management"}
+    )
+    """``ProviderOptions`` fields the ``from_*`` factories accept."""
+
     # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
     # mixed code+JSON+thinking session (de89f75430bf). Three tokenizer
     # generations cluster: opus-4-7 (2.83), opus/sonnet-4.6-4.5 (3.66),
@@ -463,6 +470,30 @@ class Anthropic:
             valid_efforts=("low", "medium", "high"),
             chars_per_token=3.66,
             max_image_dim=_NATIVE_DIM_STD,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
+        "claude-sonnet-5": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_SONNET,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
+        "claude-sonnet-5+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_SONNET,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
             max_image_bytes=_IMAGE_BYTES,
             max_request_bytes=_REQUEST_BYTES,
         ),
@@ -607,19 +638,29 @@ class Anthropic:
           model: Anthropic model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``.
+          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``, or it
+              carries a ``+fast`` tag on a model without fast mode.
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Try exact match first, then strip +1m context tag.
-        # Fail fast on unknown model IDs.
-        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            base_model_id(mid),
+        # Try exact match first, then the context-tagged id (``+1m``
+        # variants carry their own profile), then the base id. Fail
+        # fast on unknown model IDs.
+        profile = (
+            self.KNOWN_MODELS.get(mid)
+            or self.KNOWN_MODELS.get(strip_latency_tags(mid))
+            or self.KNOWN_MODELS.get(base_model_id(mid))
         )
         if profile is None:
             known = ", ".join(sorted(self.KNOWN_MODELS))
             raise ValueError(
                 f"Unknown model {mid!r} for Anthropic. Known models: {known}",
+            )
+        if latency_from_model_id(mid) is not None and not supports_fast_mode(mid):
+            fast = ", ".join(sorted(_FAST_MODE_MODELS))
+            raise ValueError(
+                f"Model {mid!r} does not support fast mode (+fast). "
+                f"Fast-capable models: {fast}",
             )
         return _AnthropicModel(
             provider=self,

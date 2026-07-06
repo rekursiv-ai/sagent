@@ -400,6 +400,13 @@ def test_provider_model_unknown_id_raises() -> None:
         _ = p.model("does-not-exist")
 
 
+def test_provider_model_rejects_fast_tag_without_latency_mode() -> None:
+    """Compat vendors expose no fast path; a ``+fast`` id fails fast."""
+    p = _DummyProvider.from_key("k")
+    with pytest.raises(ValueError, match="does not support fast mode"):
+        _ = p.model("stub-1+fast")
+
+
 def test_provider_model_default_picks_default_model() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()

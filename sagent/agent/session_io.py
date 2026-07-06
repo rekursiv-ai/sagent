@@ -42,6 +42,7 @@ from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.custom_json import float_val, int_val
 from sagent.types.model import Model, ModelSpec, TokenCount
+from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
@@ -117,9 +118,7 @@ class PersistentAgentRecord:
     service_tier: str | None = None
     max_budget_usd: float | None = None
     persistent_retry: bool = False
-    provider_args: Mapping[str, object] = dataclasses.field(
-        default_factory=lambda: cast(Mapping[str, object], {})
-    )
+    provider_options: ProviderOptions = ProviderOptions()  # noqa: RUF009 -- frozen dataclass, no mutable default risk
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -1042,11 +1041,8 @@ def _persistent_agent_from_json(
         if isinstance(raw_tools, list)
         else ()
     )
-    raw_provider_args = record.get("provider_args")
-    provider_args: Mapping[str, object] = (
-        cast(Mapping[str, object], raw_provider_args)
-        if isinstance(raw_provider_args, Mapping)
-        else {}
+    provider_options = _provider_options_from_json(
+        record.get("provider_options", record.get("provider_args")),
     )
     notify_raw = record.get("notify_on_asleep")
     return PersistentAgentRecord(
@@ -1071,8 +1067,35 @@ def _persistent_agent_from_json(
         service_tier=_optional_str(record.get("service_tier")),
         max_budget_usd=_optional_float(record.get("max_budget_usd")),
         persistent_retry=bool(record.get("persistent_retry")),
-        provider_args=dict(provider_args),
+        provider_options=provider_options,
     )
+
+
+def _provider_options_from_json(raw: object) -> ProviderOptions:
+    """Decode construction options, tolerating the legacy ``provider_args`` bag.
+
+    Known field names decode into ``ProviderOptions``; anything else in
+    a legacy record is dropped with one warning (the untyped bag it
+    came from no longer exists).
+    """
+    if not isinstance(raw, Mapping):
+        return ProviderOptions()
+    record = cast(Mapping[str, object], raw)
+    known = {field.name for field in dataclasses.fields(ProviderOptions)}
+    usable = {
+        key: value
+        for key, value in record.items()
+        if key in known and isinstance(value, bool)
+    }
+    # A known key with a non-bool value (legacy JSON bag) is dropped too
+    # and must warn just like an unknown key.
+    dropped = sorted(str(key) for key in record if key not in usable)
+    if dropped:
+        logger.warning(
+            "Dropping unusable provider option(s) from session record: %s",
+            ", ".join(dropped),
+        )
+    return ProviderOptions(**usable)
 
 
 def _persistent_state(raw: object) -> PersistentAgentState | None:
@@ -1122,7 +1145,9 @@ def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object
         "service_tier": record.service_tier,
         "max_budget_usd": record.max_budget_usd,
         "persistent_retry": record.persistent_retry,
-        "provider_args": dict(record.provider_args),
+        "provider_options": cast(
+            dict[str, object], record.provider_options.set_fields()
+        ),
         "timestamp": time.time(),
     }
 
@@ -1165,7 +1190,7 @@ def append_persistent_agent_lifecycle(
                 service_tier=child.service_tier,
                 max_budget_usd=child.max_budget_usd,
                 persistent_retry=child.persistent_retry,
-                provider_args=child.provider_args,
+                provider_options=child.provider_options,
             )
         ],
     )
