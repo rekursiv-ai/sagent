@@ -203,7 +203,7 @@ class Engine:
         lk = self.world.locks[li]
         if lk["open"]:
             return None
-        tiles = [tuple(p) for p in lk["plates"]]
+        tiles = lk["plates"]
         holder: dict[tuple[int, int], tuple[str, str]] = {}
         for o in self.world.agents.values():
             if not o.alive or o.xy not in tiles or o.id not in self.armed:
