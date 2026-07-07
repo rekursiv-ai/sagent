@@ -34,6 +34,7 @@ import tempfile
 
 from sagent.agent import Agent
 from sagent.tools import AgentSelf
+from sagent.types.model import Model, ModelSpec
 from sagent.types.runtime import AssistantMessage, ToolResult, UserMessage
 from sagent.types.tools import Tool
 
@@ -267,11 +268,11 @@ def _final_text(history: list[Any]) -> str:
 
 async def run_condition(
     condition: str,
-    model,
+    model: Model,
     *,
     system_prompt: str,
     allow_upgrade: bool,
-    model_spec=None,
+    model_spec: ModelSpec | None = None,
     max_budget: float = 0.50,
 ) -> dict[str, Any]:
     """Run one arm on the task; return a captured, grader-graded result dict.
