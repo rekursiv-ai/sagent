@@ -238,7 +238,7 @@ def _strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
         script.decompose()
 
 
-def _clean_text(text: str) -> str:
+def clean_text(text: str) -> str:
     """Collapse whitespace runs and drop spaces before punctuation."""
     return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
 
@@ -252,7 +252,7 @@ def _get_gsa_useragents() -> tuple[str, ...]:
     return tuple(line for line in _GSA_USERAGENTS_PATH.read_text().splitlines() if line)
 
 
-def _gsa_headers_for_query(query: str) -> dict[str, str]:
+def gsa_headers_for_query(query: str) -> dict[str, str]:
     """Build request headers with a query-stable GSA mobile UA."""
     useragents = _get_gsa_useragents()
     idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(useragents)
@@ -450,8 +450,8 @@ def _searxng_web(item: dict[str, object]) -> SearchResult:
     """Parse a SearXNG ``default.html`` item into a :class:`SearchResult`."""
     return SearchResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
     )
 
 
@@ -459,8 +459,8 @@ def _searxng_image(item: dict[str, object]) -> ImageResult:
     """Parse a SearXNG ``images.html`` item into an :class:`ImageResult`."""
     return ImageResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         image_url=str_val(item.get("img_src")),
         thumbnail_url=str_val(item.get("thumbnail_src")),
         resolution=str_val(item.get("resolution")),
@@ -474,8 +474,8 @@ def _searxng_video(item: dict[str, object]) -> VideoResult:
     """Parse a SearXNG ``videos.html`` item into a :class:`VideoResult`."""
     return VideoResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         published=datetime_val(item.get("publishedDate")),
         iframe_url=str_val(item.get("iframe_src")),
         length=str_val(item.get("length")),
@@ -489,8 +489,8 @@ def _searxng_media(item: dict[str, object]) -> MediaResult:
     """Parse a ``news``/``music`` ``default.html`` item into a :class:`MediaResult`."""
     return MediaResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         published=datetime_val(item.get("publishedDate")),
         audio_url=str_val(item.get("audio_src")),
         iframe_url=str_val(item.get("iframe_src")),
@@ -503,8 +503,8 @@ def _searxng_map(item: dict[str, object]) -> MapResult:
     """Parse a SearXNG ``map.html`` item into a :class:`MapResult`."""
     return MapResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         latitude=float_val(item.get("latitude")) if "latitude" in item else None,
         longitude=float_val(item.get("longitude")) if "longitude" in item else None,
         address=str_map_val(item.get("address")),
@@ -525,8 +525,8 @@ def _searxng_package(item: dict[str, object]) -> PackageResult:
     """Parse a SearXNG ``packages.html`` item into a :class:`PackageResult`."""
     return PackageResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         package_name=str_val(item.get("package_name")),
         version=str_val(item.get("version")),
         maintainer=str_val(item.get("maintainer")),
@@ -542,8 +542,8 @@ def _searxng_code(item: dict[str, object]) -> CodeResult:
     """Parse a SearXNG ``code.html`` item into a :class:`CodeResult`."""
     return CodeResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         repository=str_val(item.get("repository")),
         filename=str_val(item.get("filename")),
         code_language=str_val(item.get("code_language")),
@@ -566,8 +566,8 @@ def _searxng_file(item: dict[str, object]) -> FileResult:
     """Parse a SearXNG ``file.html`` item into a :class:`FileResult`."""
     return FileResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(
             str_val(item.get("abstract")) or str_val(item.get("content"))
         ),
         filename=str_val(item.get("filename")),
@@ -581,8 +581,8 @@ def _searxng_torrent(item: dict[str, object]) -> TorrentResult:
     """Parse a SearXNG ``torrent.html`` item into a :class:`TorrentResult`."""
     return TorrentResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         magnet_url=str_val(item.get("magnetlink")),
         torrent_url=str_val(item.get("torrentfile")),
         seed=int_val(item.get("seed"), 0) if "seed" in item else None,
@@ -603,10 +603,10 @@ def _searxng_paper(item: dict[str, object]) -> PaperResult:
     cites = _CITATIONS_RE.match(str_val(item.get("comments")))
     return PaperResult(
         url=str_val(item.get("url")),
-        title=_clean_text(str_val(item.get("title"))),
-        snippet=_clean_text(str_val(item.get("content"))),
+        title=clean_text(str_val(item.get("title"))),
+        snippet=clean_text(str_val(item.get("content"))),
         authors=str_list_val(item.get("authors")),
-        journal=_clean_text(str_val(item.get("journal"))),
+        journal=clean_text(str_val(item.get("journal"))),
         doi=str_val(item.get("doi")),
         pdf_url=str_val(item.get("pdf_url")),
         published=datetime_val(item.get("publishedDate")),
@@ -677,7 +677,7 @@ def duckduckgo(
             f"DuckDuckGo query exceeds {_DUCKDUCKGO_MAX_QUERY_CHARS} characters "
             f"(got {len(query)})."
         )
-    request_headers = _gsa_headers_for_query(query) | {
+    request_headers = gsa_headers_for_query(query) | {
         "Accept": "*/*",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
@@ -754,13 +754,13 @@ def _duckduckgo_parse(
         url = _duckduckgo_extract_url(href)
         if url is None:
             continue
-        title = _clean_text(link.get_text(separator=" ", strip=True))
+        title = clean_text(link.get_text(separator=" ", strip=True))
         if not title:
             continue
 
         snippet_el = container.select_one("a.result__snippet")
         snippet = (
-            _clean_text(snippet_el.get_text(separator=" ", strip=True))
+            clean_text(snippet_el.get_text(separator=" ", strip=True))
             if snippet_el is not None
             else ""
         )
