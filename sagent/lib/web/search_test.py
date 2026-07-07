@@ -33,10 +33,10 @@ from sagent.lib.web.search import (
     _duckduckgo_extract_url,
     _duckduckgo_parse,
     _duckduckgo_quote_bangs,
-    _gsa_headers_for_query,
     _searxng_url,
     _strip_scripts,
     duckduckgo,
+    gsa_headers_for_query,
     search,
     searxng,
 )
@@ -104,8 +104,8 @@ class TestGsaHeaders:
             "sagent.lib.web.search._get_gsa_useragents",
             return_value=("ua0", "ua1", "ua2"),
         ):
-            assert _gsa_headers_for_query("same") == _gsa_headers_for_query("same")
-            assert _gsa_headers_for_query("same")["User-Agent"].endswith(" NSTNWV")
+            assert gsa_headers_for_query("same") == gsa_headers_for_query("same")
+            assert gsa_headers_for_query("same")["User-Agent"].endswith(" NSTNWV")
 
 
 class TestSearchSearxng:
