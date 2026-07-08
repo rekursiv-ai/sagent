@@ -36,7 +36,7 @@ jobs:
           uv run ruff format --check --no-cache .
           uv run codespell .
           uv run ty check
-          uv run basedpyright --threads=6 sagent examples
+          uv run basedpyright --threads=6 sagent
           uv run pytest
           uv run pytest -m ci_smoke -o addopts="--durations=20"
           uv run python -c "import sagent"

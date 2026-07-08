@@ -449,3 +449,47 @@ class CooldownGate:
         wait = self.remaining()
         if wait > 0:
             await self._clock.sleep_async(wait)
+
+
+class Pacer:
+    """Steady pacing plus a shared block-triggered cooldown, as one gate.
+
+    Composes the two orthogonal signals a polite client needs: a
+    :class:`RateLimiter` paces grants at a steady rate, and a
+    :class:`CooldownGate` absorbs an external "slow down" (an HTTP 429, a
+    CAPTCHA) so every requester waits rather than each rediscovering the block.
+    :meth:`pace`, called before each request, honors an active cooldown first
+    and then spends one rate-limit token; :meth:`trigger_cooldown`, called when
+    a block is observed, opens the shared window.
+
+    Share one :class:`Pacer` across every request to a resource so a burst
+    cannot outrun the limit; back both the limiter and the gate with a
+    :class:`FileStore` to extend that budget across processes on the same host.
+
+    Args:
+      limiter: Paces grants; one :meth:`acquire` per :meth:`pace`.
+      cooldown: Shared back-off window honored before each grant.
+      cooldown_sec: Seconds :meth:`trigger_cooldown` holds the window open when
+        a block is observed.
+
+    """
+
+    def __init__(
+        self,
+        *,
+        limiter: RateLimiter,
+        cooldown: CooldownGate,
+        cooldown_sec: float = 120.0,
+    ) -> None:
+        self._limiter = limiter
+        self._cooldown = cooldown
+        self._cooldown_sec = cooldown_sec
+
+    def pace(self) -> None:
+        """Wait out any active cooldown, then spend one rate-limit token."""
+        self._cooldown.wait()
+        self._limiter.acquire()
+
+    def trigger_cooldown(self) -> None:
+        """Open (or extend) the shared cooldown by ``cooldown_sec``."""
+        self._cooldown.trigger(self._cooldown_sec)

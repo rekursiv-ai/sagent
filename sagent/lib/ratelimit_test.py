@@ -12,6 +12,7 @@ from sagent.lib.ratelimit import (
     AsyncRateLimiter,
     CooldownGate,
     FileStore,
+    Pacer,
     RateLimiter,
     SlidingWindowRateLimiter,
     TokenBucketRateLimiter,
@@ -356,6 +357,48 @@ def test_cooldown_shared_across_instances_via_filestore(tmp_path: Path) -> None:
     b = CooldownGate(store=FileStore(store_path), clock=FakeClock())
     a.trigger(7.0)
     assert b.remaining() == 7.0
+
+
+# -- Pacer -------------------------------------------------------------------
+
+
+def test_pacer_spends_one_token_per_pace() -> None:
+    clock = FakeClock()
+    # Capacity-1 bucket: the second pace must wait ~1s for a refill.
+    pacer = Pacer(
+        limiter=TokenBucketRateLimiter(max_calls=1, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+    )
+    pacer.pace()  # first token is free (bucket starts full)
+    pacer.pace()  # drained -> waits for one refill
+    assert clock.sleeps == [1.0]
+
+
+def test_pacer_honors_cooldown_before_granting() -> None:
+    clock = FakeClock()
+    pacer = Pacer(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+        cooldown_sec=5.0,
+    )
+    pacer.trigger_cooldown()
+    pacer.pace()  # bucket has tokens, but the cooldown must be waited out first
+    assert clock.sleeps == [5.0]
+
+
+def test_pacer_cooldown_shared_via_filestore(tmp_path: Path) -> None:
+    # A Pacer built on a FileStore-backed cooldown honors a window another
+    # party opened -- the cross-process back-off contract.
+    store_path = tmp_path / "cd.lock"
+    other = CooldownGate(store=FileStore(store_path), clock=FakeClock())
+    clock = FakeClock()
+    pacer = Pacer(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(store=FileStore(store_path), clock=clock),
+    )
+    other.trigger(4.0)
+    pacer.pace()
+    assert clock.sleeps == [4.0]
 
 
 if __name__ == "__main__":
