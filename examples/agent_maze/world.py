@@ -58,7 +58,7 @@ PRESS_WINDOW = 10  # a press stays "armed" this many ticks (absorbs multi-agent 
 PRESS_CHARGES = 6  # presses each agent gets -> can't spam; must time it (=> comms)
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Item:
     """A pickup sitting on a tile or carried by an agent."""
 
@@ -69,7 +69,7 @@ class Item:
     collected: bool = False  # treasures: banked, not carried
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class Agent:
     """One body in the maze, driven by external macro-intents."""
 
@@ -128,11 +128,17 @@ class World:
                 # Non-terrain glyphs (items, spawns) sit on floor.
                 cells.append("floor")
                 if ch == "*":
-                    self.items["diamond"] = Item("diamond", "diamond", (x, y))
+                    self.items["diamond"] = Item(
+                        name="diamond", kind="diamond", xy=(x, y)
+                    )
                 elif ch == "$":
-                    self.items[f"t_{x}_{y}"] = Item(f"t_{x}_{y}", "treasure", (x, y))
+                    self.items[f"t_{x}_{y}"] = Item(
+                        name=f"t_{x}_{y}", kind="treasure", xy=(x, y)
+                    )
                 elif ch == "k":
-                    self.items[f"key_{x}_{y}"] = Item(f"key_{x}_{y}", "junk", (x, y))
+                    self.items[f"key_{x}_{y}"] = Item(
+                        name=f"key_{x}_{y}", kind="junk", xy=(x, y)
+                    )
                 elif ch.isdigit() and ch != "0":
                     spawns.append((int(ch), f"agent{ch}"))
             self.grid.append(cells)
@@ -177,7 +183,7 @@ class World:
         return not (c == "diggable" and self.dig_hp.get((x, y), 0) > 0)
 
     def _neighbors(self, x: int, y: int) -> list[tuple[int, int]]:
-        out = []
+        out: list[tuple[int, int]] = []
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = x + dx, y + dy
             if self.passable(nx, ny):

@@ -35,7 +35,7 @@ def _local_map(world: World, aid: str) -> str:
     a = world.agents[aid]
     s = world.sight
     occ = {o.xy for o in world.agents.values() if o.alive and o.id != aid}
-    lines = []
+    lines: list[str] = []
     for dy in range(-s, s + 1):
         row = ""
         for dx in range(-s, s + 1):

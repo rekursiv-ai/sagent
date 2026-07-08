@@ -16,6 +16,7 @@ import json
 from examples.agent_maze.arena import Arena
 from examples.agent_maze.engine import Engine
 from examples.agent_maze.world import make_spawn_level
+from sagent.lib.userdirs import config_dir
 from sagent.providers import Anthropic
 from sagent.types.model import Model
 
@@ -25,9 +26,7 @@ MODEL = "claude-sonnet-4-6"
 
 
 def _key() -> str:
-    return (
-        (Path.home() / ".config" / "sagent" / "anthropic_api_key").read_text().strip()
-    )
+    return (config_dir("sagent") / "anthropic_api_key").read_text().strip()
 
 
 def _make_model() -> Model:

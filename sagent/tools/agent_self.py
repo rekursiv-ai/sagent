@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, cast
 
 import dataclasses
 
@@ -56,7 +56,7 @@ class AgentSelf:
     tool_id: str = "application/x-tool-agentself"
     clearable_results: bool = False
     description: str = load_tool_description("agentself")
-    directive_schema: ClassVar[JSON] = json_freeze(
+    directive_schema: JSON = json_freeze(
         {
             "type": "object",
             "properties": {

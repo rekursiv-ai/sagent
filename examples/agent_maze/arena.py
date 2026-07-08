@@ -21,7 +21,11 @@ import asyncio
 import contextlib
 
 from examples.agent_maze.engine import Engine
-from examples.agent_maze.tools import CommsTool, SpawnTool, WorldTool
+from examples.agent_maze.tools import (
+    CommsTool,
+    SpawnTool,
+    WorldTool,
+)
 from examples.agent_maze.world import SpawnMeta
 from sagent.agent import Agent
 from sagent.tools.core import agent_label_var
