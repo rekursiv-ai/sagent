@@ -96,6 +96,11 @@ _ARXIV_NEW_RE = re.compile(r"^(\d{4}\.\d{4,5})(v\d+)?$")
 # S2 and arXiv both still honor these for papers pre-April-2007.
 _ARXIV_OLD_RE = re.compile(r"^([a-z-]+(?:\.[A-Z]{2})?)/(\d{7})(v\d+)?$")
 
+# arXiv id embedded in an abs/pdf URL, for backends (SearXNG, Google Scholar)
+# that surface no structured arXiv id but link to arxiv.org. Distinct from the
+# anchored id regexes above, which match a bare id, not a URL.
+ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w.-]+/\d+|\d{4}\.\d{4,5})")
+
 IdType = Literal["doi", "arxiv"]
 
 
@@ -275,6 +280,7 @@ def _id_prefix(rec: PaperRecord) -> str:
         parts.append(f"doi:{rec.doi}")
     if rec.arxiv_id:
         parts.append(f"arXiv:{rec.arxiv_id}")
+
     inner = " | ".join(parts) if parts else "no-id"
     return f"[{inner}]"
 

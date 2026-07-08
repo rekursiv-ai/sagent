@@ -25,9 +25,14 @@ import cachetools
 
 from sagent.lib.custom_json import JSON, MutableJSON, bool_val, int_val, json_freeze
 from sagent.lib.web.fetch import FetchError, fetch
-from sagent.lib.web.search import PaperResult, SearchError, searxng
+from sagent.lib.web.search import (
+    PaperResult,
+    SearchError,
+    searxng,
+)
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
+    ARXIV_URL_RE,
     S2_PAPER_FIELDS_STR,
     PaperRecord,
     format_record,
@@ -73,7 +78,12 @@ _OPENALEX_SELECT = ",".join(
     ),
 )
 
-_VALID_SOURCES = ("s2", "openalex", "searxng", "fused")
+_VALID_SOURCES = (
+    "s2",
+    "openalex",
+    "searxng",
+    "fused",
+)
 
 # Search results are stable on an agent's timescale; the cache collapses
 # duplicate queries within a process (sparing the shared S2 gate), bounded by
@@ -388,9 +398,6 @@ def _searxng_science_call(query: str, limit: int | None) -> list[PaperResult]:
     )
 
 
-_ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w.-]+/\d+|\d{4}\.\d{4,5})")
-
-
 def _searxng_paper_to_record(hit: PaperResult) -> PaperRecord:
     """Convert a SearXNG :class:`PaperResult` into a :class:`PaperRecord`.
 
@@ -399,7 +406,7 @@ def _searxng_paper_to_record(hit: PaperResult) -> PaperRecord:
     arXiv id); a DOI present in both ``doi`` and a DOI-shaped URL prefers the
     explicit field.
     """
-    arxiv_match = _ARXIV_URL_RE.search(hit.url)
+    arxiv_match = ARXIV_URL_RE.search(hit.url)
     arxiv_id = arxiv_match.group(1) if arxiv_match else None
     # ``hit.tags`` (SearXNG field-of-study tags) is intentionally dropped:
     # ``PaperRecord`` carries no tag concept, and the S2 / OpenAlex converters
@@ -556,11 +563,10 @@ class PaperSearch:
                 "query": {
                     "type": "string",
                     "description": (
-                        "Free-form text. The default Semantic Scholar backend "
-                        "matches title/abstract text, NOT author names -- an "
-                        "author surname in the query can yield zero hits. To "
-                        'search by author, use source="fused" (OpenAlex '
-                        "indexes authors) or the PaperAuthor tool."
+                        "Free-form text. Every backend matches title/abstract "
+                        "text, NOT author names -- an author surname in the "
+                        "query can yield zero hits. To search by author, use "
+                        "the PaperAuthor tool."
                     ),
                 },
                 "source": {
