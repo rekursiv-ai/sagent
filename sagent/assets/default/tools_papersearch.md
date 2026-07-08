@@ -9,11 +9,11 @@ comparison, or widen with SearXNG science metasearch (adds PubMed, Crossref,
 arXiv, OpenAIRE breadth beyond S2/OpenAlex).
 
 Parameters:
-  - `query` (required) — free-form text. Matches title/abstract text.
+  - `query` (required) -- free-form text. Matches title/abstract text.
     NOT author names: every backend ranks against title/abstract, so an
     author surname alone can zero-hit (use the `PaperAuthor` tool for
     author search).
-  - `source` — `"fused"` (default), `"s2"`, `"openalex"`, or
+  - `source` -- `"fused"` (default), `"s2"`, `"openalex"`, or
     `"searxng"`. `"fused"` reciprocal-rank-fuses S2 + OpenAlex: a paper
     both backends rank well floats above either backend's lone top hit,
     with S2 weighted higher; OpenAlex-only hits still place by their own
@@ -23,11 +23,11 @@ Parameters:
     biomedical or very recent work). SearXNG has no citation graph, so
     its hits carry no reference counts and `year_from`/`year_to`/
     `open_access_only` are applied best-effort client-side.
-  - `limit` — cap on returned hits. Omit to let the backend decide its
+  - `limit` -- cap on returned hits. Omit to let the backend decide its
     default page; no cap is imposed by the tool.
-  - `year_from` / `year_to` — publication-year bounds, inclusive.
-  - `open_access_only` (bool) — restrict to papers with a known OA PDF.
-  - `abstract_chars` (int) — truncate abstracts. Omit for full text.
+  - `year_from` / `year_to` -- publication-year bounds, inclusive.
+  - `open_access_only` (bool) -- restrict to papers with a known OA PDF.
+  - `abstract_chars` (int) -- truncate abstracts. Omit for full text.
 
 Output: one paper per line, in the same shape `PaperDetails` uses, with a
 `sources:` tag indicating which backend(s) found the record. Results
@@ -51,10 +51,6 @@ Workflow guidance:
     recent work that S2 + OpenAlex both miss, try `source="searxng"`.
   - SearXNG hits have no citation graph: to walk references/citations
     of a SearXNG result, take its DOI/arXiv id to `PaperDetails`.
-
-No Google Scholar backend is provided. GS requires scraping with
-captcha/proxy handling, which is out of scope — OpenAlex covers the
-"broad academic search" niche without the fragility.
 
 Sources:
   - Semantic Scholar: https://api.semanticscholar.org (`SEMANTIC_SCHOLAR_API_KEY`)

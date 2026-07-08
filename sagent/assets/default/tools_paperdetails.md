@@ -3,17 +3,17 @@ Backed by the Semantic Scholar Graph API. Set env var `SEMANTIC_SCHOLAR_API_KEY`
 for higher rate limits; omit it to use unauthenticated API limits.
 
 Operations (dispatched by which fields are set):
-  - Metadata — pass `ids` (a bare string for one, or an array for
+  - Metadata -- pass `ids` (a bare string for one, or an array for
     several), omit `operation`.
     Returns a block per paper with title, authors, year, venue,
     abstract, citation and reference counts, and an open-access PDF URL
     when available. Pass every id you need at once: they resolve in ONE
     batched request (up to 500), in input order (`<id>: not found` for
-    misses) — far more efficient against the 1 request/second rate limit
+    misses) -- far more efficient against the 1 request/second rate limit
     than one call per id.
-  - References — one id in `ids` + `operation="references"`. Returns the
+  - References -- one id in `ids` + `operation="references"`. Returns the
     papers this one cites (backward edges of the citation graph).
-  - Citations — one id in `ids` + `operation="citations"`. Returns the
+  - Citations -- one id in `ids` + `operation="citations"`. Returns the
     papers that cite this one (forward edges).
 
 Each id is a DOI (`10.xxxx/yyy`, optionally prefixed with `doi:` or
@@ -23,17 +23,17 @@ or legacy `hep-th/9901001`). PMIDs and raw S2 ids are not accepted.
 one id with them.
 
 Citation-only filters:
-  - `influential_only` (bool) — restrict to citations S2 flags as
+  - `influential_only` (bool) -- restrict to citations S2 flags as
     substantively building on the paper (its unique quality signal).
     Default false.
-  - `year_from` (int) — drop citations published before this year.
+  - `year_from` (int) -- drop citations published before this year.
     Useful for "who built on this since 2022" queries.
 
 Shared:
-  - `limit` — only applies to references and citations; ignored for
+  - `limit` -- only applies to references and citations; ignored for
     metadata. Omit to let Semantic Scholar return its default page; the
     tool imposes no cap and paginates to gather the requested number.
-  - `abstract_chars` (int) — trim abstracts to this many characters
+  - `abstract_chars` (int) -- trim abstracts to this many characters
     across every record in the response. Omit for full abstracts.
 
 Output:

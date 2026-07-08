@@ -15,7 +15,9 @@ if TYPE_CHECKING:
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.fetch import FetchError
-from sagent.lib.web.search import PaperResult
+from sagent.lib.web.search import (
+    PaperResult,
+)
 from sagent.tools.paper_common import PaperRecord
 from sagent.tools.paper_search import (
     PaperSearch,
