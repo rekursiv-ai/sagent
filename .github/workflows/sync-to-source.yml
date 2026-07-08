@@ -8,9 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       public_base_ref:
-        description: Public ref that represents the already-synced base tree.
-        default: main
-        required: true
+        description: >-
+          Public ref of the already-synced base tree. Leave empty to resolve
+          it from the target's last landed import (the usual recovery path).
+        required: false
       public_head_ref:
         description: Public ref to import. Defaults to this workflow run SHA.
         required: false
@@ -90,6 +91,40 @@ jobs:
           fi
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
+      # The target checkout precedes ref resolution so a push/dispatch can
+      # derive the merge baseline from what the target actually imported last,
+      # not from the pushed commit's parent (which drifts ahead whenever an
+      # import fails to land). Needs full history for the import-commit walk.
+      - uses: actions/checkout@v4
+        if: steps.settings.outputs.enabled == 'true'
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+          ref: main
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: steps.settings.outputs.enabled == 'true'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        if: steps.settings.outputs.enabled == 'true'
+      - name: Install system packages
+        if: steps.settings.outputs.enabled == 'true'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
+
+      # Capture the target's own import helper before running it, so baseline
+      # resolution below reuses the tested `last_synced_public_sha` logic rather
+      # than a second, drift-prone shell reimplementation. The target checkout
+      # has persist-credentials disabled; this reads its history only.
+      - name: Capture trusted import helper
+        if: steps.settings.outputs.enabled == 'true'
+        run: |
+          install -m 600 \
+            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
+            "$TRUSTED_IMPORT_SCRIPT"
+
       - id: refs
         name: Resolve public refs
         if: steps.settings.outputs.enabled == 'true'
@@ -104,8 +139,23 @@ jobs:
               head_ref="${GITHUB_SHA}"
             fi
           else
-            base_ref="${{ github.event.before }}"
             head_ref="${GITHUB_SHA}"
+            base_ref=""
+          fi
+          # On push (and any run that left base_ref empty), resolve the baseline
+          # from the target's last landed import via the tested helper. Its
+          # commit subject records the imported public SHA -- the tree the
+          # target reflects -- which is the correct three-way-merge common
+          # ancestor. --fallback-sha is the branch tip before this push
+          # (github.event.before); it is used only on a genuine first import
+          # (no landed history), where merge-import tolerates an older base.
+          if [ -z "$base_ref" ]; then
+            base_ref="$(uv --quiet run --no-project python \
+              "$TRUSTED_IMPORT_SCRIPT" --print-synced-base \
+              --target-dir target \
+              --base-branch main \
+              --sync-label "$COPYBARISTA_SYNC_LABEL" \
+              --fallback-sha "${{ github.event.before }}")"
           fi
           if [ -z "$base_ref" ] || [ "$base_ref" = "0000000000000000000000000000000000000000" ]; then
             echo "::error::Cannot resolve public base ref for import."
@@ -130,36 +180,22 @@ jobs:
         with:
           ref: ${{ steps.refs.outputs.head_ref }}
           path: public-head
-      - uses: actions/checkout@v4
-        if: steps.settings.outputs.enabled == 'true'
-        with:
-          repository: ${{ env.TARGET_REPO }}
-          token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
-          ref: main
-          path: target
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        if: steps.settings.outputs.enabled == 'true'
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-        if: steps.settings.outputs.enabled == 'true'
 
-      - name: Install system packages
+      # Resolve head to its concrete commit SHA. `head_ref` may be a symbolic
+      # ref (a dispatch may pass a branch name), but the import commit subject
+      # must record a SHA so the next run's baseline walk can match it. This is
+      # the exact tree the target will reflect after this import lands.
+      - id: head_sha
+        name: Resolve public head SHA
         if: steps.settings.outputs.enabled == 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
-      - name: Capture trusted import helper
-        if: steps.settings.outputs.enabled == 'true'
-        run: |
-          install -m 600 \
-            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
-            "$TRUSTED_IMPORT_SCRIPT"
+        run: echo "sha=$(git -C public-head rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Import public tree into target repository
         if: steps.settings.outputs.enabled == 'true'
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
+          public_head_sha="${{ steps.head_sha.outputs.sha }}"
           uv --quiet run --no-project python \
             "$TRUSTED_IMPORT_SCRIPT" \
             --public-base public-base \
@@ -169,7 +205,7 @@ jobs:
             --project-path "$TARGET_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
-            --public-sha "$GITHUB_SHA" \
+            --public-sha "$public_head_sha" \
             --public-base-ref "$public_base_ref" \
             --public-head-ref "$public_head_ref" \
             --branch-prefix "$COPYBARISTA_IMPORT_BRANCH_PREFIX" \
@@ -185,6 +221,7 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
+          public_head_sha="${{ steps.head_sha.outputs.sha }}"
           # The target checkout uses persist-credentials: false so the import
           # token never reaches the validation step (which executes imported
           # public code). The PR step needs git auth to push the import branch,
@@ -198,7 +235,7 @@ jobs:
             --project-path "$TARGET_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
-            --public-sha "$GITHUB_SHA" \
+            --public-sha "$public_head_sha" \
             --public-base-ref "$public_base_ref" \
             --public-head-ref "$public_head_ref" \
             --branch-prefix "$COPYBARISTA_IMPORT_BRANCH_PREFIX" \
