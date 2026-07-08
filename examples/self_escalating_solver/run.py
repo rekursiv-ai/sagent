@@ -34,6 +34,13 @@ import tempfile
 import webbrowser
 
 from examples.self_escalating_solver import solver
+from sagent.lib.userdirs import config_dir
+from sagent.providers import (
+    Anthropic,
+    Google,
+    default_auth_for_provider,
+)
+from sagent.types.model import ModelSpec
 
 
 HERE = Path(__file__).parent
@@ -76,13 +83,11 @@ def _read_key(provider_name: str) -> str | None:
     for e in _KEY_ENV[provider_name]:
         if os.environ.get(e):
             return os.environ[e]
-    kf = Path.home() / ".config" / "sagent" / _KEY_FILE[provider_name]
+    kf = config_dir("sagent") / _KEY_FILE[provider_name]
     return kf.read_text().strip() if kf.exists() else None
 
 
 def _provider(provider_name: str):
-    from sagent.providers import Anthropic, Google  # noqa: PLC0415
-
     key = _read_key(provider_name)
     if provider_name == "Google":
         return Google.from_key(key) if key else Google.from_env()
@@ -91,9 +96,6 @@ def _provider(provider_name: str):
 
 def build(provider_name: str, model_id: str):
     """Return (Model, ModelSpec) for one arm. The spec is what AgentSelf swaps from."""
-    from sagent.providers import default_auth_for_provider  # noqa: PLC0415
-    from sagent.types.model import ModelSpec  # noqa: PLC0415
-
     model = _provider(provider_name).model(model_id)
     # auth must map to a real provider factory; "api" had no `from_api`. The
     # provider's conventional auth (Anthropic/Google → "env") is what AgentSelf

@@ -70,8 +70,7 @@ def test_fog_is_limited() -> None:
     w = World(LEVEL_V1, sight=2)
     w.spawn(["a"])
     view = w.view("a")
-    cells = view["visible_cells"]
-    assert isinstance(cells, list)
+    cells = cast("list[dict[str, object]]", view["visible_cells"])
     # A sight-2 square is at most 5x5 = 25 tiles (fewer at the edge).
     assert len(cells) <= 25
     # The far diamond must NOT be visible from spawn.

@@ -33,16 +33,15 @@ import subprocess
 import tempfile
 
 from sagent.agent import Agent
+from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools import AgentSelf
 from sagent.types.model import Model, ModelSpec
-from sagent.types.runtime import AssistantMessage, ToolResult, UserMessage
+from sagent.types.runtime import (
+    AssistantMessage,
+    ToolResult,
+    UserMessage,
+)
 from sagent.types.tools import Tool
-
-
-try:
-    from sagent.lib.custom_json import JSON, json_freeze
-except ImportError:  # older sagent branches
-    from sagent.lib.json import JSON, json_freeze
 
 
 # --------------------------------------------------------------------------
@@ -144,19 +143,16 @@ class RunPython:
     name: str = "run_python"
     tool_id: str = "application/x-tool-runpython"
     clearable_results: bool = True
+    description: str = (
+        "Run a COMPLETE, self-contained Python script in a fresh subprocess. numpy "
+        "and scipy are available, and a grader function check(samples) is already "
+        "defined for you (do not redefine it). Nothing else persists between calls — "
+        "include all your own imports and definitions every time. Returns "
+        "stdout+stderr. print() what you want to inspect, including print(check(samples))."
+    )
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
-
-    @property
-    def description(self) -> str:
-        return (
-            "Run a COMPLETE, self-contained Python script in a fresh subprocess. numpy "
-            "and scipy are available, and a grader function check(samples) is already "
-            "defined for you (do not redefine it). Nothing else persists between calls — "
-            "include all your own imports and definitions every time. Returns "
-            "stdout+stderr. print() what you want to inspect, including print(check(samples))."
-        )
 
     directive_schema: JSON = json_freeze(
         {
@@ -234,7 +230,7 @@ def _build_timeline(
             continue
         if m.text and m.text.strip():
             steps.append(
-                {"kind": "think", "model": active, "text": _clip(m.text, 100000)}
+                {"kind": "think", "model": active, "text": _clip(m.text, 100_000)}
             )
         for tc in m.tool_calls:
             if tc.name == "run_python":
