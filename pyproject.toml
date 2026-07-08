@@ -416,7 +416,7 @@ ignore-words = ".codespell-ignore"
 # Pre-commit exclude handles most skips. This covers direct CLI invocations.
 # Don't add new folder paths here — add them to .pre-commit-config.yaml's
 # codespell exclude regex instead. This list is only for file patterns.
-skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/,*/web/data.js"
+skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/"
 
 [tool.jupytext]
 formats = "ipynb,py:percent"
