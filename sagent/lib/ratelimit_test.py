@@ -11,11 +11,12 @@ import threading
 from sagent.lib.ratelimit import (
     AsyncRateLimiter,
     CooldownGate,
+    CooldownRateLimiter,
     FileStore,
-    Pacer,
     RateLimiter,
     SlidingWindowRateLimiter,
     TokenBucketRateLimiter,
+    cross_process_limiter,
 )
 
 
@@ -359,46 +360,80 @@ def test_cooldown_shared_across_instances_via_filestore(tmp_path: Path) -> None:
     assert b.remaining() == 7.0
 
 
-# -- Pacer -------------------------------------------------------------------
+# -- CooldownRateLimiter -----------------------------------------------------
 
 
-def test_pacer_spends_one_token_per_pace() -> None:
+def test_cooldown_rate_limiter_spends_one_token_per_acquire() -> None:
     clock = FakeClock()
-    # Capacity-1 bucket: the second pace must wait ~1s for a refill.
-    pacer = Pacer(
+    # Capacity-1 bucket: the second acquire must wait ~1s for a refill.
+    limiter = CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(max_calls=1, per_seconds=1.0, clock=clock),
         cooldown=CooldownGate(clock=clock),
     )
-    pacer.pace()  # first token is free (bucket starts full)
-    pacer.pace()  # drained -> waits for one refill
+    limiter.acquire()  # first token is free (bucket starts full)
+    limiter.acquire()  # drained -> waits for one refill
     assert clock.sleeps == [1.0]
 
 
-def test_pacer_honors_cooldown_before_granting() -> None:
+def test_cooldown_rate_limiter_honors_cooldown_before_granting() -> None:
     clock = FakeClock()
-    pacer = Pacer(
+    limiter = CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
         cooldown=CooldownGate(clock=clock),
         cooldown_sec=5.0,
     )
-    pacer.trigger_cooldown()
-    pacer.pace()  # bucket has tokens, but the cooldown must be waited out first
+    limiter.trigger_cooldown()
+    limiter.acquire()  # bucket has tokens, but the cooldown must be waited out first
     assert clock.sleeps == [5.0]
 
 
-def test_pacer_cooldown_shared_via_filestore(tmp_path: Path) -> None:
-    # A Pacer built on a FileStore-backed cooldown honors a window another
-    # party opened -- the cross-process back-off contract.
+def test_cooldown_rate_limiter_cooldown_shared_via_filestore(tmp_path: Path) -> None:
+    # A CooldownRateLimiter built on a FileStore-backed cooldown honors a window
+    # another party opened -- the cross-process back-off contract.
     store_path = tmp_path / "cd.lock"
     other = CooldownGate(store=FileStore(store_path), clock=FakeClock())
     clock = FakeClock()
-    pacer = Pacer(
+    limiter = CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
         cooldown=CooldownGate(store=FileStore(store_path), clock=clock),
     )
     other.trigger(4.0)
-    pacer.pace()
+    limiter.acquire()
     assert clock.sleeps == [4.0]
+
+
+# -- cross_process_limiter ---------------------------------------------------
+
+
+def test_cross_process_limiter_caches_per_key(tmp_path: Path) -> None:
+    # Same (key, per_seconds, state_dir) returns the identical instance; a
+    # different key does not.
+    a = cross_process_limiter("s2", per_seconds=1.0, state_dir=tmp_path)
+    b = cross_process_limiter("s2", per_seconds=1.0, state_dir=tmp_path)
+    c = cross_process_limiter("openalex", per_seconds=1.0, state_dir=tmp_path)
+    assert a is b
+    assert a is not c
+
+
+def test_cross_process_limiter_writes_keyed_lockfiles(tmp_path: Path) -> None:
+    limiter = cross_process_limiter("s2", per_seconds=1.0, state_dir=tmp_path)
+    limiter.acquire()  # first token free; forces the FileStore to materialize.
+    assert (tmp_path / "s2_ratelimit.lock").exists()
+
+
+def test_cross_process_limiter_shares_cooldown_across_instances(
+    tmp_path: Path,
+) -> None:
+    # A cooldown opened via one handle is honored by another built on the same
+    # key + state_dir -- the cross-process contract. Distinct keys cache
+    # separately, so vary per_seconds to dodge the process cache within a test.
+    first = cross_process_limiter("s2", per_seconds=2.0, state_dir=tmp_path)
+    first.trigger_cooldown(30.0)
+    second = cross_process_limiter("s2", per_seconds=2.0, state_dir=tmp_path)
+    assert second is first  # cached; the shared FileStore carries the window.
+    raw = (tmp_path / "s2_cooldown.lock").read_bytes()
+    until, _ = struct.unpack("<dd", raw)
+    assert until > 0
 
 
 if __name__ == "__main__":
