@@ -42,6 +42,27 @@ import time
 from sagent.lib.userdirs import data_dir
 
 
+class CooldownActiveError(Exception):
+    """A cooldown longer than the caller's tolerance is active -- do not wait.
+
+    Raised by :meth:`CooldownRateLimiter.acquire` when the shared cooldown's
+    remaining time exceeds the configured ``max_cooldown_wait_sec``. A long
+    cooldown (e.g. a 48h scraping ban) must NOT be slept through -- the caller
+    should abort and rotate/retry later instead of hanging the process.
+
+    Attributes:
+      remaining_sec: Seconds still left in the active cooldown window.
+
+    """
+
+    def __init__(self, remaining_sec: float) -> None:
+        super().__init__(
+            f"cooldown active for {remaining_sec:.0f}s more; "
+            "not waiting -- retry later or change identity (IP / key)"
+        )
+        self.remaining_sec = remaining_sec
+
+
 @runtime_checkable
 class RateLimiter(Protocol):
     """Blocks the calling thread until a request slot is available."""
@@ -434,9 +455,26 @@ class CooldownGate:
 
         self._store.transact(write)
 
-    def wait(self) -> None:
-        """Block the thread until the active cooldown elapses."""
+    def wait(self, max_wait_sec: float | None = None) -> None:
+        """Block the thread until the active cooldown elapses.
+
+        Reads the window ONCE and acts on that single value, so the decision and
+        the sleep can never disagree: with ``max_wait_sec`` set, a window longer
+        than it raises :class:`CooldownActiveError` rather than being slept
+        through -- there is no second read a concurrent :meth:`trigger` could
+        extend between (the TOCTOU a check-then-wait pair would have).
+
+        Args:
+          max_wait_sec: Longest window to sleep. ``None`` sleeps any length.
+
+        Raises:
+          CooldownActiveError: When ``max_wait_sec`` is set and the window
+            exceeds it.
+
+        """
         wait = self.remaining()
+        if max_wait_sec is not None and wait > max_wait_sec:
+            raise CooldownActiveError(wait)
         if wait > 0:
             self._clock.sleep(wait)
 
@@ -475,6 +513,12 @@ class CooldownRateLimiter:
       cooldown: Shared back-off window honored before each grant.
       cooldown_sec: Seconds :meth:`trigger_cooldown` holds the window open when
         a block is observed.
+      max_cooldown_wait_sec: The longest active cooldown :meth:`acquire` will
+        sleep through. When the remaining window EXCEEDS this, :meth:`acquire`
+        raises :class:`CooldownActiveError` instead of sleeping -- so a long ban
+        (e.g. a multi-hour scraping block) aborts the caller for rotation rather
+        than hanging it. ``None`` (default) preserves the sleep-always behavior,
+        correct for short variable back-offs (a few-second 429 retry).
 
     """
 
@@ -484,14 +528,23 @@ class CooldownRateLimiter:
         limiter: RateLimiter,
         cooldown: CooldownGate,
         cooldown_sec: float = 120.0,
+        max_cooldown_wait_sec: float | None = None,
     ) -> None:
         self._limiter = limiter
         self._cooldown = cooldown
         self._cooldown_sec = cooldown_sec
+        self._max_cooldown_wait_sec = max_cooldown_wait_sec
 
     def acquire(self) -> None:
-        """Wait out any active cooldown, then spend one rate-limit token."""
-        self._cooldown.wait()
+        """Wait out any active cooldown, then spend one rate-limit token.
+
+        Raises:
+          CooldownActiveError: When ``max_cooldown_wait_sec`` is set and the
+            active cooldown's remaining time exceeds it -- the caller must not
+            wait (rotate/retry later instead).
+
+        """
+        self._cooldown.wait(self._max_cooldown_wait_sec)
         self._limiter.acquire()
 
     def trigger_cooldown(self, backoff_sec: float | None = None) -> None:
@@ -515,6 +568,8 @@ def cross_process_limiter(
     *,
     per_seconds: float,
     state_dir: Path | None = None,
+    cooldown_sec: float = 120.0,
+    max_cooldown_wait_sec: float | None = None,
 ) -> CooldownRateLimiter:
     """Return a host-wide :class:`CooldownRateLimiter` for ``key``, built once.
 
@@ -539,6 +594,12 @@ def cross_process_limiter(
       state_dir: Directory for the ``{key}_ratelimit.lock`` /
         ``{key}_cooldown.lock`` files. Defaults to ``data_dir("ratelimit")``.
         Created on first write by :class:`FileStore`.
+      cooldown_sec: Default seconds a triggered cooldown holds the shared window
+        open (a caller may override per :meth:`CooldownRateLimiter.trigger_cooldown`).
+      max_cooldown_wait_sec: When set, :meth:`CooldownRateLimiter.acquire` raises
+        :class:`CooldownActiveError` instead of sleeping once the active cooldown
+        exceeds it -- for a long ban that must abort the caller (rotate) rather
+        than hang it. ``None`` (default) keeps sleep-always semantics.
 
     Returns:
       limiter: The shared cross-process cooldown-rate-limiter for ``key``.
@@ -557,4 +618,6 @@ def cross_process_limiter(
             store=FileStore(base / f"{key}_cooldown.lock"),
             clock=clock,
         ),
+        cooldown_sec=cooldown_sec,
+        max_cooldown_wait_sec=max_cooldown_wait_sec,
     )
