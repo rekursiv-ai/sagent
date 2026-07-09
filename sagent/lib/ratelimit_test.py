@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import asyncio
 import struct
 import threading
 
+import pytest
+
 from sagent.lib.ratelimit import (
     AsyncRateLimiter,
+    CooldownActiveError,
     CooldownGate,
     CooldownRateLimiter,
     FileStore,
@@ -400,6 +404,62 @@ def test_cooldown_rate_limiter_cooldown_shared_via_filestore(tmp_path: Path) -> 
     other.trigger(4.0)
     limiter.acquire()
     assert clock.sleeps == [4.0]
+
+
+def test_cooldown_short_is_slept_when_under_max_wait() -> None:
+    clock = FakeClock()
+    limiter = CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+        max_cooldown_wait_sec=60.0,
+    )
+    limiter.trigger_cooldown(5.0)  # under the 60s tolerance -> still sleeps
+    limiter.acquire()
+    assert clock.sleeps == [5.0]
+
+
+def test_cooldown_over_max_wait_raises_without_sleeping() -> None:
+    clock = FakeClock()
+    limiter = CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+        max_cooldown_wait_sec=60.0,
+    )
+    limiter.trigger_cooldown(3600.0)  # a 1h ban -> must NOT be slept through
+    with pytest.raises(CooldownActiveError) as excinfo:
+        limiter.acquire()
+    assert clock.sleeps == []  # never slept
+    assert excinfo.value.remaining_sec == 3600.0
+
+
+def test_cooldown_no_max_wait_sleeps_any_length() -> None:
+    clock = FakeClock()
+    limiter = CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=CooldownGate(clock=clock),
+    )  # max_cooldown_wait_sec=None -> legacy sleep-always
+    limiter.trigger_cooldown(3600.0)
+    limiter.acquire()
+    assert clock.sleeps == [3600.0]
+
+
+def test_cooldown_window_growing_between_check_and_wait_never_sleeps_long() -> None:
+    # TOCTOU guard: a concurrent trigger extends the window AFTER the fail-fast
+    # gate reads a small value but BEFORE the wait re-reads. The decision and the
+    # sleep must derive from ONE read, so acquire must never sleep the long
+    # (post-extension) window -- it raises instead.
+    clock = FakeClock()
+    gate = CooldownGate(clock=clock)
+    limiter = CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(max_calls=10, per_seconds=1.0, clock=clock),
+        cooldown=gate,
+        max_cooldown_wait_sec=60.0,
+    )
+    # Two successive reads: gate-check sees 10s (would pass), a re-read would see
+    # a 1h ban. A single-read design uses only the first value.
+    with patch.object(gate, "remaining", side_effect=[10.0, 3600.0]):
+        limiter.acquire()
+    assert clock.sleeps == [10.0]  # slept the CHECKED value, never 3600
 
 
 # -- cross_process_limiter ---------------------------------------------------

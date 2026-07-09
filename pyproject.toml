@@ -78,26 +78,27 @@ debug = [
     "ipython",
 ]
 lint = [
-    "pre-commit>=3.5",
     "codespell>=2.2.4",
+    "pre-commit>=4.6",
     "ruff",
 ]
 test = [
-    "pytest>=7.0",
+    "hypothesis>=6.155.1",
     "pytest-asyncio>=1.3.0",
     "pytest-cov",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "hypothesis>=6.155.1",
+    "pytest>=7.0",
 ]
-typing = [
+typecheck = [
     "basedpyright>=1.10",
-    "ty",
+    "ty>=0.0.56",
 ]
 dev = [
+    {include-group = "debug"},
     {include-group = "lint"},
     {include-group = "test"},
-    {include-group = "typing"},
+    {include-group = "typecheck"},
 ]
 
 [project.urls]
