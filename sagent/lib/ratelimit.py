@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
@@ -37,6 +38,8 @@ import os
 import struct
 import threading
 import time
+
+from sagent.lib.userdirs import data_dir
 
 
 @runtime_checkable
@@ -451,23 +454,24 @@ class CooldownGate:
             await self._clock.sleep_async(wait)
 
 
-class Pacer:
-    """Steady pacing plus a shared block-triggered cooldown, as one gate.
+class CooldownRateLimiter:
+    """Steady rate limiting plus a shared block-triggered cooldown, as one gate.
 
     Composes the two orthogonal signals a polite client needs: a
     :class:`RateLimiter` paces grants at a steady rate, and a
     :class:`CooldownGate` absorbs an external "slow down" (an HTTP 429, a
     CAPTCHA) so every requester waits rather than each rediscovering the block.
-    :meth:`pace`, called before each request, honors an active cooldown first
+    :meth:`acquire`, called before each request, honors an active cooldown first
     and then spends one rate-limit token; :meth:`trigger_cooldown`, called when
     a block is observed, opens the shared window.
 
-    Share one :class:`Pacer` across every request to a resource so a burst
-    cannot outrun the limit; back both the limiter and the gate with a
+    Share one :class:`CooldownRateLimiter` across every request to a resource so
+    a burst cannot outrun the limit; back both the limiter and the gate with a
     :class:`FileStore` to extend that budget across processes on the same host.
 
     Args:
-      limiter: Paces grants; one :meth:`acquire` per :meth:`pace`.
+      limiter: Paces grants; one :meth:`RateLimiter.acquire` per
+        :meth:`acquire`.
       cooldown: Shared back-off window honored before each grant.
       cooldown_sec: Seconds :meth:`trigger_cooldown` holds the window open when
         a block is observed.
@@ -485,11 +489,72 @@ class Pacer:
         self._cooldown = cooldown
         self._cooldown_sec = cooldown_sec
 
-    def pace(self) -> None:
+    def acquire(self) -> None:
         """Wait out any active cooldown, then spend one rate-limit token."""
         self._cooldown.wait()
         self._limiter.acquire()
 
-    def trigger_cooldown(self) -> None:
-        """Open (or extend) the shared cooldown by ``cooldown_sec``."""
-        self._cooldown.trigger(self._cooldown_sec)
+    def trigger_cooldown(self, backoff_sec: float | None = None) -> None:
+        """Open (or extend) the shared cooldown.
+
+        Args:
+          backoff_sec: Seconds to hold the window open. Defaults to the
+            configured ``cooldown_sec`` -- pass an explicit value for a
+            variable back-off (e.g. exponential 429 retry) against the same
+            shared window.
+
+        """
+        self._cooldown.trigger(
+            self._cooldown_sec if backoff_sec is None else backoff_sec
+        )
+
+
+@cache
+def cross_process_limiter(
+    key: str,
+    *,
+    per_seconds: float,
+    state_dir: Path | None = None,
+) -> CooldownRateLimiter:
+    """Return a host-wide :class:`CooldownRateLimiter` for ``key``, built once.
+
+    Composes the standard cross-process gate: a one-token bucket refilling every
+    ``per_seconds`` plus a shared cooldown, both backed by ``fcntl``-locked
+    :class:`FileStore` files under ``state_dir`` and a wall clock. Every process
+    on the host that asks for the same ``key`` shares one budget -- the unit a
+    per-IP / per-API-key limit is enforced against -- not merely coroutines in
+    one process.
+
+    Cached on the full argument tuple so repeated calls with the same ``key``
+    return one instance; a different ``per_seconds`` or ``state_dir`` yields a
+    distinct gate. Built lazily (never at import) so it has no filesystem side
+    effect until first use. The wall clock is mandatory with :class:`FileStore`:
+    the persisted timestamp is compared across processes, which share no
+    monotonic epoch.
+
+    Args:
+      key: Identity the limit is enforced against (e.g. an API-key / per-IP
+        source name). Names the two lockfiles and the cache entry.
+      per_seconds: Minimum seconds between grants (one token per window).
+      state_dir: Directory for the ``{key}_ratelimit.lock`` /
+        ``{key}_cooldown.lock`` files. Defaults to ``data_dir("ratelimit")``.
+        Created on first write by :class:`FileStore`.
+
+    Returns:
+      limiter: The shared cross-process cooldown-rate-limiter for ``key``.
+
+    """
+    base = state_dir if state_dir is not None else data_dir("ratelimit")
+    clock = SystemClock(source=time.time)
+    return CooldownRateLimiter(
+        limiter=TokenBucketRateLimiter(
+            max_calls=1,
+            per_seconds=per_seconds,
+            clock=clock,
+            store=FileStore(base / f"{key}_ratelimit.lock"),
+        ),
+        cooldown=CooldownGate(
+            store=FileStore(base / f"{key}_cooldown.lock"),
+            clock=clock,
+        ),
+    )
