@@ -4,11 +4,22 @@ Queries OpenAlex ``/works`` via the ``title_and_abstract.search`` filter and
 maps each work onto the backend-agnostic :class:`PaperRecord`. Sync, paced
 through the shared ``openalex`` cross-process gate. Adds broad, non-CS coverage
 and an independent quota so it degrades independently of S2.
+
+Tunable knobs are literal-default keyword-only kwargs on the functions that
+consume them (NOT module state); a caller needing different limits overrides
+via the signature. Named here once so the rationale lives in one place:
+  base="https://api.openalex.org" -- API base URL.
+  timeout_sec=10.0    -- HTTP timeout; matches the S2 ceiling so this leg cannot
+                         silently hang a turn after a sibling returned.
+  interval_sec=0.1    -- min seconds between requests. OpenAlex's cap is a daily
+                         credit budget, so a light steady pace smooths bursts.
+  per_page_max=200    -- OpenAlex ``per-page`` ceiling.
+  source="openalex"   -- rate-limit gate key.
+The ``select`` field list is built inline by :func:`_select`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import cast
 
 import json
@@ -17,9 +28,14 @@ import re
 
 from sagent.lib.custom_json import MutableJSON, int_val
 from sagent.lib.ratelimit import cross_process_limiter
-from sagent.lib.web.fetch import FetchError, fetch
+from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import fetch
 from sagent.lib.web.paper.custom_types import IdType, PaperRecord
-from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
+from sagent.lib.web.paper.errors import (
+    BackendError,
+    NotFoundError,
+    translate_http_error,
+)
 from sagent.lib.web.paper.paginate import Cursor, Page, paginate
 
 
@@ -30,32 +46,11 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class OpenAlexConfig:
-    """Tunable knobs for the OpenAlex client, grouped in one scope.
-
-    A frozen default instance (:data:`_CONFIG`) supplies the values; a caller
-    needing different limits builds its own and passes it in.
-    """
-
-    base: str = "https://api.openalex.org"
-    """API base URL."""
-
-    timeout_sec: float = 10.0
-    """HTTP timeout. Matches the S2 client's ceiling: a loose value would let
-    this leg silently hang an interactive turn even after a sibling returned."""
-
-    per_page_max: int = 200
-    """OpenAlex ``per-page`` ceiling."""
-
-    source: str = "openalex"
-    """Rate-limit gate key."""
-
-    interval_sec: float = 0.1
-    """Minimum seconds between requests. OpenAlex's cap is a daily credit
-    budget, not a per-second throttle, so a light steady pace smooths bursts."""
-
-    select_fields: tuple[str, ...] = (
+def _select(extra: str = "") -> str:
+    """Comma-joined ``select`` field list, kept small to shrink responses."""
+    # extra appends caller-specific fields (e.g. referenced_works) that a graph
+    # walk needs but the default search does not.
+    fields = (
         "id",
         "doi",
         "ids",
@@ -69,16 +64,7 @@ class OpenAlexConfig:
         "abstract_inverted_index",
         "open_access",
     )
-    """Fields requested via ``select`` to keep responses small."""
-
-    @property
-    def select(self) -> str:
-        """Comma-joined :attr:`select_fields` for the ``select`` query param."""
-        return ",".join(self.select_fields)
-
-
-_CONFIG = OpenAlexConfig()
-"""Process-wide default OpenAlex client config."""
+    return ",".join((*fields, extra)) if extra else ",".join(fields)
 
 
 def _headers() -> dict[str, str]:
@@ -118,6 +104,13 @@ def search(
     citation-skewed. The cost is recall (it requires every term), the correct
     tradeoff since a fused caller still covers such queries via S2.
 
+    Args:
+      query: Free-text query matched against title and abstract.
+      limit: Maximum records to return, or ``None`` for one page.
+      year_from: Inclusive lower publication-year bound, when set.
+      year_to: Inclusive upper publication-year bound, when set.
+      open_access_only: Restrict to works with an open-access location.
+
     Raises:
       PaperError: On an HTTP failure, timeout, or bad JSON.
 
@@ -138,20 +131,17 @@ def search(
 
 
 def _paginate_works(
-    extra_params: dict[str, str | int], *, limit: int | None
+    extra_params: dict[str, str | int], *, limit: int | None, per_page_max: int = 200
 ) -> tuple[Page, int]:
-    """Walk ``/works`` via the shared cursor; return (page, reported-total).
-
-    OpenAlex pages a filtered ``/works`` list with a 1-based ``page`` bounded by
-    ``meta.count``, capped at ``per-page`` <= 200. The walker owns the clamp and
-    the offset arithmetic; this only describes the wire mechanics.
-    """
+    """Walk ``/works`` via the shared cursor; return (page, reported-total)."""
+    # OpenAlex pages a filtered /works list with a 1-based page bounded by
+    # meta.count, per-page <= 200. The walker owns the clamp and offset math.
     total = 0
 
     def fetch_page(page_no: int, size: int) -> MutableJSON:
         nonlocal total
         params: dict[str, str | int] = {
-            "select": _CONFIG.select,
+            "select": _select(),
             **extra_params,
             "page": page_no,
             "per-page": size,
@@ -160,52 +150,64 @@ def _paginate_works(
         total = int_val(cast(MutableJSON, body.get("meta") or {}).get("count"), 0)
         return body
 
-    def advance(body: MutableJSON, page_no: int, size: int) -> int | None:
-        rows = cast(list[MutableJSON], body.get("results") or [])
-        count = int_val(cast(MutableJSON, body.get("meta") or {}).get("count"), 0)
-        # Exact exhaustion from ``meta.count``: a full final page that reaches
-        # the total is the last one, so a short page is not the only stop signal
-        # (the ``len<size`` heuristic alone would lie on a count-aligned page).
-        seen = (page_no - 1) * size + len(rows)
-        return page_no + 1 if rows and seen < count else None
-
     cursor = Cursor(
         fetch=fetch_page,
         rows=lambda body: cast(list[MutableJSON], body.get("results") or []),
-        advance=advance,
-        page_size_max=_CONFIG.per_page_max,
+        advance=_works_page_advance,
+        page_size_max=per_page_max,
         start=1,
     )
     return paginate(cursor, limit=limit), total
 
 
-def _get(path: str, params: dict[str, str | int]) -> MutableJSON:
+def _works_page_advance(body: MutableJSON, page_no: int, size: int) -> int | None:
+    """Next 1-based ``/works`` page; stops via ``meta.count`` so a count-aligned
+    full final page ends (``len < size`` alone would miss it).
+    """
+    rows = cast(list[MutableJSON], body.get("results") or [])
+    count = int_val(cast(MutableJSON, body.get("meta") or {}).get("count"), 0)
+    seen = (page_no - 1) * size + len(rows)
+    return page_no + 1 if rows and seen < count else None
+
+
+def _get(
+    path: str,
+    params: dict[str, str | int],
+    *,
+    base: str = "https://api.openalex.org",
+    source: str = "openalex",
+    interval_sec: float = 0.1,
+    timeout_sec: float = 10.0,
+) -> MutableJSON:
     """GET an OpenAlex path, gated, with polite UA + optional key; parse JSON."""
     # A premium key raises the daily credit budget far above the anonymous
     # ~1000/day; send it when configured.
     api_key = os.environ.get("OPENALEX_API_KEY", "")
     if api_key:
         params = {**params, "api_key": api_key}
-    cross_process_limiter(_CONFIG.source, per_seconds=_CONFIG.interval_sec).acquire()
+    cross_process_limiter(source, per_seconds=interval_sec).acquire()
     try:
         raw = fetch(
-            url=f"{_CONFIG.base}{path}",
+            url=f"{base}{path}",
             params=params,
             headers=_headers(),
-            timeout_sec=_CONFIG.timeout_sec,
+            timeout_sec=timeout_sec,
         )
     except FetchError as e:
         detail = e.body[:200].decode(errors="replace")
-        if e.status == 429:
-            # Usually daily-credit-budget exhaustion (free tier ~1000/day,
-            # list search = 10 each), resetting at midnight UTC.
-            raise RateLimitError(
+        raise translate_http_error(
+            e,
+            backend="OpenAlex",
+            rate_limit_message=(
+                # Usually daily-credit-budget exhaustion (free tier ~1000/day,
+                # list search = 10 each), resetting at midnight UTC.
                 "OpenAlex rate limit / daily credit budget exhausted. Set "
                 "OPENALEX_API_KEY for a higher budget, or retry after the reset "
                 f"(midnight UTC). {detail}"
-            ) from e
-        raise BackendError(
-            f"OpenAlex HTTP {e.status}: {detail}", status=e.status
+            ),
+            # OpenAlex signals real not-found semantically (200 + empty results);
+            # an HTTP 404 here is a bad endpoint -> BackendError, not NotFound.
+            not_found_on_404=False,
         ) from e
     except (TimeoutError, OSError) as e:
         raise BackendError(
@@ -296,7 +298,14 @@ def references(
 
     OpenAlex inlines a work's ``referenced_works`` (a few hundred OpenAlex ids at
     most), so this resolves the seed to its work, then batch-resolves those ids
-    to records. ``complete`` is False only when ``limit`` cut the list short.
+    to records. ``complete`` is False when ``limit`` cut the list short OR when
+    the batch resolve returned fewer records than ids requested (an id OpenAlex
+    could not resolve).
+
+    Args:
+      kind: Seed identifier type (must be ``doi``).
+      canonical: Bare seed DOI.
+      limit: Maximum reference records to return, or ``None`` for all.
 
     Raises:
       BackendError: For an arXiv seed id (OpenAlex keys its graph on DOIs;
@@ -310,7 +319,14 @@ def references(
     ids = [_work_id_tail(u) for u in ref_urls]
     capped = ids if limit is None else ids[:limit]
     records = _resolve_works(capped)
-    return records, limit is None or len(ids) <= limit
+    # ``complete`` is evidence-derived, never intent-derived: the ``openalex:``
+    # OR-filter silently drops ids it cannot resolve, so a short result must NOT
+    # report complete even when the limit did not cut the list. Require both that
+    # the limit spared the tail AND that every DISTINCT requested id resolved
+    # (the OR-filter de-dups, so a repeated ref id resolves once -- compare
+    # against the distinct count, not the raw length, else a dup lies incomplete).
+    complete = (limit is None or len(ids) <= limit) and len(records) == len(set(capped))
+    return records, complete
 
 
 def citations(
@@ -324,6 +340,12 @@ def citations(
 
     Uses the ``cites:<work-id>`` filter (OpenAlex does not inline the citing set
     -- it can run to tens of thousands). ``year_from`` is applied server-side.
+
+    Args:
+      kind: Seed identifier type (must be ``doi``).
+      canonical: Bare seed DOI.
+      limit: Maximum citing records to return, or ``None`` for one page.
+      year_from: Inclusive lower publication-year bound, applied server-side.
 
     Raises:
       BackendError: For an arXiv seed id (see :func:`references`).
@@ -358,12 +380,16 @@ def _resolve_work(kind: IdType, canonical: str, *, extra_select: str) -> Mutable
     return results[0]
 
 
-def _resolve_works(work_ids: list[str]) -> list[PaperRecord]:
+def _resolve_works(
+    work_ids: list[str], *, per_page_max: int = 200
+) -> list[PaperRecord]:
     """Batch-resolve OpenAlex work ids to records (references are unranked)."""
     records: list[PaperRecord] = []
-    for chunk in _chunked(work_ids, _CONFIG.per_page_max):
+    for chunk in _chunked(work_ids, per_page_max):
         page, _ = _paginate_works(
-            {"filter": f"openalex:{'|'.join(chunk)}"}, limit=_CONFIG.per_page_max
+            {"filter": f"openalex:{'|'.join(chunk)}"},
+            limit=per_page_max,
+            per_page_max=per_page_max,
         )
         records.extend(_work_to_record(w) for w in page.entries)
     return records

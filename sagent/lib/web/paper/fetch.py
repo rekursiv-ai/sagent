@@ -16,13 +16,13 @@ only the network + format work, so it takes no sagent dependency.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import logging
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.web.fetch import FetchError, fetch
+from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import fetch
 from sagent.lib.web.paper.custom_types import IdType
 from sagent.lib.web.paper.errors import NotFoundError
 from sagent.lib.web.paper.ids import s2_wire_id
@@ -45,59 +45,71 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class FetchConfig:
-    """Tunable knobs for the PDF download cascade, grouped in one scope."""
-
-    arxiv_pdf_base: str = "https://arxiv.org/pdf"
-    """arXiv direct-PDF base URL."""
-
-    download_timeout_sec: float = 180.0
-    """HTTP timeout for a PDF byte download."""
-
-    http_timeout_sec: float = 60.0
-    """HTTP timeout for a metadata/interstitial request."""
-
-    download_retries: int = 2
-    """Retry budget for a PDF download."""
-
-    pdf_magic: bytes = b"%PDF-"
-    """Leading bytes every valid PDF starts with."""
-
-    min_pdf_bytes: int = 128
-    """Smallest plausible PDF; anything smaller is almost certainly not one."""
+# Default knob values are literal defaults on the functions that use them (NOT
+# module state). Named here only in prose so the rationale lives once; the values
+# themselves are the signature defaults below.
+#   min_pdf_bytes=128         -- smallest plausible PDF; smaller is not one
+#   pdf_magic=b"%PDF-"        -- leading bytes every valid PDF starts with
+#   download_timeout_sec=180  -- HTTP timeout for a PDF byte download
+#   http_timeout_sec=60       -- HTTP timeout for a metadata/interstitial request
+#   download_retries=2        -- retry budget for a PDF download
+#   arxiv_pdf_base            -- arXiv direct-PDF base URL
 
 
-_CONFIG = FetchConfig()
-"""Process-wide default PDF-cascade config."""
+def looks_like_pdf(
+    content: bytes,
+    *,
+    min_pdf_bytes: int = 128,
+    pdf_magic: bytes = b"%PDF-",
+) -> bool:
+    """Magic-byte check. Rejects HTML pages and captcha interstitials.
+
+    Args:
+      content: The downloaded bytes to test.
+      min_pdf_bytes: Minimum length below which the content cannot be a real PDF.
+      pdf_magic: The leading signature a PDF must start with.
+
+    Returns:
+      is_pdf: True when ``content`` is long enough and starts with ``pdf_magic``.
+
+    """
+    return len(content) >= min_pdf_bytes and content[: len(pdf_magic)] == pdf_magic
 
 
-def looks_like_pdf(content: bytes) -> bool:
-    """Magic-byte check. Rejects HTML pages and captcha interstitials."""
-    return len(content) >= _CONFIG.min_pdf_bytes and content[:5] == _CONFIG.pdf_magic
-
-
-def _validate_pdf(url: str, body: bytes) -> bytes:
+def _validate_pdf(url: str, body: bytes, *, min_pdf_bytes: int = 128) -> bytes:
     """Return ``body`` if it looks like a PDF, else raise ``ValueError``."""
-    if not looks_like_pdf(body):
+    if not looks_like_pdf(body, min_pdf_bytes=min_pdf_bytes):
         raise ValueError(
             f"GET {url} → non-PDF ({len(body)} bytes, prefix={body[:16]!r})"
         )
     return body
 
 
-def _download_pdf(url: str, *, retries: int | None = None) -> bytes:
+def _download_pdf(
+    url: str,
+    *,
+    retries: int = 2,
+    download_timeout_sec: float = 180.0,
+    min_pdf_bytes: int = 128,
+) -> bytes:
     """Download a URL, validate it looks like a PDF, return bytes."""
-    if retries is None:
-        retries = _CONFIG.download_retries
     return _validate_pdf(
-        url, fetch(url, retries=retries, timeout_sec=_CONFIG.download_timeout_sec)
+        url,
+        fetch(url, retries=retries, timeout_sec=download_timeout_sec),
+        min_pdf_bytes=min_pdf_bytes,
     )
 
 
 def oa_url_of(paper: MutableJSON) -> str | None:
-    """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record."""
+    """Extract a non-empty ``openAccessPdf.url`` from an S2 paper record.
+
+    Args:
+      paper: An S2 paper record (the ``openAccessPdf`` field is read).
+
+    Returns:
+      url: The open-access PDF URL, or ``None`` when absent or empty.
+
+    """
     oa = cast(MutableJSON, paper.get("openAccessPdf") or {})
     url = oa.get("url")
     return url if isinstance(url, str) and url else None
@@ -106,9 +118,15 @@ def oa_url_of(paper: MutableJSON) -> str | None:
 def batch_oa_urls(wire_ids: list[str]) -> list[str | None] | None:
     """Resolve open-access URLs for many ids in one batched S2 request.
 
-    Returns per-id URL (input order); ``None`` per id means S2 has no OA copy.
-    The whole result is ``None`` when the batch call itself failed, so a caller
-    can fall back to gated per-id lookups rather than trusting empty data.
+    Args:
+      wire_ids: S2 wire-format paper ids to resolve in a single batch.
+
+    Returns:
+      urls: Per-id OA URL in input order; a ``None`` element means S2 has no OA
+        copy for that id. The whole result is ``None`` when the batch call
+        itself failed, so a caller can fall back to gated per-id lookups rather
+        than trusting empty data.
+
     """
     try:
         papers = s2.batch(wire_ids, "openAccessPdf")
@@ -117,9 +135,11 @@ def batch_oa_urls(wire_ids: list[str]) -> list[str | None] | None:
     return [oa_url_of(p) if p is not None else None for p in papers]
 
 
-def _fetch_arxiv(canonical: str) -> bytes | None:
+def _fetch_arxiv(
+    canonical: str, *, arxiv_pdf_base: str = "https://arxiv.org/pdf"
+) -> bytes | None:
     """Fetch ``https://arxiv.org/pdf/<id>`` - no intermediary."""
-    url = f"{_CONFIG.arxiv_pdf_base}/{canonical}"
+    url = f"{arxiv_pdf_base}/{canonical}"
     try:
         return _download_pdf(url)
     except (FetchError, ValueError, OSError) as e:
@@ -171,7 +191,8 @@ def download(
         second per-id S2 query.
 
     Returns:
-      pdf: ``(pdf_bytes, source_label)``.
+      pdf_bytes: The downloaded PDF content.
+      source_label: Which source served it (e.g. ``"arxiv"``, ``"open_access"``).
 
     Raises:
       NotFoundError: When no enabled source returned a PDF.

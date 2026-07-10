@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import asyncio
 
+from sagent.lib.web.errors import GoogleSorryError, PuzzleChallengeError
 from sagent.lib.web.search import (
-    CaptchaError,
     ImageResult,
     MapResult,
     PaperResult,
@@ -174,11 +174,25 @@ def test_run_value_error_returns_tool_result_error() -> None:
 def test_run_captcha_error_returns_tool_result_error() -> None:
     with patch(
         "sagent.tools.web_search.search",
-        side_effect=CaptchaError("captcha"),
+        side_effect=PuzzleChallengeError("captcha"),
     ):
         result = asyncio.run(WebSearch().run({"query": "x"}))
     assert result.is_error
-    assert "captcha" in result.content
+    # The tool surfaces the bot-flag's specific guidance, not a bare "HTTP 403".
+    assert PuzzleChallengeError.guidance in result.content
+
+
+def test_run_bot_flag_preserves_per_instance_reason() -> None:
+    # F4: a per-instance reason (e.g. scholar cooldown "~Nh on this IP") must
+    # NOT be discarded in favor of the static class guidance.
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=GoogleSorryError("cooling down ~5.0h on this IP"),
+    ):
+        result = asyncio.run(WebSearch().run({"query": "x"}))
+    assert result.is_error
+    assert "cooling down ~5.0h on this IP" in result.content
+    assert GoogleSorryError.guidance in result.content
 
 
 def test_run_invalid_backend() -> None:
@@ -286,7 +300,7 @@ def test_format_image_result() -> None:
             resolution="1x1",
         )
     )
-    assert "https://img" in out
+    assert out.count("https://img") >= 1
     assert "1x1" in out
 
 

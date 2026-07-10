@@ -10,7 +10,7 @@ import json
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import FetchError
 from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
 from sagent.lib.web.paper.providers import openalex
 
@@ -304,6 +304,62 @@ class TestReferences:
         assert complete
         # Second call resolves the referenced ids via the ``openalex:`` filter.
         assert "openalex:W10|W11" in fetch.call_args.kwargs["params"]["filter"]
+
+    def test_unresolved_ref_ids_mark_incomplete(self) -> None:
+        # B1: the seed cites 2 works, but the batch resolve returns only 1 (the
+        # ``openalex:`` OR-filter silently drops an id it cannot resolve). With
+        # limit=None the old code reported complete=True from the REQUESTED count,
+        # hiding a short reference set -- the lying-`complete` paginate.py exists
+        # to prevent. `complete` must reflect the RESOLVED records, not intent.
+        resolve: MutableJSON = {
+            "results": [
+                {
+                    "id": "https://openalex.org/W1",
+                    "referenced_works": [
+                        "https://openalex.org/W10",
+                        "https://openalex.org/W11",
+                    ],
+                }
+            ]
+        }
+        # count=1: OpenAlex resolved only W10, dropped W11.
+        batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
+        fetch = MagicMock(
+            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+        )
+        with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
+            records, complete = openalex.references("doi", "10.1/x", limit=None)
+        assert len(records) == 1  # only 1 of 2 refs resolved
+        assert not complete  # must NOT claim complete when refs went missing
+
+    def test_duplicate_ref_id_still_complete(self) -> None:
+        # SPEC-A: referenced_works may repeat an id. The ``openalex:`` OR-filter
+        # de-dups, so the batch returns fewer records than the (dup-bearing)
+        # requested list -- but every DISTINCT id resolved, so this is COMPLETE.
+        # A naive ``len(records) == len(capped)`` mis-reports incomplete here.
+        resolve: MutableJSON = {
+            "results": [
+                {
+                    "id": "https://openalex.org/W1",
+                    "referenced_works": [
+                        "https://openalex.org/W10",
+                        "https://openalex.org/W11",
+                        "https://openalex.org/W10",  # duplicate of the first
+                    ],
+                }
+            ]
+        }
+        # Both DISTINCT ids resolved (W10, W11); OpenAlex returns 2, not 3.
+        batch: MutableJSON = {
+            "meta": {"count": 2},
+            "results": [{"title": "ref-a"}, {"title": "ref-b"}],
+        }
+        fetch = MagicMock(
+            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+        )
+        with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
+            _, complete = openalex.references("doi", "10.1/x", limit=None)
+        assert complete  # all distinct refs resolved -> complete despite dup
 
     def test_limit_truncates_and_marks_incomplete(self) -> None:
         resolve: MutableJSON = {

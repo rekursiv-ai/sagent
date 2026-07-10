@@ -7,8 +7,8 @@ paces through :func:`sagent.lib.ratelimit.cross_process_limiter`). A coroutine c
 site lifts any function into a thread with ``asyncio.to_thread``.
 
 Import each name from the submodule that defines it (this package's
-``__init__`` re-exports nothing, per STYLE), exactly as ``sagent.lib.web`` is
-used (``from sagent.lib.web.search import search``):
+``__init__`` re-exports nothing), exactly as ``sagent.lib.web`` is used
+(``from sagent.lib.web.search import search``):
 
 - :mod:`.search` -- ``search`` + ``SearchResult`` / ``Source``.
 - :mod:`.details` -- ``metadata``, ``metadata_batch``, ``references``,

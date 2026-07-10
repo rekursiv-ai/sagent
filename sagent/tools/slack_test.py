@@ -7,7 +7,7 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import FetchError
 from sagent.tools.slack import Slack
 from sagent.types.runtime import ToolResult
 

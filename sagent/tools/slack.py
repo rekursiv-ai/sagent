@@ -26,7 +26,8 @@ import json
 import logging
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
-from sagent.lib.web.fetch import FetchError, fetch
+from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import fetch
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -73,27 +74,21 @@ async def _slack_call(
     try:
         if post:
             headers["Content-Type"] = "application/json; charset=utf-8"
-            raw = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty can't narrow to_thread through overloads
-                bytes,
-                await asyncio.to_thread(
-                    fetch,
-                    url=url,
-                    method="POST",
-                    json=dict(params),
-                    headers=headers,
-                    timeout_sec=_DEFAULT_TIMEOUT,
-                ),
+            raw = await asyncio.to_thread(
+                fetch,
+                url=url,
+                method="POST",
+                json=dict(params),
+                headers=headers,
+                timeout_sec=_DEFAULT_TIMEOUT,
             )
         else:
-            raw = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty can't narrow to_thread through overloads
-                bytes,
-                await asyncio.to_thread(
-                    fetch,
-                    url=url,
-                    params=dict(params),
-                    headers=headers,
-                    timeout_sec=_DEFAULT_TIMEOUT,
-                ),
+            raw = await asyncio.to_thread(
+                fetch,
+                url=url,
+                params=dict(params),
+                headers=headers,
+                timeout_sec=_DEFAULT_TIMEOUT,
             )
     except FetchError as e:
         return ToolResult(

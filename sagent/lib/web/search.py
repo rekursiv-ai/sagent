@@ -31,7 +31,12 @@ from sagent.lib.custom_json import (
     str_map_val,
     str_val,
 )
-from sagent.lib.web.fetch import FetchError, fetch
+from sagent.lib.web.errors import (
+    BotDetectionError,
+    FetchError,
+    PuzzleChallengeError,
+)
+from sagent.lib.web.fetch import fetch
 
 
 if TYPE_CHECKING:
@@ -221,10 +226,6 @@ class TorrentResult(SearchResult):
     filesize: str = ""
 
 
-class CaptchaError(Exception):
-    """Raised when a backend returns a CAPTCHA/sorry page."""
-
-
 class SearchError(RuntimeError):
     """Raised when a search backend fails before returning results."""
 
@@ -239,7 +240,16 @@ def _strip_scripts(tag: bs4.Tag | bs4.BeautifulSoup) -> None:
 
 
 def clean_text(text: str) -> str:
-    """Collapse whitespace runs and drop spaces before punctuation."""
+    """Collapse whitespace runs and drop spaces before punctuation.
+
+    Args:
+      text: The raw scraped text to normalize.
+
+    Returns:
+      cleaned: ``text`` with whitespace runs collapsed and pre-punctuation
+        spaces removed.
+
+    """
     return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
 
 
@@ -253,7 +263,15 @@ def _get_gsa_useragents() -> tuple[str, ...]:
 
 
 def gsa_headers_for_query(query: str) -> dict[str, str]:
-    """Build request headers with a query-stable GSA mobile UA."""
+    """Build request headers with a query-stable GSA mobile UA.
+
+    Args:
+      query: The search query; hashed to pick a stable User-Agent per query.
+
+    Returns:
+      headers: A one-entry ``User-Agent`` header dict.
+
+    """
     useragents = _get_gsa_useragents()
     idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(useragents)
     return {"User-Agent": f"{useragents[idx]} NSTNWV"}
@@ -264,17 +282,6 @@ def gsa_headers_for_query(query: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 _SEARXNG_URL_ENV = "SEARXNG_URL"  # config-globals: ignore -- env var name.
-
-# SearXNG is a metasearch aggregator: one query fans out to several upstream
-# engines and the response returns only once they finish or hit SearXNG's own
-# per-engine timeouts (``outgoing.request_timeout`` defaults to 3s, but heavy
-# science engines like Crossref are configured up to ~30s). The client ceiling
-# must therefore clear SearXNG's internal aggregation tail, not a single
-# engine's latency: at 10s the multi-engine ``it``/``science`` tabs hit a
-# premature client-side timeout mid-aggregation (observed live). 15s clears the
-# common tail while still bounding an interactive turn.
-_SEARXNG_TIMEOUT_SEC = 15.0  # config-globals: ignore -- HTTP timeout default.
-
 # SearXNG result categories (tabs) -- the full set from ``categories_as_tabs``
 # in SearXNG's ``settings.yml``. Each maps to one or more result-template
 # shapes; ``science`` yields ``paper.html`` (structured ``PaperResult``). The
@@ -397,6 +404,7 @@ def searxng(
     headers: dict[str, str] | None = None,
     *,
     categories: SearxngCategory = "general",
+    timeout_sec: float = 15.0,
 ) -> Sequence[SearxngResult]:
     """Query a SearXNG instance and return parsed, typed JSON results.
 
@@ -416,12 +424,21 @@ def searxng(
       num_results: Maximum results to return.
       headers: Optional override headers forwarded to fetch.
       categories: SearXNG result category (tab) to query.
+      timeout_sec: HTTP ceiling. SearXNG fans one query out to several upstream
+        engines and returns only once they finish or hit its own per-engine
+        timeouts (heavy science engines run to ~30s), so the client ceiling must
+        clear the aggregation tail, not a single engine's latency: at 10s the
+        multi-engine ``it``/``science`` tabs hit a premature client-side timeout
+        mid-aggregation (observed live). 15s clears the common tail while still
+        bounding an interactive turn.
 
     Returns:
       results: One typed record per hit -- a :class:`SearchResult` or a
         category-specific subclass of it.
 
     """
+    if num_results < 0:
+        raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
     base_url = _searxng_url()
     params = urlencode(
         {"q": query, "format": "json", "pageno": "1", "categories": categories}
@@ -429,7 +446,7 @@ def searxng(
     body = fetch(
         f"{base_url}/search?{params}",
         headers=headers,
-        timeout_sec=_SEARXNG_TIMEOUT_SEC,
+        timeout_sec=timeout_sec,
     )
     payload = cast("object", json.loads(body))
     raw = (
@@ -650,13 +667,14 @@ def _searxng_url() -> str:
 _DUCKDUCKGO_URL = (
     "https://html.duckduckgo.com/html/"  # config-globals: ignore -- endpoint URL.
 )
-_DUCKDUCKGO_MAX_QUERY_CHARS = 499  # config-globals: ignore -- endpoint limit.
 
 
 def duckduckgo(
     query: str,
     num_results: int = 10,
     headers: dict[str, str] | None = None,
+    *,
+    max_query_chars: int = 499,
 ) -> list[SearchResult]:
     """Scrape DuckDuckGo's HTML-only endpoint.
 
@@ -667,15 +685,18 @@ def duckduckgo(
       query: Search query string.
       num_results: Maximum results to return.
       headers: Optional override headers forwarded to fetch.
+      max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
+        endpoint silently drops overlong queries, so fail loudly instead.
 
     Returns:
       results: Parsed search results.
 
     """
-    if len(query) > _DUCKDUCKGO_MAX_QUERY_CHARS:
+    if num_results < 0:
+        raise ValueError(f"'num_results' must be >= 0, got {num_results}.")
+    if len(query) > max_query_chars:
         raise SearchError(
-            f"DuckDuckGo query exceeds {_DUCKDUCKGO_MAX_QUERY_CHARS} characters "
-            f"(got {len(query)})."
+            f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)})."
         )
     request_headers = gsa_headers_for_query(query) | {
         "Accept": "*/*",
@@ -715,7 +736,7 @@ def _duckduckgo_check_captcha(page_html: str) -> None:
     """Raise when DDG returns its challenge page."""
     soup = bs4.BeautifulSoup(page_html, "html.parser")
     if soup.select_one("form#challenge-form") is not None:
-        raise CaptchaError("DuckDuckGo returned a CAPTCHA challenge.")
+        raise PuzzleChallengeError("DuckDuckGo returned a challenge form.")
 
 
 def _duckduckgo_extract_url(href: str) -> str | None:
@@ -741,6 +762,8 @@ def _duckduckgo_parse(
     max_results: int,
 ) -> list[SearchResult]:
     """Extract search results from DDG's HTML."""
+    if max_results <= 0:
+        return []  # append-before-cap would otherwise return one at max=0
     soup = bs4.BeautifulSoup(page_html, "html.parser")
     _strip_scripts(soup)
     results: list[SearchResult] = []
@@ -905,6 +928,12 @@ def search(
         if backend == "duckduckgo":
             return duckduckgo(query, num_results, headers)
 
+    except BotDetectionError:
+        # A bot-detection block carries actionable, type-specific guidance
+        # (solve captcha / rotate IP). It is-a FetchError, so it MUST be caught
+        # before the generic handler below, or that handler would flatten it into
+        # a guidance-less SearchError. Propagate it intact.
+        raise
     except (
         FetchError,
         OSError,
@@ -917,13 +946,7 @@ def search(
 
 
 def _refresh_gsa_useragents() -> None:
-    """Regenerate the User-Agent pool from upstream source data.
-
-    Downloads the upstream user-agent dataset (a gzipped JSON array of
-    ``{"userAgent": ...}`` records) and rewrites ``gsa_useragents.txt``.
-
-    Run via ``python -m sagent.lib.web.search`` (scheduled in CI).
-    """
+    """Rewrite ``gsa_useragents.txt`` from the upstream gzipped-JSON UA dataset."""
     url = (
         "https://raw.githubusercontent.com/intoli/user-agents/"
         "main/src/user-agents.json.gz"

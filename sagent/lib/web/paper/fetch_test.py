@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import FetchError
 from sagent.lib.web.paper import fetch as fetch_mod
 from sagent.lib.web.paper.errors import NotFoundError
 from sagent.lib.web.paper.providers import s2
@@ -33,6 +33,11 @@ class TestLooksLikePdf:
 
     def test_wrong_magic_rejected(self) -> None:
         assert not fetch_mod.looks_like_pdf(b"<html>" + b"0" * 200)
+
+    def test_custom_magic_shorter_than_default(self) -> None:
+        # A caller-supplied magic shorter than the 5-byte default must compare
+        # against len(magic) bytes, not a hardcoded [:5] slice.
+        assert fetch_mod.looks_like_pdf(b"%PDF" + b"0" * 200, pdf_magic=b"%PDF")
 
 
 class TestOaUrlOf:

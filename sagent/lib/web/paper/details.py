@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, cast
 
+import functools
+
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.paper.custom_types import IdType, PaperRecord
 from sagent.lib.web.paper.errors import PaperError
@@ -53,7 +55,13 @@ class Listing:
 
 
 def metadata(kind: IdType, canonical: str) -> PaperRecord:
-    """Fetch single-paper metadata from S2."""
+    """Fetch single-paper metadata from S2.
+
+    Args:
+      kind: Seed identifier type.
+      canonical: Bare seed identifier.
+
+    """
     data = s2.get(
         f"/paper/{s2_wire_id(kind, canonical)}", {"fields": s2.S2_PAPER_FIELDS_STR}
     )
@@ -61,7 +69,12 @@ def metadata(kind: IdType, canonical: str) -> PaperRecord:
 
 
 def metadata_batch(wire_ids: list[str]) -> list[PaperRecord | None]:
-    """Batch-fetch metadata for many wire ids; ``None`` per unresolved id."""
+    """Batch-fetch metadata for many wire ids; ``None`` per unresolved id.
+
+    Args:
+      wire_ids: S2 wire-format paper ids to resolve in one batched request.
+
+    """
     records = s2.batch(wire_ids, s2.S2_PAPER_FIELDS_STR, endpoint="paper")
     return [s2.paper_record_from(r) if r is not None else None for r in records]
 
@@ -139,15 +152,9 @@ def citations(
         ("isInfluential", *(f"citingPaper.{f}" for f in s2.S2_PAPER_FIELDS))
     )
 
-    def keep(entry: MutableJSON) -> bool:
-        if influential_only and not entry.get("isInfluential"):
-            return False
-        if year_from is None:
-            return True
-        inner = cast(MutableJSON, entry.get("citingPaper") or {})
-        year = inner.get("year")
-        return isinstance(year, int) and year >= year_from
-
+    keep = functools.partial(
+        _citation_keep, influential_only=influential_only, year_from=year_from
+    )
     page = s2.paginate(
         f"/paper/{s2_wire_id(kind, canonical)}/citations",
         {"fields": fields},
@@ -155,6 +162,19 @@ def citations(
         keep=keep,
     )
     return _edge_listing(page, inner_key="citingPaper")
+
+
+def _citation_keep(
+    entry: MutableJSON, *, influential_only: bool, year_from: int | None
+) -> bool:
+    """Whether a citation edge passes the influence and ``year_from`` filters."""
+    if influential_only and not entry.get("isInfluential"):
+        return False
+    if year_from is None:
+        return True
+    inner = cast(MutableJSON, entry.get("citingPaper") or {})
+    year = inner.get("year")
+    return isinstance(year, int) and year >= year_from
 
 
 def _edge_listing(page: Page, *, inner_key: str) -> Listing:

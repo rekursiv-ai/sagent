@@ -30,6 +30,7 @@ dependencies = [
     "beautifulsoup4",
     "brotli",
     "cachetools",
+    "curl-cffi>=0.15",
     "defusedxml>=0.7.1",
     "httpx>=0.27",
     "imagesize>=1.4",

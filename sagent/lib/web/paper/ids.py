@@ -107,7 +107,12 @@ def normalize_id(raw: str) -> tuple[IdType, str]:
 
 
 def looks_like_paper_id(token: str) -> bool:
-    """Whether ``token`` parses as a DOI or arXiv id."""
+    """Whether ``token`` parses as a DOI or arXiv id.
+
+    Args:
+      token: The candidate identifier string to test.
+
+    """
     try:
         _ = normalize_id(token)
     except InvalidIdError:

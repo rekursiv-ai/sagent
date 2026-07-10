@@ -15,9 +15,12 @@ import urllib.error
 import bs4
 import pytest
 
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import (
+    BotDetectionError,
+    FetchError,
+    PuzzleChallengeError,
+)
 from sagent.lib.web.search import (
-    CaptchaError,
     CodeResult,
     FileResult,
     ImageResult,
@@ -96,6 +99,32 @@ class TestSearchDispatch:
             pytest.raises(SearchError, match="duckduckgo"),
         ):
             search("cats", backend="duckduckgo")
+
+    def test_bot_detection_error_propagates_with_guidance(self) -> None:
+        # A-WEB-002: a BotDetectionError is-a FetchError, so the broad
+        # `except FetchError` flattened it into a generic SearchError, discarding
+        # the actionable `.guidance` and specific type. It must propagate intact
+        # so a caller can tell "solve captcha / rotate IP" from a plain failure.
+        err = PuzzleChallengeError("DuckDuckGo returned a challenge form.")
+        with (
+            _patch_fetch(side_effect=err),
+            pytest.raises(BotDetectionError) as exc,
+        ):
+            search("cats", backend="duckduckgo")
+        assert "captcha" in exc.value.guidance.lower()
+
+    def test_negative_num_results_rejected_duckduckgo(self) -> None:
+        # O-WEB-003: negative num_results was accepted inconsistently (ddg had no
+        # guard, searxng sliced items[:-1], scholar raised). Reject uniformly.
+        with pytest.raises(ValueError, match="num_results"):
+            search("cats", backend="duckduckgo", num_results=-1)
+
+    def test_negative_num_results_rejected_searxng(self) -> None:
+        with (
+            patch.dict("os.environ", {"SEARXNG_URL": "https://searx.example"}),
+            pytest.raises(ValueError, match="num_results"),
+        ):
+            search("cats", backend="searxng", num_results=-1)
 
 
 class TestGsaHeaders:
@@ -550,7 +579,7 @@ class TestQuoteBangsDdg:
 
 class TestCheckCaptchaDdg:
     def test_detects_challenge_form(self) -> None:
-        with pytest.raises(CaptchaError):
+        with pytest.raises(PuzzleChallengeError):
             _duckduckgo_check_captcha(
                 '<html><body><form id="challenge-form"></form></body></html>',
             )
@@ -608,6 +637,10 @@ class TestParseDdg:
 
     def test_max_results_caps(self) -> None:
         assert len(_duckduckgo_parse(_TWO_DDG, 1)) == 1
+
+    def test_zero_max_returns_empty(self) -> None:
+        # O-WEB-009: max_results=0 must yield [] (append-before-cap bug).
+        assert _duckduckgo_parse(_TWO_DDG, 0) == []
 
     def test_no_results(self) -> None:
         assert _duckduckgo_parse(_NO_RESULTS_DDG, 10) == []
