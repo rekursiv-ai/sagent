@@ -39,6 +39,14 @@ def search(
     filters run client-side after the fetch, so an unfiltered page must
     over-fetch to leave enough survivors.
 
+    Args:
+      query: Free-text query for the science category.
+      limit: Maximum records to return, or ``None`` to fetch ``default_fetch``.
+      year_from: Inclusive lower publication-year bound, applied client-side.
+      year_to: Inclusive upper publication-year bound, applied client-side.
+      open_access_only: Keep only records with an open-access PDF (client-side).
+      default_fetch: Candidate count requested when ``limit`` is ``None``.
+
     Raises:
       BackendError: When the SearXNG request fails.
 

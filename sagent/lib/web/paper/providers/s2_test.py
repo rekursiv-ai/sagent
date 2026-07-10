@@ -10,7 +10,7 @@ import json
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import FetchError
 from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
 from sagent.lib.web.paper.providers import s2
 
@@ -169,6 +169,35 @@ class TestPaginate:
             page = s2.author_papers("42", limit=None)
         assert [e.get("title") for e in page.entries] == ["P"]
         assert mock.call_args.kwargs["url"].endswith("/author/42/papers")
+
+
+class TestSearchPaginate:
+    def test_walks_offset_to_total_and_reports_total(self) -> None:
+        pages = [
+            json.dumps({"data": [{"title": "A"}] * 2, "total": 3}).encode(),
+            json.dumps({"data": [{"title": "B"}], "total": 3}).encode(),
+        ]
+        with patch("sagent.lib.web.paper.providers.s2.fetch", side_effect=pages):
+            page, total = s2.search_paginate({"query": "x"}, limit=5)
+        assert [e.get("title") for e in page.entries] == ["A", "A", "B"]
+        assert total == 3
+        assert page.complete
+
+    def test_caps_page_size_at_search_ceiling(self) -> None:
+        one = json.dumps({"data": [{"title": "A"}], "total": 1}).encode()
+        with patch("sagent.lib.web.paper.providers.s2.fetch", return_value=one) as mock:
+            page, total = s2.search_paginate({"query": "x"}, limit=None)
+        assert total == 1
+        assert page.entries == [{"title": "A"}]
+        assert mock.call_args.kwargs["params"]["limit"] == 100
+
+
+class TestSearchTotal:
+    def test_extracts_total(self) -> None:
+        assert s2.search_total({"total": 42}) == 42
+
+    def test_missing_total_defaults_zero(self) -> None:
+        assert s2.search_total({}) == 0
 
 
 class TestRecordMapping:

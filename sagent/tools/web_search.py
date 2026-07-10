@@ -9,9 +9,9 @@ import asyncio
 import re
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze
+from sagent.lib.web.errors import BotDetectionError
 from sagent.lib.web.search import (
     DEFAULT_SEARCH_BACKEND,
-    CaptchaError,
     CodeResult,
     FileResult,
     ImageResult,
@@ -186,7 +186,17 @@ class WebSearch:
             results = await asyncio.to_thread(
                 search, q, backend=backend, categories=categories
             )
-        except (CaptchaError, RuntimeError, SearchError, ValueError) as err:
+        except BotDetectionError as err:
+            # Surface the class guidance (which captcha / IP-rotation remedy)
+            # AND the per-instance reason when it carries extra detail (e.g. the
+            # scholar cooldown's "~Nh on this IP"), so that actionable specifics
+            # are not discarded. Mirrors web_fetch's specific rendering.
+            reason = str(err)
+            content = (
+                f"{reason} {err.guidance}" if reason != err.guidance else err.guidance
+            )
+            return ToolResult(call_id="", content=content, is_error=True)
+        except (RuntimeError, SearchError, ValueError) as err:
             return ToolResult(call_id="", content=str(err), is_error=True)
         if not results:
             text = "(no results)"

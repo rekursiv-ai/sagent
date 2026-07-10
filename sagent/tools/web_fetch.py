@@ -21,7 +21,8 @@ import defusedxml.common
 import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
-from sagent.lib.web.fetch import FetchError, ValidatedHost, fetch
+from sagent.lib.web.errors import BotDetectionError, FetchError, classify_bot_detection
+from sagent.lib.web.fetch import ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -216,8 +217,25 @@ class WebFetch:
                 json_body=json_body,
                 form_body=form_body,
             )
+        except BotDetectionError as e:
+            # fetch() classified the block at the boundary: surface the SPECIFIC
+            # kind (Cloudflare vs puzzle vs Google /sorry), each with its own
+            # actionable guidance, rather than a generic "HTTP 403".
+            return ToolResult(call_id="", content=e.explain(raw_url), is_error=True)
         except (FetchError, ValueError, OSError) as e:
             return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
+
+        # A block/challenge page can arrive as apparent success on any rung -- a
+        # reader proxy returns Cloudflare's "security check" HTML with HTTP 200,
+        # or a site soft-blocks with a 200 body. Detect it on the raw body (the
+        # markers survive there even if extraction strips the title) and surface
+        # it as an error, so block-page prose is never rendered as the document.
+        flag = classify_bot_detection(body, on_success_body=True)
+        if flag is not None:
+            # Surface the SPECIFIC kind of block (Cloudflare vs puzzle vs Google
+            # /sorry), each with its own actionable guidance, rather than a
+            # generic "blocked" -- the class knows what it is and how to clear it.
+            return ToolResult(call_id="", content=flag.explain(raw_url), is_error=True)
 
         text = await _extract_text(
             body,
@@ -437,7 +455,15 @@ def _check_ssrf(url: str) -> None:
 
 
 def _validated_host(netloc: str) -> ValidatedHost:
-    """Return a host/IP pair after SSRF validation."""
+    """Return a host/IP pair after SSRF validation.
+
+    Pins the connect IP to defeat DNS rebinding. Prefers an IPv4 address when
+    the host resolves to both families: ``getaddrinfo`` commonly lists AAAA
+    (v6) first, but many hosts/networks have no working v6 route, and pinning
+    to a single unreachable v6 address turns a servable page into a status-0
+    connection failure (unlike an un-pinned client, which Happy-Eyeballs to
+    v4). Falls back to v6 only when that is the sole family.
+    """
     parsed = urlparse(f"//{netloc}")
     host = parsed.hostname
     if not host:
@@ -446,7 +472,9 @@ def _validated_host(netloc: str) -> ValidatedHost:
     if err is not None:
         raise ValueError(err)
     infos = socket.getaddrinfo(host, None)
-    ip = str(infos[0][4][0])
+    ips = [str(info[4][0]) for info in infos]
+    # Prefer the first IPv4; else the first address of any family.
+    ip = next((a for a in ips if ":" not in a), ips[0] if ips else "")
     err = _ip_is_safe(host, ip)
     if err is not None:
         raise ValueError(err)

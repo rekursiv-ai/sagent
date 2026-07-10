@@ -34,31 +34,6 @@ def _dedup_key(rec: PaperRecord) -> str:
     return f"title:{_normalize_title(rec.title)}"
 
 
-def _merge(first: PaperRecord, second: PaperRecord) -> PaperRecord:
-    """Combine two records of the same paper - prefer non-null from first."""
-    return PaperRecord(
-        title=first.title or second.title,
-        authors=first.authors or second.authors,
-        year=first.year if first.year is not None else second.year,
-        venue=first.venue or second.venue,
-        doi=first.doi or second.doi,
-        arxiv_id=first.arxiv_id or second.arxiv_id,
-        abstract=first.abstract or second.abstract,
-        citation_count=(
-            first.citation_count
-            if first.citation_count is not None
-            else second.citation_count
-        ),
-        reference_count=(
-            first.reference_count
-            if first.reference_count is not None
-            else second.reference_count
-        ),
-        open_access_pdf=first.open_access_pdf or second.open_access_pdf,
-        sources=tuple(dict.fromkeys((*first.sources, *second.sources))),
-    )
-
-
 def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRecord]:
     """Reciprocal-rank-fuse S2 and OpenAlex hits into one ranked list.
 
@@ -96,7 +71,7 @@ def fuse(s2_hits: list[PaperRecord], oa_hits: list[PaperRecord]) -> list[PaperRe
         for rank, rec in enumerate(hits, start=1):
             key = _dedup_key(rec)
             score[key] = score.get(key, 0.0) + weight / (offset + rank)
-            by_key[key] = _merge(by_key[key], rec) if key in by_key else rec
+            by_key[key] = by_key[key].merge(rec) if key in by_key else rec
     # Stable sort by descending score over insertion-ordered keys; the S2 loop
     # runs first so a coincidental score tie keeps S2's key first.
     ordered = sorted(by_key, key=lambda k: score[k], reverse=True)

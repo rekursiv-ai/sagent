@@ -164,6 +164,14 @@ class TestPaginate:
         paginate(cursor, limit=None)
         assert seen == [1]
 
+    def test_negative_limit_rejected(self) -> None:
+        # O-WEB-006: a negative limit flows into _page_size -> min(-1, max) = -1,
+        # sending a negative page size on the wire and slicing entries[:-1].
+        # Reject it at the boundary instead.
+        cursor = _offset_cursor([[]], page_size_max=100)
+        with pytest.raises(ValueError, match="limit"):
+            paginate(cursor, limit=-1)
+
 
 if __name__ == "__main__":
     from sagent.lib.testing import test_main

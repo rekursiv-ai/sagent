@@ -52,6 +52,17 @@ class TestFusedSearch:
         assert result.total == 9
         assert result.complete
 
+    def test_total_never_below_returned_records(self) -> None:
+        # Disjoint hits: each backend reports total=1, fused set has 2 records.
+        # total must not be less than what's returned (max(1,1,2) == 2).
+        with (
+            patch.object(search_mod, "_s2_search", return_value=([_rec("s", "s2")], 1)),
+            patch.object(openalex, "search", return_value=([_rec("o", "openalex")], 1)),
+        ):
+            result = search("q")
+        assert len(result.records) == 2
+        assert result.total >= len(result.records)
+
     def test_one_backend_error_is_partial_not_fatal(self) -> None:
         with (
             patch.object(search_mod, "_s2_search", side_effect=PaperError("s2 down")),

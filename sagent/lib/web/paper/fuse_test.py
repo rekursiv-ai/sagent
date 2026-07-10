@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 from sagent.lib.web.paper.custom_types import PaperRecord
 from sagent.lib.web.paper.fuse import fuse
 
 
 def _rec(title: str, *, doi: str | None = None, source: str = "s2") -> PaperRecord:
     return PaperRecord(title=title, doi=doi, sources=(source,))
+
+
+class TestMergeCompleteness:
+    def test_merge_preserves_every_field_on_dedup(self) -> None:
+        # A-WEB-005: _merge enumerated fields by hand and forgot several optional
+        # ones (e.g. is_influential), zeroing them when two records dedup. Any
+        # field populated only on the first record must survive the merge --
+        # assert per-field so a NEWLY added field can't be silently dropped.
+        first = PaperRecord(
+            title="X",
+            doi="10.1/a",
+            is_influential=True,
+            sources=("s2",),
+        )
+        second = PaperRecord(title="X", doi="10.1/a", sources=("openalex",))
+        (merged,) = fuse([first], [second])
+        for f in fields(PaperRecord):
+            if f.name == "sources":
+                continue  # sources are unioned, asserted elsewhere
+            assert getattr(merged, f.name) == getattr(first, f.name), (
+                f"_merge dropped field {f.name!r}"
+            )
 
 
 class TestFuse:

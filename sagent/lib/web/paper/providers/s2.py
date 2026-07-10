@@ -15,17 +15,18 @@ thread with ``asyncio.to_thread``. Functions return parsed records or raise a
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Literal, cast
 
+import functools
 import json
 import os
 
 from sagent.lib.custom_json import MutableJSON, int_val
 from sagent.lib.ratelimit import cross_process_limiter
-from sagent.lib.web.fetch import FetchError, fetch
+from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import fetch
 from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
-from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
+from sagent.lib.web.paper.errors import BackendError, translate_http_error
 from sagent.lib.web.paper.paginate import (
     Cursor,
     Page,
@@ -48,51 +49,36 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class S2Config:
-    """Tunable knobs for the Semantic Scholar client, grouped in one scope.
+# Default knob values live as literal kwarg defaults on the functions that use
+# them (NOT module state); a caller overrides any knob through the signature.
+# Named here in prose so the rationale lives once:
+#   base="https://api.semanticscholar.org/graph/v1" -- S2 Graph API base URL.
+#   source="s2" -- rate-limit gate key
+#     (see :func:`sagent.lib.ratelimit.cross_process_limiter`). Every holder of the
+#     S2 budget must pass the same key to share one gate.
+#   timeout_sec=10.0 -- healthy S2 latency is sub-second to a few seconds even
+#     for a 100-item page; 10s clears the slow tail (batch POST, deep
+#     pagination) while still bounding a silent hang when S2 is wedged.
+#   max_retries=2 -- paper lookups are interactive: a hard-throttled key must
+#     surface in seconds, so two retries (backoff 1s then 2s = 3s total) honor
+#     S2's required backoff while staying interactive.
+#   backoff_base_sec=1.0 -- base of the exponential 429 backoff (base*2**attempt).
+#   page_rows=1000 -- list-endpoint page size (refs/cites/author-papers): large
+#     to gather a given number of matches in the fewest gated calls. S2 caps an
+#     over-large request and signals its depth ceiling with a 400, which the
+#     cursor walk treats as exhaustion.
+#   search_page_max=100 -- /paper/search page-size ceiling: S2 rejects a search
+#     limit above 100 with a 400. Distinct from page_rows (list endpoints allow
+#     a far larger page).
+#   interval_sec=1.0 -- minimum seconds between requests. S2's authenticated
+#     tier is one request/second cumulative across every endpoint and holder of
+#     the key.
 
-    A frozen default instance (:data:`_CONFIG`) supplies the values; a caller
-    that needs different limits builds its own instance and passes it to the
-    public functions. Grouping the knobs here keeps them named, documented, and
-    overridable rather than scattered as module globals.
-    """
 
-    base: str = "https://api.semanticscholar.org/graph/v1"
-    """API base URL."""
-
-    timeout_sec: float = 10.0
-    """HTTP timeout. Healthy S2 latency is sub-second to a few seconds even for
-    a 100-item page; 10s clears the slow tail (batch POST, deep pagination)
-    while still bounding a silent hang when S2 is wedged."""
-
-    max_retries: int = 2
-    """429 retry budget. Paper lookups are interactive: a hard-throttled key
-    must surface in seconds, so two retries (backoff 1s then 2s = 3s total)
-    honor S2's required backoff while staying interactive."""
-
-    backoff_base_sec: float = 1.0
-    """Base of the exponential 429 backoff (``base * 2**attempt``)."""
-
-    page_rows: int = 1000
-    """List-endpoint page size (references/citations/author-papers): large to
-    gather a given number of matches in the fewest gated calls. S2 caps an
-    over-large request and signals its depth ceiling with a 400, which the
-    cursor walk treats as exhaustion."""
-
-    search_page_max: int = 100
-    """``/paper/search`` page-size ceiling: S2 rejects a search ``limit`` above
-    100 with a 400. Distinct from :attr:`page_rows` (the list endpoints allow a
-    far larger page)."""
-
-    source: str = "s2"
-    """Rate-limit gate key (see :func:`sagent.lib.ratelimit.cross_process_limiter`)."""
-
-    interval_sec: float = 1.0
-    """Minimum seconds between requests. S2's authenticated tier is one
-    request/second cumulative across every endpoint and holder of the key."""
-
-    paper_fields: tuple[str, ...] = (
+def _default_paper_fields() -> tuple[str, ...]:
+    """S2 paper fields every query requests, consumed by ``paper_record_from``."""
+    # Refs/cites endpoints prefix each field with the edge inner-key.
+    return (
         "paperId",
         "externalIds",
         "title",
@@ -104,10 +90,11 @@ class S2Config:
         "referenceCount",
         "openAccessPdf",
     )
-    """S2 paper fields every query requests; ``paper_record_from`` consumes
-    exactly these. Refs/cites endpoints prefix each with the edge inner-key."""
 
-    author_fields: tuple[str, ...] = (
+
+def _default_author_fields() -> tuple[str, ...]:
+    """S2 author fields every author query requests."""
+    return (
         "authorId",
         "name",
         "aliases",
@@ -117,28 +104,14 @@ class S2Config:
         "citationCount",
         "paperCount",
     )
-    """S2 author fields every author query requests."""
-
-    @property
-    def paper_fields_str(self) -> str:
-        """Comma-joined :attr:`paper_fields` for the ``fields`` query param."""
-        return ",".join(self.paper_fields)
-
-    @property
-    def author_fields_str(self) -> str:
-        """Comma-joined :attr:`author_fields` for the ``fields`` query param."""
-        return ",".join(self.author_fields)
 
 
-_CONFIG = S2Config()
-"""Process-wide default S2 client config; callers may pass their own instance."""
-
-# Backwards-friendly module aliases the rest of the package imports. These read
-# from the default config instance (not standalone literals), so they stay in
-# sync with a single source of truth.
-S2_PAPER_FIELDS = _CONFIG.paper_fields
-S2_PAPER_FIELDS_STR = _CONFIG.paper_fields_str
-AUTHOR_FIELDS_STR = _CONFIG.author_fields_str
+# Backwards-friendly module names the rest of the package imports. Derived from
+# the field-list helpers (a call result, not a loose literal) so the API field
+# selectors -- fixed contracts, not tunables -- live in one place.
+S2_PAPER_FIELDS = _default_paper_fields()
+S2_PAPER_FIELDS_STR = ",".join(S2_PAPER_FIELDS)
+AUTHOR_FIELDS_STR = ",".join(_default_author_fields())
 
 
 def _headers() -> dict[str, str]:
@@ -150,48 +123,67 @@ def _headers() -> dict[str, str]:
     return headers
 
 
-def _attempt(do_fetch: Callable[[], bytes]) -> bytes:
+def _attempt(
+    do_fetch: Callable[[], bytes],
+    *,
+    source: str = "s2",
+    interval_sec: float = 1.0,
+    max_retries: int = 2,
+    backoff_base_sec: float = 1.0,
+) -> bytes:
     """Run one gated S2 request with 429 backoff; return bytes or raise."""
-    limiter = cross_process_limiter(_CONFIG.source, per_seconds=_CONFIG.interval_sec)
-    for attempt in range(_CONFIG.max_retries + 1):
+    limiter = cross_process_limiter(source, per_seconds=interval_sec)
+    for attempt in range(max_retries + 1):
         limiter.acquire()
         try:
             return do_fetch()
         except FetchError as e:
-            if e.status == 429 and attempt < _CONFIG.max_retries:
+            if e.status == 429 and attempt < max_retries:
                 # Record the backoff into the shared cooldown so the next
                 # iteration's gate wait IS the backoff and concurrent requesters
                 # share one window rather than each rediscovering the throttle.
-                limiter.trigger_cooldown(_CONFIG.backoff_base_sec * 2**attempt)
+                limiter.trigger_cooldown(backoff_base_sec * 2**attempt)
                 continue
-            raise _translate(e) from e
+            raise translate_http_error(
+                e,
+                backend="Semantic Scholar",
+                rate_limit_message=(
+                    "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
+                    "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
+                ),
+            ) from e
         except (TimeoutError, OSError) as e:
             raise BackendError(
                 f"Semantic Scholar request failed (timeout or connection error): {e}",
                 status=0,
             ) from e
-    raise AssertionError("_attempt retry loop exited without returning")
+    raise AssertionError(  # pragma: no cover -- loop either returns or raises
+        "_attempt retry loop exited without returning"
+    )
 
 
-def _translate(e: FetchError) -> Exception:
-    """Map an S2 ``FetchError`` to the library's exception hierarchy."""
-    if e.status == 404:
-        return NotFoundError("Semantic Scholar: not found.")
-    if e.status == 429:
-        return RateLimitError(
-            "Semantic Scholar rate limit hit (shared 1 req/sec gate). Set "
-            "SEMANTIC_SCHOLAR_API_KEY for a higher tier or retry shortly."
-        )
-    body = e.body[:200].decode(errors="replace")
-    return BackendError(f"Semantic Scholar HTTP {e.status}: {body}", status=e.status)
-
-
-def get(path: str, params: dict[str, str | int]) -> MutableJSON:
+def get(
+    path: str,
+    params: dict[str, str | int],
+    *,
+    base: str = "https://api.semanticscholar.org/graph/v1",
+    source: str = "s2",
+    interval_sec: float = 1.0,
+    max_retries: int = 2,
+    backoff_base_sec: float = 1.0,
+    timeout_sec: float = 10.0,
+) -> MutableJSON:
     """GET an S2 Graph API path, rate-gated, with key injection and backoff.
 
     Args:
-      path: API path relative to the config base (e.g. ``/paper/search``).
+      path: API path relative to ``base`` (e.g. ``/paper/search``).
       params: Query parameters.
+      base: S2 Graph API base URL.
+      source: Rate-limit gate key shared across all S2 callers.
+      interval_sec: Minimum seconds between gated requests.
+      max_retries: 429 retry budget before surfacing the throttle.
+      backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
+      timeout_sec: Per-request HTTP timeout.
 
     Returns:
       data: Parsed JSON object.
@@ -202,11 +194,15 @@ def get(path: str, params: dict[str, str | int]) -> MutableJSON:
     """
     raw = _attempt(
         lambda: fetch(
-            url=f"{_CONFIG.base}{path}",
+            url=f"{base}{path}",
             params=params,
             headers=_headers(),
-            timeout_sec=_CONFIG.timeout_sec,
-        )
+            timeout_sec=timeout_sec,
+        ),
+        source=source,
+        interval_sec=interval_sec,
+        max_retries=max_retries,
+        backoff_base_sec=backoff_base_sec,
     )
     parsed = _loads(raw, path)
     assert not isinstance(parsed, list), f"unexpected array from GET {path}"
@@ -218,6 +214,12 @@ def batch(
     fields: str,
     *,
     endpoint: Literal["paper", "author"] = "paper",
+    base: str = "https://api.semanticscholar.org/graph/v1",
+    source: str = "s2",
+    interval_sec: float = 1.0,
+    max_retries: int = 2,
+    backoff_base_sec: float = 1.0,
+    timeout_sec: float = 10.0,
 ) -> list[MutableJSON | None]:
     """Fetch metadata for many ids in one batched ``POST /{endpoint}/batch``.
 
@@ -232,6 +234,12 @@ def batch(
         opaque author ids for ``endpoint="author"``).
       fields: Comma-separated S2 field selector.
       endpoint: Which batch endpoint to hit.
+      base: S2 Graph API base URL.
+      source: Rate-limit gate key shared across all S2 callers.
+      interval_sec: Minimum seconds between gated requests.
+      max_retries: 429 retry budget before surfacing the throttle.
+      backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
+      timeout_sec: Per-request HTTP timeout.
 
     Returns:
       records: One entry per input id, in order; ``None`` for unresolved ids.
@@ -244,13 +252,17 @@ def batch(
         return []
     raw = _attempt(
         lambda: fetch(
-            url=f"{_CONFIG.base}/{endpoint}/batch",
+            url=f"{base}/{endpoint}/batch",
             method="POST",
             params={"fields": fields},
             json={"ids": ids},
             headers=_headers(),
-            timeout_sec=_CONFIG.timeout_sec,
-        )
+            timeout_sec=timeout_sec,
+        ),
+        source=source,
+        interval_sec=interval_sec,
+        max_retries=max_retries,
+        backoff_base_sec=backoff_base_sec,
     )
     result = _loads(raw, f"/{endpoint}/batch")
     if not isinstance(result, list):
@@ -264,6 +276,7 @@ def paginate(
     *,
     limit: int | None,
     keep: Callable[[MutableJSON], bool] = lambda _e: True,
+    page_rows: int = 1000,
 ) -> Page:
     """Walk an S2 ``offset``/``next`` list endpoint via the shared cursor walker.
 
@@ -273,6 +286,8 @@ def paginate(
         by the walker.
       limit: Post-filter entries the caller wants, or ``None`` for one page.
       keep: Predicate selecting entries to retain. Defaults to keep-all.
+      page_rows: List-endpoint page size; large to gather matches in the fewest
+        gated calls (S2 signals its depth ceiling with a 400).
 
     Returns:
       page: A :class:`Page` (entries + completeness).
@@ -281,7 +296,7 @@ def paginate(
       PaperError: From any request other than the depth-ceiling 400.
 
     """
-    return _paginate(path, params, limit=limit, keep=keep, page_size=_CONFIG.page_rows)
+    return _paginate(path, params, limit=limit, keep=keep, page_size=page_rows)
 
 
 def _paginate(
@@ -293,20 +308,10 @@ def _paginate(
     page_size: int,
 ) -> Page:
     """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
-
-    def fetch_page(offset: int, size: int) -> MutableJSON:
-        return get(path, {**params, "offset": offset, "limit": size})
-
-    def advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
-        nxt = body.get("next")
-        rows = cast(list[MutableJSON], body.get("data") or [])
-        # S2 list endpoints signal exhaustion by dropping ``next`` (or no rows).
-        return nxt if isinstance(nxt, int) and rows else None
-
     cursor = Cursor(
-        fetch=fetch_page,
+        fetch=functools.partial(_fetch_offset_page, path, params),
         rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
-        advance=advance,
+        advance=_next_offset_advance,
         page_size_max=page_size,
         # S2 answers a too-deep page with 400 ``offset + limit < 10000`` -- the
         # only 400 a cursor walk can provoke -- so treat it as the depth ceiling.
@@ -315,20 +320,38 @@ def _paginate(
     return paginate_cursor(cursor, limit=limit, keep=keep)
 
 
+def _fetch_offset_page(
+    path: str, params: dict[str, str | int], offset: int, size: int
+) -> MutableJSON:
+    """GET one offset/limit page of an S2 list endpoint."""
+    return get(path, {**params, "offset": offset, "limit": size})
+
+
+def _next_offset_advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
+    """Next offset from an S2 list body; None when ``next`` is gone or no rows."""
+    nxt = body.get("next")
+    rows = cast(list[MutableJSON], body.get("data") or [])
+    return nxt if isinstance(nxt, int) and rows else None
+
+
 def search_paginate(
-    params: dict[str, str | int], *, limit: int | None
+    params: dict[str, str | int],
+    *,
+    limit: int | None,
+    search_page_max: int = 100,
 ) -> tuple[Page, int]:
     """Walk ``/paper/search`` (offset/total paging, capped at the search ceiling).
 
     ``/paper/search`` returns ``total``/``offset``/``data`` (no ``next`` cursor)
     and rejects a page ``limit`` above 100, so paging advances the offset until
-    ``total`` is reached, requesting at most :attr:`S2Config.search_page_max`
-    rows per call.
+    ``total`` is reached, requesting at most ``search_page_max`` rows per call.
 
     Args:
       params: Search query params (``query``/``fields``/``year``/...);
         ``offset``/``limit`` are supplied by the walker.
       limit: Max hits, or ``None`` for a single page.
+      search_page_max: ``/paper/search`` page-size ceiling (S2 rejects a search
+        limit above 100 with a 400).
 
     Returns:
       page: A :class:`Page` (hits + completeness).
@@ -343,20 +366,21 @@ def search_paginate(
         total = int_val(body.get("total"), 0)
         return body
 
-    def advance(body: MutableJSON, offset: int, _size: int) -> int | None:
-        rows = cast(list[MutableJSON], body.get("data") or [])
-        nxt = offset + len(rows)
-        # Exhausted when the offset reaches the reported total or a page empties.
-        return nxt if rows and nxt < int_val(body.get("total"), 0) else None
-
     cursor = Cursor(
         fetch=fetch_page,
         rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
-        advance=advance,
-        page_size_max=_CONFIG.search_page_max,
+        advance=_search_offset_advance,
+        page_size_max=search_page_max,
         is_depth_ceiling=lambda e: e.status == 400,
     )
     return paginate_cursor(cursor, limit=limit, keep=lambda _e: True), total
+
+
+def _search_offset_advance(body: MutableJSON, offset: int, _size: int) -> int | None:
+    """Next ``/paper/search`` offset; None once ``total`` is reached or a page empties."""
+    rows = cast(list[MutableJSON], body.get("data") or [])
+    nxt = offset + len(rows)
+    return nxt if rows and nxt < int_val(body.get("total"), 0) else None
 
 
 def _loads(raw: bytes, what: str) -> MutableJSON | list[object]:
@@ -412,7 +436,12 @@ def paper_record_from(
 
 
 def author_record_from(data: MutableJSON) -> AuthorRecord:
-    """Convert an S2 author dict into an :class:`AuthorRecord`."""
+    """Convert an S2 author dict into an :class:`AuthorRecord`.
+
+    Args:
+      data: A raw S2 author record (the ``/author`` response shape).
+
+    """
     author_id = str(data.get("authorId") or "")
     aliases_raw = cast(list[object], data.get("aliases") or [])
     aliases = tuple(str(a) for a in aliases_raw if a)
@@ -453,7 +482,14 @@ def author_papers(
     limit: int | None,
     keep: Callable[[MutableJSON], bool] = lambda _e: True,
 ) -> Page:
-    """Fetch an author's publications, walking the cursor for filtered matches."""
+    """Fetch an author's publications, walking the cursor for filtered matches.
+
+    Args:
+      author_id: S2 author id whose papers to fetch.
+      limit: Maximum kept records to return, or ``None`` for one page.
+      keep: Predicate selecting which paper entries to retain.
+
+    """
     return paginate(
         f"/author/{author_id}/papers",
         {"fields": S2_PAPER_FIELDS_STR},
@@ -463,5 +499,10 @@ def author_papers(
 
 
 def search_total(data: MutableJSON) -> int:
-    """Extract the ``total`` field from an S2 search response."""
+    """Extract the ``total`` field from an S2 search response.
+
+    Args:
+      data: A raw S2 search response body.
+
+    """
     return int_val(data.get("total"), 0)

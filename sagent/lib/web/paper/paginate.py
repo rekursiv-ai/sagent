@@ -110,6 +110,8 @@ def paginate(
       BackendError: Any error the cursor does not classify as its depth ceiling.
 
     """
+    if limit is not None and limit < 0:
+        raise ValueError(f"'limit' must be >= 0 or None, got {limit}.")
     page_size = _page_size(limit, cursor.page_size_max)
     kept: list[MutableJSON] = []
     position = cursor.start

@@ -24,7 +24,7 @@ if "trafilatura" not in sys.modules:
     _stub.__dict__["extract"] = MagicMock(return_value="")
     sys.modules["trafilatura"] = _stub
 
-from sagent.lib.web.fetch import FetchError
+from sagent.lib.web.errors import CloudflareChallengeError, FetchError
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
     _ADAPTERS,
@@ -59,7 +59,16 @@ type AddrInfo = tuple[int, int, int, str, tuple[str, int]]
 
 def _addrinfo(ip: str) -> list[AddrInfo]:
     """Build a ``socket.getaddrinfo``-shaped result for a single IP."""
-    return [(0, 0, 0, "", (ip, 0))]
+    fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    return [(fam, 0, 0, "", (ip, 0))]
+
+
+def _addrinfo_multi(*ips: str) -> list[AddrInfo]:
+    """A ``getaddrinfo`` result over several IPs, in the given order."""
+    out: list[AddrInfo] = []
+    for ip in ips:
+        out.extend(_addrinfo(ip))
+    return out
 
 
 def test_webfetch_metadata() -> None:
@@ -130,6 +139,33 @@ def test_validated_host_rejects_rebound_private_ip() -> None:
         pytest.raises(ValueError, match="non-public"),
     ):
         _validated_host("example.com")
+
+
+def test_validated_host_prefers_ipv4_when_resolver_lists_ipv6_first() -> None:
+    # RED: getaddrinfo often returns AAAA (v6) first, but many hosts/networks
+    # have no working v6 route. Pinning to infos[0] (v6) then connecting fails
+    # with status 0 on a page that plainly serves over v4. _validated_host must
+    # pick a v4 address when one exists rather than blindly taking infos[0].
+    with patch(
+        "socket.getaddrinfo",
+        # _url_is_safe call, then the pin-selection call: both dual-family, v6 first.
+        side_effect=[
+            _addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
+            _addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
+        ],
+    ):
+        vh = _validated_host("docs.astral.sh")
+    assert vh.ip == "104.26.13.77"
+
+
+def test_validated_host_uses_ipv6_when_only_family() -> None:
+    # v6-only host: pin the v6 address (bracketing is the transport's job).
+    with patch(
+        "socket.getaddrinfo",
+        side_effect=[_addrinfo("2606:4700:20::1"), _addrinfo("2606:4700:20::1")],
+    ):
+        vh = _validated_host("v6only.example")
+    assert vh.ip == "2606:4700:20::1"
 
 
 def test_reddit_adapter_matches_canonical() -> None:
@@ -251,6 +287,104 @@ def test_run_json_response_skips_extraction() -> None:
     ):
         result = asyncio.run(WebFetch().run({"url": "https://api/json"}))
     assert '"hello"' in result.content
+
+
+def test_run_flags_challenge_page_returned_as_success() -> None:
+    # RED: a block/challenge page can arrive as apparent SUCCESS -- e.g. the
+    # reader-proxy rung returns Cloudflare's "security check" HTML with HTTP 200.
+    # Rendered verbatim, the user sees block-page prose with NO indication the
+    # document was not retrieved. The tool must flag such content as an error.
+    challenge = (
+        b"<html><head><title>Just a moment...</title></head>"
+        b"<body>Security check required. Ray ID: abc123</body></html>"
+    )
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, str]:
+        del raw_url, method, json_body, form_body
+        return challenge, _KIND_HTML
+
+    url = "https://blocked.example"
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        result = asyncio.run(WebFetch().run({"url": url}))
+    assert result.is_error
+    # The "Just a moment" body is a Cloudflare challenge -- the error must carry
+    # that SPECIFIC guidance (rotate IP / real browser), not a generic string.
+    assert "cloudflare" in result.content.lower()
+    # The offending URL is echoed back in the error content.
+    assert result.content.count(url) >= 1
+
+
+def test_run_does_not_flag_real_content() -> None:
+    # Guard against over-flagging: ordinary fetched content is not an error.
+    body = b"<html><body><h1>Build isolation</h1><p>uv builds packages...</p></body></html>"
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, str]:
+        del raw_url, method, json_body, form_body
+        return body, _KIND_HTML
+
+    with (
+        patch(
+            "sagent.tools.web_fetch._fetch_body",
+            side_effect=fake_fetch_body,
+        ),
+        patch(
+            "sagent.tools.web_fetch.trafilatura.extract",
+            return_value="Build isolation. uv builds packages...",
+        ),
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://docs.example"}))
+    assert not result.is_error
+
+
+def test_run_does_not_flag_page_that_merely_embeds_recaptcha() -> None:
+    # DRV-1: a legitimate 200 page (login/contact form) that EMBEDS a reCAPTCHA
+    # widget is real content, not a block. The success-path guard must not flag
+    # it on the weak "g-recaptcha"/"data-sitekey" markers -- those only mean a
+    # block when the page IS the challenge (4xx/5xx), not when it hosts a widget.
+    body = (
+        b"<html><body><h1>Sign in</h1>"
+        b'<form><input name="email">'
+        b'<div class="g-recaptcha" data-sitekey="abc"></div>'
+        b"<button>Log in</button></form></body></html>"
+    )
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+    ) -> tuple[bytes, str]:
+        del raw_url, method, json_body, form_body
+        return body, _KIND_HTML
+
+    with (
+        patch(
+            "sagent.tools.web_fetch._fetch_body",
+            side_effect=fake_fetch_body,
+        ),
+        patch(
+            "sagent.tools.web_fetch.trafilatura.extract",
+            return_value="Sign in. Log in.",
+        ),
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://site.example/login"}))
+    assert not result.is_error
 
 
 def test_run_cache_hit_skips_second_fetch() -> None:
@@ -394,6 +528,25 @@ def test_run_fetch_error_oserror() -> None:
     with patch("sagent.tools.web_fetch._fetch_body", side_effect=err):
         result = asyncio.run(WebFetch().run({"url": "https://x"}))
     assert result.is_error
+
+
+def test_run_cloudflare_challenge_yields_specific_guidance_not_bare_403() -> None:
+    # Regression: fetch() now classifies the block at the boundary and raises a
+    # CloudflareChallengeError (is-a FetchError). The tool's ERROR path must
+    # render its SPECIFIC actionable guidance, not the generic "Fetch failed:
+    # HTTP 403" that the old error path produced.
+    err = CloudflareChallengeError(
+        url="https://x.com",
+        status=403,
+        headers={"server": "cloudflare", "cf-ray": "a1"},
+        body=b"<title>Just a moment...</title>",
+    )
+    with patch("sagent.tools.web_fetch._fetch_body", side_effect=err):
+        result = asyncio.run(WebFetch().run({"url": "https://x.com"}))
+    assert result.is_error
+    assert "cloudflare" in result.content.lower()
+    assert CloudflareChallengeError.guidance in result.content
+    assert "HTTP 403" not in result.content
 
 
 def test_fetch_body_non_reddit_path() -> None:
@@ -904,7 +1057,7 @@ def test_format_rss_renders_title_and_items() -> None:
     out = _format_rss(feed)
     assert "# Top stories" in out
     assert "## Headline one" in out
-    assert "https://example.com/a" in out
+    assert out.count("https://example.com/a") >= 1
     assert "NYT" in out
     assert "Fri, 22 May 2026" in out
 
@@ -958,7 +1111,7 @@ def test_format_rss_renders_atom_entries() -> None:
     assert "# newest submissions : LocalLLaMA" in out
     assert "## Granite 4.1 Architecture Changes?" in out
     assert "/u/the-salami -- 2026-05-28T17:44:55+00:00" in out
-    assert "https://www.reddit.com/r/LocalLLaMA/comments/abc/post/" in out
+    assert out.count("https://www.reddit.com/r/LocalLLaMA/comments/abc/post/") >= 1
     assert "Why pure transformer?" in out
 
 

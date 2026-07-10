@@ -193,8 +193,12 @@ def _fused(
     # errored, so the caller can decline to cache the partial result.
     if not answered:
         raise PaperError("; ".join(errors))
+    records = fuse(s2_hits, oa_hits)
     return SearchResult(
-        records=fuse(s2_hits, oa_hits),
-        total=max(s2_total, oa_total),
+        records=records,
+        # The two backend totals overlap unknowably, so `max` is the honest
+        # lower bound -- but the fused set can hold papers unique to each, so
+        # never report fewer than the records actually returned.
+        total=max(s2_total, oa_total, len(records)),
         complete=not errors,
     )
