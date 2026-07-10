@@ -599,7 +599,7 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
         return {
             str(k): _encode(v) for k, v in cast(Mapping[object, object], value).items()
         }
-    if isinstance(value, Sequence):  # tuple / list (str/bytes handled above)
+    if isinstance(value, Sequence):
         return [_encode(v) for v in value]
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 

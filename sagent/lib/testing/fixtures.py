@@ -66,14 +66,12 @@ def test_main(test_file: str) -> None:
     sys.exit(
         pytest.main(
             [
-                test_file,  # The test file to run
-                "-v",  # Verbose output
+                test_file,
+                "-v",
                 "-s",  # Don't capture output (show print statements)
                 "-W",  # Warning filter (overrides -Werror for specific warning)
                 "ignore::pytest.PytestAssertRewriteWarning",  # Ignore assertion rewrite warnings (happens during direct execution)
-                *sys.argv[
-                    1:
-                ],  # Pass through command-line arguments (e.g., -k for test filtering)
+                *sys.argv[1:],
             ],
         ),
     )
