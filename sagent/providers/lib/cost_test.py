@@ -76,6 +76,47 @@ def test_compute_cost_fast_without_fast_rates_falls_back_to_standard() -> None:
     assert (in_c, out_c, total) == (5.0, 25.0, 30.0)
 
 
+def test_compute_cost_applies_long_context_tier_to_every_input_pool() -> None:
+    pricing = Pricing(
+        request=5.0,
+        response=30.0,
+        cache_write=6.25,
+        cache_read=0.5,
+        long_context_threshold=272_000,
+        long_context_input_multiplier=2.0,
+        long_context_output_multiplier=1.5,
+    )
+    in_c, out_c, total = compute_cost(
+        pricing,
+        input_tokens=100_001,
+        output_tokens=1_000,
+        cache_creation=100_000,
+        cache_read=72_000,
+    )
+    assert in_c == pytest.approx(
+        (100_001 * 10.0 + 100_000 * 12.5 + 72_000 * 1.0) / 1_000_000
+    )
+    assert out_c == pytest.approx(1_000 * 45.0 / 1_000_000)
+    assert total == pytest.approx(in_c + out_c)
+
+
+def test_compute_cost_keeps_base_tier_at_272k_boundary() -> None:
+    pricing = Pricing(
+        request=5.0,
+        response=30.0,
+        long_context_threshold=272_000,
+        long_context_input_multiplier=2.0,
+        long_context_output_multiplier=1.5,
+    )
+    in_c, out_c, _ = compute_cost(
+        pricing,
+        input_tokens=272_000,
+        output_tokens=1_000,
+    )
+    assert in_c == pytest.approx(272_000 * 5.0 / 1_000_000)
+    assert out_c == pytest.approx(1_000 * 30.0 / 1_000_000)
+
+
 def test_model_profile_defaults() -> None:
     p = ModelProfile(max_request_tokens=1000, max_response_tokens=500)
     assert p.max_request_tokens == 1000

@@ -915,6 +915,19 @@ def _grep_python(
     offset: int,
 ) -> str | ToolResult:
     """Grep using Python regex (fallback)."""
+    if offset > 0 and (context_before > 0 or context_after > 0):
+        logger.warning("grep: offset ignored when context lines are requested")
+        offset = 0
+    if not multiline and r"\n" in pattern:
+        return ToolResult(
+            call_id="",
+            content=(
+                "pattern references a newline but multiline is off. "
+                'Pass multiline=true to match across lines (literal "\\n" '
+                "or `.` spanning newlines)."
+            ),
+            is_error=True,
+        )
     flags = 0
     if multiline:
         flags |= re.DOTALL
@@ -925,7 +938,7 @@ def _grep_python(
     except re.error as exc:
         return ToolResult(
             call_id="",
-            content=f"invalid regex pattern: {exc}",
+            content=f"ripgrep error (Python fallback): invalid regex pattern: {exc}",
             is_error=True,
         )
     max_results = sys.maxsize if keep_last > 0 or keep_first <= 0 else keep_first

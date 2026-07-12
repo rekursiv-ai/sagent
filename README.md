@@ -246,7 +246,7 @@ export MINIMAX_API_KEY=...
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5` |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.6-sol` |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |

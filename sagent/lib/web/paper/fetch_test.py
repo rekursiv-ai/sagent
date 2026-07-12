@@ -8,6 +8,7 @@ import pytest
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import FetchSession
 from sagent.lib.web.paper import fetch as fetch_mod
 from sagent.lib.web.paper.errors import NotFoundError
 from sagent.lib.web.paper.providers import s2
@@ -72,14 +73,18 @@ class TestBatchOaUrls:
 
 class TestDownload:
     def test_arxiv_success(self) -> None:
-        with patch.object(fetch_mod, "fetch", return_value=_PDF):
+        with patch.object(fetch_mod, "fetch", return_value=(_PDF, FetchSession())):
             body, source = fetch_mod.download("arxiv", "1706.03762")
         assert body == _PDF
         assert source == "arxiv"
 
     def test_arxiv_fails_then_open_access(self) -> None:
         # arXiv GET returns non-PDF (rejected); the supplied OA URL then wins.
-        with patch.object(fetch_mod, "fetch", side_effect=[_HTML, _PDF]):
+        with patch.object(
+            fetch_mod,
+            "fetch",
+            side_effect=[(_HTML, FetchSession()), (_PDF, FetchSession())],
+        ):
             body, source = fetch_mod.download(
                 "arxiv", "1706.03762", oa_url="http://oa/pdf", oa_looked_up=True
             )
@@ -91,7 +96,11 @@ class TestDownload:
         s2_get = MagicMock(return_value={"openAccessPdf": {"url": "http://oa/pdf"}})
         with (
             patch.object(s2, "get", s2_get),
-            patch.object(fetch_mod, "fetch", side_effect=[_HTML, _PDF]),
+            patch.object(
+                fetch_mod,
+                "fetch",
+                side_effect=[(_HTML, FetchSession()), (_PDF, FetchSession())],
+            ),
         ):
             body, source = fetch_mod.download("arxiv", "1706.03762")
         assert source == "open_access"
@@ -102,7 +111,7 @@ class TestDownload:
         s2_get = MagicMock()
         with (
             patch.object(s2, "get", s2_get),
-            patch.object(fetch_mod, "fetch", return_value=_PDF),
+            patch.object(fetch_mod, "fetch", return_value=(_PDF, FetchSession())),
         ):
             body, source = fetch_mod.download(
                 "doi", "10.1/x", oa_url="http://oa/pdf", oa_looked_up=True
@@ -116,7 +125,7 @@ class TestDownload:
         s2_get = MagicMock()
         with (
             patch.object(s2, "get", s2_get),
-            patch.object(fetch_mod, "fetch", side_effect=[_HTML]),
+            patch.object(fetch_mod, "fetch", side_effect=[(_HTML, FetchSession())]),
             pytest.raises(NotFoundError),
         ):
             fetch_mod.download("arxiv", "1706.03762", oa_url=None, oa_looked_up=True)
@@ -131,7 +140,7 @@ class TestDownload:
 
     def test_doi_kind_skips_arxiv_branch(self) -> None:
         # A doi kind never hits the arXiv PDF base; OA supplies the bytes.
-        fetch_fn = MagicMock(return_value=_PDF)
+        fetch_fn = MagicMock(return_value=(_PDF, FetchSession()))
         with patch.object(fetch_mod, "fetch", fetch_fn):
             body, source = fetch_mod.download(
                 "doi", "10.1/x", oa_url="http://oa/pdf", oa_looked_up=True

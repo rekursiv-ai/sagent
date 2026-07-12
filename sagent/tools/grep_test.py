@@ -486,7 +486,7 @@ async def test_grep_rg_offset_with_context_ignored(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_grep_rg_error_invalid_regex(tmp_path: Path) -> None:
-    """Ripgrep returns exit code >= 2 for syntactically invalid patterns."""
+    """Invalid patterns preserve the tool's ripgrep-compatible error surface."""
     (tmp_path / "x.py").write_text("hi\n")
     result = await _run_grep(
         {"pattern": "(unclosed", "path": str(tmp_path)},
@@ -838,6 +838,34 @@ async def test_grep_literal_newline_error_rewritten(tmp_path: Path) -> None:
     assert result.is_error
     assert "multiline=true" in result.content
     assert "the literal" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_ignores_offset_when_context_requested(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "x.py").write_text("a\nMATCH\nc\n")
+    result = await _run_grep_py(
+        {
+            "pattern": "MATCH",
+            "path": str(tmp_path),
+            "output_mode": "content",
+            "offset": 1,
+            "-C": 1,
+        },
+        tmp_path,
+    )
+    assert "MATCH" in result.content
+
+
+@pytest.mark.asyncio
+async def test_grep_python_fallback_rejects_literal_newline_without_multiline(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "x.py").write_text("a\nb\n")
+    result = await _run_grep_py({"pattern": "a\\nb", "path": str(tmp_path)}, tmp_path)
+    assert result.is_error
+    assert "multiline=true" in result.content
 
 
 @pytest.mark.asyncio

@@ -29,7 +29,7 @@ import re
 from sagent.lib.custom_json import MutableJSON, int_val
 from sagent.lib.ratelimit import cross_process_limiter
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.lib.web.paper.custom_types import IdType, PaperRecord
 from sagent.lib.web.paper.errors import (
     BackendError,
@@ -187,11 +187,13 @@ def _get(
         params = {**params, "api_key": api_key}
     cross_process_limiter(source, per_seconds=interval_sec).acquire()
     try:
-        raw = fetch(
+        raw, _ = fetch(
             url=f"{base}{path}",
-            params=params,
-            headers=_headers(),
-            timeout_sec=timeout_sec,
+            request=RequestParams(
+                params=params,
+                headers=_headers(),
+                timeout_sec=timeout_sec,
+            ),
         )
     except FetchError as e:
         detail = e.body[:200].decode(errors="replace")

@@ -35,6 +35,7 @@ from typing import Protocol, cast, runtime_checkable
 import asyncio
 import fcntl
 import os
+import random
 import struct
 import threading
 import time
@@ -292,6 +293,67 @@ class SlidingWindowRateLimiter:
             slot = self._calls[-self._max_calls] + self._per_seconds
             self._calls.append(slot)
             return slot - now
+
+
+class RandomUniformPacer:
+    """Sleep a fresh ``uniform(low, high)`` seconds before every grant.
+
+    Unlike the fixed-interval limiters, this paces on a *randomized* gap: each
+    :meth:`acquire` waits an independent ``uniform(low, high)`` draw. The
+    irregular cadence is the point -- a scraper on a perfectly fixed interval is
+    itself a bot signal, and a target (e.g. Google Scholar) with adaptive
+    back-off trips on the regularity, not just the mean rate. This is the pacer
+    the Scholar harvest ran on for months without a CAPTCHA: a 1 req/s floor
+    plus ``uniform(6, 12)`` jitter on top. A fixed interval at the same *mean*
+    (9s) burned in testing at ~21 requests; the variance is load-bearing.
+
+    Satisfies the :class:`RateLimiter` / :class:`AsyncRateLimiter` protocols, so
+    it drops into :class:`CooldownRateLimiter` as its ``limiter``. It keeps no
+    call history -- each grant's wait depends only on the draw, not on when the
+    previous grant fell -- so it is inherently process-local-agnostic (every
+    process paces independently). Pair it with a shared :class:`CooldownGate`
+    for the cross-process block signal; the jitter itself needs no shared state.
+
+    Args:
+      low: Minimum seconds to sleep before a grant (inclusive).
+      high: Maximum seconds to sleep before a grant (inclusive). Must be ``>=
+        low``.
+      clock: Time source, for its ``sleep`` / ``sleep_async``; injectable for
+        tests. Defaults to :class:`SystemClock`.
+      rng: Draw source; defaults to :class:`random.SystemRandom` (the OG's
+        ``_RNG``) so the sequence is unpredictable and un-seedable by an
+        observer. Injectable for deterministic tests.
+
+    """
+
+    def __init__(
+        self,
+        low: float,
+        high: float,
+        *,
+        clock: Clock | None = None,
+        rng: random.Random | None = None,
+    ) -> None:
+        if low < 0:
+            raise ValueError(f"low must be >= 0, got {low}")
+        if high < low:
+            raise ValueError(f"high must be >= low, got high={high}, low={low}")
+        self._low = low
+        self._high = high
+        self._clock: Clock = clock if clock is not None else SystemClock()
+        self._rng: random.Random = rng if rng is not None else random.SystemRandom()
+
+    def _draw(self) -> float:
+        """Return a fresh ``uniform(low, high)`` wait in seconds."""
+        return self._rng.uniform(self._low, self._high)
+
+    def acquire(self) -> None:
+        """Sleep a fresh ``uniform(low, high)`` seconds, then grant."""
+        self._clock.sleep(self._draw())
+
+    async def acquire_async(self) -> None:
+        """Async twin of :meth:`acquire`."""
+        await self._clock.sleep_async(self._draw())
 
 
 class TokenBucketRateLimiter:

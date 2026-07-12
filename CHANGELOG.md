@@ -4,6 +4,18 @@ All notable Sagent changes are documented here.
 
 ## Unreleased
 
+- Added GPT-5.6 Sol, Terra, and Luna to the OpenAI API-key and subscription
+  providers, with GPT-5.6-specific `xhigh` and `max` effort handling. API-key
+  users can select the 1.05M-window variants; subscription auth accepts the
+  same IDs but clamps them to its 272K backend contract. GPT-5.6 Sol is now the
+  OpenAI provider default. Because GPT-5.6 Chat Completions rejects function
+  tools with reasoning enabled, the API-key transport forces effort to `none`
+  for tool-using requests; use the subscription Responses transport for
+  reasoning and tools together.
+- Fixed `OpenAISubscription` credential loading to report API-key-shaped Codex
+  auth files as a clean configuration error instead of raising `KeyError`.
+- Fixed headless runs to exit nonzero and emit an error payload when the model
+  call fails, instead of returning an empty successful result.
 - **Breaking:** removed the `--provider-arg Class.key=JSON` CLI flag and the
   untyped `Agent(provider_args=...)` bag. Provider construction knobs are now
   typed fields on `types.providers.ProviderOptions`

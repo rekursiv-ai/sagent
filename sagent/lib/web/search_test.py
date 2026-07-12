@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 from unittest.mock import MagicMock, patch
 
 import json
@@ -20,6 +20,7 @@ from sagent.lib.web.errors import (
     FetchError,
     PuzzleChallengeError,
 )
+from sagent.lib.web.fetch import FetchSession
 from sagent.lib.web.search import (
     CodeResult,
     FileResult,
@@ -49,12 +50,25 @@ def _patch_fetch(
     return_value: bytes = b"{}",
     side_effect: Any = None,
 ) -> Any:
+    # fetch returns (body, session); wrap the byte-valued test inputs so the
+    # mock matches that shape (an exception side_effect still raises).
     kwargs: dict[str, Any] = {}
     if side_effect is not None:
-        kwargs["side_effect"] = side_effect
+        kwargs["side_effect"] = _tuple_side_effect(side_effect)
     else:
-        kwargs["return_value"] = return_value
+        kwargs["return_value"] = (return_value, FetchSession())
     return patch("sagent.lib.web.search.fetch", **kwargs)
+
+
+def _tuple_side_effect(side_effect: Any) -> Any:
+    """Wrap a byte-valued side_effect so each byte result becomes (bytes, session)."""
+    if isinstance(side_effect, list):
+        items = cast("list[object]", side_effect)
+        return [
+            item if isinstance(item, BaseException) else (item, FetchSession())
+            for item in items
+        ]
+    return side_effect  # an exception class/instance: raised as-is.
 
 
 @contextmanager
@@ -130,7 +144,7 @@ class TestSearchDispatch:
 class TestGsaHeaders:
     def test_query_selects_stable_user_agent(self) -> None:
         with patch(
-            "sagent.lib.web.search._get_gsa_useragents",
+            "sagent.lib.web.search.user_agent_pool",
             return_value=("ua0", "ua1", "ua2"),
         ):
             assert gsa_headers_for_query("same") == gsa_headers_for_query("same")
@@ -727,15 +741,22 @@ class TestSearchDuckduckgo:
     def test_uses_normal_browser_request_contract(self) -> None:
         with (
             patch(
-                "sagent.lib.web.search._get_gsa_useragents",
+                "sagent.lib.web.search.user_agent_pool",
                 return_value=("ddg-test-ua",),
             ),
             _patch_fetch(return_value=_NO_RESULTS_DDG.encode()) as mock,
         ):
             duckduckgo("test")
-        assert mock.call_args.kwargs["method"] == "POST"
-        assert mock.call_args.kwargs["data"] == {"q": "test", "b": "", "kl": "wt-wt"}
-        assert mock.call_args.kwargs["headers"] == {
+        # The query rides in the URL, not a POST body: a POSTed query is dropped
+        # and DDG serves its empty homepage. GET with q= returns real results.
+        req = mock.call_args.kwargs["request"]
+        assert req.method == "GET"
+        assert req.data is None
+        url = mock.call_args.args[0]
+        assert url.startswith("https://html.duckduckgo.com/html/?")
+        assert "q=test" in url
+        assert "kl=wt-wt" in url
+        assert req.headers == {
             "User-Agent": "ddg-test-ua NSTNWV",
             "Accept": "*/*",
             "Sec-Fetch-Dest": "document",
@@ -745,18 +766,19 @@ class TestSearchDuckduckgo:
             "Accept-Language": "all,all-ALL;q=0.7",
             "Referer": "https://html.duckduckgo.com/html/",
         }
-        assert "cookies" not in mock.call_args.kwargs
+        assert not req.cookies
         # INF-025: the GSA mobile UA must be sent verbatim, without fetch's
         # default desktop Chrome sec-ch-ua headers.
-        assert mock.call_args.kwargs["raw_headers"] is True
-        assert mock.call_args.kwargs["retries"] == 2
+        assert req.raw_headers is True
+        assert req.retries == 2
 
     def test_quotes_bangs_before_request(self) -> None:
         with _patch_fetch(
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("!w python")
-        assert mock.call_args.kwargs["data"]["q"] == "'!w' python"
+        # Bang tokens are quoted, then percent-encoded into the query string.
+        assert "q=%27%21w%27+python" in mock.call_args.args[0]
 
     def test_rejects_too_long_query(self) -> None:
         # INF-026: an over-length query must raise, not silently return [].
@@ -777,7 +799,7 @@ class TestHeadersArg:
     def test_searxng_custom_headers(self) -> None:
         with _patch_searxng_fetch({"results": []}) as mock:
             searxng("q", headers={"User-Agent": "custom/1.0"})
-        assert mock.call_args.kwargs["headers"] == {
+        assert mock.call_args.kwargs["request"].headers == {
             "User-Agent": "custom/1.0",
         }
 
@@ -786,7 +808,7 @@ class TestHeadersArg:
             return_value=_NO_RESULTS_DDG.encode(),
         ) as mock:
             duckduckgo("q", headers={"User-Agent": "x"})
-        assert mock.call_args.kwargs["headers"] == {
+        assert mock.call_args.kwargs["request"].headers == {
             "User-Agent": "x",
             "Accept": "*/*",
             "Sec-Fetch-Dest": "document",

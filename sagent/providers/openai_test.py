@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+from types import SimpleNamespace
+from typing import cast
+
+from PIL import Image
+
 import pytest
+import tiktoken
 
 from sagent.providers.openai import OpenAI
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
+from sagent.types.tools import Tool
 
 
 def test_openai_from_key_constructs() -> None:
@@ -50,6 +58,10 @@ def test_openai_unknown_model_raises() -> None:
 @pytest.mark.parametrize(
     ("base_id", "full_tokens"),
     [
+        ("gpt-5.6", 1_050_000),
+        ("gpt-5.6-sol", 1_050_000),
+        ("gpt-5.6-terra", 1_050_000),
+        ("gpt-5.6-luna", 1_050_000),
         ("gpt-5.5", 1_000_000),
         ("gpt-5.5-pro", 1_050_000),
         ("gpt-5.4", 1_050_000),
@@ -72,8 +84,65 @@ def test_openai_default_model_opts_into_full_window() -> None:
     # API-key default is the ``+1m`` variant: full window out of the box.
     p = OpenAI.from_key("k")
     m = p.model()
-    assert m.model_id == "gpt-5.5+1m"
-    assert m.max_request_tokens == 1_000_000
+    assert m.model_id == "gpt-5.6-sol+1m"
+    assert m.max_request_tokens == 1_050_000
+
+
+@pytest.mark.parametrize(
+    ("model_id", "request_price", "response_price", "cache_write_price"),
+    [
+        ("gpt-5.6", 5.0, 30.0, 6.25),
+        ("gpt-5.6-sol", 5.0, 30.0, 6.25),
+        ("gpt-5.6-terra", 2.5, 15.0, 3.125),
+        ("gpt-5.6-luna", 1.0, 6.0, 1.25),
+    ],
+)
+def test_openai_gpt_56_profiles(
+    model_id: str,
+    request_price: float,
+    response_price: float,
+    cache_write_price: float,
+) -> None:
+    m = OpenAI.from_key("k").model(model_id)
+    assert m.max_request_tokens == 272_000
+    assert m.max_response_tokens == 128_000
+    assert m.pricing.request == request_price
+    assert m.pricing.response == response_price
+    assert m.pricing.cache_write == cache_write_price
+    assert m.pricing.cache_read == request_price / 10
+    assert m.pricing.long_context_threshold == 272_000
+    assert m.pricing.long_context_input_multiplier == 2.0
+    assert m.pricing.long_context_output_multiplier == 1.5
+    assert m.max_image_dim == 0
+    assert m.max_image_bytes == 0
+    assert m.max_request_bytes == 512 * 1024 * 1024
+
+
+def _png(width: int, height: int) -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (width, height)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "tokens"),
+    [(1, 1, 1), (1024, 1024, 1024), (33, 65, 6)],
+)
+def test_openai_gpt_56_image_tokens_use_32px_patches(
+    width: int,
+    height: int,
+    tokens: int,
+) -> None:
+    model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    assert model.approx_image_tokens(_png(width, height)) == tokens
+
+
+@pytest.mark.anyio
+async def test_openai_gpt_56_uses_o200k_tokenizer() -> None:
+    model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    text = "GPT-5.6 token counting: 東京 and function_call(arg=42)"
+    expected = len(tiktoken.get_encoding("o200k_base").encode(text))
+    assert await model.actual_text_tokens(text) == expected
 
 
 @pytest.mark.parametrize("base_id", ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"])
@@ -179,6 +248,54 @@ def test_openai_build_body_maps_effort_to_wire_vocabulary() -> None:
         stream=False,
     )
     assert max_body["reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
+        ("none", "none"),
+        ("minimal", "none"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "xhigh"),
+    ],
+)
+def test_openai_gpt_56_maps_effort_for_chat_completions(
+    effort: str,
+    wire_effort: str,
+) -> None:
+    m = OpenAI.from_key("k").model("gpt-5.6-sol")
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], effort=effort),
+        stream=False,
+    )
+    assert body["reasoning_effort"] == wire_effort
+
+
+@pytest.mark.parametrize("effort", [None, "low", "max"])
+def test_openai_gpt_56_chat_tools_force_none_effort(
+    effort: str | None,
+) -> None:
+    tool = cast(
+        Tool,
+        SimpleNamespace(
+            name="List",
+            description="List files",
+            directive_schema={"type": "object", "properties": {}},
+        ),
+    )
+    model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    body = model._build_body(
+        ModelRequest(
+            messages=[UserMessage(text="x")],
+            tools=[tool],
+            effort=effort,
+        ),
+        stream=False,
+    )
+    assert body["reasoning_effort"] == "none"
 
 
 def test_openai_reasoning_model_uses_max_completion_tokens() -> None:

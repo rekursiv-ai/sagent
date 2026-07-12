@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote, urlparse
 from xml.etree.ElementTree import Element, ParseError
 
@@ -22,7 +22,7 @@ import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.lib.web.errors import BotDetectionError, FetchError, classify_bot_detection
-from sagent.lib.web.fetch import ValidatedHost, fetch
+from sagent.lib.web.fetch import RequestParams, ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -33,6 +33,9 @@ from sagent.types.runtime import ToolResult
 
 
 trafilatura = lazy_import("trafilatura")
+
+# The only HTTP methods this tool supports; enforced at the directive boundary.
+HttpMethod = Literal["GET", "POST"]
 
 # Response kinds returned by ``_fetch_body``; controls extraction.
 _KIND_HTML = "html"  # raw HTML, needs trafilatura
@@ -191,13 +194,21 @@ class WebFetch:
 
         """
         raw_url = str(args.get("url", ""))
-        method = str(args.get("method", "GET")).upper()
-        if method not in ("GET", "POST"):
+        raw_method = str(args.get("method", "GET")).upper()
+        if raw_method not in ("GET", "POST"):
             return ToolResult(
                 call_id="",
-                content=f"Unsupported method {method!r}; only GET and POST allowed.",
+                content=(
+                    f"Unsupported method {raw_method!r}; only GET and POST allowed."
+                ),
                 is_error=True,
             )
+        # The guard above admits only "GET"/"POST"; cast narrows the str to the
+        # HttpMethod literal. ty cannot follow the `in`-membership guard; pyright
+        # can, hence its reportUnnecessaryCast suppression.
+        method = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty needs cast; pyright narrows from `in`
+            "HttpMethod", raw_method
+        )
 
         try:
             json_body, form_body = _request_bodies(method, args)
@@ -249,7 +260,7 @@ class WebFetch:
 
 
 def _request_bodies(
-    method: str,
+    method: HttpMethod,
     args: Mapping[str, object],
 ) -> tuple[JSONValue, dict[str, str] | None]:
     """Return POST request bodies from a tool directive."""
@@ -279,7 +290,7 @@ def _request_bodies(
     }
 
 
-async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
+async def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
     """Extract tool result text from a response body.
 
     ``kind`` selects the post-processing path:
@@ -310,7 +321,7 @@ async def _extract_text(body: bytes, *, kind: str, method: str) -> str:
 async def _fetch_body(
     raw_url: str,
     *,
-    method: str,
+    method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
 ) -> tuple[bytes, str]:
@@ -351,20 +362,20 @@ async def _fetch_body(
 def _fetch_with_fallback(
     url: str,
     *,
-    method: str,
+    method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
 ) -> tuple[bytes, str]:
     """Fetch ``url`` through a bot-wall-aware fallback ladder.
 
-    The stdlib HTTP path (via ``_safe_fetch``) is always tried first.
-    On a 403/429/503 response to a GET -- the signature of edge-side
-    bot detection (Fastly, Akamai, Cloudflare) -- the ladder falls
-    through to additional fetch strategies and finally to a reader-
-    proxy hop that renders the URL with a third-party browser stack.
-    Non-GET methods, non-fallback statuses (404, 500, ...), and SSRF /
-    DNS errors surface immediately; the ladder only engages on the
-    specific bot-wall signature.
+    The direct path (``_safe_fetch`` -> :func:`sagent.lib.web.fetch.fetch`,
+    Chrome TLS/HTTP-2 impersonation) is always tried first. On a 403/429/503
+    response to a GET -- the signature of edge-side bot detection (Fastly,
+    Akamai, Cloudflare) -- the ladder falls through to a reader-proxy hop that
+    renders the URL with a third-party browser stack (a different egress).
+    Non-GET methods, non-fallback statuses (404, 500, ...), and SSRF / DNS
+    errors surface immediately; the ladder only engages on the specific
+    bot-wall signature.
 
     Args:
       url: Target URL (SSRF-checked by ``_safe_fetch`` on each rung).
@@ -393,7 +404,10 @@ def _fetch_with_fallback(
             raise
         rung1_err = e
 
-    # Reader-proxy fallback (final rung).
+    # Reader-proxy fallback (final rung). The first rung already fetches with
+    # Chrome TLS/HTTP-2 impersonation via sagent.lib.web.fetch, so a same-egress
+    # curl retry would present an identical fingerprint and hit the same wall;
+    # the proxy is the only rung with a genuinely different egress.
     try:
         return _reader_proxy_fetch(url), _KIND_MARKDOWN
     except (FetchError, ValueError, OSError) as e:
@@ -430,21 +444,33 @@ def _reader_proxy_fetch(url: str) -> bytes:
 def _safe_fetch(
     url: str,
     *,
-    method: str = "GET",
+    method: HttpMethod = "GET",
     json_body: JSONValue = None,
     form_body: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> bytes:
-    """Fetch with SSRF check on the initial URL and every redirect."""
+    """Fetch with SSRF check on the initial URL and every redirect.
+
+    Delegates the transport -- Chrome TLS/HTTP-2 impersonation, redirect
+    following, retry, decompression -- to :func:`sagent.lib.web.fetch.fetch`. This
+    tool supplies only the app-level SSRF policy (via the ``validated_hosts`` and
+    ``on_redirect`` hooks) and, when a caller passes ``headers`` (e.g. Reddit's
+    Android app User-Agent + bearer token), the identity to present.
+    """
     _check_ssrf(url)
-    return fetch(
+    body, _session = fetch(
         url,
-        method=method,
-        json=json_body,
-        data=form_body,
-        on_redirect=_check_ssrf,
-        validated_hosts=_validated_host,
-        timeout_sec=15,
+        request=RequestParams(
+            method=method,
+            json=json_body,
+            data=form_body,
+            headers=headers,
+            on_redirect=_check_ssrf,
+            validated_hosts=_validated_host,
+            timeout_sec=15,
+        ),
     )
+    return body
 
 
 def _check_ssrf(url: str) -> None:
@@ -454,21 +480,23 @@ def _check_ssrf(url: str) -> None:
         raise ValueError(err)
 
 
-def _validated_host(netloc: str) -> ValidatedHost:
+def _validated_host(hostname: str) -> ValidatedHost:
     """Return a host/IP pair after SSRF validation.
 
-    Pins the connect IP to defeat DNS rebinding. Prefers an IPv4 address when
-    the host resolves to both families: ``getaddrinfo`` commonly lists AAAA
-    (v6) first, but many hosts/networks have no working v6 route, and pinning
-    to a single unreachable v6 address turns a servable page into a status-0
-    connection failure (unlike an un-pinned client, which Happy-Eyeballs to
-    v4). Falls back to v6 only when that is the sole family.
+    ``hostname`` is the bare host the ``validated_hosts`` resolver contract
+    passes (never a netloc-with-port). Pins the connect IP to defeat DNS
+    rebinding. Prefers an IPv4 address when the host resolves to both families:
+    ``getaddrinfo`` commonly lists AAAA (v6) first, but many hosts/networks have
+    no working v6 route, and pinning to a single unreachable v6 address turns a
+    servable page into a status-0 connection failure (unlike an un-pinned
+    client, which Happy-Eyeballs to v4). Falls back to v6 only when that is the
+    sole family.
     """
-    parsed = urlparse(f"//{netloc}")
+    parsed = urlparse(f"//{hostname}")
     host = parsed.hostname
     if not host:
         raise ValueError("URL has no host.")
-    err = _url_is_safe(f"http://{netloc}")
+    err = _url_is_safe(f"http://{hostname}")
     if err is not None:
         raise ValueError(err)
     infos = socket.getaddrinfo(host, None)
@@ -478,7 +506,10 @@ def _validated_host(netloc: str) -> ValidatedHost:
     err = _ip_is_safe(host, ip)
     if err is not None:
         raise ValueError(err)
-    return ValidatedHost(host=netloc, ip=ip)
+    # Return the BARE host (never the raw netloc-with-port): the transport
+    # re-appends any port via _host_header, so returning a port here would
+    # double it on the wire.
+    return ValidatedHost(host=host, ip=ip)
 
 
 def _url_is_safe(url: str) -> str | None:

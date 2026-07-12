@@ -95,22 +95,47 @@ logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0
 
-# Map sagent's effort vocabulary onto the effort levels OpenAI's reasoning
-# models actually accept (``minimal``/``low``/``medium``/``high``). The agent
-# advertises a wider set (``none``..``max``) for cross-provider uniformity, so
-# both OpenAI transports -- chat-completions (``reasoning_effort`` here) and the
-# subscription Responses API (``reasoning.effort`` in ``openai_sub``) -- must
-# funnel through this single table. Sending a raw ``none``/``xhigh``/``max`` is
-# a 400 on the wire, and two transports disagreeing is a contract drift bug.
-OPENAI_REASONING_EFFORT: dict[str, str] = {
-    "none": "minimal",
-    "minimal": "minimal",
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "high",
-    "max": "high",
-}
+
+def openai_chat_reasoning_effort(model_id: str, effort: str) -> str | None:
+    """Map Sagent effort to OpenAI Chat Completions wire values.
+
+    Args:
+      model_id: OpenAI model identifier, optionally carrying Sagent tags.
+      effort: Sagent reasoning-effort value.
+
+    Returns:
+      wire_effort: OpenAI reasoning-effort value, or ``None`` when unknown.
+
+    """
+    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        return None
+    if base_model_id(model_id).startswith("gpt-5.6"):
+        if effort == "minimal":
+            return "none"
+        if effort == "max":
+            return "xhigh"
+        return effort
+    if effort in ("none", "minimal"):
+        return "minimal"
+    if effort in ("xhigh", "max"):
+        return "high"
+    return effort
+
+
+def openai_responses_reasoning_effort(model_id: str, effort: str) -> str | None:
+    """Map Sagent effort to OpenAI Responses API wire values.
+
+    Args:
+      model_id: OpenAI model identifier, optionally carrying Sagent tags.
+      effort: Sagent reasoning-effort value.
+
+    Returns:
+      wire_effort: OpenAI reasoning-effort value, or ``None`` when unknown.
+
+    """
+    if base_model_id(model_id).startswith("gpt-5.6") and effort == "max":
+        return "max"
+    return openai_chat_reasoning_effort(model_id, effort)
 
 
 class OpenAICompat:
@@ -425,15 +450,19 @@ class OpenAICompatModel:
         return self._profile.pricing
 
     def approx_image_tokens(self, data: bytes) -> int:
-        """Local estimate via OpenAI's tile formula (``85 + tiles * 170``).
+        """Estimate image tokens using the model family's published formula.
 
         References:
-          https://platform.openai.com/docs/guides/vision/calculating-costs
+          https://developers.openai.com/api/docs/guides/images-vision
 
         """
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
+        if base_model_id(self._model_id).startswith("gpt-5.6"):
+            # GPT-5.6 ``auto``/``original`` preserves dimensions and bills one
+            # token unit per 32x32 patch, with patches rounded up per edge.
+            return math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
         return 85 + tiles * 170
 
@@ -470,6 +499,12 @@ class OpenAICompatModel:
         try:
             return tiktoken.encoding_for_model(self._wire_model_id)
         except KeyError:
+            # tiktoken 0.13 maps the GPT-5 generation to o200k_base but its
+            # registry predates dotted release ids (gpt-5.4/5.5/5.6). Keep
+            # OpenAI's own generation mapping instead of silently degrading
+            # these models to the chars/4 heuristic.
+            if base_model_id(self._wire_model_id).startswith("gpt-5."):
+                return tiktoken.get_encoding("o200k_base")
             return None
 
     @property
@@ -567,12 +602,25 @@ class OpenAICompatModel:
         if stream:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
-        if request.effort is not None and self.supports_effort:
+        if request.tools and self._wire_model_id.startswith("gpt-5.6"):
+            # GPT-5.6 Chat Completions rejects function tools whenever
+            # reasoning is enabled, including its default ``medium`` effort.
+            # The Responses transport supports reasoning and tools together;
+            # this compatibility transport must explicitly disable reasoning.
+            body["reasoning_effort"] = "none"
+            if request.effort not in (None, "none", "minimal"):
+                logger.warning(
+                    "GPT-5.6 Chat Completions requires reasoning effort "
+                    "'none' when tools are present; ignoring requested effort %r. "
+                    "Use the Responses transport for reasoning with tools.",
+                    request.effort,
+                )
+        elif request.effort is not None and self.supports_effort:
             # Map through the shared table: the wire accepts only a subset of
             # sagent's advertised efforts. An unknown value should be impossible
             # (the agent's effort setter validates against ``valid_efforts``), so
             # warn rather than silently run at the most expensive level.
-            mapped = OPENAI_REASONING_EFFORT.get(request.effort)
+            mapped = openai_chat_reasoning_effort(self._model_id, request.effort)
             if mapped is None:
                 logger.warning(
                     "unknown reasoning effort %r; defaulting to 'high'",
@@ -831,8 +879,8 @@ def _is_image_mime(descriptor: str) -> bool:
     return descriptor.startswith("image/")
 
 
-def _extract_usage(usage: MutableJSON) -> tuple[int, int, int]:
-    """Return (input_tokens, output_tokens, cache_read) from a usage dict."""
+def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
+    """Return total input, output, cache-read, and cache-write token counts."""
     input_tokens = int_val(usage.get("prompt_tokens"), 0)
     output_tokens = int_val(usage.get("completion_tokens"), 0)
     raw_details = usage.get("prompt_tokens_details")
@@ -840,7 +888,8 @@ def _extract_usage(usage: MutableJSON) -> tuple[int, int, int]:
         cast(MutableJSON, raw_details) if isinstance(raw_details, dict) else {}
     )
     cache_read = int_val(details.get("cached_tokens"), 0)
-    return input_tokens, output_tokens, cache_read
+    cache_write = int_val(details.get("cache_write_tokens"), 0)
+    return input_tokens, output_tokens, cache_read, cache_write
 
 
 async def consume_stream(
@@ -874,6 +923,7 @@ async def consume_stream(
     tool_name: dict[int, str] = {}
     tool_args: dict[int, list[str]] = {}
     finish_reason: str | None = None
+    saw_refusal = False
     message_id = ""
     usage: MutableJSON = {}
 
@@ -912,6 +962,12 @@ async def consume_stream(
                 text_parts.append(content_chunk)
                 if publish is not None:
                     publish(ModelResponsePartial(content_chunk))
+            refusal_chunk = delta.get("refusal")
+            if isinstance(refusal_chunk, str) and refusal_chunk:
+                saw_refusal = True
+                text_parts.append(refusal_chunk)
+                if publish is not None:
+                    publish(ModelResponsePartial(refusal_chunk))
             if reasoning_field:
                 think_chunk = delta.get(reasoning_field)
                 if isinstance(think_chunk, str) and think_chunk:
@@ -957,22 +1013,26 @@ async def consume_stream(
         tool_calls=tuple(tool_calls),
     )
 
-    total_input, output_tokens, cache_read = _extract_usage(usage)
+    total_input, output_tokens, cache_read, cache_write = _extract_usage(usage)
     # OpenAI-compatible APIs report a cache-inclusive prompt total; store the
     # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from the
     # cache pools (the convention the cost contract and consumers rely on).
-    input_tokens = max(0, total_input - cache_read)
+    input_tokens = max(0, total_input - cache_read - cache_write)
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
         input_tokens,
         output_tokens,
+        cache_creation=cache_write,
         cache_read=cache_read,
     )
+    if saw_refusal and finish_reason in (None, "stop"):
+        finish_reason = "content_filter"
     response = ModelResponse(
         message=asst,
         tokens=TokenCount(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_creation_tokens=cache_write,
             cache_read_tokens=cache_read,
         ),
         stop_reason=normalize_stop_reason(

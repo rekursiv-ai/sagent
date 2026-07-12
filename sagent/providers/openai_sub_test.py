@@ -18,6 +18,7 @@ import httpx
 import openai
 import pytest
 
+from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI, openai_sub
 from sagent.providers.lib.cost import ModelProfile, Pricing
@@ -134,16 +135,48 @@ class _ReasoningDeltaEvent:
 class _CompletedEvent:
     """Small stand-in for OpenAI's completed event class."""
 
-    def __init__(self) -> None:
-        self.response = _CompletedResponse()
+    def __init__(self, response: object | None = None) -> None:
+        self.response = response or _CompletedResponse()
 
 
 class _CompletedResponse:
     """Small stand-in for OpenAI's completed response payload."""
 
-    id: str = "resp_123"
-    status: str = "completed"
-    usage: object | None = None
+    def __init__(self, usage: object | None = None) -> None:
+        self.id = "resp_123"
+        self.status = "completed"
+        self.usage = usage
+
+
+class _InputTokenDetails:
+    """SDK-shaped details object whose ``to_dict`` exposes new fields."""
+
+    def __init__(self, *, cached_tokens: int, cache_write_tokens: int) -> None:
+        self.cached_tokens = cached_tokens
+        self._cache_write_tokens = cache_write_tokens
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "cached_tokens": self.cached_tokens,
+            "cache_write_tokens": self._cache_write_tokens,
+        }
+
+
+class _Usage:
+    def __init__(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.input_tokens_details = _InputTokenDetails(
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
 
 
 class _ResponseErrorEvent:
@@ -177,8 +210,8 @@ class _FailedResponse:
 class _IncompleteEvent:
     """Small stand-in for OpenAI's incomplete terminal event."""
 
-    def __init__(self) -> None:
-        self.response = _IncompleteResponse()
+    def __init__(self, reason: str = "max_output_tokens") -> None:
+        self.response = _IncompleteResponse(reason)
 
 
 class _IncompleteResponse:
@@ -187,7 +220,37 @@ class _IncompleteResponse:
     id: str = "resp_incomplete"
     status: str = "incomplete"
     error = None
-    incomplete_details = type("Incomplete", (), {"reason": "max_output_tokens"})()
+
+    def __init__(self, reason: str) -> None:
+        self.incomplete_details = type("Incomplete", (), {"reason": reason})()
+
+
+class _ReasoningOutputItem:
+    type: str = "reasoning"
+
+    def to_dict(self, **_: object) -> dict[str, object]:
+        return {
+            "id": "rs_123",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "encrypted-reasoning",
+            "status": "completed",
+        }
+
+
+class _ReasoningOutputDoneEvent:
+    def __init__(self) -> None:
+        self.item = _ReasoningOutputItem()
+
+
+class _RefusalDeltaEvent:
+    def __init__(self, delta: str) -> None:
+        self.delta = delta
+
+
+class _RefusalDoneEvent:
+    def __init__(self, refusal: str) -> None:
+        self.refusal = refusal
 
 
 def _stub_request_messages(
@@ -356,6 +419,22 @@ def test_build_assistant_items_no_text_only_tool_calls() -> None:
     items = _items_as_list(_stub_request_messages(asst))
     assert len(items) == 1
     assert items[0]["type"] == "function_call"
+
+
+def test_build_assistant_items_replays_encrypted_reasoning() -> None:
+    reasoning: dict[str, object] = {
+        "id": "rs_123",
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": "encrypted-reasoning",
+        "status": "completed",
+    }
+    asst = AssistantMessage(text="answer", thinking_blocks=(reasoning,))
+    items = _items_as_list(_stub_request_messages(asst))
+    assert items == [
+        reasoning,
+        {"role": "assistant", "content": "answer"},
+    ]
 
 
 def test_parse_tool_arguments_prefers_done_when_set() -> None:
@@ -550,6 +629,34 @@ def test_load_missing_file_raises(tmp_path: Path) -> None:
         OpenAISubscription.load(path=tmp_path / "nope.json")
 
 
+def test_load_api_key_mode_file_raises_actionable_error(tmp_path: Path) -> None:
+    target = tmp_path / "auth.json"
+    _write_creds_file(
+        target,
+        {"auth_mode": "apikey", "OPENAI_API_KEY": "test-api-key"},
+    )
+    with pytest.raises(ValueError, match=r"API-key.*OpenAI.*env"):
+        OpenAISubscription.load(path=target)
+
+
+def test_load_incomplete_oauth_file_raises_value_error(tmp_path: Path) -> None:
+    target = tmp_path / "auth.json"
+    _write_creds_file(target, {"auth_mode": "chatgpt", "tokens": {}})
+    with pytest.raises(ValueError, match="missing required OAuth fields"):
+        OpenAISubscription.load(path=target)
+
+
+@pytest.mark.parametrize("payload", [[], None, "not an object"])
+def test_load_non_object_json_raises_value_error(
+    tmp_path: Path,
+    payload: object,
+) -> None:
+    target = tmp_path / "auth.json"
+    target.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="JSON object"):
+        OpenAISubscription.load(path=target)
+
+
 def test_save_writes_id_token_when_present(tmp_path: Path) -> None:
     target = tmp_path / "auth.json"
     creds = _make_creds(_make_jwt({"exp": 0.0}))
@@ -617,6 +724,11 @@ def test_subscription_model_clamps_against_wire_contract() -> None:
     # KNOWN_MODELS is clamped via ``_subscription_profile``.
     assert m.max_request_tokens == 272_000
     assert m.max_response_tokens == 32_000
+
+
+def test_subscription_model_override_cannot_bypass_wire_contract() -> None:
+    m = _make_provider().model("gpt-5.6-sol+1m", max_request_tokens=1_050_000)
+    assert m.max_request_tokens == 272_000
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
@@ -743,7 +855,10 @@ def test_subscription_expired_property_false_when_far_future() -> None:
     assert p.expired is False
 
 
-async def _reasoning_effort_for(request: ModelRequest) -> str:
+async def _reasoning_effort_for(
+    request: ModelRequest,
+    model_id: str = "gpt-5.5",
+) -> str:
     provider = _make_provider()
     sdk = MagicMock()
     sdk.responses = MagicMock()
@@ -757,12 +872,40 @@ async def _reasoning_effort_for(request: ModelRequest) -> str:
             _CompletedEvent,
         ),
     ):
-        model = provider.model("gpt-5.5")
+        model = provider.model(model_id)
         await model.stream(request)
     await_args = sdk.responses.create.await_args
     assert await_args is not None
-    reasoning = await_args.kwargs["reasoning"]
-    return str(reasoning.effort)
+    raw_reasoning: object = await_args.kwargs["reasoning"]
+    assert isinstance(raw_reasoning, dict)
+    reasoning = cast(dict[str, object], raw_reasoning)
+    effort = reasoning["effort"]
+    assert isinstance(effort, str)
+    return effort
+
+
+async def _create_kwargs_for(
+    request: ModelRequest,
+    *,
+    model_id: str = "gpt-5.6-sol",
+) -> dict[str, object]:
+    provider = _make_provider()
+    sdk = MagicMock()
+    sdk.responses = MagicMock()
+    sdk.responses.create = AsyncMock(
+        return_value=_DelayedStream([_CompletedEvent()], delay_sec=0.0)
+    )
+    with (
+        patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
+        patch(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        ),
+    ):
+        await provider.model(model_id).stream(request)
+    await_args = sdk.responses.create.await_args
+    assert await_args is not None
+    return cast(dict[str, object], await_args.kwargs)
 
 
 @pytest.mark.anyio
@@ -781,9 +924,25 @@ async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> No
     assert effort == "high"
 
 
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [("none", "none"), ("xhigh", "xhigh"), ("max", "max")],
+)
+@pytest.mark.anyio
+async def test_subscription_stream_preserves_gpt_56_effort(
+    effort: str,
+    wire_effort: str,
+) -> None:
+    actual = await _reasoning_effort_for(
+        ModelRequest(messages=[UserMessage(text="hi")], effort=effort),
+        model_id="gpt-5.6-sol",
+    )
+    assert actual == wire_effort
+
+
 @pytest.mark.anyio
 async def test_subscription_stream_maps_sagent_none_effort_to_openai_minimal() -> None:
-    """Responses transport funnels through the SHARED ``OPENAI_REASONING_EFFORT``.
+    """Responses transport funnels through the shared effort mapper.
 
     Locks the cross-transport contract: ``none`` must map to ``minimal`` here
     exactly as it does in the chat-completions ``_build_body`` path, so the two
@@ -829,7 +988,22 @@ async def test_subscription_stream_requests_reasoning_summary_when_thinking() ->
     reasoning = await _reasoning_for(
         ModelRequest(messages=[UserMessage(text="hi")], thinking="adaptive")
     )
-    assert getattr(reasoning, "summary", None) == "auto"
+    assert isinstance(reasoning, dict)
+    assert cast(dict[str, object], reasoning)["summary"] == "auto"
+
+
+@pytest.mark.anyio
+async def test_subscription_stream_requests_encrypted_reasoning_for_stateless_history() -> (
+    None
+):
+    kwargs = await _create_kwargs_for(
+        ModelRequest(messages=[UserMessage(text="hi")], effort="medium")
+    )
+    assert kwargs["store"] is False
+    assert kwargs["include"] == ["reasoning.encrypted_content"]
+    reasoning = kwargs["reasoning"]
+    assert isinstance(reasoning, dict)
+    assert cast(dict[str, object], reasoning)["context"] == "all_turns"
 
 
 @pytest.mark.anyio
@@ -1402,6 +1576,9 @@ class TestStreamIdleTimeout:
         assert "too many requests" in msg
         assert "code=rate_limit" in msg
         assert "param=input" in msg
+        model = _make_provider().model("gpt-5.6-sol")
+        assert is_retryable(raised.value, model) is True
+        assert is_rate_limited(raised.value) is True
 
     @pytest.mark.anyio
     async def test_error_event_closes_stream(
@@ -1463,28 +1640,149 @@ class TestStreamIdleTimeout:
         assert "response_id=resp_failed" in msg
         assert "code=server_error" in msg
         assert "backend failed" in msg
+        model = _make_provider().model("gpt-5.6-sol")
+        assert is_retryable(raised.value, model) is True
 
     @pytest.mark.anyio
-    async def test_response_incomplete_event_is_user_facing(
+    async def test_response_incomplete_event_returns_partial_length_response(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            _TextDeltaEvent,
+        )
         monkeypatch.setattr(
             "sagent.providers.openai_sub.oai_responses.ResponseIncompleteEvent",
             _IncompleteEvent,
         )
-        stream = _DelayedStream([_IncompleteEvent()], delay_sec=0.0)
+        stream = _DelayedStream(
+            [_TextDeltaEvent("partial answer"), _IncompleteEvent()],
+            delay_sec=0.0,
+        )
 
-        with pytest.raises(UserFacingError) as raised:
-            await _consume_stream(
-                stream,
-                pricing=Pricing(),
-                publish=None,
+        response = await _consume_stream(
+            stream,
+            pricing=Pricing(),
+            publish=None,
+        )
+
+        assert response.message.text == "partial answer"
+        assert response.message_id == "resp_incomplete"
+        assert response.stop_reason == "max_tokens"
+
+    @pytest.mark.anyio
+    async def test_response_incomplete_content_filter_is_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            _TextDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseIncompleteEvent",
+            _IncompleteEvent,
+        )
+        stream = _DelayedStream(
+            [_TextDeltaEvent("partial answer"), _IncompleteEvent("content_filter")],
+            delay_sec=0.0,
+        )
+
+        response = await _consume_stream(
+            stream,
+            pricing=Pricing(),
+            publish=None,
+        )
+
+        assert response.message.text == "partial answer"
+        assert response.stop_reason == "model_refusal"
+
+    @pytest.mark.anyio
+    async def test_completed_usage_tracks_and_bills_cache_write_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        event = _CompletedEvent(
+            _CompletedResponse(
+                _Usage(
+                    input_tokens=1309,
+                    output_tokens=2,
+                    cache_write_tokens=1306,
+                )
             )
+        )
+        response = await _consume_stream(
+            _DelayedStream([event], delay_sec=0.0),
+            pricing=Pricing(request=1.0, response=6.0, cache_write=1.25),
+            publish=None,
+        )
+        assert response.tokens.input_tokens == 3
+        assert response.tokens.cache_creation_tokens == 1306
+        assert response.input_cost == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
 
-        msg = str(raised.value)
-        assert "status=incomplete" in msg
-        assert "response_id=resp_incomplete" in msg
-        assert "reason=max_output_tokens" in msg
+    @pytest.mark.anyio
+    async def test_stream_preserves_and_replays_encrypted_reasoning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseOutputItemDoneEvent",
+            _ReasoningOutputDoneEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        response = await _consume_stream(
+            _DelayedStream(
+                [_ReasoningOutputDoneEvent(), _CompletedEvent()],
+                delay_sec=0.0,
+            ),
+            pricing=Pricing(),
+            publish=None,
+        )
+        encrypted = next(
+            block
+            for block in response.message.thinking_blocks
+            if block.get("encrypted_content") == "encrypted-reasoning"
+        )
+        replay = _items_as_list(
+            ModelRequest(messages=[AssistantMessage(thinking_blocks=(encrypted,))])
+        )
+        assert replay == [encrypted]
+
+    @pytest.mark.anyio
+    async def test_stream_preserves_refusal_without_duplication(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseRefusalDeltaEvent",
+            _RefusalDeltaEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseRefusalDoneEvent",
+            _RefusalDoneEvent,
+        )
+        monkeypatch.setattr(
+            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        response = await _consume_stream(
+            _DelayedStream(
+                [
+                    _RefusalDeltaEvent("I can’t "),
+                    _RefusalDeltaEvent("help with that."),
+                    _RefusalDoneEvent("I can’t help with that."),
+                    _CompletedEvent(),
+                ],
+                delay_sec=0.0,
+            ),
+            pricing=Pricing(),
+            publish=None,
+        )
+        assert response.message.text == "I can’t help with that."
+        assert response.stop_reason == "model_refusal"
 
     @pytest.mark.anyio
     async def test_stream_routes_reasoning_deltas_to_thinking(

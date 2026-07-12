@@ -132,10 +132,11 @@ def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
             "prompt_tokens_details": {"cached_tokens": 400},
         },
     )
-    input_tokens, output_tokens, cache_read = _extract_usage(usage)
+    input_tokens, output_tokens, cache_read, cache_write = _extract_usage(usage)
     assert input_tokens == 1000
     assert output_tokens == 100
     assert cache_read == 400
+    assert cache_write == 0
 
 
 @pytest.mark.asyncio
@@ -165,6 +166,39 @@ async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
     )
     assert resp.tokens.input_tokens == 600
     assert resp.tokens.cache_read_tokens == 400
+
+
+@pytest.mark.asyncio
+async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
+    events: list[MutableJSON] = [
+        {
+            "id": "stream-cache-write",
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1309,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0,
+                    "cache_write_tokens": 1306,
+                },
+            },
+        },
+    ]
+    resp = await consume_stream(
+        _sse_response(events),
+        publish=None,
+        pricing=Pricing(
+            request=1.0,
+            response=6.0,
+            cache_write=1.25,
+            cache_read=0.1,
+        ),
+        reasoning_field=None,
+    )
+    assert resp.tokens.input_tokens == 3
+    assert resp.tokens.cache_creation_tokens == 1306
+    assert resp.tokens.cache_read_tokens == 0
+    assert resp.input_cost == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
 
 
 def _sse_response(events: list[MutableJSON]) -> httpx.Response:
@@ -215,6 +249,30 @@ async def test_consume_stream_text_and_usage() -> None:
     assert resp.tokens.output_tokens == 2
     assert resp.stop_reason == "model_finished"
     assert resp.message_id == "stream-1"
+
+
+@pytest.mark.asyncio
+async def test_consume_stream_preserves_chat_refusal_text() -> None:
+    events: list[MutableJSON] = [
+        {
+            "id": "stream-refusal",
+            "choices": [
+                {
+                    "delta": {"refusal": "I can’t help with that."},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 6},
+        },
+    ]
+    resp = await consume_stream(
+        _sse_response(events),
+        publish=None,
+        pricing=Pricing(),
+        reasoning_field=None,
+    )
+    assert resp.message.text == "I can’t help with that."
+    assert resp.stop_reason == "model_refusal"
 
 
 @pytest.mark.asyncio

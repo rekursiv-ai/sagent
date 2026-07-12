@@ -6,7 +6,7 @@ Usage::
 
     provider = OpenAI.from_key("sk-...")
     # or: export OPENAI_API_KEY=sk-... and use OpenAI.from_env()
-    gpt = provider.model("gpt-5.5")
+    gpt = provider.model("gpt-5.6-sol")
     response = await gpt.buffer(request)
 """
 
@@ -57,25 +57,51 @@ class _OpenAIModel(OpenAICompatModel):
         return ("fast",)
 
 
-# Image / wire byte limits shared by every OpenAI model (verified Jun 2026):
+# Conservative compatibility caps retained for pre-GPT-5.6 profiles:
 #   - ``max_image_dim`` = 2048: detail:high images are first scaled to fit
 #     within a 2048x2048 square before tiling
 #     (https://developers.openai.com/api/docs/guides/images-vision); pre-resizing
 #     to this caps wire bytes without losing fidelity the model would keep.
-#   - ``max_image_bytes`` = 20 MB: documented per-image upload limit.
-#   - ``max_request_bytes`` = 20 MB: conservative wire ceiling; OpenAI does not
-#     publish a single Responses-API body limit, and the 20 MB per-image figure
-#     is the binding practical constraint for image-bearing requests.
+#   - The 20 MB byte ceilings preserve their established local resize/compaction
+#     behavior. They are not the current GPT-5.6 limits; those are declared
+#     separately below.
 _IMAGE_DIM = 2048
 _IMAGE_BYTES = 20 * 1024 * 1024
 _REQUEST_BYTES = 20 * 1024 * 1024
 
-# Cheap-tier input window for models OpenAI prices in two tiers. For gpt-5.5 /
-# gpt-5.4 (and their -pro variants) prompts above 272K input tokens bill at 2x
-# input / 1.5x output for the whole session, so the default profile caps the
-# window here; a ``+1m`` model id opts into the full window (and the 2x tier).
-# https://developers.openai.com/api/docs/models/gpt-5.5
+# GPT-5.6 ``auto``/``original`` preserves source dimensions. Current image
+# requirements publish a 512 MB TOTAL request-payload cap and no separate
+# per-image byte cap, so ``0`` keeps each image unmodified while the request
+# guard enforces the aggregate ceiling.
+# https://developers.openai.com/api/docs/guides/images-vision
+_GPT56_IMAGE_BYTES = 0
+_GPT56_REQUEST_BYTES = 512 * 1024 * 1024
+
+# Cheap-tier input window for models OpenAI prices in two tiers. For GPT-5.6,
+# gpt-5.5, gpt-5.4, and their applicable variants, prompts above 272K input
+# tokens bill at 2x input / 1.5x output for the whole session. The base profile
+# caps the window here; a ``+1m`` model id opts into the full window.
+# https://developers.openai.com/api/docs/models/gpt-5.6-sol
 _TWO_TIER_TOKENS = 272_000
+
+
+def _two_tier_pricing(
+    *,
+    request: float,
+    response: float,
+    cache_write: float = 0.0,
+    cache_read: float = 0.0,
+) -> Pricing:
+    """Build OpenAI's >272K whole-request pricing schedule."""
+    return Pricing(
+        request=request,
+        response=response,
+        cache_write=cache_write,
+        cache_read=cache_read,
+        long_context_threshold=_TWO_TIER_TOKENS,
+        long_context_input_multiplier=2.0,
+        long_context_output_multiplier=1.5,
+    )
 
 
 def _with_window(profile: ModelProfile, max_request_tokens: int) -> ModelProfile:
@@ -86,10 +112,10 @@ def _with_window(profile: ModelProfile, max_request_tokens: int) -> ModelProfile
 class OpenAI(OpenAICompat):
     """OpenAI provider."""
 
-    # Current frontier default for API-key users; ``+1m`` opts into the full 1M
-    # window (mirrors Anthropic's ``+1m`` default). Subscription auth clamps this
-    # back to its 272K contract, so the suffix is a no-op on that path.
-    DEFAULT_MODEL: ClassVar[str] = "gpt-5.5+1m"
+    # Current frontier default for API-key users; ``+1m`` opts into the full
+    # 1.05M window. Subscription auth clamps this back to its 272K contract, so
+    # the suffix is a no-op on that path.
+    DEFAULT_MODEL: ClassVar[str] = "gpt-5.6-sol+1m"
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.4-mini"
 
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
@@ -105,12 +131,48 @@ class OpenAI(OpenAICompat):
     # ModelProfile entry here with the correct pricing from the
     # pricing URL.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
+        "gpt-5.6-sol": ModelProfile(
+            max_request_tokens=_TWO_TIER_TOKENS,
+            max_response_tokens=128_000,
+            pricing=_two_tier_pricing(
+                request=5.0,
+                response=30.0,
+                cache_write=6.25,
+                cache_read=0.5,
+            ),
+            max_image_bytes=_GPT56_IMAGE_BYTES,
+            max_request_bytes=_GPT56_REQUEST_BYTES,
+        ),
+        "gpt-5.6-terra": ModelProfile(
+            max_request_tokens=_TWO_TIER_TOKENS,
+            max_response_tokens=128_000,
+            pricing=_two_tier_pricing(
+                request=2.5,
+                response=15.0,
+                cache_write=3.125,
+                cache_read=0.25,
+            ),
+            max_image_bytes=_GPT56_IMAGE_BYTES,
+            max_request_bytes=_GPT56_REQUEST_BYTES,
+        ),
+        "gpt-5.6-luna": ModelProfile(
+            max_request_tokens=_TWO_TIER_TOKENS,
+            max_response_tokens=128_000,
+            pricing=_two_tier_pricing(
+                request=1.0,
+                response=6.0,
+                cache_write=1.25,
+                cache_read=0.1,
+            ),
+            max_image_bytes=_GPT56_IMAGE_BYTES,
+            max_request_bytes=_GPT56_REQUEST_BYTES,
+        ),
         "gpt-5.5": ModelProfile(
             # Defaults to the 272K cheap tier; ``gpt-5.5+1m`` opts into the full
             # 1M window (billed at the 2x tier above 272K). See ``_TWO_TIER_TOKENS``.
             max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
-            pricing=Pricing(
+            pricing=_two_tier_pricing(
                 request=5.0,
                 response=30.0,
                 cache_read=0.5,
@@ -122,7 +184,7 @@ class OpenAI(OpenAICompat):
         "gpt-5.5-pro": ModelProfile(
             max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
-            pricing=Pricing(
+            pricing=_two_tier_pricing(
                 request=30.0,
                 response=180.0,
             ),
@@ -133,7 +195,7 @@ class OpenAI(OpenAICompat):
         "gpt-5.4": ModelProfile(
             max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
-            pricing=Pricing(
+            pricing=_two_tier_pricing(
                 request=2.5,
                 response=15.0,
                 cache_read=0.25,
@@ -145,7 +207,7 @@ class OpenAI(OpenAICompat):
         "gpt-5.4-pro": ModelProfile(
             max_request_tokens=_TWO_TIER_TOKENS,
             max_response_tokens=128_000,
-            pricing=Pricing(
+            pricing=_two_tier_pricing(
                 request=30.0,
                 response=180.0,
             ),
@@ -344,12 +406,18 @@ class OpenAI(OpenAICompat):
             max_request_bytes=_REQUEST_BYTES,
         ),
     }
-    # Long-context (``+1m``) variants. For the two-tier models the base id caps at
-    # ``_TWO_TIER_TOKENS`` and ``+1m`` opts into the model's full input window; for
-    # gpt-4.1 (single flat price, no tier cliff) ``+1m`` is an alias of the base,
-    # so both ids resolve to the same full window.
+    # The unsuffixed GPT-5.6 alias routes to Sol with identical metadata.
+    KNOWN_MODELS["gpt-5.6"] = KNOWN_MODELS["gpt-5.6-sol"]
+
+    # Long-context (``+1m``) variants. For the two-tier models the base id caps
+    # at ``_TWO_TIER_TOKENS`` and ``+1m`` opts into the full input window. For
+    # gpt-4.1 (single flat price, no tier cliff) ``+1m`` aliases the base.
     KNOWN_MODELS.update(
         {
+            "gpt-5.6+1m": _with_window(KNOWN_MODELS["gpt-5.6"], 1_050_000),
+            "gpt-5.6-sol+1m": _with_window(KNOWN_MODELS["gpt-5.6-sol"], 1_050_000),
+            "gpt-5.6-terra+1m": _with_window(KNOWN_MODELS["gpt-5.6-terra"], 1_050_000),
+            "gpt-5.6-luna+1m": _with_window(KNOWN_MODELS["gpt-5.6-luna"], 1_050_000),
             "gpt-5.5+1m": _with_window(KNOWN_MODELS["gpt-5.5"], 1_000_000),
             "gpt-5.5-pro+1m": _with_window(KNOWN_MODELS["gpt-5.5-pro"], 1_050_000),
             "gpt-5.4+1m": _with_window(KNOWN_MODELS["gpt-5.4"], 1_050_000),

@@ -120,15 +120,31 @@ def compute_cost(
     # so cache write/read stay at standard rates here.
     request_rate = pricing.request
     response_rate = pricing.response
+    cache_write_rate = pricing.cache_write
+    cache_read_rate = pricing.cache_read
     if fast:
         # Un-priced fast rates (``fast_*`` == 0.0) fall back to standard:
         # bill what's known, never $0.
         request_rate = pricing.fast_request or request_rate
         response_rate = pricing.fast_response or response_rate
+
+    # Tier selection uses the full prompt size. ``TokenCount`` keeps ordinary,
+    # cache-write, and cache-read pools disjoint, but providers price the tier
+    # from their sum. OpenAI's long-context rule applies its input multiplier
+    # to all three pools and its output multiplier to the whole response.
+    total_input = input_tokens + cache_creation + cache_read
+    if (
+        pricing.long_context_threshold > 0
+        and total_input > pricing.long_context_threshold
+    ):
+        request_rate *= pricing.long_context_input_multiplier
+        cache_write_rate *= pricing.long_context_input_multiplier
+        cache_read_rate *= pricing.long_context_input_multiplier
+        response_rate *= pricing.long_context_output_multiplier
     input_cost = (
         input_tokens * request_rate
-        + cache_creation * pricing.cache_write
-        + cache_read * pricing.cache_read
+        + cache_creation * cache_write_rate
+        + cache_read * cache_read_rate
     ) / 1_000_000
     output_cost = output_tokens * response_rate / 1_000_000
     return input_cost, output_cost, input_cost + output_cost

@@ -9,6 +9,7 @@ import asyncio
 import json
 
 from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import FetchSession
 from sagent.tools.linear import Linear
 from sagent.types.runtime import ToolResult
 
@@ -60,7 +61,10 @@ def test_run_no_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_list_issues_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
     payload = _gql_response({"issues": {"nodes": []}})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(Linear().run({"operation": "list_issues"}))
     assert not result.is_error
     assert result.content == "(no issues)"
@@ -80,7 +84,10 @@ def test_list_issues_renders(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     ]
     payload = _gql_response({"issues": {"nodes": nodes}})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run(
                 {
@@ -104,7 +111,10 @@ def test_get_issue_requires_id(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_get_issue_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = _gql_response({"issue": None})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "get_issue", "id": "ENG-9999"}),
         )
@@ -134,7 +144,10 @@ def test_get_issue_renders(monkeypatch: pytest.MonkeyPatch) -> None:
         },
     }
     payload = _gql_response({"issue": issue})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "get_issue", "id": "ENG-1"}),
         )
@@ -154,7 +167,10 @@ def test_create_issue_requires_team_and_title(monkeypatch: pytest.MonkeyPatch) -
 def test_create_issue_team_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = _gql_response({"teams": {"nodes": []}})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "create_issue", "team": "NOPE", "title": "x"}),
         )
@@ -165,18 +181,21 @@ def test_create_issue_team_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_create_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     responses = [
-        _gql_response({"teams": {"nodes": [{"id": "team-id"}]}}),
-        _gql_response(
-            {
-                "issueCreate": {
-                    "success": True,
-                    "issue": {
-                        "identifier": "ENG-5",
-                        "title": "T",
-                        "url": "u",
-                    },
+        (_gql_response({"teams": {"nodes": [{"id": "team-id"}]}}), FetchSession()),
+        (
+            _gql_response(
+                {
+                    "issueCreate": {
+                        "success": True,
+                        "issue": {
+                            "identifier": "ENG-5",
+                            "title": "T",
+                            "url": "u",
+                        },
+                    }
                 }
-            }
+            ),
+            FetchSession(),
         ),
     ]
     with patch("sagent.tools.linear.fetch", side_effect=responses):
@@ -196,8 +215,8 @@ def test_create_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_create_issue_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     responses = [
-        _gql_response({"teams": {"nodes": [{"id": "team-id"}]}}),
-        _gql_response({"issueCreate": {"success": False}}),
+        (_gql_response({"teams": {"nodes": [{"id": "team-id"}]}}), FetchSession()),
+        (_gql_response({"issueCreate": {"success": False}}), FetchSession()),
     ]
     with patch("sagent.tools.linear.fetch", side_effect=responses):
         result = asyncio.run(
@@ -236,7 +255,10 @@ def test_update_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         }
     )
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run(
                 {
@@ -254,7 +276,10 @@ def test_update_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_update_issue_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = _gql_response({"issueUpdate": {"success": False}})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "update_issue", "id": "ENG-1", "title": "T"}),
         )
@@ -275,7 +300,10 @@ def test_add_comment_success(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = _gql_response(
         {"commentCreate": {"success": True, "comment": {"id": "c1"}}}
     )
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "add_comment", "id": "ENG-1", "body": "Hi"}),
         )
@@ -285,7 +313,10 @@ def test_add_comment_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_add_comment_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = _gql_response({"commentCreate": {"success": False}})
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(
             Linear().run({"operation": "add_comment", "id": "ENG-1", "body": "Hi"}),
         )
@@ -316,7 +347,10 @@ def test_http_error_returns_tool_result(monkeypatch: pytest.MonkeyPatch) -> None
 def test_graphql_errors_returns_tool_result(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = json.dumps({"errors": [{"message": "bad"}]}).encode()
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(Linear().run({"operation": "list_issues"}))
     assert result.is_error
     assert "GraphQL errors" in result.content
@@ -325,7 +359,10 @@ def test_graphql_errors_returns_tool_result(monkeypatch: pytest.MonkeyPatch) -> 
 def test_response_missing_data_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = json.dumps({}).encode()
-    with patch("sagent.tools.linear.fetch", return_value=payload):
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(payload, FetchSession()),
+    ):
         result = asyncio.run(Linear().run({"operation": "list_issues"}))
     assert result.is_error
     assert "no data" in result.content

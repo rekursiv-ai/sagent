@@ -9,13 +9,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from functools import cache
-from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast, overload
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import gzip
 import hashlib
 import json
 import logging
@@ -36,7 +33,8 @@ from sagent.lib.web.errors import (
     FetchError,
     PuzzleChallengeError,
 )
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
+from sagent.lib.web.useragents import user_agent_pool
 
 
 if TYPE_CHECKING:
@@ -253,17 +251,18 @@ def clean_text(text: str) -> str:
     return _CLEAN_SPACE_BEFORE_PUNCT.sub(r"\1", " ".join(text.split()))
 
 
-_GSA_USERAGENTS_PATH = Path(__file__).with_name("gsa_useragents.txt")
-
-
-@cache
-def _get_gsa_useragents() -> tuple[str, ...]:
-    """Return cached GSA user-agent strings, loading on first call."""
-    return tuple(line for line in _GSA_USERAGENTS_PATH.read_text().splitlines() if line)
-
-
 def gsa_headers_for_query(query: str) -> dict[str, str]:
-    """Build request headers with a query-stable GSA mobile UA.
+    """Build request headers with a query-stable Android-Chrome UA.
+
+    Known coherence debt (REV2A-001): this Android/mobile UA is paired with
+    ``fetch``'s default ``impersonate="chrome"`` (a DESKTOP TLS/JA4/HTTP2
+    fingerprint + desktop ``sec-ch-ua-mobile: ?0`` / ``sec-ch-ua-platform:
+    "macOS"``), so the UA and the wire fingerprint disagree -- normally a bot
+    tell. A coherent fix (``impersonate="chrome_android"`` + mobile hints) is
+    DEFERRED and UNVERIFIED: Google now JS-gates HTML scraping (the enablejs
+    shell) independently of the fingerprint -- a coherent identity did NOT clear
+    the wall in offline testing -- so a fingerprint change is unverifiable and
+    likely valueless until the JS gate is addressed. Left as-is deliberately.
 
     Args:
       query: The search query; hashed to pick a stable User-Agent per query.
@@ -272,9 +271,9 @@ def gsa_headers_for_query(query: str) -> dict[str, str]:
       headers: A one-entry ``User-Agent`` header dict.
 
     """
-    useragents = _get_gsa_useragents()
-    idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(useragents)
-    return {"User-Agent": f"{useragents[idx]} NSTNWV"}
+    pool = user_agent_pool("chrome_android")
+    idx = int.from_bytes(hashlib.sha256(query.encode()).digest()[:8]) % len(pool)
+    return {"User-Agent": f"{pool[idx]} NSTNWV"}
 
 
 # ---------------------------------------------------------------------------
@@ -443,10 +442,12 @@ def searxng(
     params = urlencode(
         {"q": query, "format": "json", "pageno": "1", "categories": categories}
     )
-    body = fetch(
+    body, _ = fetch(
         f"{base_url}/search?{params}",
-        headers=headers,
-        timeout_sec=timeout_sec,
+        request=RequestParams(
+            headers=headers,
+            timeout_sec=timeout_sec,
+        ),
     )
     payload = cast("object", json.loads(body))
     raw = (
@@ -709,16 +710,22 @@ def duckduckgo(
     }
     if headers:
         request_headers.update(headers)
+    # The query goes in the URL, not a POST body: DuckDuckGo's HTML endpoint now
+    # drops a POSTed query and serves its empty homepage (``body--home``),
+    # yielding zero results. A GET with ``q`` in the query string returns the
+    # real results page. ``kl=wt-wt`` keeps the region-neutral ("no region")
+    # results the POST form sent.
+    params = urlencode({"q": _duckduckgo_quote_bangs(query), "kl": "wt-wt"})
     # Send exactly these headers: the GSA mobile User-Agent must not be paired
     # with fetch's default desktop Chrome ``sec-ch-ua``/``sec-ch-ua-platform``,
     # whose drift from the UA can trip DuckDuckGo's bot check.
-    body = fetch(
-        _DUCKDUCKGO_URL,
-        method="POST",
-        data={"q": _duckduckgo_quote_bangs(query), "b": "", "kl": "wt-wt"},
-        headers=request_headers,
-        raw_headers=True,
-        retries=2,
+    body, _ = fetch(
+        f"{_DUCKDUCKGO_URL}?{params}",
+        request=RequestParams(
+            headers=request_headers,
+            raw_headers=True,
+            retries=2,
+        ),
     )
     html = body.decode("utf-8")
     _duckduckgo_check_captcha(html)
@@ -943,46 +950,3 @@ def search(
     ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e
     raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime
-
-
-def _refresh_gsa_useragents() -> None:
-    """Rewrite ``gsa_useragents.txt`` from the upstream gzipped-JSON UA dataset."""
-    url = (
-        "https://raw.githubusercontent.com/intoli/user-agents/"
-        "main/src/user-agents.json.gz"
-    )
-    raw = gzip.decompress(fetch(url, timeout_sec=30))
-    parsed: object = json.loads(raw)
-    if not isinstance(parsed, list):
-        # TRY004: upstream-shape failure, not a caller type error; matches the
-        # RuntimeError raised below for the same class of contract violation.
-        msg = f"expected JSON array from {url}; upstream shape changed?"
-        raise RuntimeError(msg)  # noqa: TRY004
-    records = cast("list[object]", parsed)
-    selected: set[str] = set()
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        ua = cast("dict[str, object]", record).get("userAgent")
-        if not isinstance(ua, str):
-            continue
-        if (
-            "Android" in ua
-            and "Chrome" in ua
-            and "Samsung" not in ua
-            and "Android 10; K" not in ua
-        ):
-            selected.add(ua)
-    if not selected:
-        raise RuntimeError(
-            f"refresh produced 0 user agents from {url}; upstream shape changed?",
-        )
-    text = "\n".join(sorted(selected)) + "\n"
-    _GSA_USERAGENTS_PATH.write_text(text)
-    _get_gsa_useragents.cache_clear()
-    logger.info("wrote %d user agents to %s", len(selected), _GSA_USERAGENTS_PATH)
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    _refresh_gsa_useragents()
