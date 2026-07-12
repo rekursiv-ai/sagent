@@ -201,6 +201,17 @@ class Pricing:
     fast_response: float = 0.0
     """Price per million output tokens when the server billed fast mode."""
 
+    long_context_threshold: int = 0
+    """Prompt-token threshold above which long-context multipliers apply.
+    ``0`` disables tiered pricing."""
+
+    long_context_input_multiplier: float = 1.0
+    """Multiplier for uncached, cache-write, and cache-read input rates above
+    ``long_context_threshold``."""
+
+    long_context_output_multiplier: float = 1.0
+    """Multiplier for output rates above ``long_context_threshold``."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenCount:

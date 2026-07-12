@@ -16,7 +16,7 @@ Usage::
     ./cli.py --provider Anthropic
 
     # OpenAI
-    ./cli.py --provider OpenAI --model gpt-5.5
+    ./cli.py --provider OpenAI --model gpt-5.6-sol
 
     # Google
     ./cli.py --provider Google --auth env --model gemini-3.1-pro-preview
@@ -77,6 +77,7 @@ from sagent.prompt import build_system
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
+    default_auth_for_provider,
     supported_provider_options,
 )
 from sagent.repl import run_repl
@@ -363,8 +364,9 @@ def parse_agent_args(
         "--effort",
         default=None,
         help=(
-            "Anthropic effort level (low|medium|high|xhigh|max)."
-            " Unset = API default. Non-Anthropic providers will raise."
+            "Provider-specific reasoning effort"
+            " (none|minimal|low|medium|high|xhigh|max)."
+            " Unset = provider default; unsupported values raise."
         ),
     )
     parser.add_argument(
@@ -622,13 +624,17 @@ def _build_provider_model_once(
     thinking_state: ThinkingState | None,
 ) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Build one provider/model pair without fallback."""
+    provider_name = str(args.provider)
     auth = str(args.auth)
+    if bool(getattr(args, "provider_explicit", False)) and not bool(
+        getattr(args, "auth_explicit", False)
+    ):
+        auth = default_auth_for_provider(provider_name)
     model_id = cast(str | None, args.model)
     model_lookup = model_id
     if args.provider == "SelfHosted":
         auth = model_id or "env"
         model_lookup = None
-    provider_name = str(args.provider)
     options = _cli_provider_options(args)
     if thinking_state is not None and "redact_thinking" in (
         supported_provider_options(provider_name)
@@ -1172,16 +1178,28 @@ async def _run_headless(
         sys.exit(1)
 
     user_msg = types.runtime.UserMessage(text=prompt)
+    model_error: BaseException | None = None
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
+            if isinstance(event, types.runtime.ModelResponseError):
+                model_error = event.exception
             record = _event_to_json_record(event)
             if record is None:
                 continue
             json.dump(record, sys.stdout)
             sys.stdout.write("\n")
     else:
-        async for _event in agent.run(user_msg):
-            pass
+        async for event in agent.run(user_msg):
+            if isinstance(event, types.runtime.ModelResponseError):
+                model_error = event.exception
+    if model_error is not None:
+        message = f"{type(model_error).__name__}: {model_error}"
+        if output_format == "json":
+            json.dump({"error": message}, sys.stdout)
+            sys.stdout.write("\n")
+        elif output_format == "text":
+            sys.stderr.write(f"Error: {message}\n")
+        raise SystemExit(1)
     result_text = _last_assistant_text(agent.history)
     if output_format == "stream-json":
         json.dump({"content": result_text, "descriptor": "result"}, sys.stdout)

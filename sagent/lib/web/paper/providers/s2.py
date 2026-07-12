@@ -24,7 +24,7 @@ import os
 from sagent.lib.custom_json import MutableJSON, int_val
 from sagent.lib.ratelimit import cross_process_limiter
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
 from sagent.lib.web.paper.errors import BackendError, translate_http_error
 from sagent.lib.web.paper.paginate import (
@@ -195,10 +195,12 @@ def get(
     raw = _attempt(
         lambda: fetch(
             url=f"{base}{path}",
-            params=params,
-            headers=_headers(),
-            timeout_sec=timeout_sec,
-        ),
+            request=RequestParams(
+                params=params,
+                headers=_headers(),
+                timeout_sec=timeout_sec,
+            ),
+        )[0],
         source=source,
         interval_sec=interval_sec,
         max_retries=max_retries,
@@ -253,12 +255,14 @@ def batch(
     raw = _attempt(
         lambda: fetch(
             url=f"{base}/{endpoint}/batch",
-            method="POST",
-            params={"fields": fields},
-            json={"ids": ids},
-            headers=_headers(),
-            timeout_sec=timeout_sec,
-        ),
+            request=RequestParams(
+                method="POST",
+                params={"fields": fields},
+                json={"ids": ids},
+                headers=_headers(),
+                timeout_sec=timeout_sec,
+            ),
+        )[0],
         source=source,
         interval_sec=interval_sec,
         max_retries=max_retries,

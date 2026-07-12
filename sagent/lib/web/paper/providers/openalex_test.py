@@ -11,6 +11,7 @@ import pytest
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import FetchSession
 from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
 from sagent.lib.web.paper.providers import openalex
 
@@ -27,7 +28,7 @@ def mock_limiter() -> Iterator[MagicMock]:
 
 
 def _fetch_returning(payload: object) -> MagicMock:
-    return MagicMock(return_value=json.dumps(payload).encode())
+    return MagicMock(return_value=(json.dumps(payload).encode(), FetchSession()))
 
 
 def _search(
@@ -71,28 +72,28 @@ class TestSearch:
 
     def test_query_sanitizes_comma_and_pipe(self) -> None:
         fetch = _search("deep, learning | attention")
-        flt = fetch.call_args.kwargs["params"]["filter"]
+        flt = fetch.call_args.kwargs["request"].params["filter"]
         assert "title_and_abstract.search:deep  learning   attention" in flt
         assert "," not in flt.split("title_and_abstract.search:")[1]
         assert "|" not in flt
 
     def test_limit_caps_at_per_page_max(self) -> None:
         fetch = _search(limit=500)
-        assert fetch.call_args.kwargs["params"]["per-page"] == 200
+        assert fetch.call_args.kwargs["request"].params["per-page"] == 200
 
     def test_limit_below_max_passthrough(self) -> None:
         fetch = _search(limit=10)
-        assert fetch.call_args.kwargs["params"]["per-page"] == 10
+        assert fetch.call_args.kwargs["request"].params["per-page"] == 10
 
     def test_limit_none_requests_full_page(self) -> None:
         # With no limit the walker fetches one full page (the ceiling), not a
         # bare default page -- so ``per-page`` is present and equals the max.
         fetch = _search(limit=None)
-        assert fetch.call_args.kwargs["params"]["per-page"] == 200
+        assert fetch.call_args.kwargs["request"].params["per-page"] == 200
 
     def test_filter_year_bounds_and_open_access(self) -> None:
         fetch = _search(year_from=2020, year_to=2023, open_access_only=True)
-        flt = fetch.call_args.kwargs["params"]["filter"]
+        flt = fetch.call_args.kwargs["request"].params["filter"]
         assert "from_publication_date:2020-01-01" in flt
         assert "to_publication_date:2023-12-31" in flt
         assert "open_access.is_oa:true" in flt
@@ -102,14 +103,14 @@ class TestSearch:
     ) -> None:
         monkeypatch.setenv("OPENALEX_API_KEY", "secret")
         fetch = _search()
-        assert fetch.call_args.kwargs["params"]["api_key"] == "secret"
+        assert fetch.call_args.kwargs["request"].params["api_key"] == "secret"
 
     def test_api_key_absent_when_env_unset(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
         fetch = _search()
-        assert "api_key" not in fetch.call_args.kwargs["params"]
+        assert "api_key" not in fetch.call_args.kwargs["request"].params
 
 
 class TestHeaders:
@@ -181,7 +182,7 @@ class TestRequestErrors:
         with (
             patch(
                 "sagent.lib.web.paper.providers.openalex.fetch",
-                MagicMock(return_value=b"not json"),
+                MagicMock(return_value=(b"not json", FetchSession())),
             ),
             pytest.raises(BackendError) as ei,
         ):
@@ -296,14 +297,17 @@ class TestReferences:
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(batch).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
         assert [r.title for r in records] == ["ref-a", "ref-b"]
         assert complete
         # Second call resolves the referenced ids via the ``openalex:`` filter.
-        assert "openalex:W10|W11" in fetch.call_args.kwargs["params"]["filter"]
+        assert "openalex:W10|W11" in fetch.call_args.kwargs["request"].params["filter"]
 
     def test_unresolved_ref_ids_mark_incomplete(self) -> None:
         # B1: the seed cites 2 works, but the batch resolve returns only 1 (the
@@ -325,7 +329,10 @@ class TestReferences:
         # count=1: OpenAlex resolved only W10, dropped W11.
         batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(batch).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             records, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -355,7 +362,10 @@ class TestReferences:
             "results": [{"title": "ref-a"}, {"title": "ref-b"}],
         }
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(batch).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=None)
@@ -376,12 +386,15 @@ class TestReferences:
         }
         batch: MutableJSON = {"meta": {"count": 1}, "results": [{"title": "ref-a"}]}
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(batch).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(batch).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             _, complete = openalex.references("doi", "10.1/x", limit=1)
         assert not complete  # 3 referenced, only 1 requested
-        assert fetch.call_args.kwargs["params"]["filter"] == "openalex:W10"
+        assert fetch.call_args.kwargs["request"].params["filter"] == "openalex:W10"
 
     def test_arxiv_seed_rejected(self) -> None:
         with pytest.raises(BackendError, match="DOIs only"):
@@ -407,24 +420,30 @@ class TestCitations:
             "results": [{"title": "citer"}],
         }
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(citing).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(citing).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=1)
         assert [r.title for r in records] == ["citer"]
         assert total == 500
         assert not complete  # 1 of 500 -> more remain
-        assert fetch.call_args.kwargs["params"]["filter"] == "cites:W1"
+        assert fetch.call_args.kwargs["request"].params["filter"] == "cites:W1"
 
     def test_year_from_added_to_filter(self) -> None:
         resolve: MutableJSON = {"results": [{"id": "https://openalex.org/W1"}]}
         citing: MutableJSON = {"meta": {"count": 0}, "results": []}
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(citing).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(citing).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             openalex.citations("doi", "10.1/x", limit=None, year_from=2020)
-        flt = fetch.call_args.kwargs["params"]["filter"]
+        flt = fetch.call_args.kwargs["request"].params["filter"]
         assert "cites:W1" in flt
         assert "from_publication_date:2020-01-01" in flt
 
@@ -447,9 +466,9 @@ class TestCitations:
         }
         fetch = MagicMock(
             side_effect=[
-                json.dumps(resolve).encode(),
-                json.dumps(page1).encode(),
-                json.dumps(page2).encode(),
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(page1).encode(), FetchSession()),
+                (json.dumps(page2).encode(), FetchSession()),
             ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
@@ -458,7 +477,7 @@ class TestCitations:
         assert total == 500
         assert not complete
         for call in fetch.call_args_list:
-            per_page = call.kwargs["params"].get("per-page")
+            per_page = call.kwargs["request"].params.get("per-page")
             assert per_page is None or per_page <= 200
 
     def test_limit_none_reports_honest_completeness(self) -> None:
@@ -472,7 +491,10 @@ class TestCitations:
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(citing).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(citing).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             _, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -489,7 +511,10 @@ class TestCitations:
             "results": [{"title": f"c{i}"} for i in range(200)],
         }
         fetch = MagicMock(
-            side_effect=[json.dumps(resolve).encode(), json.dumps(citing).encode()]
+            side_effect=[
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(citing).encode(), FetchSession()),
+            ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):
             records, total, complete = openalex.citations("doi", "10.1/x", limit=None)
@@ -511,9 +536,9 @@ class TestCitations:
         }
         fetch = MagicMock(
             side_effect=[
-                json.dumps(resolve).encode(),
-                json.dumps(page1).encode(),
-                json.dumps(page2).encode(),
+                (json.dumps(resolve).encode(), FetchSession()),
+                (json.dumps(page1).encode(), FetchSession()),
+                (json.dumps(page2).encode(), FetchSession()),
             ]
         )
         with patch("sagent.lib.web.paper.providers.openalex.fetch", fetch):

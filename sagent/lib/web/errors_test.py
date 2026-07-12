@@ -6,6 +6,7 @@ from sagent.lib.web.errors import (
     BotDetectionError,
     CloudflareChallengeError,
     FetchError,
+    GoogleJavascriptRequiredError,
     GoogleSorryError,
     PuzzleChallengeError,
     classify_bot_detection,
@@ -18,10 +19,14 @@ class TestHierarchy:
         assert issubclass(PuzzleChallengeError, BotDetectionError)
         assert issubclass(CloudflareChallengeError, BotDetectionError)
         assert issubclass(GoogleSorryError, BotDetectionError)
+        assert issubclass(GoogleJavascriptRequiredError, BotDetectionError)
 
     def test_leaves_are_distinct(self) -> None:
         assert not issubclass(PuzzleChallengeError, CloudflareChallengeError)
         assert not issubclass(CloudflareChallengeError, GoogleSorryError)
+        # enablejs (JS-required wall) is not /sorry (IP refusal): distinct kinds.
+        assert not issubclass(GoogleJavascriptRequiredError, GoogleSorryError)
+        assert not issubclass(GoogleSorryError, GoogleJavascriptRequiredError)
 
     def test_bot_flagged_is_a_fetch_error(self) -> None:
         # The core of the refactor: a BotDetectionError is-a FetchError, so every
@@ -167,6 +172,25 @@ class TestClassifyBotFlag:
             is GoogleSorryError
         )
 
+    def test_enablejs_shell_is_javascript_required(self) -> None:
+        # Google's HTTP-200 enablejs shell meta-refreshes to this exact path.
+        body = (
+            '<noscript><meta http-equiv="refresh" '
+            'content="0;url=/httpservice/retry/enablejs?sei=abc"></noscript>'
+        )
+        assert classify_bot_detection(body) is GoogleJavascriptRequiredError
+
+    def test_enablejs_is_not_google_sorry(self) -> None:
+        # The JS-required wall must NOT be misread as an IP /sorry ban -- the
+        # remedy differs (render JS vs rotate IP).
+        body = "<meta content='0;url=/httpservice/retry/enablejs'>"
+        assert classify_bot_detection(body) is not GoogleSorryError
+
+    def test_benign_enablejs_mention_is_not_flagged(self) -> None:
+        # A page that merely tells a user to enable JavaScript, without the
+        # retry-service path, is ordinary content.
+        assert classify_bot_detection("Please enable JavaScript to continue.") is None
+
     def test_benign_sorry_path_is_not_google_sorry(self) -> None:
         # O-SPEC-1: a bare "/sorry/" substring is too weak -- a benign page that
         # links to its own apology page (example.com/sorry/) must NOT be
@@ -201,13 +225,15 @@ class TestGuidance:
             PuzzleChallengeError.guidance,
             CloudflareChallengeError.guidance,
             GoogleSorryError.guidance,
+            GoogleJavascriptRequiredError.guidance,
             BotDetectionError.guidance,
         }
-        assert len(guidances) == 4  # all distinct
+        assert len(guidances) == 5  # all distinct
         # each names its mechanism/remedy
         assert "captcha" in PuzzleChallengeError.guidance.lower()
         assert "cloudflare" in CloudflareChallengeError.guidance.lower()
         assert "google" in GoogleSorryError.guidance.lower()
+        assert "javascript" in GoogleJavascriptRequiredError.guidance.lower()
 
     def test_explain_includes_url_and_guidance(self) -> None:
         msg = CloudflareChallengeError.explain("https://x.com/doc")
@@ -242,6 +268,20 @@ class TestOnSuccessBodyMode:
             classify_bot_detection("just a moment", on_success_body=True)
             is CloudflareChallengeError
         )
+
+    def test_challenge_platform_beacon_not_flagged_on_success_body(self) -> None:
+        # A real Cloudflare-fronted 200 page carries the ambient JS-Detections
+        # beacon (/cdn-cgi/challenge-platform/scripts/jsd/main.js) in its markup;
+        # it rides EVERY proxied page, so on a success body it is NOT a block.
+        # (thecompassforsbc.org served its article this way.)
+        body = (
+            b"<!doctype html><html><body>real article"
+            b"<script>a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js'"
+            b"</script></body></html>"
+        )
+        assert classify_bot_detection(body, on_success_body=True) is None
+        # But the same beacon on an ERROR body still corroborates the block.
+        assert classify_bot_detection(body) is CloudflareChallengeError
 
 
 if __name__ == "__main__":

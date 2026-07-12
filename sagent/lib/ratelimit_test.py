@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import asyncio
+import random
 import struct
 import threading
 
@@ -17,6 +19,7 @@ from sagent.lib.ratelimit import (
     CooldownGate,
     CooldownRateLimiter,
     FileStore,
+    RandomUniformPacer,
     RateLimiter,
     SlidingWindowRateLimiter,
     TokenBucketRateLimiter,
@@ -67,6 +70,66 @@ def test_both_limiters_satisfy_async_protocol() -> None:
     bucket: AsyncRateLimiter = TokenBucketRateLimiter(max_calls=1)
     assert callable(sliding.acquire_async)
     assert callable(bucket.acquire_async)
+
+
+# -- RandomUniformPacer ------------------------------------------------------
+
+
+class _FixedRng:
+    """RNG stub whose ``uniform`` returns a preset value, recording its bounds."""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+        self.calls: list[tuple[float, float]] = []
+
+    def uniform(self, low: float, high: float) -> float:
+        self.calls.append((low, high))
+        return self.value
+
+
+def test_pacer_satisfies_protocols() -> None:
+    pacer = RandomUniformPacer(6.0, 12.0)
+    sync: RateLimiter = pacer
+    asyncy: AsyncRateLimiter = pacer
+    assert callable(sync.acquire)
+    assert callable(asyncy.acquire_async)
+
+
+def test_pacer_rejects_negative_low() -> None:
+    with pytest.raises(ValueError, match="low"):
+        RandomUniformPacer(-1.0, 12.0)
+
+
+def test_pacer_rejects_high_below_low() -> None:
+    with pytest.raises(ValueError, match="high"):
+        RandomUniformPacer(12.0, 6.0)
+
+
+def test_pacer_acquire_sleeps_a_draw_from_the_range() -> None:
+    clock = FakeClock()
+    rng = _FixedRng(7.5)
+    RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng)).acquire()
+    assert clock.sleeps == [7.5]
+    assert rng.calls == [(6.0, 12.0)]
+
+
+def test_pacer_acquire_async_sleeps_a_draw_from_the_range() -> None:
+    clock = FakeClock()
+    rng = _FixedRng(9.0)
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    asyncio.run(pacer.acquire_async())
+    assert clock.sleeps == [9.0]
+
+
+def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
+    # Real RNG: every draw the pacer sleeps must fall in [low, high].
+    clock = FakeClock()
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock)
+    for _ in range(500):
+        pacer.acquire()
+    assert all(6.0 <= s <= 12.0 for s in clock.sleeps)
+    # And it is not a constant -- variance is the whole point.
+    assert len(set(clock.sleeps)) > 1
 
 
 # -- SlidingWindowRateLimiter ------------------------------------------------

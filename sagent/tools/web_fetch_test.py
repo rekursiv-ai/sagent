@@ -168,6 +168,18 @@ def test_validated_host_uses_ipv6_when_only_family() -> None:
     assert vh.ip == "2606:4700:20::1"
 
 
+def test_validated_host_returns_bare_host_not_netloc() -> None:
+    # The validated_hosts contract returns the BARE hostname (the transport
+    # re-appends any port via _host_header). Returning the raw netloc-with-port
+    # would double the port on the wire. So .host must never carry a port.
+    with patch(
+        "socket.getaddrinfo",
+        side_effect=[_addrinfo("1.2.3.4"), _addrinfo("1.2.3.4")],
+    ):
+        vh = _validated_host("example.com:8443")
+    assert vh.host == "example.com"
+
+
 def test_reddit_adapter_matches_canonical() -> None:
     assert _RedditAdapter().matches("https://reddit.com/r/x") is True
 
@@ -882,6 +894,37 @@ def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
     assert "%23" in encoded
     assert "?" not in encoded
     assert "#" not in encoded
+
+
+def test_fetch_with_fallback_bot_wall_falls_to_reader_proxy() -> None:
+    """A 403 on the direct rung falls through to the reader proxy.
+
+    The direct rung (``_safe_fetch`` -> sagent.lib.web.fetch, Chrome
+    impersonation) is the sole first-party fetch; the reader proxy is the only
+    fallback, since a same-egress curl retry would present an identical
+    fingerprint and hit the same wall.
+    """
+    err = FetchError(url="https://x", status=403, headers={}, body=b"")
+    proxy = MagicMock(return_value=b"# md")
+    with (
+        patch(
+            "sagent.tools.web_fetch._safe_fetch",
+            side_effect=err,
+        ),
+        patch(
+            "sagent.tools.web_fetch._reader_proxy_fetch",
+            proxy,
+        ),
+    ):
+        body, kind = _fetch_with_fallback(
+            "https://x",
+            method="GET",
+            json_body=None,
+            form_body=None,
+        )
+    assert body == b"# md"
+    assert kind == _KIND_MARKDOWN
+    proxy.assert_called_once()
 
 
 # Host adapter dispatch & per-host adapters.

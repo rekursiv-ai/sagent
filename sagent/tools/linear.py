@@ -28,7 +28,7 @@ import os
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -125,10 +125,12 @@ async def _gql(
         raw = await asyncio.to_thread(
             fetch,
             url=_API_URL,
-            method="POST",
-            json={"query": query, "variables": variables},
-            headers=headers,
-            timeout_sec=_DEFAULT_TIMEOUT,
+            request=RequestParams(
+                method="POST",
+                json={"query": query, "variables": variables},
+                headers=headers,
+                timeout_sec=_DEFAULT_TIMEOUT,
+            ),
         )
     except FetchError as e:
         return ToolResult(
@@ -138,7 +140,7 @@ async def _gql(
             ),
             is_error=True,
         )
-    body = cast(MutableJSON, json.loads(raw))
+    body = cast(MutableJSON, json.loads(raw[0]))
     if errors := body.get("errors"):
         return ToolResult(
             call_id="",

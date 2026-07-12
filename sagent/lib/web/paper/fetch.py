@@ -22,7 +22,7 @@ import logging
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.lib.web.paper.custom_types import IdType
 from sagent.lib.web.paper.errors import NotFoundError
 from sagent.lib.web.paper.ids import s2_wire_id
@@ -93,11 +93,10 @@ def _download_pdf(
     min_pdf_bytes: int = 128,
 ) -> bytes:
     """Download a URL, validate it looks like a PDF, return bytes."""
-    return _validate_pdf(
-        url,
-        fetch(url, retries=retries, timeout_sec=download_timeout_sec),
-        min_pdf_bytes=min_pdf_bytes,
+    body, _ = fetch(
+        url, request=RequestParams(retries=retries, timeout_sec=download_timeout_sec)
     )
+    return _validate_pdf(url, body, min_pdf_bytes=min_pdf_bytes)
 
 
 def oa_url_of(paper: MutableJSON) -> str | None:

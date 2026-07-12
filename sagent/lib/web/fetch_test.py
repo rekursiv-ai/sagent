@@ -2,21 +2,31 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import Mock, patch
 
 import base64
 import gzip
 import http.client
 import io
+import warnings
 import zlib
 
-from curl_cffi import CurlError, CurlInfo, CurlOpt
+from curl_cffi import (
+    CurlError,
+    CurlInfo,
+    CurlOpt,
+    requests as cc_requests,
+)
 
 import brotli
 import pytest
 import zstandard
 
+from sagent.lib.web import fetch as fetch_mod
 from sagent.lib.web.errors import (
     BotDetectionError,
     CloudflareChallengeError,
@@ -24,16 +34,120 @@ from sagent.lib.web.errors import (
     PuzzleChallengeError,
 )
 from sagent.lib.web.fetch import (
+    FetchSession,
+    RequestParams,
     ValidatedHost,
     _apply_redirect,
-    _backoff_delay,
     _bracket_ipv6,
     _decompress,
     _open_connection,
+    _registrable_domain,
     _rewrite_origin,
+    _seed_session_jar,
+    _send_as,
     _split_userinfo,
+    egress_ip as _real_egress_ip,
     fetch,
+    last_known_egress_ip as _last_known_egress_ip,
+    set_last_egress_ip as _set_last_egress_ip,
 )
+from sagent.lib.web.profile import Profile, ProfileStore
+
+
+# Captured before any fixture stubs it, so the pool-locking tests can invoke the
+# REAL curl_session (isolate_profiles replaces the module attribute).
+_REAL_CURL_SESSION = fetch_mod.curl_session
+
+
+def _lower_headers(kw: dict[str, Any]) -> dict[str, str]:
+    """Lower-cased request headers from a curl ``request`` mock's kwargs."""
+    headers = cast("dict[str, str] | None", kw.get("headers")) or {}
+    return {k.lower(): v for k, v in headers.items()}
+
+
+def _const_curl_session(stub: Any) -> Callable[..., Any]:
+    """A ``curl_session`` replacement that always returns ``stub`` (typed)."""
+
+    def factory(*_args: object) -> Any:
+        return stub
+
+    return factory
+
+
+if TYPE_CHECKING:
+    from curl_cffi.requests import Response
+
+
+class _StubCookie:
+    """A minimal jar entry: just a name/value, enough for the pooled-path tests."""
+
+    def __init__(self, name: str, value: str) -> None:
+        self.name = name
+        self.value = value
+
+
+class _StubCookies:
+    """Minimal curl-cookies stand-in: a recording jar plus a ``set`` that stores."""
+
+    def __init__(self) -> None:
+        self.jar: list[Any] = []
+
+    def set(
+        self,
+        name: str,
+        value: str,
+        *,
+        domain: str = "",
+        path: str = "/",
+        secure: bool = False,
+    ) -> None:
+        del domain, path, secure
+        self.jar = [c for c in self.jar if getattr(c, "name", None) != name]
+        self.jar.append(_StubCookie(name, value))
+
+
+class _StubSession:
+    """A pooled-Session stand-in whose request delegates to the module-level
+    ``curl_cffi.requests.request`` -- so one ``patch("curl_cffi.requests.request")``
+    intercepts both the identity (session) and keyless paths.
+    """
+
+    def __init__(self) -> None:
+        self.cookies = _StubCookies()
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        return cc_requests.request(*args, **kwargs)  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **RequestParams TypedDict is unstubbed
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def isolate_profiles(tmp_path: Any, monkeypatch: Any) -> Any:
+    """Hermetic identity layer: a tmp store and a fixed egress, no network.
+
+    ``fetch`` transparently loads/saves a per-``(egress_ip, domain)`` profile.
+    Without isolation these tests would share the real on-disk store (state
+    leaking between cases) and call the live egress echo. Point the store at a
+    tmp dir and pin the egress so the transport assertions stay deterministic.
+    """
+
+    def fixed_egress(*, cache: bool = True, **_kw: Any) -> str:
+        del cache, _kw
+        return "203.0.113.1"
+
+    store = ProfileStore(base_dir=tmp_path)
+    monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
+    monkeypatch.setattr(fetch_mod, "egress_ip", fixed_egress)
+    monkeypatch.setattr(fetch_mod, "_last_egress_ip", None)
+
+    def stub_session(egress: str, domain: str, impersonate: str) -> _StubSession:
+        del egress, domain, impersonate
+        return _StubSession()
+
+    monkeypatch.setattr(fetch_mod, "curl_session", stub_session)
+    monkeypatch.setattr(fetch_mod, "_curl_sessions", {})
+    return
 
 
 class TestRewriteOrigin:
@@ -67,6 +181,7 @@ class TestApplyRedirect:
     def test_303_drops_case_variant_content_type(self) -> None:
         # REVE559-002: a 303 POST->GET must drop Content-Type regardless of case.
         headers, method, body = _apply_redirect(
+            "https://x/submit",
             {"content-type": "application/json", "Accept": "*/*"},
             "POST",
             b"{}",
@@ -76,6 +191,45 @@ class TestApplyRedirect:
         assert method == "GET"
         assert body is None
         assert not any(k.lower() == "content-type" for k in headers)
+
+    def test_302_downgrades_post_to_get(self) -> None:
+        _headers, method, body = _apply_redirect(
+            "https://x/submit", {}, "POST", b"{}", 302, "https://x/land"
+        )
+        assert method == "GET"
+        assert body is None
+
+    def test_307_preserves_method_and_body(self) -> None:
+        _headers, method, body = _apply_redirect(
+            "https://x/submit", {}, "POST", b"{}", 307, "https://x/land"
+        )
+        assert method == "POST"
+        assert body == b"{}"
+
+    def test_cross_origin_drops_cookie_and_hints(self) -> None:
+        headers, _m, _b = _apply_redirect(
+            "https://a.com/1",
+            {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"', "Accept": "*/*"},
+            "GET",
+            None,
+            302,
+            "https://b.com/2",
+        )
+        assert "Cookie" not in headers
+        assert "sec-ch-ua-arch" not in headers
+        assert headers.get("Accept") == "*/*"  # non-origin-bound survives
+
+    def test_same_origin_keeps_cookie_and_hints(self) -> None:
+        headers, _m, _b = _apply_redirect(
+            "https://a.com/1",
+            {"Cookie": "SID=x", "sec-ch-ua-arch": '"x86"'},
+            "GET",
+            None,
+            302,
+            "https://a.com/2",
+        )
+        assert headers.get("Cookie") == "SID=x"
+        assert headers.get("sec-ch-ua-arch") == '"x86"'
 
 
 class TestDecompress:
@@ -120,21 +274,53 @@ class TestDecompress:
         with pytest.raises(ValueError, match="Decompression failed"):
             _decompress(b"not gzip", "gzip")
 
+    def test_raw_deflate_without_zlib_header(self) -> None:
+        # REV2A-002: some servers emit raw DEFLATE (no zlib wrapper); a browser
+        # falls back to wbits=-MAX_WBITS. We must decode it, not raise.
+        data = b"hello world"
+        raw = zlib.compress(data)[2:-4]  # strip zlib header + adler checksum
+        assert _decompress(raw, "deflate") == data
+
+    def test_chained_content_encoding(self) -> None:
+        # REV2A-003: chained "gzip, br" is RFC-legal; apply right-to-left.
+        data = b"hello world"
+        chained = gzip.compress(brotli.compress(data))
+        assert _decompress(chained, "br, gzip") == data
+
 
 class TestBackoffDelay:
     def test_exponential_growth(self) -> None:
-        d0 = _backoff_delay(0, {})
-        d2 = _backoff_delay(2, {})
+        d0 = RequestParams().backoff_delay(0, {})
+        d2 = RequestParams().backoff_delay(2, {})
         assert d0 < d2
 
     def test_capped_at_30(self) -> None:
-        assert _backoff_delay(100, {}) <= 45  # 30 + 0.5*30
+        assert RequestParams().backoff_delay(100, {}) <= 45  # 30 + 0.5*30
 
     def test_retry_after_header(self) -> None:
-        assert _backoff_delay(0, {"retry-after": "5"}) == 5.0
+        assert RequestParams().backoff_delay(0, {"retry-after": "5"}) == 5.0
 
     def test_retry_after_capped(self) -> None:
-        assert _backoff_delay(0, {"retry-after": "999"}) == 30.0
+        assert RequestParams().backoff_delay(0, {"retry-after": "999"}) == 30.0
+
+    def test_retry_after_http_date_honored(self) -> None:
+        # REV2A-007: Retry-After may be an HTTP-date, not just delta-seconds.
+        # A near-future date must produce a positive delay (honored), not fall
+        # through to exponential backoff.
+        future = datetime.now(tz=UTC) + timedelta(seconds=10)
+        delay = RequestParams().backoff_delay(
+            0, {"retry-after": format_datetime(future)}
+        )
+        assert 5 <= delay <= 30  # ~10s, capped at 30; not the ~1s exp backoff
+
+    def test_retry_after_past_date_is_zero(self) -> None:
+        # A past HTTP-date means "retry now": non-negative, small.
+        assert (
+            RequestParams().backoff_delay(
+                0, {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}
+            )
+            == 0.0
+        )
 
 
 class TestSplitUserinfo:
@@ -197,19 +383,19 @@ class TestFetchInputValidation:
         # O-WEB-001: retries=-1 -> range(1+-1)=range(0), the loop never runs and
         # the internal "unreachable" AssertionError leaks. Reject up front.
         with pytest.raises(ValueError, match="retries"):
-            fetch("https://example.com", retries=-1)
+            fetch("https://example.com", request=RequestParams(retries=-1))
 
     def test_negative_max_redirects_rejected(self) -> None:
         # O-WEB-007: max_redirects=-1 silently behaves like 0 (never follow),
         # but the contract documents only 0 as "disable". Reject the ambiguous -1.
         with pytest.raises(ValueError, match="max_redirects"):
-            fetch("https://example.com", max_redirects=-1)
+            fetch("https://example.com", request=RequestParams(max_redirects=-1))
 
     def test_nonpositive_timeout_rejected(self) -> None:
         # O-WEB-008: timeout_sec=0 means opposite things per transport (curl 0 =
         # no timeout, stdlib 0 = non-blocking). Reject non-positive timeouts.
         with pytest.raises(ValueError, match="timeout_sec"):
-            fetch("https://example.com", timeout_sec=0)
+            fetch("https://example.com", request=RequestParams(timeout_sec=0))
 
 
 class TestFetchClassifiesBlockAtBoundary:
@@ -240,7 +426,6 @@ class TestFetchClassifiesBlockAtBoundary:
             {"server": "cloudflare", "cf-ray": "a1-LAX"},
         )
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(CloudflareChallengeError) as exc,
         ):
@@ -259,7 +444,6 @@ class TestFetchClassifiesBlockAtBoundary:
             {"content-type": "text/html"},
         )
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(PuzzleChallengeError) as exc,
         ):
@@ -276,7 +460,6 @@ class TestFetchClassifiesBlockAtBoundary:
         resp.headers = {"server": "nginx"}
         resp.url = "https://x.com/"
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp),
             pytest.raises(FetchError) as exc,
         ):
@@ -293,7 +476,6 @@ class TestFetchClassifiesBlockAtBoundary:
         )
         caught: FetchError | None = None
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp),
         ):
             try:
@@ -306,11 +488,9 @@ class TestFetchClassifiesBlockAtBoundary:
 class TestFetchStdlibPath:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        # These tests pin the stdlib (http.client connection) transport; force
-        # _HAVE_CURL off so the curl backend never intercepts and the stdlib
-        # connection-path behavior is asserted.
-        with patch("sagent.lib.web.fetch._HAVE_CURL", False):
-            yield
+        # These tests pin the stdlib (http.client connection) transport by
+        # passing use_curl=False on each fetch call.
+        return
 
     def _mock_http_response(
         self,
@@ -335,7 +515,9 @@ class TestFetchStdlibPath:
     def test_basic_get(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            result = fetch("https://example.com")
+            result, _ = fetch(
+                "https://example.com", request=RequestParams(use_curl=False)
+            )
         assert result == b"hello"
         mock_conn.request.assert_called_once()
         assert mock_conn.request.call_args.args[0] == "GET"
@@ -347,15 +529,19 @@ class TestFetchStdlibPath:
         )
         mock_conn = self._mock_conn(resp)
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            assert fetch("https://example.com") == b"hello"
+            assert (
+                fetch("https://example.com", request=RequestParams(use_curl=False))[0]
+                == b"hello"
+            )
 
     def test_post_with_data(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com",
-                method="POST",
-                data={"q": "test"},
+                request=RequestParams(
+                    method="POST", data={"q": "test"}, use_curl=False
+                ),
             )
         assert mock_conn.request.call_args.args[0] == "POST"
         assert mock_conn.request.call_args.kwargs["body"] == b"q=test"
@@ -365,8 +551,9 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com",
-                method="POST",
-                json={"key": "value"},
+                request=RequestParams(
+                    method="POST", json={"key": "value"}, use_curl=False
+                ),
             )
         assert mock_conn.request.call_args.kwargs["body"] == b'{"key": "value"}'
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -376,14 +563,16 @@ class TestFetchStdlibPath:
         with pytest.raises(ValueError, match="mutually exclusive"):
             fetch(
                 "https://example.com",
-                data={"a": "1"},
-                json={"b": 2},
+                request=RequestParams(data={"a": "1"}, json={"b": 2}, use_curl=False),
             )
 
     def test_cookies_serialized(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            fetch("https://example.com", cookies={"a": "1", "b": "2"})
+            fetch(
+                "https://example.com",
+                request=RequestParams(cookies={"a": "1", "b": "2"}, use_curl=False),
+            )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert "a=1" in headers["Cookie"]
         assert "b=2" in headers["Cookie"]
@@ -391,7 +580,10 @@ class TestFetchStdlibPath:
     def test_custom_headers_override_defaults(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            fetch("https://example.com", headers={"User-Agent": "custom"})
+            fetch(
+                "https://example.com",
+                request=RequestParams(headers={"User-Agent": "custom"}, use_curl=False),
+            )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert headers["User-Agent"] == "custom"
 
@@ -400,10 +592,13 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com",
-                method="POST",
-                data={"q": "test"},
-                headers={"User-Agent": "custom"},
-                raw_headers=True,
+                request=RequestParams(
+                    method="POST",
+                    data={"q": "test"},
+                    headers={"User-Agent": "custom"},
+                    raw_headers=True,
+                    use_curl=False,
+                ),
             )
         assert mock_conn.request.call_args.kwargs["headers"] == {"User-Agent": "custom"}
 
@@ -412,9 +607,12 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://u:p@example.com",
-                headers={"User-Agent": "custom"},
-                cookies={"a": "1"},
-                raw_headers=True,
+                request=RequestParams(
+                    headers={"User-Agent": "custom"},
+                    cookies={"a": "1"},
+                    raw_headers=True,
+                    use_curl=False,
+                ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert headers == {
@@ -428,7 +626,10 @@ class TestFetchStdlibPath:
         with patch(
             "sagent.lib.web.fetch._open_connection", return_value=mock_conn
         ) as mock_open:
-            fetch("https://u:p@example.com:8443/x")
+            fetch(
+                "https://u:p@example.com:8443/x",
+                request=RequestParams(use_curl=False),
+            )
         # userinfo stripped: the connection opens on the bare host:port, and the
         # request path carries no credentials.
         assert mock_open.call_args.args[1] == "example.com"
@@ -442,7 +643,9 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://u:p@example.com/",
-                headers={"Authorization": "Bearer xyz"},
+                request=RequestParams(
+                    headers={"Authorization": "Bearer xyz"}, use_curl=False
+                ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert headers["Authorization"] == "Bearer xyz"
@@ -454,22 +657,25 @@ class TestFetchStdlibPath:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError, match="403"),
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
 
     def test_timeout_passed(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch(
             "sagent.lib.web.fetch._open_connection", return_value=mock_conn
         ) as mock_open:
-            fetch("https://example.com", timeout_sec=60)
+            fetch(
+                "https://example.com",
+                request=RequestParams(timeout_sec=60, use_curl=False),
+            )
         assert mock_open.call_args.args[2] == 60
 
 
 class TestFetchRetry:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        with patch("sagent.lib.web.fetch._HAVE_CURL", False):
-            yield
+        # Stdlib path is selected per-call via use_curl=False, not a global.
+        return
 
     def _mock_http_response(
         self,
@@ -496,7 +702,13 @@ class TestFetchRetry:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             patch("sagent.lib.web.fetch.time.sleep"),
         ):
-            assert fetch("https://example.com", retries=1) == b"ok"
+            assert (
+                fetch(
+                    "https://example.com",
+                    request=RequestParams(retries=1, use_curl=False),
+                )[0]
+                == b"ok"
+            )
 
     def test_no_retry_on_404(self) -> None:
         resp = self._mock_http_response(status=404, body=b"NF")
@@ -507,7 +719,9 @@ class TestFetchRetry:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError, match="404"),
         ):
-            fetch("https://example.com", retries=3)
+            fetch(
+                "https://example.com", request=RequestParams(retries=3, use_curl=False)
+            )
 
     def test_error_body_is_decompressed(self) -> None:
         # RED: an error response (e.g. a Cloudflare 403 challenge page) is
@@ -527,7 +741,7 @@ class TestFetchRetry:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://x.com")
+            fetch("https://x.com", request=RequestParams(use_curl=False))
         # The caller must receive readable HTML, not the raw zstd frame.
         assert exc.value.body == html
 
@@ -541,14 +755,20 @@ class TestFetchRetry:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             patch("sagent.lib.web.fetch.time.sleep"),
         ):
-            assert fetch("https://example.com", retries=1) == b"ok"
+            assert (
+                fetch(
+                    "https://example.com",
+                    request=RequestParams(retries=1, use_curl=False),
+                )[0]
+                == b"ok"
+            )
 
 
 class TestConnectionClosedOnError:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        with patch("sagent.lib.web.fetch._HAVE_CURL", False):
-            yield
+        # Stdlib path is selected per-call via use_curl=False, not a global.
+        return
 
     def _mock_conn(self, status: int, body: bytes = b"nope") -> Mock:
         resp = Mock(spec=http.client.HTTPResponse)
@@ -568,7 +788,7 @@ class TestConnectionClosedOnError:
             patch("sagent.lib.web.fetch._open_connection", return_value=conn),
             pytest.raises(FetchError),
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
         conn.close.assert_called_once()
 
     def test_conn_closed_on_each_retried_attempt(self) -> None:
@@ -590,17 +810,23 @@ class TestConnectionClosedOnError:
             patch("sagent.lib.web.fetch._open_connection", side_effect=[conn1, conn2]),
             patch("sagent.lib.web.fetch.time.sleep"),
         ):
-            assert fetch("https://example.com", retries=1) == b"ok"
+            assert (
+                fetch(
+                    "https://example.com",
+                    request=RequestParams(retries=1, use_curl=False),
+                )[0]
+                == b"ok"
+            )
         conn1.close.assert_called_once()
 
 
-class TestFetchConnectionPath:
+class TestFetchStdlibBackend:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        # The connection path is stdlib-only; force _HAVE_CURL off so these
-        # redirect/error/303/validated-host tests exercise the stdlib path.
-        with patch("sagent.lib.web.fetch._HAVE_CURL", False):
-            yield
+        # The stdlib backend is http.client-only; each fetch call passes
+        # use_curl=False so these redirect/error/303/validated-host tests
+        # exercise the stdlib path.
+        return
 
     def _mock_http_response(
         self,
@@ -631,7 +857,9 @@ class TestFetchConnectionPath:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            body = fetch("https://example.com/start")
+            body, _ = fetch(
+                "https://example.com/start", request=RequestParams(use_curl=False)
+            )
         assert body == b"final"
 
     def test_on_redirect_called(self) -> None:
@@ -652,9 +880,31 @@ class TestFetchConnectionPath:
         ):
             fetch(
                 "https://example.com/start",
-                on_redirect=urls.append,
+                request=RequestParams(on_redirect=urls.append, use_curl=False),
             )
         assert urls == ["https://example.com/final"]
+
+    def test_set_cookie_value_with_comma_not_missplit(self) -> None:
+        # RFC 9110 exempts Set-Cookie from comma-folding. A cookie VALUE that
+        # itself contains ", " must not be split into two bogus cookies. Two
+        # separate Set-Cookie headers must both survive intact.
+        resp = self._mock_http_response(
+            body=b"ok",
+            headers=[
+                ("content-encoding", "identity"),
+                ("Set-Cookie", "pref=a, b, c; Path=/"),
+                ("Set-Cookie", "SID=xyz; Path=/"),
+            ],
+        )
+        mock_conn = Mock()
+        mock_conn.request = Mock()
+        mock_conn.getresponse.return_value = resp
+        with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
+            _body, session = fetch(
+                "https://example.com/", request=RequestParams(use_curl=False)
+            )
+        assert session.cookies.get("pref") == "a, b, c"
+        assert session.cookies.get("SID") == "xyz"
 
     def test_on_redirect_raise_aborts(self) -> None:
         redir_resp = self._mock_http_response(
@@ -676,7 +926,10 @@ class TestFetchConnectionPath:
             ),
             pytest.raises(ValueError, match="bad redirect"),
         ):
-            fetch("https://example.com", on_redirect=reject)
+            fetch(
+                "https://example.com",
+                request=RequestParams(on_redirect=reject, use_curl=False),
+            )
 
     def test_max_redirects_zero_returns_3xx_body(self) -> None:
         resp = self._mock_http_response(
@@ -695,12 +948,15 @@ class TestFetchConnectionPath:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            result = fetch("https://example.com", max_redirects=0)
+            result, _ = fetch(
+                "https://example.com",
+                request=RequestParams(max_redirects=0, use_curl=False),
+            )
         assert result == b"redirect body"
 
     def test_plain_get_curl_absent_returns_3xx_body_at_cap(self) -> None:
         # REVE559-001: a plain GET at default max_redirects, curl absent -- once
-        # _fetch_simple (urllib) is gone, this routes through _fetch_connection,
+        # _fetch_simple (urllib) is gone, this routes through _fetch_stdlib,
         # which returns the 3xx body at the cap. The old urllib path RAISED here
         # (None-at-cap fell through to http_error_default). No conn-triggers, so
         # this is exactly the path REVE559-001 lived on.
@@ -717,10 +973,11 @@ class TestFetchConnectionPath:
         mock_conn.getresponse.return_value = resp
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", False),
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
         ):
-            result = fetch("https://example.com")  # default max_redirects=10
+            result, _ = fetch(
+                "https://example.com", request=RequestParams(use_curl=False)
+            )  # default max_redirects=10
         assert result == b"cap body"
 
     def test_cross_host_redirect(self) -> None:
@@ -743,7 +1000,9 @@ class TestFetchConnectionPath:
             "sagent.lib.web.fetch._open_connection",
             side_effect=[mock_conn1, mock_conn2],
         ):
-            body = fetch("https://example.com/start")
+            body, _ = fetch(
+                "https://example.com/start", request=RequestParams(use_curl=False)
+            )
         assert body == b"other"
         mock_conn1.close.assert_called_once()
 
@@ -760,7 +1019,10 @@ class TestFetchConnectionPath:
 
         urls: list[str] = []
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            body = fetch("https://example.com/base/start", on_redirect=urls.append)
+            body, _ = fetch(
+                "https://example.com/base/start",
+                request=RequestParams(on_redirect=urls.append, use_curl=False),
+            )
         assert body == b"landed"
         assert urls == ["https://example.com/base/next"]
         # Second request stays on the same connection (same host), path /base/next.
@@ -781,7 +1043,10 @@ class TestFetchConnectionPath:
         with patch(
             "sagent.lib.web.fetch._open_connection", side_effect=[conn_a, conn_b]
         ):
-            fetch("https://a.com/submit", method="POST", data={"x": "1"})
+            fetch(
+                "https://a.com/submit",
+                request=RequestParams(method="POST", data={"x": "1"}, use_curl=False),
+            )
         sent = conn_b.request.call_args.kwargs["headers"]
         assert sent.get("Origin") != "https://a.com"
         assert sent.get("Origin") == "https://b.com"
@@ -802,7 +1067,10 @@ class TestFetchConnectionPath:
         with patch(
             "sagent.lib.web.fetch._open_connection", side_effect=[conn_a, conn_b]
         ):
-            fetch("https://a.com/start", headers={"host": "a.com"})
+            fetch(
+                "https://a.com/start",
+                request=RequestParams(headers={"host": "a.com"}, use_curl=False),
+            )
         sent = conn_b.request.call_args.kwargs["headers"]
         assert not any(k.lower() == "host" and v == "a.com" for k, v in sent.items())
 
@@ -821,10 +1089,9 @@ class TestFetchConnectionPath:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            body = fetch(
+            body, _ = fetch(
                 "https://example.com/submit",
-                method="POST",
-                data={"x": "1"},
+                request=RequestParams(method="POST", data={"x": "1"}, use_curl=False),
             )
         assert body == b"got it"
         second_call = mock_conn.request.call_args_list[1]
@@ -848,7 +1115,7 @@ class TestFetchConnectionPath:
             ),
             pytest.raises(FetchError, match="302"),
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
 
     def test_http_error_raises_fetch_error(self) -> None:
         resp = self._mock_http_response(status=404, body=b"not found")
@@ -863,7 +1130,7 @@ class TestFetchConnectionPath:
             ),
             pytest.raises(FetchError, match="404"),
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
 
     def test_error_body_is_decompressed(self) -> None:
         # RED: connection-path twin of the simple-path bug. A compressed error
@@ -883,7 +1150,7 @@ class TestFetchConnectionPath:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
         assert exc.value.body == html
 
     def test_undecodable_error_body_falls_back_to_raw(self) -> None:
@@ -904,7 +1171,7 @@ class TestFetchConnectionPath:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com")
+            fetch("https://example.com", request=RequestParams(use_curl=False))
         assert exc.value.status == 500
         assert exc.value.body == garbage
 
@@ -925,7 +1192,10 @@ class TestFetchConnectionPath:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            fetch("https://example.com:8443/page", validated_hosts=_vh)
+            fetch(
+                "https://example.com:8443/page",
+                request=RequestParams(validated_hosts=_vh, use_curl=False),
+            )
         assert seen == ["example.com"]
 
     def test_validated_host_header_carries_non_default_port(self) -> None:
@@ -942,7 +1212,10 @@ class TestFetchConnectionPath:
             return ValidatedHost(host=hostname, ip="93.184.216.34")
 
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            fetch("https://example.com:8443/page", validated_hosts=_vh)
+            fetch(
+                "https://example.com:8443/page",
+                request=RequestParams(validated_hosts=_vh, use_curl=False),
+            )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == (
             "example.com:8443"
         )
@@ -959,7 +1232,10 @@ class TestFetchConnectionPath:
             return ValidatedHost(host=hostname, ip="93.184.216.34")
 
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
-            fetch("https://example.com/page", validated_hosts=_vh)
+            fetch(
+                "https://example.com/page",
+                request=RequestParams(validated_hosts=_vh, use_curl=False),
+            )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == "example.com"
 
     def test_cross_host_redirect_host_header_carries_non_default_port(self) -> None:
@@ -981,7 +1257,10 @@ class TestFetchConnectionPath:
         with patch(
             "sagent.lib.web.fetch._open_connection", side_effect=[conn_a, conn_b]
         ):
-            fetch("https://example.com/start", validated_hosts=_vh)
+            fetch(
+                "https://example.com/start",
+                request=RequestParams(validated_hosts=_vh, use_curl=False),
+            )
         assert conn_b.request.call_args.kwargs["headers"]["Host"] == "other.com:8443"
 
 
@@ -996,8 +1275,8 @@ class TestHeaderOrder:
 
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        with patch("sagent.lib.web.fetch._HAVE_CURL", False):
-            yield
+        # Stdlib path is selected per-call via use_curl=False, not a global.
+        return
 
     def _capture_headers(self, **fetch_kwargs: Any) -> dict[str, str]:
         resp = Mock(spec=http.client.HTTPResponse)
@@ -1012,13 +1291,17 @@ class TestHeaderOrder:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            fetch("https://example.com/", **fetch_kwargs)
+            fetch(
+                "https://example.com/",
+                request=RequestParams(use_curl=False, **fetch_kwargs),
+            )
         return dict(mock_conn.request.call_args.kwargs["headers"])
 
     def test_get_navigation_order(self) -> None:
+        # The exact order a real Chrome 146 navigation sends (captured on the
+        # wire): no Connection header, sec-ch-ua first, Priority last.
         headers = self._capture_headers()
         assert list(headers) == [
-            "Connection",
             "sec-ch-ua",
             "sec-ch-ua-mobile",
             "sec-ch-ua-platform",
@@ -1031,15 +1314,14 @@ class TestHeaderOrder:
             "Sec-Fetch-Dest",
             "Accept-Encoding",
             "Accept-Language",
+            "Priority",
         ]
-        assert headers["Connection"] == "keep-alive"
         assert headers["Sec-Fetch-Mode"] == "navigate"
         assert "Chrome/" in headers["User-Agent"]
 
     def test_post_xhr_order_with_json(self) -> None:
         headers = self._capture_headers(method="POST", json={"q": "x"})
         assert list(headers) == [
-            "Connection",
             "sec-ch-ua",
             "sec-ch-ua-mobile",
             "sec-ch-ua-platform",
@@ -1052,6 +1334,7 @@ class TestHeaderOrder:
             "Sec-Fetch-Dest",
             "Accept-Encoding",
             "Accept-Language",
+            "Priority",
         ]
         assert headers["Accept"] == "*/*"
         assert headers["Content-Type"] == "application/json"
@@ -1103,11 +1386,39 @@ class TestHeaderOrder:
             "sagent.lib.web.fetch._open_connection",
             return_value=mock_conn,
         ):
-            fetch("https://example.com/", validated_hosts=_vh)
+            fetch(
+                "https://example.com/",
+                request=RequestParams(validated_hosts=_vh, use_curl=False),
+            )
 
         captured = dict(mock_conn.request.call_args.kwargs["headers"])
         assert next(iter(captured)) == "Host"
         assert captured["Host"] == "example.com"
+
+
+class TestRegistrableDomain:
+    """The session pool keys on eTLD+1 so sibling subdomains coalesce onto one
+    connection (a browser's HTTP/2 coalescing); ``www.google.com`` and
+    ``scholar.google.com`` must map to the same key.
+    """
+
+    def test_subdomains_share_registrable_domain(self) -> None:
+        assert _registrable_domain("www.google.com") == "google.com"
+        assert _registrable_domain("scholar.google.com") == "google.com"
+
+    def test_bare_domain_unchanged(self) -> None:
+        assert _registrable_domain("google.com") == "google.com"
+
+    def test_single_label_unchanged(self) -> None:
+        assert _registrable_domain("localhost") == "localhost"
+
+    def test_cc_second_level_tld_keeps_three_labels(self) -> None:
+        assert _registrable_domain("a.example.co.uk") == "example.co.uk"
+        assert _registrable_domain("example.co.uk") == "example.co.uk"
+        assert _registrable_domain("x.y.example.com.au") == "example.com.au"
+
+    def test_plain_gtld_keeps_two_labels(self) -> None:
+        assert _registrable_domain("deep.sub.example.org") == "example.org"
 
 
 class TestIPv6Bracketing:
@@ -1248,10 +1559,9 @@ class TestFetchCurlBackend:
         # impersonation and no manual conn; returns the decoded body.
         resp = self._mock_response(content=b"hello")
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp) as mock_req,
         ):
-            body = fetch("https://example.com")
+            body, _ = fetch("https://example.com")
         assert body == b"hello"
         assert mock_req.call_args.kwargs["impersonate"] == "chrome"
         assert mock_req.call_args.kwargs["allow_redirects"] is False
@@ -1273,13 +1583,11 @@ class TestFetchCurlBackend:
             )
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
         ):
-            body = fetch(
+            body, _ = fetch(
                 "https://example.com/start",
-                validated_hosts=_vh,
-                on_redirect=lambda _u: None,
+                request=RequestParams(validated_hosts=_vh, on_redirect=lambda _u: None),
             )
         assert body == b"done"
         resolves = [v for o, v in setopts if o == int(CurlOpt.RESOLVE)]
@@ -1296,10 +1604,12 @@ class TestFetchCurlBackend:
             return ValidatedHost(host=hostname, ip="2606:4700:20::1")
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
         ):
-            fetch("https://v6.example/x", validated_hosts=_vh)
+            fetch(
+                "https://v6.example/x",
+                request=RequestParams(validated_hosts=_vh),
+            )
         resolves = [v for o, v in setopts if o == int(CurlOpt.RESOLVE)]
         assert ["v6.example:443:[2606:4700:20::1]"] in resolves
 
@@ -1316,14 +1626,13 @@ class TestFetchCurlBackend:
             return ValidatedHost(host=hostname, ip="1.2.3.4")
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
         ):
             fetch(
                 "https://a.com/submit",
-                method="POST",
-                data={"x": "1"},
-                validated_hosts=_vh,
+                request=RequestParams(
+                    method="POST", data={"x": "1"}, validated_hosts=_vh
+                ),
             )
         # The HTTPHEADER set on the SECOND hop must carry Origin: b.com, never a.com.
         header_sets = [v for o, v in setopts if o == int(CurlOpt.HTTPHEADER)]
@@ -1339,30 +1648,52 @@ class TestFetchCurlBackend:
         )
         ok = self._mock_response(status=200, content=b"done")
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", side_effect=[redir, ok]) as mock_req,
         ):
-            fetch("https://a.com/submit", method="POST", data={"x": "1"})
+            fetch(
+                "https://a.com/submit",
+                request=RequestParams(method="POST", data={"x": "1"}),
+            )
         second_headers = mock_req.call_args_list[1].kwargs["headers"]
         assert second_headers.get("Origin") == "https://b.com"
 
-    def test_simple_curl_does_not_double_send_cookies(self) -> None:
-        # F3: cookies are serialized into the Cookie header by fetch(); the curl
-        # path must NOT also pass cookies= (curl emits BOTH -> duplicated).
+    def test_pooled_curl_loads_caller_cookies_into_jar_not_header(self) -> None:
+        # F3 / S1: on the pooled-curl path a caller cookie is loaded INTO the
+        # session jar (the single cookie source), never ALSO sent via a Cookie
+        # header -- curl would then emit both, duplicating a name the jar holds.
+        stub = _StubSession()
         resp = self._mock_response(content=b"ok")
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp) as mock_req,
+            patch.object(fetch_mod, "curl_session", _const_curl_session(stub)),
         ):
-            fetch("https://example.com", cookies={"CONSENT": "YES+"})
+            fetch(
+                "https://example.com",
+                request=RequestParams(cookies={"CONSENT": "YES+"}),
+            )
         kwargs = mock_req.call_args.kwargs
-        # Exactly one cookie source: the header. The cookies= kwarg must be unset.
-        assert "CONSENT=YES+" in kwargs["headers"].get("Cookie", "")
+        # Cookie is in the jar, not the header, and cookies= kwarg is unset.
+        assert {(c.name, c.value) for c in stub.cookies.jar} == {("CONSENT", "YES+")}
+        assert "Cookie" not in kwargs["headers"]
         assert not kwargs.get("cookies")
+
+    def test_case_variant_cookie_header_not_duplicated(self) -> None:
+        # REV2A-008: a caller lowercase headers={"cookie":...} plus a cookies=
+        # param must collapse to ONE cookie header key (HTTP header names are
+        # case-insensitive; two dict keys -> two Cookie lines on the wire).
+        resp = self._mock_response(content=b"ok")
+        with patch("curl_cffi.requests.request", return_value=resp) as mock_req:
+            fetch(
+                "https://example.com",
+                request=RequestParams(headers={"cookie": "a=1"}, cookies={"b": "2"}),
+            )
+        sent = mock_req.call_args.kwargs["headers"]
+        cookie_keys = [k for k in sent if k.lower() == "cookie"]
+        assert len(cookie_keys) == 1, f"duplicate cookie header keys: {cookie_keys}"
 
     def test_redirect_cap_follows_up_to_limit_then_returns_body(self) -> None:
         # on_redirect fires once per FOLLOWED hop; when the cap is reached the
-        # curl path returns the final 3xx body (matching _fetch_connection's
+        # curl path returns the final 3xx body (matching _fetch_stdlib's
         # "return the 3xx body at the cap" contract), it does NOT raise.
         hops = [
             self._hop(status=302, headers={"location": "https://a.com/1"}),
@@ -1376,14 +1707,13 @@ class TestFetchCurlBackend:
             return ValidatedHost(host=hostname, ip="1.2.3.4")
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
         ):
-            body = fetch(
+            body, _ = fetch(
                 "https://a.com/start",
-                max_redirects=2,
-                validated_hosts=_vh,
-                on_redirect=seen.append,
+                request=RequestParams(
+                    max_redirects=2, validated_hosts=_vh, on_redirect=seen.append
+                ),
             )
         assert body == b"final 3xx"
         assert seen == ["https://a.com/1", "https://a.com/2"]
@@ -1406,11 +1736,13 @@ class TestFetchCurlBackend:
             return ValidatedHost(host=hostname, ip="1.2.3.4")
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", validated_hosts=_vh)
+            fetch(
+                "https://example.com",
+                request=RequestParams(validated_hosts=_vh),
+            )
         assert exc.value.status == 403
         assert exc.value.body == html
 
@@ -1419,13 +1751,13 @@ class TestFetchCurlBackend:
         # caller's header (plus nothing derived from the Chrome default set).
         resp = self._mock_response(content=b"ok")
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp) as mock_req,
         ):
             fetch(
                 "https://example.com",
-                headers={"User-Agent": "custom"},
-                raw_headers=True,
+                request=RequestParams(
+                    headers={"User-Agent": "custom"}, raw_headers=True
+                ),
             )
         assert mock_req.call_args.kwargs["headers"] == {"User-Agent": "custom"}
 
@@ -1433,7 +1765,6 @@ class TestFetchCurlBackend:
         # (e) any curl_cffi exception (connection/timeout) becomes
         # FetchError(status=0) rather than leaking the raw curl error.
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch(
                 "curl_cffi.requests.request",
                 side_effect=CurlError("connection refused"),
@@ -1457,14 +1788,13 @@ class TestFetchCurlBackend:
             return resp_303 if len(calls) == 1 else resp_ok
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", side_effect=_record),
         ):
-            body = fetch(
+            body, _ = fetch(
                 "https://example.com/submit",
-                method="POST",
-                data={"x": "1"},
-                on_redirect=lambda _u: None,
+                request=RequestParams(
+                    method="POST", data={"x": "1"}, on_redirect=lambda _u: None
+                ),
             )
         assert body == b"got it"
         # method is the first positional arg to cc_requests.request.
@@ -1485,10 +1815,12 @@ class TestFetchCurlBackend:
             return resp_303 if len(calls) == 1 else resp_ok
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", side_effect=_record),
         ):
-            fetch("https://example.com/submit", method="POST", json={"x": 1})
+            fetch(
+                "https://example.com/submit",
+                request=RequestParams(method="POST", json={"x": 1}),
+            )
         assert "Content-Type" not in calls[1]["headers"]
 
     def test_max_redirects_zero_returns_3xx_body_on_curl(self) -> None:
@@ -1501,10 +1833,12 @@ class TestFetchCurlBackend:
             headers={"location": "https://example.com/other"},
         )
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", return_value=resp) as mock_req,
         ):
-            body = fetch("https://example.com", max_redirects=0)
+            body, _ = fetch(
+                "https://example.com",
+                request=RequestParams(max_redirects=0),
+            )
         assert body == b"redirect body"
         assert mock_req.call_count == 1  # never followed
 
@@ -1519,11 +1853,12 @@ class TestFetchCurlBackend:
         mock_conn.request = Mock()
         mock_conn.getresponse.return_value = resp
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", False),
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             patch("curl_cffi.requests.request") as mock_curl,
         ):
-            body = fetch("https://example.com")
+            body, _ = fetch(
+                "https://example.com", request=RequestParams(use_curl=False)
+            )
         assert body == b"stdlib"
         mock_curl.assert_not_called()
 
@@ -1534,25 +1869,26 @@ class TestFetchCurlBackend:
         # the two transports disagree on what `retries=` means.
         ok = self._mock_response(content=b"ok")
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch(
                 "curl_cffi.requests.request",
                 side_effect=[CurlError("connection refused"), ok],
             ),
             patch("sagent.lib.web.fetch.time.sleep"),
         ):
-            assert fetch("https://example.com", retries=1) == b"ok"
+            assert (
+                fetch("https://example.com", request=RequestParams(retries=1))[0]
+                == b"ok"
+            )
 
     def test_curl_connection_error_exhausts_retries_then_raises(self) -> None:
         # The retry must still terminate: a persistent curl error raises after
         # the budget, not loop forever.
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", side_effect=CurlError("refused")),
             patch("sagent.lib.web.fetch.time.sleep"),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", retries=2)
+            fetch("https://example.com", request=RequestParams(retries=2))
         assert exc.value.status == 0
 
     def test_pinned_curl_reuses_resolution_on_same_origin_redirect(self) -> None:
@@ -1572,16 +1908,105 @@ class TestFetchCurlBackend:
             return ValidatedHost(host=hostname, ip="1.2.3.4")
 
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
-            patch("sagent.lib.web.fetch.Curl", fake_curl),
+            patch("curl_cffi.Curl", fake_curl),
         ):
-            body = fetch(
+            body, _ = fetch(
                 "https://example.com/start",
-                validated_hosts=_vh,
-                on_redirect=lambda _u: None,
+                request=RequestParams(validated_hosts=_vh, on_redirect=lambda _u: None),
             )
         assert body == b"ok"
         assert calls == ["example.com"]  # resolved once, reused on same-origin hop
+
+
+class TestOnResponse:
+    """``on_response(status, headers)`` fires once per received response -- on
+    success, on an HTTP error before it raises, and on every redirect hop -- for
+    both transports. It is the seam a cookie jar uses to observe Set-Cookie.
+    """
+
+    def _stdlib_resp(
+        self, status: int, headers: list[tuple[str, str]], body: bytes = b"ok"
+    ) -> Mock:
+        r = Mock(spec=http.client.HTTPResponse)
+        r.status = status
+        r.read.return_value = body
+        r.getheaders.return_value = [("content-encoding", "identity"), *headers]
+        return r
+
+    def test_stdlib_success_reports_status_and_headers(self) -> None:
+        conn = Mock(request=Mock())
+        conn.getresponse.return_value = self._stdlib_resp(
+            200, [("set-cookie", "GSP=abc")]
+        )
+        seen: list[tuple[int, dict[str, str]]] = []
+        with (
+            patch("sagent.lib.web.fetch._open_connection", return_value=conn),
+        ):
+            fetch(
+                "https://x.com",
+                request=RequestParams(
+                    on_response=lambda s, h: seen.append((s, h)), use_curl=False
+                ),
+            )
+        assert len(seen) == 1
+        status, headers = seen[0]
+        assert status == 200
+        assert headers.get("set-cookie") == "GSP=abc"
+
+    def test_stdlib_fires_per_redirect_hop_then_final(self) -> None:
+        redir = self._stdlib_resp(
+            302, [("location", "https://x.com/2"), ("set-cookie", "a=1")], b""
+        )
+        final = self._stdlib_resp(200, [("set-cookie", "b=2")])
+        conn = Mock(request=Mock())
+        conn.getresponse.side_effect = [redir, final]
+        seen: list[int] = []
+        with (
+            patch("sagent.lib.web.fetch._open_connection", return_value=conn),
+        ):
+            fetch(
+                "https://x.com/1",
+                request=RequestParams(
+                    on_response=lambda s, _h: seen.append(s), use_curl=False
+                ),
+            )
+        assert seen == [302, 200]
+
+    def test_stdlib_error_reports_before_raising(self) -> None:
+        conn = Mock(request=Mock())
+        conn.getresponse.return_value = self._stdlib_resp(
+            404, [("set-cookie", "x=1")], b"nope"
+        )
+        seen: list[int] = []
+        with (
+            patch("sagent.lib.web.fetch._open_connection", return_value=conn),
+            pytest.raises(FetchError),
+        ):
+            fetch(
+                "https://x.com",
+                request=RequestParams(
+                    on_response=lambda s, _h: seen.append(s), use_curl=False
+                ),
+            )
+        assert seen == [404]
+
+    def test_curl_success_reports_status_and_headers(self) -> None:
+        resp = Mock()
+        resp.status_code = 200
+        resp.content = b"ok"
+        resp.headers = {"set-cookie": "GSP=xyz"}
+        resp.url = "https://x.com/"
+        seen: list[tuple[int, dict[str, str]]] = []
+        with (
+            patch("curl_cffi.requests.request", return_value=resp),
+        ):
+            fetch(
+                "https://x.com",
+                request=RequestParams(on_response=lambda s, h: seen.append((s, h))),
+            )
+        assert len(seen) == 1
+        assert seen[0][0] == 200
+        assert seen[0][1].get("set-cookie") == "GSP=xyz"
 
 
 class TestTransportConsistency:
@@ -1609,10 +2034,12 @@ class TestTransportConsistency:
         mock_conn.request = Mock()
         mock_conn.getresponse.side_effect = resps
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", False),
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
         ):
-            return fetch("https://a.com/start", **kwargs)
+            return fetch(
+                "https://a.com/start",
+                request=RequestParams(use_curl=False, **kwargs),
+            )[0]
 
     def _curl_result(
         self, hops: list[tuple[int, bytes, dict[str, str]]], **kwargs: Any
@@ -1625,10 +2052,12 @@ class TestTransportConsistency:
             r.headers = hdrs
             resps.append(r)
         with (
-            patch("sagent.lib.web.fetch._HAVE_CURL", True),
             patch("curl_cffi.requests.request", side_effect=resps),
         ):
-            return fetch("https://a.com/start", **kwargs)
+            return fetch(
+                "https://a.com/start",
+                request=RequestParams(**kwargs),
+            )[0]
 
     def test_cap_returns_3xx_body_identically(self) -> None:
         # max_redirects=0: both transports return the 3xx body, neither raises.
@@ -1645,6 +2074,700 @@ class TestTransportConsistency:
         ]
         assert self._stdlib_result(hops) == b"final"
         assert self._curl_result(hops) == b"final"
+
+
+class TestFetchSession:
+    """``FetchSession`` is a frozen browsing identity a caller threads across
+    requests: ``fetch_session`` returns the session updated with what each
+    response taught it (cookies set, ``Accept-CH`` opt-ins), so the next request
+    is more browser-like -- the value-typed, functional API for reuse.
+    """
+
+    def _curl_response(
+        self, *, headers: dict[str, str], content: bytes = b"ok"
+    ) -> Mock:
+        resp = Mock()
+        resp.status_code = 200
+        resp.content = content
+        resp.headers = headers
+        resp.url = "https://x.com/"
+        return resp
+
+    def test_defaults_are_empty_and_frozen(self) -> None:
+        session = FetchSession()
+        assert session.impersonate == "chrome"
+        assert session.egress_ip == ""
+        assert dict(session.cookies) == {}
+        assert dict(session.accept_ch) == {}
+        with pytest.raises(AttributeError):
+            session.egress_ip = "1.2.3.4"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_with_cookies_returns_a_merged_copy(self) -> None:
+        base = FetchSession(cookies={"a": "1"})
+        updated = base.with_cookies({"b": "2"})
+        assert dict(updated.cookies) == {"a": "1", "b": "2"}
+        assert dict(base.cookies) == {"a": "1"}  # original unchanged
+
+    def test_with_accept_ch_records_origin_opt_in(self) -> None:
+        session = FetchSession().with_accept_ch(
+            "https://x.com", frozenset({"sec-ch-ua-arch"})
+        )
+        assert session.accept_ch["https://x.com"] == frozenset({"sec-ch-ua-arch"})
+
+    def test_with_egress_pins_and_is_idempotent(self) -> None:
+        session = FetchSession().with_egress("9.9.9.9")
+        assert session.egress_ip == "9.9.9.9"
+        assert session.with_egress("9.9.9.9") is session
+
+    def test_fetch_session_returns_body_and_session(self) -> None:
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ):
+            body, session = fetch("https://x.com/p")
+        assert body == b"ok"
+        assert isinstance(session, FetchSession)
+
+    def test_session_learns_set_cookie(self) -> None:
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={"set-cookie": "GSP=z; Path=/"}),
+        ):
+            _body, session = fetch("https://x.com/p")
+        assert session.cookies["GSP"] == "z"
+
+    def test_session_learns_accept_ch(self) -> None:
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(
+                headers={"accept-ch": "Sec-CH-UA-Arch, Sec-CH-UA-Bitness"}
+            ),
+        ):
+            _body, session = fetch("https://x.com/p")
+        assert session.accept_ch["https://x.com"] == frozenset(
+            {"sec-ch-ua-arch", "sec-ch-ua-bitness"}
+        )
+
+    def test_threaded_accept_ch_emits_extended_hints(self) -> None:
+        # A session that opted into Accept-CH must, on the NEXT request to that
+        # origin, send exactly those extended client hints -- the behavior once
+        # backed by a module global, now threaded through the session.
+        prior = FetchSession().with_accept_ch(
+            "https://x.com", frozenset({"sec-ch-ua-arch", "sec-ch-ua-bitness"})
+        )
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ) as req:
+            fetch("https://x.com/p", session=prior)
+        sent = req.call_args.kwargs["headers"]
+        assert "sec-ch-ua-arch" in sent
+        assert "sec-ch-ua-bitness" in sent
+        assert "sec-ch-ua-model" not in sent  # never opted in
+
+    def test_cold_origin_sends_no_extended_hints(self) -> None:
+        # A fresh session (no Accept-CH opt-in) sends none of the extended hints,
+        # exactly as Chrome's first request to an origin does.
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ) as req:
+            fetch("https://x.com/p")
+        sent = req.call_args.kwargs["headers"]
+        assert "sec-ch-ua-arch" not in sent
+
+    def test_threaded_session_seeds_prior_cookies(self) -> None:
+        # Prior session cookies are loaded into the pooled jar (the single cookie
+        # source on the curl path), not the Cookie header.
+        prior = FetchSession(cookies={"SID": "abc"})
+        stub = _StubSession()
+        with (
+            patch(
+                "curl_cffi.requests.request",
+                return_value=self._curl_response(headers={}),
+            ),
+            patch.object(fetch_mod, "curl_session", _const_curl_session(stub)),
+        ):
+            fetch("https://x.com/p", session=prior)
+        assert ("SID", "abc") in {(c.name, c.value) for c in stub.cookies.jar}
+
+    def test_caller_on_response_still_fires(self) -> None:
+        seen: list[int] = []
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={"set-cookie": "a=1"}),
+        ):
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(on_response=lambda s, _h: seen.append(s)),
+            )
+        assert seen == [200]
+
+
+class TestRedirectIdentityScoping:
+    """Cross-origin redirects must re-scope every origin-bound identity element.
+
+    A real browser, following a redirect to a NEW origin, does not carry the
+    source origin's Cookie header or extended client hints to the target, does
+    not attribute the target's Set-Cookie to the source, and downgrades a
+    301/302 POST to a bodyless GET. These tests drive the curl backend through a
+    two-hop redirect and assert each of those rules on the second hop.
+    """
+
+    def _two_hop(
+        self,
+        *,
+        first_status: int,
+        target_set_cookie: str | None = None,
+    ) -> Callable[..., Mock]:
+        """A curl ``request`` mock: a.com/start -> (status) -> b.com/next -> 200."""
+
+        def fake_request(_verb: str, url: str, **_kw: Any) -> Mock:
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = first_status
+                resp.headers = {"location": "https://b.com/next"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = (
+                    {"set-cookie": target_set_cookie} if target_set_cookie else {}
+                )
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        return fake_request
+
+    def test_302_post_downgrades_to_bodyless_get(self) -> None:
+        # A 301/302 POST must convert to a bodyless GET on the next hop (browser
+        # behavior; only 307/308 preserve the method). Currently only 303 does.
+        calls: list[tuple[str, str, object]] = []
+
+        def fake_request(verb: str, url: str, **kw: Any) -> Mock:
+            calls.append((verb, url, kw.get("data")))
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = 302
+                resp.headers = {"location": "https://a.com/land"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = {}
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        with (
+            patch("curl_cffi.requests.request", side_effect=fake_request),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            fetch(
+                "https://a.com/start",
+                request=RequestParams(method="POST", data={"x": "1"}),
+            )
+        # Second hop must be a GET with no body.
+        _verb, _url, second_body = calls[1]
+        assert calls[1][0] == "GET"
+        assert second_body is None
+
+    def test_cross_origin_redirect_drops_cookie_header(self) -> None:
+        # a.com's session cookie must NOT be sent to b.com after a cross-origin
+        # redirect (a real browser scopes cookies to their origin).
+        sent: list[tuple[str, dict[str, str]]] = []
+
+        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+            sent.append((url, _lower_headers(kw)))
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = 302
+                resp.headers = {"location": "https://b.com/next"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = {}
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        with (
+            patch("curl_cffi.requests.request", side_effect=fake_request),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            fetch(
+                "https://a.com/start",
+                session=FetchSession(cookies={"SID": "secret"}),
+            )
+        b_headers = next(h for url, h in sent if url == "https://b.com/next")
+        assert "cookie" not in b_headers
+
+    def test_same_origin_redirect_keeps_cookie_header(self) -> None:
+        # A same-origin redirect must PRESERVE the cookie (the scoping rule only
+        # drops on origin change).
+        sent: list[tuple[str, dict[str, str]]] = []
+
+        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+            sent.append((url, _lower_headers(kw)))
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = 302
+                resp.headers = {"location": "https://a.com/next"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = {}
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        with (
+            patch("curl_cffi.requests.request", side_effect=fake_request),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            fetch(
+                "https://a.com/start",
+                session=FetchSession(cookies={"SID": "secret"}),
+            )
+        next_headers = next(h for url, h in sent if url == "https://a.com/next")
+        assert next_headers.get("cookie") == "SID=secret"
+
+    def test_cross_origin_redirect_drops_extended_hints(self) -> None:
+        # a.com's opted-in extended client hints must NOT leak to b.com.
+        sent: list[tuple[str, dict[str, str]]] = []
+
+        def fake_request(_verb: str, url: str, **kw: Any) -> Mock:
+            sent.append((url, _lower_headers(kw)))
+            resp = Mock()
+            if url == "https://a.com/start":
+                resp.status_code = 302
+                resp.headers = {"location": "https://b.com/next"}
+                resp.content = b""
+            else:
+                resp.status_code = 200
+                resp.headers = {}
+                resp.content = b"done"
+            resp.url = url
+            return resp
+
+        session = FetchSession().with_accept_ch(
+            "https://a.com", frozenset({"sec-ch-ua-arch", "sec-ch-ua-bitness"})
+        )
+        with (
+            patch("curl_cffi.requests.request", side_effect=fake_request),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            fetch("https://a.com/start", session=session)
+        b_headers = next(h for url, h in sent if url == "https://b.com/next")
+        assert "sec-ch-ua-arch" not in b_headers
+
+    def test_cross_origin_target_cookie_not_persisted_to_source_profile(
+        self, tmp_path: Any, monkeypatch: Any
+    ) -> None:
+        # b.com's Set-Cookie must NOT be stored in a.com's (egress,domain) profile.
+        store = ProfileStore(base_dir=tmp_path)
+
+        def _fixed_egress(**_kw: Any) -> str:
+            return "9.9.9.9"
+
+        def _no_pool(*_a: Any) -> None:
+            return None
+
+        monkeypatch.setattr(ProfileStore, "shared", classmethod(lambda _cls: store))
+        monkeypatch.setattr(fetch_mod, "egress_ip", _fixed_egress)
+        monkeypatch.setattr(fetch_mod, "curl_session", _no_pool)
+        with patch(
+            "curl_cffi.requests.request",
+            side_effect=self._two_hop(
+                first_status=302, target_set_cookie="FOREIGN=1; Path=/"
+            ),
+        ):
+            fetch("https://a.com/start", request=RequestParams())
+        profile = store.load("9.9.9.9", "a.com")
+        assert profile is not None
+        assert "FOREIGN" not in profile.cookies
+
+    def test_cross_origin_target_cookie_not_attributed_to_source_session(
+        self,
+    ) -> None:
+        # The returned session must not record b.com's cookie under a.com.
+        with (
+            patch(
+                "curl_cffi.requests.request",
+                side_effect=self._two_hop(
+                    first_status=302, target_set_cookie="FOREIGN=1; Path=/"
+                ),
+            ),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+        ):
+            _body, session = fetch("https://a.com/start")
+        # a.com is the request origin; FOREIGN belongs to b.com, not a.com's jar.
+        assert "FOREIGN" not in session.cookies
+
+
+class TestIdentityLayer:
+    """``fetch`` transparently backs each call with a persistent per-(egress,
+    domain) identity: it seeds the stored UA + cookies (caller values win),
+    saves ``Set-Cookie`` back, and on a bot-block of a KNOWN identity discards it
+    and retries once fresh. The ``isolate_profiles`` fixture pins egress to
+    ``203.0.113.1`` and points the store at a tmp dir.
+    """
+
+    _EGRESS = "203.0.113.1"
+
+    def _curl_response(
+        self, *, status: int = 200, content: bytes = b"ok", headers: dict[str, str]
+    ) -> Mock:
+        resp = Mock()
+        resp.status_code = status
+        resp.content = content
+        resp.headers = headers
+        resp.url = "https://x.com/"
+        return resp
+
+    def _store(self) -> ProfileStore:
+        return ProfileStore.shared()
+
+    def test_delegates_ua_and_cookie_jar_to_curl_session(self) -> None:
+        # On the curl path curl_cffi's impersonate emits a coherent User-Agent
+        # (matching its TLS fingerprint), so fetch does NOT send a User-Agent
+        # header. The stored jar is NOT seeded into the Cookie header either --
+        # the pooled curl session's own jar persists + resends cookies, so
+        # header-seeding them too would duplicate the Cookie header (a bot tell).
+        self._store().save(
+            self._EGRESS, "x.com", Profile(ua="StoredUA/9", cookies={"GSP": "s"})
+        )
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ) as req:
+            fetch("https://x.com/p")
+        sent = req.call_args.kwargs["headers"]
+        assert "User-Agent" not in sent
+        assert "Cookie" not in sent  # jar carries the stored cookie, not the header
+
+    def test_caller_ua_and_cookie_override_profile(self) -> None:
+        self._store().save(
+            self._EGRESS, "x.com", Profile(ua="StoredUA/9", cookies={"GSP": "s"})
+        )
+        stub = _StubSession()
+        with (
+            patch(
+                "curl_cffi.requests.request",
+                return_value=self._curl_response(headers={}),
+            ) as req,
+            patch.object(fetch_mod, "curl_session", _const_curl_session(stub)),
+        ):
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(
+                    headers={"User-Agent": "Mine/1"}, cookies={"GSP": "caller"}
+                ),
+            )
+        sent = req.call_args.kwargs["headers"]
+        assert sent["User-Agent"] == "Mine/1"
+        # The caller cookie overrides the profile's GSP in the jar (single source).
+        assert ("GSP", "caller") in {(c.name, c.value) for c in stub.cookies.jar}
+        assert ("GSP", "s") not in {(c.name, c.value) for c in stub.cookies.jar}
+
+    def test_no_profile_delegates_ua_to_impersonate(self) -> None:
+        # First contact, no profile: still no seeded User-Agent header on the
+        # curl path -- impersonate supplies a coherent one at the transport.
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ) as req:
+            fetch("https://x.com/p")
+        assert "User-Agent" not in req.call_args.kwargs["headers"]
+
+    def test_set_cookie_is_persisted(self) -> None:
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(
+                headers={"set-cookie": "GSP=minted; Path=/"}
+            ),
+        ):
+            fetch("https://x.com/p")
+        got = self._store().load(self._EGRESS, "x.com")
+        assert got is not None
+        assert got.cookies == {"GSP": "minted"}
+
+    def test_caller_on_response_still_fires(self) -> None:
+        seen: list[int] = []
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={"set-cookie": "a=1"}),
+        ):
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(on_response=lambda s, _h: seen.append(s)),
+            )
+        assert seen == [200]
+
+    def test_burn_on_known_identity_discards_and_retries_fresh(self) -> None:
+        self._store().save(
+            self._EGRESS, "x.com", Profile(ua="PoisonUA", cookies={"GSP": "old"})
+        )
+        blocked = self._curl_response(
+            status=403,
+            content=(b'<div class="g-recaptcha" data-sitekey="x"></div>'),
+            headers={"content-type": "text/html"},
+        )
+        ok = self._curl_response(content=b"ok", headers={})
+        with patch("curl_cffi.requests.request", side_effect=[blocked, ok]) as req:
+            body, _ = fetch("https://x.com/p")
+        assert body == b"ok"
+        assert req.call_count == 2
+        # The retry used a fresh identity: no poisoned cookies ride along (the UA
+        # is curl's coherent impersonate UA, never seeded, so it cannot leak).
+        retry_headers = req.call_args_list[1].kwargs["headers"]
+        assert "GSP=old" not in retry_headers.get("Cookie", "")
+        # The poisoned identity was discarded and a fresh one saved.
+        got = self._store().load(self._EGRESS, "x.com")
+        assert got is not None
+        assert "GSP" not in got.cookies
+
+    def test_second_burn_raises(self) -> None:
+        self._store().save(self._EGRESS, "x.com", Profile(ua="U", cookies={"GSP": "x"}))
+        blocked = self._curl_response(
+            status=403,
+            content=b'<div class="g-recaptcha" data-sitekey="x"></div>',
+            headers={"content-type": "text/html"},
+        )
+        with (
+            patch("curl_cffi.requests.request", return_value=blocked),
+            pytest.raises(PuzzleChallengeError),
+        ):
+            fetch("https://x.com/p")
+
+    def test_first_contact_burn_does_not_retry(self) -> None:
+        blocked = self._curl_response(
+            status=403,
+            content=b'<div class="g-recaptcha" data-sitekey="x"></div>',
+            headers={"content-type": "text/html"},
+        )
+        with (
+            patch("curl_cffi.requests.request", return_value=blocked) as req,
+            pytest.raises(PuzzleChallengeError),
+        ):
+            fetch("https://x.com/p")
+        assert req.call_count == 1  # no retry with no known identity
+
+    def test_raw_headers_bypasses_identity(self) -> None:
+        self._store().save(
+            self._EGRESS, "x.com", Profile(ua="StoredUA", cookies={"GSP": "s"})
+        )
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={}),
+        ) as req:
+            fetch(
+                "https://x.com/p",
+                request=RequestParams(headers={"User-Agent": "raw"}, raw_headers=True),
+            )
+        sent = req.call_args.kwargs["headers"]
+        assert sent == {"User-Agent": "raw"}  # no profile UA, no stored cookie
+
+    def test_send_as_keyless_when_egress_none(self, tmp_path: Any) -> None:
+        # _send_as with egress=None draws a UA, sends, persists nothing.
+        request = fetch_mod._Request(
+            url="https://x.com/p",
+            session=FetchSession(impersonate="chrome"),
+            params=RequestParams(
+                method="GET",
+                params=None,
+                data=None,
+                json=None,
+                retries=0,
+                timeout_sec=30,
+                max_redirects=10,
+                on_redirect=None,
+                on_response=None,
+                validated_hosts=None,
+            ),
+        )
+        with patch(
+            "curl_cffi.requests.request",
+            return_value=self._curl_response(headers={"set-cookie": "GSP=z"}),
+        ):
+            body = _send_as(request, None, None, None, None)
+        assert body == b"ok"
+        assert not list(tmp_path.glob("*.json"))
+
+
+class TestCurlSessionPoolLocking:
+    """Every mutation of the ``_curl_sessions`` pool holds ``_egress_lock``, so a
+    concurrent ``set_last_egress_ip`` close-sweep never races an insert/pop.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_curl_session(self, monkeypatch: Any) -> None:
+        # The module isolate_profiles fixture stubs curl_session; restore the
+        # real function so these tests exercise its actual locking.
+        monkeypatch.setattr(fetch_mod, "curl_session", _REAL_CURL_SESSION)
+
+    def test_curl_session_holds_egress_lock(self, monkeypatch: Any) -> None:
+        acquired: list[str] = []
+        real_lock = fetch_mod._egress_lock
+
+        class _Instrumented:
+            def __enter__(self) -> None:
+                acquired.append("enter")
+                real_lock.acquire()
+
+            def __exit__(self, *_a: object) -> None:
+                real_lock.release()
+
+        monkeypatch.setattr(fetch_mod, "_egress_lock", _Instrumented())
+        monkeypatch.setattr(fetch_mod, "_curl_sessions", {})
+        with patch("curl_cffi.requests.Session", return_value=Mock()):
+            fetch_mod.curl_session("1.2.3.4", "x.com", "chrome")
+        assert acquired, "curl_session mutated the pool without _egress_lock"
+
+    def test_close_curl_session_holds_egress_lock(self, monkeypatch: Any) -> None:
+        acquired: list[str] = []
+        real_lock = fetch_mod._egress_lock
+
+        class _Instrumented:
+            def __enter__(self) -> None:
+                acquired.append("enter")
+                real_lock.acquire()
+
+            def __exit__(self, *_a: object) -> None:
+                real_lock.release()
+
+        monkeypatch.setattr(fetch_mod, "_egress_lock", _Instrumented())
+        monkeypatch.setattr(fetch_mod, "_curl_sessions", {})
+        fetch_mod.close_curl_session("1.2.3.4", "x.com", "chrome")  # absent: no-op
+        assert acquired, "close_curl_session mutated the pool without _egress_lock"
+
+
+class TestEgressIp:
+    """``egress_ip`` probes an echo cascade for the host's public IP, memoizing
+    into the last-known global; ``cache=True`` reads it without a network call,
+    ``cache=False`` refreshes it, ``last_known_egress_ip`` is a pure read.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _real_egress(self, monkeypatch: Any) -> Any:
+        # The module isolate_profiles fixture stubs egress_ip to a fixed value;
+        # restore the REAL function here and just reset the last-known global.
+        monkeypatch.setattr(fetch_mod, "egress_ip", _real_egress_ip)
+        monkeypatch.setattr(fetch_mod, "_last_egress_ip", None)
+        return
+
+    def _probe(self, fetch_mock: Mock, *, ipv6: bool = False) -> str | None:
+        # egress_ip unpacks fetch's (body, session) tuple; adapt the byte-valued
+        # mock so a bytes return becomes (bytes, session) and an exception still
+        # raises (the echo-cascade paths this test exercises).
+        def adapt(*args: Any, **kwargs: Any) -> tuple[bytes, FetchSession]:
+            return fetch_mock(*args, **kwargs), FetchSession()
+
+        with patch.object(fetch_mod, "fetch", side_effect=adapt):
+            return _real_egress_ip(cache=False, ipv6=ipv6)
+
+    def test_first_echo_returned(self) -> None:
+        assert self._probe(Mock(return_value=b" 203.0.113.7\n")) == "203.0.113.7"
+
+    def test_non_v4_reply_falls_through(self) -> None:
+        assert self._probe(Mock(side_effect=[b"2001:db8::1", b"198.51.100.9"])) == (
+            "198.51.100.9"
+        )
+
+    def test_fetch_error_falls_through(self) -> None:
+        err = FetchError(url="u", status=500, headers={}, body=b"")
+        assert self._probe(Mock(side_effect=[err, b"192.0.2.5"])) == "192.0.2.5"
+
+    def test_all_fail_resolves_none(self) -> None:
+        assert self._probe(Mock(side_effect=OSError("offline"))) is None
+
+    def test_v6_echo_returned(self) -> None:
+        assert (
+            self._probe(Mock(return_value=b"2606:4700:4700::1111\n"), ipv6=True)
+            == "2606:4700:4700::1111"
+        )
+
+    def test_v4_reply_rejected_for_v6_request(self) -> None:
+        assert self._probe(Mock(return_value=b"203.0.113.7"), ipv6=True) is None
+
+    def test_uses_v6_endpoints(self) -> None:
+        mock = Mock(return_value=b"2001:db8::5")
+        self._probe(mock, ipv6=True)
+        assert "ipv6" in mock.call_args.args[0] or "api64" in mock.call_args.args[0]
+
+    def test_malformed_v6_reply_rejected(self) -> None:
+        assert self._probe(Mock(return_value=b"::::"), ipv6=True) is None
+        assert self._probe(Mock(return_value=b"ff:"), ipv6=True) is None
+
+    def test_probe_records_last_known(self) -> None:
+        assert _last_known_egress_ip() is None
+        self._probe(Mock(return_value=b"203.0.113.7"))
+        assert _last_known_egress_ip() == "203.0.113.7"
+
+    def test_cache_true_returns_last_known_without_probing(
+        self, monkeypatch: Any
+    ) -> None:
+        monkeypatch.setattr(fetch_mod, "_last_egress_ip", "9.9.9.9")
+        echo = Mock()
+        with patch.object(fetch_mod, "fetch", echo):
+            assert _real_egress_ip() == "9.9.9.9"
+        echo.assert_not_called()
+
+    def test_cache_true_probes_to_fill_empty(self) -> None:
+        echo = Mock(return_value=(b"1.2.3.4", FetchSession()))
+        with patch.object(fetch_mod, "fetch", echo):
+            assert _real_egress_ip() == "1.2.3.4"
+        assert echo.call_count == 1
+        assert _last_known_egress_ip() == "1.2.3.4"
+
+    def test_cache_false_always_probes_and_refreshes(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(fetch_mod, "_last_egress_ip", "1.1.1.1")
+        with patch.object(
+            fetch_mod, "fetch", Mock(return_value=(b"2.2.2.2", FetchSession()))
+        ):
+            assert _real_egress_ip(cache=False) == "2.2.2.2"
+        assert _last_known_egress_ip() == "2.2.2.2"
+
+    def test_failed_probe_leaves_last_known_untouched(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(fetch_mod, "_last_egress_ip", "keepme")
+        with patch.object(fetch_mod, "fetch", Mock(side_effect=OSError("x"))):
+            assert _real_egress_ip(cache=False) is None
+        assert _last_known_egress_ip() == "keepme"
+
+    def test_set_last_egress_ip_injects_without_probing(self) -> None:
+        # A caller who knows the egress (e.g. just rolled the VPN) can set it;
+        # a cached read then returns it with no network.
+        _set_last_egress_ip("5.5.5.5")
+        echo = Mock()
+        with patch.object(fetch_mod, "fetch", echo):
+            assert _real_egress_ip() == "5.5.5.5"
+        echo.assert_not_called()
+        assert _last_known_egress_ip() == "5.5.5.5"
+
+
+class TestSeedSessionJar:
+    def test_secure_prefixed_cookie_seeded_without_warning(self) -> None:
+        # RFC 6265bis: a __Secure-/__Host- prefixed cookie is only valid Secure;
+        # seeding it without secure=True made curl_cffi emit a CurlCffiWarning
+        # (which the live Google-search integration path surfaced as a failure).
+        session = cast("cc_requests.Session[Response]", cc_requests.Session())
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                _seed_session_jar(
+                    session,
+                    "www.google.com",
+                    {"__Secure-STRP": "abc", "__Host-GSP": "def", "NID": "ghi"},
+                )
+        finally:
+            session.close()
+        jar = {c.name: c for c in session.cookies.jar}
+        assert jar["__Secure-STRP"].secure is True
+        assert jar["__Secure-STRP"].domain == "www.google.com"
+        # __Host- is host-only per spec: Secure, no Domain, Path=/.
+        assert jar["__Host-GSP"].secure is True
+        assert jar["__Host-GSP"].path == "/"
+        # A plain cookie is seeded non-Secure (Chrome sends it over either).
+        assert jar["NID"].secure is False
 
 
 if __name__ == "__main__":

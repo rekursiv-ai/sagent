@@ -20,6 +20,11 @@ how to proceed. One class per kind of response we can identify from the body:
   the mechanism is not further splittable from the body.
 - :class:`GoogleSorryError` -- Google's ``/sorry`` interstitial: a refusal
   served when Google treats the traffic as automated, not a solve-this challenge.
+- :class:`GoogleJavascriptRequiredError` -- Google's ``enablejs`` shell: an
+  HTTP-200 page with no results that meta-refreshes to ``/httpservice/retry/
+  enablejs``, served when Google enforces its JavaScript requirement on a
+  server-side (no-JS) request. Distinct from ``/sorry`` -- not an IP refusal but
+  a "run the page JS" wall.
 
 The base :class:`BotDetectionError` is raised directly when a response is clearly
 such a block but the kind is not determinable (e.g. a generic "security check
@@ -37,6 +42,7 @@ __all__ = [
     "BotDetectionError",
     "CloudflareChallengeError",
     "FetchError",
+    "GoogleJavascriptRequiredError",
     "GoogleSorryError",
     "PuzzleChallengeError",
     "classify_bot_detection",
@@ -169,6 +175,18 @@ class GoogleSorryError(BotDetectionError):
     )
 
 
+class GoogleJavascriptRequiredError(BotDetectionError):
+    """Google's ``enablejs`` shell: an HTTP-200 no-results page requiring JS."""
+
+    guidance = (
+        "Google served its enablejs shell (an HTTP-200 page with no results that "
+        "meta-refreshes to /httpservice/retry/enablejs). Since Jan 2025 Google "
+        "enforces JavaScript on Search, so a plain server-side request gets no "
+        "results -- render the page in a real browser engine or route through a "
+        "backend that does."
+    )
+
+
 def _is_cloudflare_front(headers: dict[str, str]) -> bool:
     """Whether *headers* show a Cloudflare front (not a proxied origin)."""
     # A plain origin error relayed through a CDN keeps the ORIGIN's server name,
@@ -204,14 +222,22 @@ def classify_bot_detection(
     cloudflare: tuple[str, ...] = (
         "cf_chl",
         "cf-challenge",
-        "challenge-platform",
         "just a moment",
         "cf-turnstile",
         "turnstile",
     ),
+    # Cloudflare's ambient "JavaScript Detections" beacon
+    # (``/cdn-cgi/challenge-platform/scripts/jsd/main.js``) is injected into
+    # EVERY proxied page, served 200s included -- so it corroborates a block only
+    # on an ERROR body, never on a success body (mirrors ``puzzle_widget``).
+    cloudflare_ambient: tuple[str, ...] = ("challenge-platform",),
     # ``google.com/sorry`` (not a bare ``/sorry/``): the host qualifier avoids
     # misclassifying a benign page that merely links to its own apology path.
     google_sorry: tuple[str, ...] = ("google.com/sorry",),
+    # The enablejs shell meta-refreshes to this exact retry path; the full path
+    # (not a bare ``enablejs``) avoids misclassifying a page that merely mentions
+    # enabling JavaScript.
+    google_enablejs: tuple[str, ...] = ("/httpservice/retry/enablejs",),
     generic: tuple[str, ...] = (
         "checking your browser",
         "attention required",
@@ -240,8 +266,12 @@ def classify_bot_detection(
         DuckDuckGo ``challenge-form``, Scholar ``gs_captcha_f``).
       puzzle_widget: Embeddable CAPTCHA widgets a legit page hosts; a block only
         on an ERROR body (see ``on_success_body``).
-      cloudflare: Cloudflare managed-challenge signatures.
+      cloudflare: Cloudflare managed-challenge signatures (the interstitial page
+        itself; always a block).
+      cloudflare_ambient: Cloudflare's telemetry beacon, injected into normal
+        served pages too; a block only on an ERROR body (see ``on_success_body``).
       google_sorry: Google ``/sorry`` refusal.
+      google_enablejs: Google ``enablejs`` JavaScript-required shell.
       generic: The response is clearly a block but the kind is indeterminate.
 
     """
@@ -255,7 +285,11 @@ def classify_bot_detection(
         return PuzzleChallengeError
     if any(m in text for m in google_sorry):
         return GoogleSorryError
+    if any(m in text for m in google_enablejs):
+        return GoogleJavascriptRequiredError
     if any(m in text for m in cloudflare):
+        return CloudflareChallengeError
+    if not on_success_body and any(m in text for m in cloudflare_ambient):
         return CloudflareChallengeError
     if not on_success_body and any(m in text for m in puzzle_widget):
         return PuzzleChallengeError

@@ -11,6 +11,7 @@ import pytest
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.web.errors import FetchError
+from sagent.lib.web.fetch import FetchSession
 from sagent.lib.web.paper.errors import BackendError, NotFoundError, RateLimitError
 from sagent.lib.web.paper.providers import s2
 
@@ -26,7 +27,7 @@ def mock_limiter() -> Iterator[MagicMock]:
 
 
 def _fetch_returning(payload: object) -> MagicMock:
-    return MagicMock(return_value=json.dumps(payload).encode())
+    return MagicMock(return_value=(json.dumps(payload).encode(), FetchSession()))
 
 
 class TestGet:
@@ -49,7 +50,7 @@ class TestGet:
         with (
             patch(
                 "sagent.lib.web.paper.providers.s2.fetch",
-                MagicMock(return_value=b"not json"),
+                MagicMock(return_value=(b"not json", FetchSession())),
             ),
             pytest.raises(BackendError),
         ):
@@ -86,7 +87,7 @@ class TestBackoff:
 
     def test_429_then_success_recovers(self, mock_limiter: MagicMock) -> None:
         err = FetchError("u", 429, {}, b"slow")
-        ok = json.dumps({"title": "ok"}).encode()
+        ok = (json.dumps({"title": "ok"}).encode(), FetchSession())
         with patch("sagent.lib.web.paper.providers.s2.fetch", side_effect=[err, ok]):
             assert s2.get("/paper/x", {}) == {"title": "ok"}
         assert mock_limiter.trigger_cooldown.call_count == 1
@@ -121,8 +122,14 @@ class TestBatch:
 class TestPaginate:
     def test_walks_cursor_to_limit(self) -> None:
         pages = [
-            json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
-            json.dumps({"data": [{"year": 2021}] * 3, "next": 6}).encode(),
+            (
+                json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
+                FetchSession(),
+            ),
+            (
+                json.dumps({"data": [{"year": 2021}] * 3, "next": 6}).encode(),
+                FetchSession(),
+            ),
         ]
         with patch("sagent.lib.web.paper.providers.s2.fetch", side_effect=pages):
             page = s2.paginate("/paper/x/citations", {"fields": "year"}, limit=5)
@@ -130,13 +137,19 @@ class TestPaginate:
         assert not page.complete
 
     def test_exhaustion_marks_complete(self) -> None:
-        one = json.dumps({"data": [{"year": 2020}], "next": None}).encode()
+        one = (
+            json.dumps({"data": [{"year": 2020}], "next": None}).encode(),
+            FetchSession(),
+        )
         with patch("sagent.lib.web.paper.providers.s2.fetch", return_value=one):
             page = s2.paginate("/paper/x/references", {}, limit=10)
         assert page.complete
 
     def test_depth_ceiling_400_stops_with_results(self) -> None:
-        first = json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode()
+        first = (
+            json.dumps({"data": [{"year": 2020}] * 3, "next": 3}).encode(),
+            FetchSession(),
+        )
         ceiling = FetchError("u", 400, {}, b"offset + limit < 10000")
         with patch(
             "sagent.lib.web.paper.providers.s2.fetch", side_effect=[first, ceiling]
@@ -157,14 +170,20 @@ class TestPaginate:
     def test_non_advancing_cursor_terminates(self) -> None:
         # A server regression where ``next`` does not advance past ``offset``
         # must terminate (not loop forever) and report incomplete.
-        page_json = json.dumps({"data": [{"year": 2020}] * 3, "next": 0}).encode()
+        page_json = (
+            json.dumps({"data": [{"year": 2020}] * 3, "next": 0}).encode(),
+            FetchSession(),
+        )
         with patch("sagent.lib.web.paper.providers.s2.fetch", return_value=page_json):
             page = s2.paginate("/paper/x/citations", {}, limit=100)
         assert len(page.entries) == 3
         assert not page.complete
 
     def test_author_papers_builds_endpoint(self) -> None:
-        one = json.dumps({"data": [{"title": "P"}], "next": None}).encode()
+        one = (
+            json.dumps({"data": [{"title": "P"}], "next": None}).encode(),
+            FetchSession(),
+        )
         with patch("sagent.lib.web.paper.providers.s2.fetch", return_value=one) as mock:
             page = s2.author_papers("42", limit=None)
         assert [e.get("title") for e in page.entries] == ["P"]
@@ -174,8 +193,14 @@ class TestPaginate:
 class TestSearchPaginate:
     def test_walks_offset_to_total_and_reports_total(self) -> None:
         pages = [
-            json.dumps({"data": [{"title": "A"}] * 2, "total": 3}).encode(),
-            json.dumps({"data": [{"title": "B"}], "total": 3}).encode(),
+            (
+                json.dumps({"data": [{"title": "A"}] * 2, "total": 3}).encode(),
+                FetchSession(),
+            ),
+            (
+                json.dumps({"data": [{"title": "B"}], "total": 3}).encode(),
+                FetchSession(),
+            ),
         ]
         with patch("sagent.lib.web.paper.providers.s2.fetch", side_effect=pages):
             page, total = s2.search_paginate({"query": "x"}, limit=5)
@@ -184,12 +209,15 @@ class TestSearchPaginate:
         assert page.complete
 
     def test_caps_page_size_at_search_ceiling(self) -> None:
-        one = json.dumps({"data": [{"title": "A"}], "total": 1}).encode()
+        one = (
+            json.dumps({"data": [{"title": "A"}], "total": 1}).encode(),
+            FetchSession(),
+        )
         with patch("sagent.lib.web.paper.providers.s2.fetch", return_value=one) as mock:
             page, total = s2.search_paginate({"query": "x"}, limit=None)
         assert total == 1
         assert page.entries == [{"title": "A"}]
-        assert mock.call_args.kwargs["params"]["limit"] == 100
+        assert mock.call_args.kwargs["request"].params["limit"] == 100
 
 
 class TestSearchTotal:

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import argparse
+import asyncio
 import dataclasses
+import io
 import json
 import logging
 import os
 import subprocess
+import sys
 
 import pytest
 
+from sagent.agent import Agent
 from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
@@ -35,6 +39,7 @@ from sagent.bin.cli import (
     _resolve_cli_thinking_state,
     _resolve_session_dir,
     _resume_label,
+    _run_headless,
     parse_agent_args,
     resolve_tools,
 )
@@ -55,7 +60,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
 
 def _parse(args: Sequence[str]) -> argparse.Namespace:
@@ -395,6 +400,55 @@ def test_event_to_json_record_model_error() -> None:
         "descriptor": "application/x-error",
         "content": "RuntimeError: creds",
     }
+
+
+class _HeadlessErrorAgent:
+    def __init__(self) -> None:
+        self.history: list[ModelContextEvent] = []
+
+    async def run(
+        self,
+        message: UserMessage,
+    ) -> AsyncIterator[ModelResponseError]:
+        del message
+        yield ModelResponseError(exception=RuntimeError("boom"))
+
+
+@pytest.mark.parametrize(
+    ("output_format", "stdout", "stderr"),
+    [
+        ("text", "", "Error: RuntimeError: boom\n"),
+        ("json", '{"error": "RuntimeError: boom"}\n', ""),
+        (
+            "stream-json",
+            '{"descriptor": "application/x-error", "content": "RuntimeError: boom"}\n',
+            "",
+        ),
+    ],
+)
+def test_run_headless_model_error_exits_nonzero(
+    output_format: str,
+    stdout: str,
+    stderr: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello"))
+    agent = cast(Agent, _HeadlessErrorAgent())
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(
+            _run_headless(
+                agent,
+                input_format="text",
+                output_format=output_format,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == stdout
+    assert captured.err == stderr
 
 
 def test_event_to_json_record_model_service_suspended() -> None:

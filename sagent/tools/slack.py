@@ -27,7 +27,7 @@ import logging
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import fetch
+from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -77,18 +77,22 @@ async def _slack_call(
             raw = await asyncio.to_thread(
                 fetch,
                 url=url,
-                method="POST",
-                json=dict(params),
-                headers=headers,
-                timeout_sec=_DEFAULT_TIMEOUT,
+                request=RequestParams(
+                    method="POST",
+                    json=dict(params),
+                    headers=headers,
+                    timeout_sec=_DEFAULT_TIMEOUT,
+                ),
             )
         else:
             raw = await asyncio.to_thread(
                 fetch,
                 url=url,
-                params=dict(params),
-                headers=headers,
-                timeout_sec=_DEFAULT_TIMEOUT,
+                request=RequestParams(
+                    params=dict(params),
+                    headers=headers,
+                    timeout_sec=_DEFAULT_TIMEOUT,
+                ),
             )
     except FetchError as e:
         return ToolResult(
@@ -96,7 +100,7 @@ async def _slack_call(
             content=(f"Slack HTTP {e.status}: {e.body[:200].decode(errors='replace')}"),
             is_error=True,
         )
-    body = cast(MutableJSON, json.loads(raw))
+    body = cast(MutableJSON, json.loads(raw[0]))
     if not body.get("ok"):
         return ToolResult(
             call_id="",

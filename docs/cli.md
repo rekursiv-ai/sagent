@@ -29,7 +29,7 @@ printf 'Summarize this repository in five bullets.' | \
 
 ```bash
 sagent --provider Anthropic --model claude-sonnet-4-6
-sagent --provider OpenAI --model gpt-5.5
+sagent --provider OpenAI --model gpt-5.6-sol
 sagent --provider Google --model gemini-3.1-pro-preview
 sagent --provider Moonshot --model kimi-k2.6
 sagent --provider DashScope --model qwen3.6-plus
@@ -41,11 +41,11 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 | Flag | Meaning |
 | --- | --- |
 | `--provider NAME` | Provider class from `sagent.providers`, such as `Anthropic` or `Google`. |
-| `--auth METHOD` | Calls `Provider.from_<METHOD>()`; default is `env`. |
+| `--auth METHOD` | Calls `Provider.from_<METHOD>()`; an explicit API-key provider defaults to `env`, while subscription providers default to `credentials`. |
 | `--account NAME` | Optional named credential slot for providers that support one. |
-| `--model ID` | Provider-specific model ID. Anthropic and OpenAI IDs may include `+1m` (OpenAI: `gpt-5.5`/`gpt-5.4` and their `-pro` variants; default is the `+1m` window); Anthropic IDs may also include `+200k`; SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
+| `--model ID` | Provider-specific model ID. Anthropic and OpenAI IDs may include `+1m` (OpenAI: GPT-5.6, `gpt-5.5`, `gpt-5.4`, and applicable variants; the OpenAI default uses `+1m`); Anthropic IDs may also include `+200k`; SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
 | `--system TEXT` | Extra system prompt instructions appended to Sagent's default prompt. |
-| `--effort LEVEL` | Provider-specific reasoning effort. Anthropic accepts `low`, `medium`, `high`, `xhigh`, `max`. |
+| `--effort LEVEL` | Provider-specific reasoning effort. GPT-5.6 accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`; its API-key Chat Completions path maps tool-free `max` to `xhigh` and forces `none` when function tools are present. |
 | `--max-response-tokens N` | Limit response tokens for each model call. |
 | `--log-level LEVEL` | Enable stderr diagnostics. Same values as Python logging levels. |
 

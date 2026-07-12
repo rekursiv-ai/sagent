@@ -7,7 +7,7 @@ Sagent separates providers from models. A provider owns authentication and creat
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7+1m` | `claude-haiku-4-5` | Anthropic API-key provider. |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.5+1m` | `gpt-5.4-mini` | OpenAI API provider. `+1m` opts into the full 1M window; bare `gpt-5.5` caps at the 272K cheap tier. |
+| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.6-sol+1m` | `gpt-5.4-mini` | OpenAI API provider. `+1m` opts into the full 1.05M window; bare GPT-5.6 IDs cap at the 272K cheap tier. |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |
@@ -37,6 +37,18 @@ ProviderClass.from_env().utility_model()
 ```
 
 `model(None)` uses the provider's default model. Unknown model IDs raise with the provider's known model list.
+
+OpenAI supports the GPT-5.6 family as `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`; `gpt-5.6` is an alias for Sol. Append `+1m` to any of these
+IDs for Sagent's full-window API-key budget. `OpenAISubscription` accepts the
+same IDs for catalog compatibility but clamps every request to its 272K backend
+contract, so `+1m` does not widen that transport. GPT-5.6 accepts reasoning
+efforts from `none` through `max`. The subscription Responses API sends `max`
+directly; the API-key Chat Completions transport maps it to that endpoint's
+highest accepted value, `xhigh`, for tool-free requests. GPT-5.6 Chat
+Completions rejects function tools when reasoning is enabled, so Sagent forces
+effort to `none` whenever that transport sends tools. Use
+`OpenAISubscription`'s Responses transport for reasoning and tools together.
 
 ## CLI dispatch
 

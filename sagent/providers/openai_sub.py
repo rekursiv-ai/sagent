@@ -56,6 +56,7 @@ from typing import (
     TYPE_CHECKING,
     ClassVar,
     NotRequired,
+    Protocol,
     TypedDict,
     cast,
     override,
@@ -81,7 +82,6 @@ if TYPE_CHECKING:
     import httpx
     import openai
     import openai.types.responses as oai_responses
-    import openai.types.shared as oai_shared
 
     import sagent.lib.image as image_lib
 else:
@@ -90,12 +90,11 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     openai = lazy_import("openai")  # 493ms cold
     oai_responses = lazy_import("openai.types.responses")
-    oai_shared = lazy_import("openai.types.shared")
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import MutableJSON, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, int_val, json_unfreeze
 from sagent.providers.lib.cost import (
     ModelProfile,
     Pricing,
@@ -118,7 +117,9 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
-from sagent.providers.openai_compat import OPENAI_REASONING_EFFORT
+from sagent.providers.openai_compat import (
+    openai_responses_reasoning_effort,
+)
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,
@@ -129,6 +130,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     TokenCount,
+    base_model_id,
     strip_latency_tags,
 )
 from sagent.types.runtime import (
@@ -187,6 +189,10 @@ _FINISH_MAP: dict[str, str] = {
     "incomplete": "length",
     "failed": "stop",
 }
+
+
+class _CredentialFileError(ValueError):
+    """Stored credentials do not match the subscription OAuth schema."""
 
 
 def _subscription_profile(profile: ModelProfile) -> ModelProfile:
@@ -463,7 +469,8 @@ class OpenAISubscription(OpenAI):
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
         # Fail fast -- every supported model must be in KNOWN_MODELS.
-        # Strip only latency tags: no ``+1m`` variants exist here.
+        # Strip only latency tags. Inherited ``+1m`` ids are accepted, but
+        # their profiles remain clamped to the subscription backend contract.
         profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
             strip_latency_tags(mid),
         )
@@ -477,10 +484,11 @@ class OpenAISubscription(OpenAI):
             provider=self,
             model_id=mid,
             profile=profile,
-            max_request_tokens=(
+            max_request_tokens=min(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else profile.max_request_tokens,
+                profile.max_request_tokens,
             ),
         )
 
@@ -729,19 +737,51 @@ class OpenAISubscription(OpenAI):
 
         Raises:
           FileNotFoundError: If no credentials file exists.
+          ValueError: If the file is not a complete OAuth credential record.
 
         """
         p = path or credentials_path(DEFAULT_CREDENTIALS_PATH, account)
         if not p.exists():
             raise FileNotFoundError(f"No credentials at {p}")
-        raw: MutableJSON = json.loads(p.read_text(encoding="utf-8"))
-        tokens = cast(MutableJSON, raw["tokens"])
-        access_token = cast(str, tokens["access_token"])
+        decoded: object = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(decoded, dict):
+            raise _CredentialFileError(
+                f"{p} must contain a JSON object with OpenAI subscription "
+                "OAuth credentials."
+            )
+        raw = cast(MutableJSON, decoded)
+        raw_tokens = raw.get("tokens")
+        if not isinstance(raw_tokens, dict):
+            auth_mode = raw.get("auth_mode")
+            if auth_mode in ("apikey", "api_key") or "OPENAI_API_KEY" in raw:
+                raise _CredentialFileError(
+                    f"{p} contains OpenAI API-key credentials, not ChatGPT "
+                    "subscription OAuth credentials. Use --provider OpenAI "
+                    "--auth env, or run `sagent --provider OpenAISubscription "
+                    "login` first."
+                )
+            raise _CredentialFileError(
+                f"{p} does not contain OpenAI subscription OAuth tokens. Run "
+                "`sagent --provider OpenAISubscription login`."
+            )
+        tokens = cast(MutableJSON, raw_tokens)
+        required = ("access_token", "refresh_token", "account_id")
+        missing = [
+            name
+            for name in required
+            if not isinstance(tokens.get(name), str) or not tokens.get(name)
+        ]
+        if missing:
+            raise _CredentialFileError(
+                f"{p} is missing required OAuth fields: {', '.join(missing)}. "
+                "Run `sagent --provider OpenAISubscription login`."
+            )
+        access_token = cast(str, tokens.get("access_token"))
         expires_at = _jwt_exp(access_token)
         creds = cls.Credentials(
             access_token=access_token,
-            refresh_token=cast(str, tokens["refresh_token"]),
-            account_id=cast(str, tokens["account_id"]),
+            refresh_token=cast(str, tokens.get("refresh_token")),
+            account_id=cast(str, tokens.get("account_id")),
             expires_at=expires_at,
         )
         id_token = tokens.get("id_token")
@@ -913,14 +953,14 @@ class _OpenAISubModel(_OpenAIModel):
         # thinking is on so the reasoning surface is actually populated.
         # (OpenAI never returns raw reasoning, only summaries; ``auto`` is
         # the broadest tier and is chosen by the model.)
-        reasoning: oai_shared.Reasoning | openai.Omit | None = (
-            oai_shared.Reasoning(
-                effort=cast("oai_shared.ReasoningEffort", reasoning_effort),
-                summary="auto",
-            )
-            if reasoning_effort is not None
-            else openai.omit
-        )
+        reasoning_dict: dict[str, str] | None = None
+        if reasoning_effort is not None:
+            reasoning_dict = {"effort": reasoning_effort, "summary": "auto"}
+            if base_model_id(self._model_id).startswith("gpt-5.6"):
+                # Sagent replays complete local history with store=False, so
+                # GPT-5.6 must render reasoning across all supplied turns.
+                reasoning_dict["context"] = "all_turns"
+        reasoning: dict[str, str] | openai.Omit = reasoning_dict or openai.omit
         create_kwargs: dict[str, object] = {
             "model": self._wire_model_id,
             "input": _build_input(
@@ -931,6 +971,9 @@ class _OpenAISubModel(_OpenAIModel):
             "instructions": request.system or "",
             "store": False,
             "stream": True,
+            "include": ["reasoning.encrypted_content"]
+            if self.supports_effort
+            else openai.omit,
             "tools": _build_tools(request.tools) if request.tools else openai.omit,
             "reasoning": reasoning,
         }
@@ -985,7 +1028,10 @@ class _OpenAISubModel(_OpenAIModel):
         if not self.supports_effort:
             return None
         if request.effort is not None:
-            return OPENAI_REASONING_EFFORT.get(request.effort, "high")
+            return (
+                openai_responses_reasoning_effort(self._model_id, request.effort)
+                or "high"
+            )
         if request.thinking == "adaptive":
             return "medium"
         if request.thinking == "enabled":
@@ -1091,6 +1137,14 @@ def _build_assistant_items(
     ids: IdRemapper,
 ) -> None:
     """Expand an AssistantMessage into assistant + function_call items."""
+    for block in entry.thinking_blocks:
+        if block.get("type") == "reasoning" and isinstance(
+            block.get("encrypted_content"), str
+        ):
+            # OpenAI documents replaying the reasoning output item verbatim in
+            # stateless mode. Copy the opaque mapping so persisted session data
+            # never mutates while the SDK serializes the request.
+            items.append(cast("oai_responses.ResponseReasoningItemParam", dict(block)))
     if entry.text:
         items.append({"role": "assistant", "content": entry.text})
     for tc in entry.tool_calls:
@@ -1124,6 +1178,81 @@ def _build_tool_result_item(
     }
 
 
+class _UsageDetails(Protocol):
+    """Minimum SDK usage-details surface needed for forward-compatible fields."""
+
+    def to_dict(self) -> dict[str, object]: ...
+
+
+def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
+    """Extract terminal response metadata, including SDK-extra usage fields."""
+    message_id = str(getattr(response, "id", "") or "")
+    status = str(getattr(response, "status", "") or "")
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return message_id, status, 0, 0, 0, 0
+    input_tokens = int_val(getattr(usage, "input_tokens", None), 0)
+    output_tokens = int_val(getattr(usage, "output_tokens", None), 0)
+    cache_read = 0
+    cache_write = 0
+    details = getattr(usage, "input_tokens_details", None)
+    if details is not None:
+        # OpenAI SDK 2.44 predates the typed ``cache_write_tokens`` field, but
+        # Stainless models preserve unknown response fields and expose them
+        # through ``to_dict``. Reading the mapping keeps new usage data without
+        # an Any cast or waiting for an SDK schema release.
+        raw_details = cast(_UsageDetails, details).to_dict()
+        cache_read = int_val(raw_details.get("cached_tokens"), 0)
+        cache_write = int_val(raw_details.get("cache_write_tokens"), 0)
+    return (
+        message_id,
+        status,
+        input_tokens,
+        output_tokens,
+        cache_read,
+        cache_write,
+    )
+
+
+_STREAM_ERROR_STATUS: dict[str, int] = {
+    "rate_limit": 429,
+    "rate_limit_error": 429,
+    "rate_limit_exceeded": 429,
+    "api_error": 500,
+    "overloaded_error": 529,
+    "server_error": 500,
+}
+
+
+class _OpenAIStreamError(UserFacingError):
+    """In-band Responses error retaining retry/rate-limit classification data."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None,
+        param: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        normalized_code = code or "unknown_error"
+        normalized_type = (
+            "rate_limit_error"
+            if normalized_code in {"rate_limit", "rate_limit_exceeded"}
+            else normalized_code
+        )
+        self.status_code = _STREAM_ERROR_STATUS.get(normalized_code)
+        self.body: Mapping[str, object] = {
+            "type": "error",
+            "error": {
+                "type": normalized_type,
+                "code": normalized_code,
+                "message": message,
+                "param": param,
+            },
+        }
+
+
 async def _consume_stream(
     stream: AsyncIterable[object],
     *,
@@ -1132,19 +1261,22 @@ async def _consume_stream(
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
     text_parts: list[str] = []
+    refusal_parts: list[str] = []
     thinking_parts: list[str] = []
+    encrypted_reasoning: list[Mapping[str, object]] = []
     tool_calls: list[ToolCall] = []
     tool_args: dict[str, list[str]] = {}
     input_tokens = 0
     output_tokens = 0
     cache_read = 0
+    cache_write = 0
     message_id = ""
     finish_reason: str | None = None
     completed = False
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
-    # Single cleanup rule: every path that does not return a COMPLETED response
+    # Single cleanup rule: every path that does not return a terminal response
     # closes the stream. A mid-stream error event (raises below), an idle
     # timeout / cancellation, and the no-completion fallthrough all leave the
     # SSE connection open otherwise -- a per-error connection leak. ``completed``
@@ -1153,7 +1285,28 @@ async def _consume_stream(
         async with asyncio.timeout_at(deadline) as watchdog:
             async for event in stream:
                 watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
-                if isinstance(event, oai_responses.ResponseTextDeltaEvent):
+                if isinstance(event, oai_responses.ResponseRefusalDeltaEvent):
+                    refusal_parts.append(event.delta)
+                    text_parts.append(event.delta)
+                    if publish is not None:
+                        publish(ModelResponsePartial(event.delta))
+                elif isinstance(event, oai_responses.ResponseRefusalDoneEvent):
+                    # Normally deltas already contain the full refusal. Keep a
+                    # done-only stream useful and append only an unseen suffix.
+                    seen = "".join(refusal_parts)
+                    suffix = (
+                        event.refusal[len(seen) :]
+                        if event.refusal.startswith(seen)
+                        else ""
+                    )
+                    if not seen:
+                        suffix = event.refusal
+                    if suffix:
+                        refusal_parts.append(suffix)
+                        text_parts.append(suffix)
+                        if publish is not None:
+                            publish(ModelResponsePartial(suffix))
+                elif isinstance(event, oai_responses.ResponseTextDeltaEvent):
                     text_parts.append(event.delta)
                     if publish is not None:
                         publish(ModelResponsePartial(event.delta))
@@ -1193,25 +1346,34 @@ async def _consume_stream(
                                 args=cast(Mapping[str, object], args),
                             )
                         )
+                    elif item.type == "reasoning":
+                        reasoning_item = item.to_dict(exclude_none=True)
+                        if isinstance(reasoning_item.get("encrypted_content"), str):
+                            encrypted_reasoning.append(reasoning_item)
                 elif isinstance(event, oai_responses.ResponseErrorEvent):
                     raise _openai_stream_event_error(event)
+                elif isinstance(event, oai_responses.ResponseFailedEvent):
+                    raise _openai_stream_response_error(event.response)
                 elif isinstance(
                     event,
                     (
-                        oai_responses.ResponseFailedEvent,
+                        oai_responses.ResponseCompletedEvent,
                         oai_responses.ResponseIncompleteEvent,
                     ),
                 ):
-                    raise _openai_stream_response_error(event.response)
-                elif isinstance(event, oai_responses.ResponseCompletedEvent):
                     resp = event.response
-                    message_id = resp.id
-                    if resp.usage:
-                        input_tokens = resp.usage.input_tokens
-                        output_tokens = resp.usage.output_tokens
-                        if resp.usage.input_tokens_details:
-                            cache_read = resp.usage.input_tokens_details.cached_tokens
-                    finish_reason = resp.status
+                    (
+                        message_id,
+                        finish_reason,
+                        input_tokens,
+                        output_tokens,
+                        cache_read,
+                        cache_write,
+                    ) = _terminal_metadata(resp)
+                    if finish_reason == "incomplete":
+                        incomplete = getattr(resp, "incomplete_details", None)
+                        if getattr(incomplete, "reason", None) == "content_filter":
+                            finish_reason = "content_filter"
                     debug_log.trace(
                         "api_response",
                         kind="openai_responses",
@@ -1225,12 +1387,16 @@ async def _consume_stream(
         if not completed:
             await _close_stream(stream)
 
+    if refusal_parts and finish_reason in (None, "completed", "stop"):
+        finish_reason = "content_filter"
     response = _build_stream_response(
         text_parts=text_parts,
         thinking_parts=thinking_parts,
+        encrypted_reasoning=encrypted_reasoning,
         tool_calls=tool_calls,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_write=cache_write,
         cache_read=cache_read,
         finish_reason=finish_reason,
         message_id=message_id,
@@ -1251,7 +1417,11 @@ def _openai_stream_event_error(event: object) -> UserFacingError:
     if isinstance(param, str) and param:
         details.append(f"param={param}")
     details.append(str(message))
-    return UserFacingError(": ".join(details))
+    return _OpenAIStreamError(
+        ": ".join(details),
+        code=code if isinstance(code, str) else None,
+        param=param if isinstance(param, str) else None,
+    )
 
 
 def _openai_stream_response_error(response: object) -> UserFacingError:
@@ -1273,16 +1443,21 @@ def _openai_stream_response_error(response: object) -> UserFacingError:
         details.append(f"reason={reason}")
     if isinstance(message, str) and message:
         details.append(message)
-    return UserFacingError(": ".join(details))
+    return _OpenAIStreamError(
+        ": ".join(details),
+        code=code if isinstance(code, str) else None,
+    )
 
 
 def _build_stream_response(
     *,
     text_parts: list[str],
     thinking_parts: list[str],
+    encrypted_reasoning: list[Mapping[str, object]],
     tool_calls: list[ToolCall],
     input_tokens: int,
     output_tokens: int,
+    cache_write: int,
     cache_read: int,
     finish_reason: str | None,
     message_id: str,
@@ -1290,27 +1465,29 @@ def _build_stream_response(
 ) -> ModelResponse:
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
-    # The Responses API reports a cache-inclusive prompt total; store the
-    # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from
-    # ``cache_read_tokens``.
-    non_cached_input = max(0, input_tokens - cache_read)
+    # The Responses API reports a cache-inclusive prompt total; keep ordinary,
+    # cache-write, and cache-read pools disjoint in Sagent's normalized usage.
+    non_cached_input = max(0, input_tokens - cache_read - cache_write)
     in_cost, out_cost, total_cost = compute_cost(
         pricing,
         non_cached_input,
         output_tokens,
+        cache_creation=cache_write,
         cache_read=cache_read,
     )
+    thinking_blocks: list[Mapping[str, object]] = list(encrypted_reasoning)
+    if thinking_parts:
+        thinking_blocks.append({"type": "reasoning", "text": "".join(thinking_parts)})
     return ModelResponse(
         message=AssistantMessage(
             text="".join(text_parts),
-            thinking_blocks=({"type": "reasoning", "text": "".join(thinking_parts)},)
-            if thinking_parts
-            else (),
+            thinking_blocks=tuple(thinking_blocks),
             tool_calls=tuple(tool_calls),
         ),
         tokens=TokenCount(
             input_tokens=non_cached_input,
             output_tokens=output_tokens,
+            cache_creation_tokens=cache_write,
             cache_read_tokens=cache_read,
         ),
         stop_reason=normalize_stop_reason(
