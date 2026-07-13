@@ -1,0 +1,6 @@
+__all__ = ["TorchVersion"]
+
+class TorchVersion(str):
+    __slots__ = ...
+
+__version__ = ...

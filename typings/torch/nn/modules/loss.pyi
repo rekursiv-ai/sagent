@@ -1,0 +1,269 @@
+from collections.abc import Callable
+from typing_extensions import deprecated
+
+from torch import Tensor
+
+from .module import Module
+
+__all__ = [
+    "BCELoss",
+    "BCEWithLogitsLoss",
+    "CTCLoss",
+    "CosineEmbeddingLoss",
+    "CrossEntropyLoss",
+    "GaussianNLLLoss",
+    "HingeEmbeddingLoss",
+    "HuberLoss",
+    "KLDivLoss",
+    "L1Loss",
+    "MSELoss",
+    "MarginRankingLoss",
+    "MultiLabelMarginLoss",
+    "MultiLabelSoftMarginLoss",
+    "MultiMarginLoss",
+    "NLLLoss",
+    "NLLLoss2d",
+    "PoissonNLLLoss",
+    "SmoothL1Loss",
+    "SoftMarginLoss",
+    "TripletMarginLoss",
+    "TripletMarginWithDistanceLoss",
+]
+
+class _Loss(Module):
+    reduction: str
+    def __init__(self, size_average=..., reduce=..., reduction: str = ...) -> None: ...
+
+class _WeightedLoss(_Loss):
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+
+class L1Loss(_Loss):
+    __constants__ = ...
+    def __init__(self, size_average=..., reduce=..., reduction: str = ...) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class NLLLoss(_WeightedLoss):
+    __constants__ = ...
+    ignore_index: int
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        ignore_index: int = ...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+@deprecated(
+    "`NLLLoss2d` has been deprecated. Please use `NLLLoss` instead as a drop-in replacement and see https://pytorch.org/docs/main/nn.html#torch.nn.NLLLoss for more details.",
+    category=FutureWarning,
+)
+class NLLLoss2d(NLLLoss):
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        ignore_index: int = ...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+
+class PoissonNLLLoss(_Loss):
+    __constants__ = ...
+    log_input: bool
+    full: bool
+    eps: float
+    def __init__(
+        self,
+        log_input: bool = ...,
+        full: bool = ...,
+        size_average=...,
+        eps: float = ...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, log_input: Tensor, target: Tensor) -> Tensor: ...
+
+class GaussianNLLLoss(_Loss):
+    __constants__ = ...
+    full: bool
+    eps: float
+    def __init__(
+        self, *, full: bool = ..., eps: float = ..., reduction: str = ...
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor, var: Tensor | float) -> Tensor: ...
+
+class KLDivLoss(_Loss):
+    __constants__ = ...
+    def __init__(
+        self, size_average=..., reduce=..., reduction: str = ..., log_target: bool = ...
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class MSELoss(_Loss):
+    __constants__ = ...
+    def __init__(self, size_average=..., reduce=..., reduction: str = ...) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class BCELoss(_WeightedLoss):
+    __constants__ = ...
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class BCEWithLogitsLoss(_Loss):
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+        pos_weight: Tensor | None = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class HingeEmbeddingLoss(_Loss):
+    __constants__ = ...
+    margin: float
+    def __init__(
+        self, margin: float = ..., size_average=..., reduce=..., reduction: str = ...
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class MultiLabelMarginLoss(_Loss):
+    __constants__ = ...
+    def __init__(self, size_average=..., reduce=..., reduction: str = ...) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class SmoothL1Loss(_Loss):
+    __constants__ = ...
+    def __init__(
+        self, size_average=..., reduce=..., reduction: str = ..., beta: float = ...
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class HuberLoss(_Loss):
+    __constants__ = ...
+    def __init__(self, reduction: str = ..., delta: float = ...) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class SoftMarginLoss(_Loss):
+    __constants__ = ...
+    def __init__(self, size_average=..., reduce=..., reduction: str = ...) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class CrossEntropyLoss(_WeightedLoss):
+    __constants__ = ...
+    ignore_index: int
+    label_smoothing: float
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        ignore_index: int = ...,
+        reduce=...,
+        reduction: str = ...,
+        label_smoothing: float = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class MultiLabelSoftMarginLoss(_WeightedLoss):
+    __constants__ = ...
+    def __init__(
+        self,
+        weight: Tensor | None = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class CosineEmbeddingLoss(_Loss):
+    __constants__ = ...
+    margin: float
+    def __init__(
+        self, margin: float = ..., size_average=..., reduce=..., reduction: str = ...
+    ) -> None: ...
+    def forward(self, input1: Tensor, input2: Tensor, target: Tensor) -> Tensor: ...
+
+class MarginRankingLoss(_Loss):
+    __constants__ = ...
+    margin: float
+    def __init__(
+        self, margin: float = ..., size_average=..., reduce=..., reduction: str = ...
+    ) -> None: ...
+    def forward(self, input1: Tensor, input2: Tensor, target: Tensor) -> Tensor: ...
+
+class MultiMarginLoss(_WeightedLoss):
+    __constants__ = ...
+    margin: float
+    p: int
+    def __init__(
+        self,
+        p: int = ...,
+        margin: float = ...,
+        weight: Tensor | None = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, input: Tensor, target: Tensor) -> Tensor: ...
+
+class TripletMarginLoss(_Loss):
+    __constants__ = ...
+    margin: float
+    p: float
+    eps: float
+    swap: bool
+    def __init__(
+        self,
+        margin: float = ...,
+        p: float = ...,
+        eps: float = ...,
+        swap: bool = ...,
+        size_average=...,
+        reduce=...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, anchor: Tensor, positive: Tensor, negative: Tensor) -> Tensor: ...
+
+class TripletMarginWithDistanceLoss(_Loss):
+    __constants__ = ...
+    margin: float
+    swap: bool
+    def __init__(
+        self,
+        *,
+        distance_function: Callable[[Tensor, Tensor], Tensor] | None = ...,
+        margin: float = ...,
+        swap: bool = ...,
+        reduction: str = ...,
+    ) -> None: ...
+    def forward(self, anchor: Tensor, positive: Tensor, negative: Tensor) -> Tensor: ...
+
+class CTCLoss(_Loss):
+    __constants__ = ...
+    blank: int
+    zero_infinity: bool
+    def __init__(
+        self, blank: int = ..., reduction: str = ..., zero_infinity: bool = ...
+    ) -> None: ...
+    def forward(
+        self,
+        log_probs: Tensor,
+        targets: Tensor,
+        input_lengths: Tensor,
+        target_lengths: Tensor,
+    ) -> Tensor: ...

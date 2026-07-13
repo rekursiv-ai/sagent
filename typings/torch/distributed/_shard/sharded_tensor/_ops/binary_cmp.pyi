@@ -1,0 +1,9 @@
+from torch.distributed._shard.sharded_tensor import _sharded_op_impl
+
+import torch
+
+def binary_cmp(cmp_fun, types, args, kwargs=..., process_group=...) -> bool: ...
+@_sharded_op_impl(torch.equal)
+def equal(types, args, kwargs, process_group) -> bool: ...
+@_sharded_op_impl(torch.allclose)
+def allclose(types, args, kwargs, process_group) -> bool: ...

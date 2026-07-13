@@ -1,0 +1,216 @@
+from collections.abc import Callable
+from typing import Any, TypeVar
+from typing_extensions import ParamSpec
+
+import operator
+
+from torch import fx
+from torch.utils._ordered_set import OrderedSet
+
+import torch
+
+from ..pattern_matcher import (
+    MULTIPLE,
+    Arg,
+    CallFunction,
+    Ignored,
+    KeywordArg,
+    ListOf,
+    Match,
+    init_once_fakemode,
+    register_graph_pattern,
+)
+
+_T = TypeVar("_T")
+_P = ParamSpec("_P")
+log = ...
+aten = ...
+prims = ...
+pass_patterns = ...
+
+def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool) -> None: ...
+def prepare_softmax_pattern(x, dim) -> tuple[Any, Any, Any, Any]: ...
+def prepare_softmax_replacement(x, dim) -> tuple[Any, Any, Any, Any]: ...
+def prepare_softmax_extra_check(match) -> bool: ...
+def decompose_map_to_while_loop(gm: torch.fx.GraphModule) -> None: ...
+def resolve_shape_to_proxy(
+    shape: list[int | torch.SymInt], bound_symbols: dict[Any, Any]
+) -> list[Any]: ...
+def decompose_scan_to_while_loop(gm: torch.fx.GraphModule) -> None: ...
+@init_once_fakemode
+def lazy_init() -> None: ...
+def reorder_for_locality(graph: torch.fx.Graph) -> None: ...
+def register_lowering_pattern(
+    pattern, extra_check=..., pass_number=...
+) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
+def is_valid_mm_plus_mm(match: Match) -> bool: ...
+def scatter_upon_const_tensor_extra_check(m) -> Literal[False]: ...
+@register_lowering_pattern(
+    CallFunction(
+        aten.scatter.value,
+        CallFunction(
+            aten.full,
+            KeywordArg("shape"),
+            KeywordArg("background_val"),
+            dtype=KeywordArg("dtype"),
+        ),
+        KeywordArg("dim"),
+        KeywordArg("selector"),
+        KeywordArg("val"),
+    ),
+    extra_check=scatter_upon_const_tensor_extra_check,
+)
+def scatter_upon_const_tensor(
+    match: Match, shape, background_val, dtype, dim, selector, val
+) -> TensorBox | ShapeAsConstantBuffer: ...
+@register_lowering_pattern(
+    CallFunction(
+        aten.add,
+        CallFunction(aten.mm, KeywordArg("mat1"), KeywordArg("mat2")),
+        CallFunction(aten.mm, KeywordArg("mat3"), KeywordArg("mat4")),
+    ),
+    extra_check=is_valid_mm_plus_mm,
+)
+def mm_plus_mm(match: Match, mat1, mat2, mat3, mat4): ...
+@register_graph_pattern(
+    CallFunction(
+        aten.cumsum.default,
+        CallFunction(
+            torch.ops.aten.full.default,
+            KeywordArg("shape"),
+            KeywordArg("fill_value"),
+            dtype=KeywordArg("dtype"),
+            layout=Ignored(),
+            device=KeywordArg("device"),
+            pin_memory=False,
+            _users=MULTIPLE,
+        ),
+        KeywordArg("dim"),
+        _users=MULTIPLE,
+    ),
+    pass_dict=pass_patterns[1],
+)
+def pointless_cumsum_replacement(
+    match: Match, shape, fill_value, device, dtype, dim
+) -> None: ...
+
+_cat_1 = ...
+
+@register_lowering_pattern(
+    CallFunction(
+        aten.cat,
+        [_cat_1, CallFunction(aten.slice, _cat_1, 1, 0, KeywordArg("size"))],
+        1,
+    )
+)
+def cat_slice_cat(match, cat_input, size, dim=...) -> Any: ...
+def is_valid_splitwithsizes_cat(match) -> bool: ...
+def same_meta(node1: torch.fx.Node, node2: torch.fx.Node) -> Any | bool: ...
+
+noop_registry: dict[Any, Any] = ...
+
+def register_noop_decomp(targets, nop_arg=...) -> Callable[..., Any]: ...
+@register_noop_decomp(aten.slice)
+def slice_noop(self, dim=..., start=..., end=..., step=...) -> bool: ...
+@register_noop_decomp(aten.slice_scatter, 1)
+def slice_scatter_noop(self, src, dim=..., start=..., end=..., step=...) -> bool: ...
+@register_noop_decomp(aten.repeat)
+def repeat_noop(self, repeats) -> bool: ...
+@register_noop_decomp(aten.constant_pad_nd)
+def constant_pad_nd(x, padding, fill_value=...) -> bool: ...
+@register_noop_decomp(torch.ops.prims.convert_element_type)
+def convert_element_type_noop(x, dtype: torch.dtype): ...
+@register_noop_decomp(torch.ops.prims.device_put)
+def device_put_noop(x, device, non_blocking=...): ...
+@register_noop_decomp([aten.ceil, aten.floor, aten.round, aten.trunc])
+def int_noop(x) -> bool: ...
+@register_noop_decomp([aten.pow])
+def pow_noop(a, b) -> bool: ...
+@register_noop_decomp([aten.cat], lambda args: args[0][0])
+def cat_noop(inputs, dim=...) -> bool: ...
+@register_noop_decomp(aten.view.default)
+def view_default_noop(arg, size) -> bool: ...
+@register_noop_decomp(aten.view.dtype)
+def view_dtype_noop(arg, dtype): ...
+@register_noop_decomp([aten.copy], nop_arg=1)
+@register_noop_decomp([aten.alias, aten.clone])
+def true_noop(*args, **kwargs) -> Literal[True]: ...
+def remove_noop_ops(graph: torch.fx.Graph) -> None: ...
+def remove_assert_ops(graph: torch.fx.Graph) -> None: ...
+def decompose_triton_kernel_wrapper_functional(graph) -> None: ...
+def decompose_auto_functionalized(graph) -> None: ...
+@register_lowering_pattern(
+    CallFunction(
+        aten.cat,
+        ListOf(
+            CallFunction(
+                operator.getitem,
+                CallFunction(
+                    aten.split_with_sizes,
+                    KeywordArg("input_"),
+                    Ignored(),
+                    Ignored(),
+                    _users=MULTIPLE,
+                ),
+                Ignored(),
+            )
+        ),
+        Ignored(),
+    ),
+    pass_number=2,
+    extra_check=is_valid_splitwithsizes_cat,
+)
+def splitwithsizes_cat_replace(match, input_): ...
+def is_valid_cat_splitwithsizes(match) -> bool: ...
+@register_lowering_pattern(
+    CallFunction(
+        aten.split_with_sizes,
+        CallFunction(aten.cat, KeywordArg("input_"), Ignored(), _users=MULTIPLE),
+        Ignored(),
+        Ignored(),
+    ),
+    pass_number=2,
+    extra_check=is_valid_cat_splitwithsizes,
+)
+def cat_splitwithsizes_replace(match, input_): ...
+def view_to_reshape(gm) -> None: ...
+def should_prefer_unfused_addmm(match) -> bool: ...
+@register_graph_pattern(
+    CallFunction(aten.addmm, KeywordArg("inp"), Arg(), Arg()),
+    pass_dict=pass_patterns[2],
+    extra_check=should_prefer_unfused_addmm,
+)
+def unfuse_bias_add_to_pointwise(match: Match, mat1, mat2, *, inp) -> None: ...
+def is_valid_addmm_fusion(match) -> bool: ...
+@register_graph_pattern(
+    CallFunction(aten.add, CallFunction(aten.mm, Arg(), Arg()), KeywordArg("inp")),
+    pass_dict=pass_patterns[2],
+    extra_check=is_valid_addmm_fusion,
+)
+@register_graph_pattern(
+    CallFunction(aten.add, KeywordArg("inp"), CallFunction(aten.mm, Arg(), Arg())),
+    pass_dict=pass_patterns[2],
+    extra_check=is_valid_addmm_fusion,
+)
+def addmm(match, mat1, mat2, *, inp) -> None: ...
+def register_partial_reduction_pattern() -> None: ...
+def check_shape_cuda_and_fused_int_mm_mul_enabled(match) -> Any | bool: ...
+def is_index_put_and_requires_h2d_sync_for_gpu_value(node) -> Any | Literal[False]: ...
+
+class ConstructorMoverPass:
+    def __init__(
+        self, target: str, allow_outputs: bool = ..., allow_inputs: bool = ...
+    ) -> None: ...
+    def allow_cpu_device(self, node: fx.Node) -> bool: ...
+    def is_on_target_device(self, node: fx.Node) -> bool: ...
+    def is_cpu_scalar_tensor(self, node: fx.Node) -> bool: ...
+    def all_inputs_are_cpu_scalar_or_on_target_device(self, node: fx.Node) -> bool: ...
+    def cannot_be_moved(self, node: fx.Node) -> bool: ...
+    def get_node_device(self, node: fx.Node) -> torch.device | None: ...
+    def get_cpu_indeg_count(self, graph: fx.Graph) -> dict[fx.Node, int]: ...
+    def __call__(self, graph: fx.Graph) -> None: ...
+    def find_movable_constructors(
+        self, graph: fx.Graph, constructors: list[fx.Node]
+    ) -> OrderedSet[fx.Node]: ...
+
+def move_constructors_to_gpu(graph: fx.Graph) -> None: ...

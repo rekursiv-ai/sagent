@@ -1,0 +1,69 @@
+from torch import nn
+
+import torch
+
+from .configuration_hubert import HubertConfig
+from ..wav2vec2.modeling_wav2vec2 import (
+    Wav2Vec2Encoder,
+    Wav2Vec2EncoderStableLayerNorm,
+    Wav2Vec2FeatureEncoder,
+    Wav2Vec2ForCTC,
+    Wav2Vec2ForSequenceClassification,
+    Wav2Vec2Model,
+    Wav2Vec2SamePadLayer,
+)
+from ...modeling_outputs import BaseModelOutput
+from ...modeling_utils import PreTrainedModel
+from ...utils import auto_docstring
+
+"""PyTorch Hubert model."""
+_HIDDEN_STATES_START_POSITION = ...
+
+class HubertPositionalConvEmbedding(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, hidden_states): ...
+
+class HubertSamePadLayer(Wav2Vec2SamePadLayer): ...
+class HubertFeatureEncoder(Wav2Vec2FeatureEncoder): ...
+
+class HubertFeatureProjection(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class HubertEncoder(Wav2Vec2Encoder): ...
+class HubertEncoderStableLayerNorm(Wav2Vec2EncoderStableLayerNorm): ...
+
+@auto_docstring
+class HubertPreTrainedModel(PreTrainedModel):
+    config: HubertConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _supports_flash_attn = ...
+    _supports_sdpa = ...
+    _supports_flex_attn = ...
+
+class HubertModel(Wav2Vec2Model, HubertPreTrainedModel):
+    def __init__(self, config: HubertConfig) -> None: ...
+    def freeze_feature_extractor(self): ...
+    def freeze_feature_encoder(self): ...
+    def forward(
+        self,
+        input_values: torch.Tensor | None,
+        attention_mask: torch.Tensor | None = ...,
+        mask_time_indices: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutput: ...
+
+class HubertForCTC(Wav2Vec2ForCTC): ...
+class HubertForSequenceClassification(Wav2Vec2ForSequenceClassification): ...
+
+__all__ = [
+    "HubertForCTC",
+    "HubertForSequenceClassification",
+    "HubertModel",
+    "HubertPreTrainedModel",
+]

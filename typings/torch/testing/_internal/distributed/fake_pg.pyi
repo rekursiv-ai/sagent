@@ -1,0 +1,3 @@
+import torch.distributed as dist
+
+class FakeStore(dist.Store): ...

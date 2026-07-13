@@ -1,0 +1,23 @@
+from typing import Any
+
+from torch.ao.quantization.observer import ObserverBase
+from torch.ao.quantization.utils import Pattern
+
+__all__ = [
+    "get_default_fusion_patterns",
+    "get_default_output_activation_post_process_map",
+    "get_default_quant_patterns",
+]
+type QuantizeHandler = Any
+_DEFAULT_FUSION_PATTERNS: dict[Pattern, QuantizeHandler] = ...
+
+def get_default_fusion_patterns() -> dict[Pattern, QuantizeHandler]: ...
+
+_DEFAULT_QUANTIZATION_PATTERNS: dict[Pattern, QuantizeHandler] = ...
+_DEFAULT_OUTPUT_FAKE_QUANTIZE_MAP: dict[Pattern, QuantizeHandler] = ...
+_DEFAULT_OUTPUT_OBSERVER_MAP: dict[Pattern, QuantizeHandler] = ...
+
+def get_default_quant_patterns() -> dict[Pattern, QuantizeHandler]: ...
+def get_default_output_activation_post_process_map(
+    is_training,
+) -> dict[Pattern, ObserverBase]: ...

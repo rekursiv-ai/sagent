@@ -1,0 +1,228 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_efficientformer import EfficientFormerConfig
+from ....modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPooling,
+    ImageClassifierOutput,
+)
+from ....modeling_utils import PreTrainedModel
+from ....utils import (
+    ModelOutput,
+    add_code_sample_docstrings,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+)
+
+"""PyTorch EfficientFormer model."""
+logger = ...
+_CONFIG_FOR_DOC = ...
+_CHECKPOINT_FOR_DOC = ...
+_EXPECTED_OUTPUT_SHAPE = ...
+_IMAGE_CLASS_CHECKPOINT = ...
+_IMAGE_CLASS_EXPECTED_OUTPUT = ...
+
+class EfficientFormerPatchEmbeddings(nn.Module):
+    def __init__(
+        self,
+        config: EfficientFormerConfig,
+        num_channels: int,
+        embed_dim: int,
+        apply_norm: bool = ...,
+    ) -> None: ...
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor: ...
+
+class EfficientFormerSelfAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        key_dim: int,
+        num_heads: int,
+        attention_ratio: int,
+        resolution: int,
+    ) -> None: ...
+    @torch.no_grad()
+    def train(self, mode=...):  # -> None:
+        ...
+    def forward(
+        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+    ) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerConvStem(nn.Module):
+    def __init__(self, config: EfficientFormerConfig, out_channels: int) -> None: ...
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor: ...
+
+class EfficientFormerPooling(nn.Module):
+    def __init__(self, pool_size: int) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class EfficientFormerDenseMlp(nn.Module):
+    def __init__(
+        self,
+        config: EfficientFormerConfig,
+        in_features: int,
+        hidden_features: int | None = ...,
+        out_features: int | None = ...,
+    ) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class EfficientFormerConvMlp(nn.Module):
+    def __init__(
+        self,
+        config: EfficientFormerConfig,
+        in_features: int,
+        hidden_features: int | None = ...,
+        out_features: int | None = ...,
+        drop: float = ...,
+    ) -> None: ...
+    def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
+
+def drop_path(
+    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+) -> torch.Tensor: ...
+
+class EfficientFormerDropPath(nn.Module):
+    def __init__(self, drop_prob: float | None = ...) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def extra_repr(self) -> str: ...
+
+class EfficientFormerFlat(nn.Module):
+    def __init__(self) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerMeta3D(nn.Module):
+    def __init__(
+        self, config: EfficientFormerConfig, dim: int, drop_path: float = ...
+    ) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+    ) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerMeta3DLayers(nn.Module):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+    ) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerMeta4D(nn.Module):
+    def __init__(
+        self, config: EfficientFormerConfig, dim: int, drop_path: float = ...
+    ) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerMeta4DLayers(nn.Module):
+    def __init__(self, config: EfficientFormerConfig, stage_idx: int) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerIntermediateStage(nn.Module):
+    def __init__(self, config: EfficientFormerConfig, index: int) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerLastStage(nn.Module):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+    ) -> tuple[torch.Tensor]: ...
+
+class EfficientFormerEncoder(nn.Module):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output_hidden_states: bool = ...,
+        output_attentions: bool = ...,
+        return_dict: bool = ...,
+    ) -> BaseModelOutput: ...
+
+class EfficientFormerPreTrainedModel(PreTrainedModel):
+    config: EfficientFormerConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+
+EFFICIENTFORMER_START_DOCSTRING = ...
+EFFICIENTFORMER_INPUTS_DOCSTRING = ...
+
+@add_start_docstrings(
+    ...,
+    EFFICIENTFORMER_START_DOCSTRING,
+)
+class EfficientFormerModel(EfficientFormerPreTrainedModel):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    @add_start_docstrings_to_model_forward(EFFICIENTFORMER_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=BaseModelOutputWithPooling,
+        config_class=_CONFIG_FOR_DOC,
+        modality="vision",
+        expected_output=_EXPECTED_OUTPUT_SHAPE,
+    )
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutput: ...
+
+@add_start_docstrings(
+    ...,
+    EFFICIENTFORMER_START_DOCSTRING,
+)
+class EfficientFormerForImageClassification(EfficientFormerPreTrainedModel):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    @add_start_docstrings_to_model_forward(EFFICIENTFORMER_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        checkpoint=_IMAGE_CLASS_CHECKPOINT,
+        output_type=ImageClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
+        expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
+    )
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        labels: torch.Tensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | ImageClassifierOutput: ...
+
+@dataclass
+class EfficientFormerForImageClassificationWithTeacherOutput(ModelOutput):
+    logits: torch.FloatTensor | None = ...
+    cls_logits: torch.FloatTensor | None = ...
+    distillation_logits: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+
+@add_start_docstrings(
+    ...,
+    EFFICIENTFORMER_START_DOCSTRING,
+)
+class EfficientFormerForImageClassificationWithTeacher(EfficientFormerPreTrainedModel):
+    def __init__(self, config: EfficientFormerConfig) -> None: ...
+    @add_start_docstrings_to_model_forward(EFFICIENTFORMER_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        checkpoint=_IMAGE_CLASS_CHECKPOINT,
+        output_type=EfficientFormerForImageClassificationWithTeacherOutput,
+        config_class=_CONFIG_FOR_DOC,
+        expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
+    )
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | EfficientFormerForImageClassificationWithTeacherOutput: ...
+
+__all__ = [
+    "EfficientFormerForImageClassification",
+    "EfficientFormerForImageClassificationWithTeacher",
+    "EfficientFormerModel",
+    "EfficientFormerPreTrainedModel",
+]

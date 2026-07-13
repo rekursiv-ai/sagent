@@ -1,0 +1,29 @@
+from ...processing_utils import ProcessorMixin
+
+"""
+Image/Text processor class for OneFormer
+"""
+
+class OneFormerProcessor(ProcessorMixin):
+    attributes = ...
+    image_processor_class = ...
+    tokenizer_class = ...
+    def __init__(
+        self,
+        image_processor=...,
+        tokenizer=...,
+        max_seq_length: int = ...,
+        task_seq_length: int = ...,
+        **kwargs,
+    ) -> None: ...
+    def __call__(
+        self, images=..., task_inputs=..., segmentation_maps=..., **kwargs
+    ): ...
+    def encode_inputs(
+        self, images=..., task_inputs=..., segmentation_maps=..., **kwargs
+    ): ...
+    def post_process_semantic_segmentation(self, *args, **kwargs): ...
+    def post_process_instance_segmentation(self, *args, **kwargs): ...
+    def post_process_panoptic_segmentation(self, *args, **kwargs): ...
+
+__all__ = ["OneFormerProcessor"]

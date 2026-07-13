@@ -1,0 +1,3 @@
+from typing import Any
+
+def get_module_from_name(module, tensor_name: str) -> tuple[Any, str]: ...

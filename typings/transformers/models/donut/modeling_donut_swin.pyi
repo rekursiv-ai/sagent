@@ -1,0 +1,220 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_donut_swin import DonutSwinConfig
+from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_utils import PreTrainedModel
+from ...utils import ModelOutput, auto_docstring
+
+"""PyTorch Donut Swin Transformer model.
+
+This implementation is identical to a regular Swin Transformer, without final layer norm on top of the final hidden
+states."""
+logger = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class DonutSwinEncoderOutput(ModelOutput):
+    last_hidden_state: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+    attentions: tuple[torch.FloatTensor, ...] | None = ...
+    reshaped_hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class DonutSwinModelOutput(ModelOutput):
+    last_hidden_state: torch.FloatTensor | None = ...
+    pooler_output: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+    attentions: tuple[torch.FloatTensor, ...] | None = ...
+    reshaped_hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class DonutSwinImageClassifierOutput(ModelOutput):
+    loss: torch.FloatTensor | None = ...
+    logits: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+    attentions: tuple[torch.FloatTensor, ...] | None = ...
+    reshaped_hidden_states: tuple[torch.FloatTensor, ...] | None = ...
+
+def window_partition(input_feature, window_size): ...
+def window_reverse(windows, window_size, height, width): ...
+
+class DonutSwinEmbeddings(nn.Module):
+    def __init__(self, config, use_mask_token=...) -> None: ...
+    def interpolate_pos_encoding(
+        self, embeddings: torch.Tensor, height: int, width: int
+    ) -> torch.Tensor: ...
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class DonutSwinPatchEmbeddings(nn.Module):
+    def __init__(self, config) -> None: ...
+    def maybe_pad(self, pixel_values, height, width):  # -> Tensor:
+        ...
+    def forward(
+        self, pixel_values: torch.FloatTensor | None
+    ) -> tuple[torch.Tensor, tuple[int]]: ...
+
+class DonutSwinPatchMerging(nn.Module):
+    def __init__(
+        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+    ) -> None: ...
+    def maybe_pad(self, input_feature, height, width):  # -> Tensor:
+        ...
+    def forward(
+        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+    ) -> torch.Tensor: ...
+
+def drop_path(
+    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+) -> torch.Tensor: ...
+
+class DonutSwinDropPath(nn.Module):
+    def __init__(self, drop_prob: float | None = ...) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def extra_repr(self) -> str: ...
+
+class DonutSwinSelfAttention(nn.Module):
+    def __init__(self, config, dim, num_heads, window_size) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class DonutSwinSelfOutput(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class DonutSwinAttention(nn.Module):
+    def __init__(self, config, dim, num_heads, window_size) -> None: ...
+    def prune_heads(self, heads):  # -> None:
+        ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class DonutSwinIntermediate(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class DonutSwinOutput(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class DonutSwinLayer(nn.Module):
+    def __init__(
+        self,
+        config,
+        dim,
+        input_resolution,
+        num_heads,
+        drop_path_rate=...,
+        shift_size=...,
+    ) -> None: ...
+    def set_shift_and_window_size(self, input_resolution):  # -> None:
+        ...
+    def get_attn_mask(self, height, width, dtype, device):  # -> Tensor | None:
+        ...
+    def maybe_pad(
+        self, hidden_states, height, width
+    ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
+        ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        always_partition: bool | None = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+class DonutSwinStage(GradientCheckpointingLayer):
+    def __init__(
+        self, config, dim, input_resolution, depth, num_heads, drop_path, downsample
+    ) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        always_partition: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class DonutSwinEncoder(nn.Module):
+    def __init__(self, config, grid_size) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        output_hidden_states_before_downsampling: bool | None = ...,
+        always_partition: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | DonutSwinEncoderOutput: ...
+
+@auto_docstring
+class DonutSwinPreTrainedModel(PreTrainedModel):
+    config: DonutSwinConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _no_split_modules = ...
+
+@auto_docstring
+class DonutSwinModel(DonutSwinPreTrainedModel):
+    def __init__(self, config, add_pooling_layer=..., use_mask_token=...) -> None: ...
+    def get_input_embeddings(self):  # -> DonutSwinPatchEmbeddings:
+        ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | DonutSwinModelOutput: ...
+
+@auto_docstring(custom_intro=...)
+class DonutSwinForImageClassification(DonutSwinPreTrainedModel):
+    def __init__(self, config) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        labels: torch.LongTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | DonutSwinImageClassifierOutput: ...
+
+__all__ = [
+    "DonutSwinForImageClassification",
+    "DonutSwinModel",
+    "DonutSwinPreTrainedModel",
+]

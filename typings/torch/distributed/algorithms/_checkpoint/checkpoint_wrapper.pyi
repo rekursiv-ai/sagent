@@ -1,0 +1,53 @@
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
+from enum import Enum
+from typing import Any
+
+from torch import nn
+
+import torch
+
+_CHECKPOINT_WRAPPED_MODULE = ...
+_CHECKPOINT_PREFIX = ...
+
+class CheckpointImpl(Enum):
+    REENTRANT = ...
+    NO_REENTRANT = ...
+
+class ActivationWrapper(torch.nn.Module, ABC):
+    def __init__(self, mod) -> None: ...
+    @abstractmethod
+    def forward(self, *args, **kwargs): ...
+    def __getattr__(self, name: str) -> Any: ...
+    def __getitem__(self, key: int) -> Any: ...
+    def named_parameters(
+        self, *args, **kwargs
+    ) -> Iterator[tuple[str, torch.nn.Parameter]]: ...
+
+class OffloadWrapper(ActivationWrapper):
+    def __init__(self, mod) -> None: ...
+    def forward(self, *args, **kwargs): ...
+
+class CheckpointWrapper(ActivationWrapper):
+    def __init__(
+        self,
+        mod: torch.nn.Module,
+        checkpoint_impl: CheckpointImpl = ...,
+        checkpoint_fn=...,
+        **checkpoint_fn_kwargs,
+    ) -> None: ...
+    def forward(self, *args, **kwargs) -> Any | None: ...
+
+def offload_wrapper(module: torch.nn.Module) -> torch.nn.Module: ...
+def checkpoint_wrapper(
+    module: torch.nn.Module,
+    checkpoint_impl: CheckpointImpl = ...,
+    checkpoint_fn=...,
+    **checkpoint_fn_kwargs,
+) -> torch.nn.Module: ...
+def apply_activation_checkpointing(
+    model,
+    checkpoint_wrapper_fn=...,
+    check_fn=...,
+    auto_wrap_policy: Callable[[nn.Module, bool, int], bool] | None = ...,
+) -> None: ...

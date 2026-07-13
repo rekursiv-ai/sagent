@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 from unittest.mock import patch
 
 import asyncio
@@ -105,28 +105,67 @@ def test_pacer_rejects_high_below_low() -> None:
         RandomUniformPacer(12.0, 6.0)
 
 
-def test_pacer_acquire_sleeps_a_draw_from_the_range() -> None:
+def test_pacer_first_acquire_does_not_sleep() -> None:
+    # A pacer spaces call N from call N-1; the FIRST call has no predecessor and
+    # must grant immediately (no sleep).
     clock = FakeClock()
     rng = _FixedRng(7.5)
     RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng)).acquire()
-    assert clock.sleeps == [7.5]
-    assert rng.calls == [(6.0, 12.0)]
+    assert clock.sleeps == []
 
 
-def test_pacer_acquire_async_sleeps_a_draw_from_the_range() -> None:
+def test_pacer_second_acquire_sleeps_remaining_interval() -> None:
+    # The 2nd acquire sleeps the drawn interval MINUS the time already elapsed
+    # since the 1st grant (work between calls counts toward the spacing).
+    clock = FakeClock()
+    rng = _FixedRng(7.5)
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    pacer.acquire()  # first: free
+    clock.now += 2.0  # 2s of work (an HTTP round-trip) elapses between calls
+    pacer.acquire()  # second: sleep 7.5 - 2.0 = 5.5
+    assert clock.sleeps == [5.5]
+
+
+def test_pacer_second_acquire_no_sleep_when_interval_already_elapsed() -> None:
+    # If more than the drawn interval already passed, the 2nd call is free.
+    clock = FakeClock()
+    rng = _FixedRng(7.5)
+    pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
+    pacer.acquire()
+    clock.now += 20.0  # far more than 7.5 elapsed
+    pacer.acquire()
+    assert clock.sleeps == []
+
+
+def test_pacer_async_first_free_then_paces() -> None:
     clock = FakeClock()
     rng = _FixedRng(9.0)
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock, rng=cast("random.Random", rng))
-    asyncio.run(pacer.acquire_async())
+    asyncio.run(pacer.acquire_async())  # first: free
+    asyncio.run(pacer.acquire_async())  # second: sleep full 9.0 (no time elapsed)
     assert clock.sleeps == [9.0]
 
 
+class _FrozenClock(FakeClock):
+    """A clock whose time never advances, so each paced sleep is the full draw."""
+
+    @override
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)  # record but do NOT advance `now`
+
+    @override
+    async def sleep_async(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+
 def test_pacer_draws_stay_within_bounds_across_many_acquires() -> None:
-    # Real RNG: every draw the pacer sleeps must fall in [low, high].
-    clock = FakeClock()
+    # Real RNG, time frozen between calls: every PACED sleep (call 2+) must fall
+    # in [low, high]. The first call is free (no sleep).
+    clock = _FrozenClock()
     pacer = RandomUniformPacer(6.0, 12.0, clock=clock)
     for _ in range(500):
         pacer.acquire()
+    assert len(clock.sleeps) == 499  # first call free, 499 paced
     assert all(6.0 <= s <= 12.0 for s in clock.sleeps)
     # And it is not a constant -- variance is the whole point.
     assert len(set(clock.sleeps)) > 1

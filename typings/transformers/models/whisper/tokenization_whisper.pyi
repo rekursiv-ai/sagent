@@ -1,0 +1,101 @@
+from functools import lru_cache
+
+from ...tokenization_utils import PreTrainedTokenizer
+
+"""Tokenization classes for Whisper."""
+VOCAB_FILES_NAMES = ...
+MAX_MODEL_INPUT_SIZES = ...
+
+def bytes_to_unicode():  # -> dict[int, str]:
+    ...
+
+logger = ...
+
+def get_pairs(word):  # -> set[Any]:
+    ...
+
+LANGUAGES = ...
+TO_LANGUAGE_CODE = ...
+TASK_IDS = ...
+
+class WhisperTokenizer(PreTrainedTokenizer):
+    vocab_files_names = ...
+    model_input_names = ...
+    def __init__(
+        self,
+        vocab_file,
+        merges_file,
+        normalizer_file=...,
+        errors=...,
+        unk_token=...,
+        bos_token=...,
+        eos_token=...,
+        pad_token=...,
+        add_prefix_space=...,
+        language=...,
+        task=...,
+        predict_timestamps=...,
+        **kwargs,
+    ) -> None: ...
+    @property
+    def vocab_size(self) -> int: ...
+    def get_vocab(self):  # -> dict[str, int]:
+        ...
+    def bpe(self, token):  # -> LiteralString:
+        ...
+    def set_prefix_tokens(
+        self,
+        language: str | None = ...,
+        task: str | None = ...,
+        predict_timestamps: bool | None = ...,
+    ):  # -> None:
+        ...
+    @property
+    def prefix_tokens(self) -> list[int]: ...
+    def build_inputs_with_special_tokens(
+        self, token_ids_0, token_ids_1=...
+    ) -> list[int]: ...
+    def get_special_tokens_mask(
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
+        already_has_special_tokens: bool = ...,
+    ) -> list[int]: ...
+    def normalize(self, text):  # -> str:
+        ...
+    @staticmethod
+    def basic_normalize(text, remove_diacritics=...):  # -> str:
+        ...
+    @lru_cache  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub
+    def timestamp_ids(self, time_precision=...):  # -> int | list[int]:
+        ...
+    def decode(
+        self,
+        token_ids,
+        skip_special_tokens: bool = ...,
+        clean_up_tokenization_spaces: bool | None = ...,
+        output_offsets: bool = ...,
+        time_precision: float = ...,
+        decode_with_timestamps: bool = ...,
+        normalize: bool = ...,
+        basic_normalize: bool = ...,
+        remove_diacritics: bool = ...,
+        **kwargs,
+    ) -> str: ...
+    def convert_tokens_to_string(self, tokens):  # -> str:
+        ...
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: str | None = ...
+    ) -> tuple[str]: ...
+    def prepare_for_tokenization(
+        self, text, is_split_into_words=..., **kwargs
+    ):  # -> tuple[str, dict[str, Any]]:
+        ...
+    def get_decoder_prompt_ids(
+        self, task=..., language=..., no_timestamps=...
+    ):  # -> list[tuple[int, int]]:
+        ...
+    def get_prompt_ids(self, text: str, return_tensors=...):  # -> Any | Encoding:
+        ...
+
+__all__ = ["WhisperTokenizer"]

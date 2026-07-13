@@ -1,0 +1,99 @@
+from ...configuration_utils import PretrainedConfig
+
+class EdgeTamVideoPromptEncoderConfig(PretrainedConfig):
+    base_config_key = ...
+    def __init__(
+        self,
+        hidden_size=...,
+        image_size=...,
+        patch_size=...,
+        mask_input_channels=...,
+        num_point_embeddings=...,
+        hidden_act=...,
+        layer_norm_eps=...,
+        scale=...,
+        **kwargs,
+    ) -> None: ...
+
+class EdgeTamVideoMaskDecoderConfig(PretrainedConfig):
+    base_config_key = ...
+    def __init__(
+        self,
+        hidden_size=...,
+        hidden_act=...,
+        mlp_dim=...,
+        num_hidden_layers=...,
+        num_attention_heads=...,
+        attention_downsample_rate=...,
+        num_multimask_outputs=...,
+        iou_head_depth=...,
+        iou_head_hidden_dim=...,
+        dynamic_multimask_via_stability=...,
+        dynamic_multimask_stability_delta=...,
+        dynamic_multimask_stability_thresh=...,
+        **kwargs,
+    ) -> None: ...
+
+class EdgeTamVideoConfig(PretrainedConfig):
+    model_type = ...
+    sub_configs = ...
+    def __init__(
+        self,
+        vision_config=...,
+        prompt_encoder_config=...,
+        mask_decoder_config=...,
+        initializer_range=...,
+        num_maskmem=...,
+        image_size=...,
+        sigmoid_scale_for_mem_enc=...,
+        sigmoid_bias_for_mem_enc=...,
+        enable_occlusion_spatial_embedding=...,
+        multimask_output_in_sam=...,
+        multimask_min_pt_num=...,
+        multimask_max_pt_num=...,
+        multimask_output_for_tracking=...,
+        max_object_pointers_in_encoder=...,
+        enable_temporal_pos_encoding_for_object_pointers=...,
+        memory_attention_hidden_size=...,
+        memory_attention_num_layers=...,
+        memory_attention_num_attention_heads=...,
+        memory_attention_downsample_rate=...,
+        memory_attention_mlp_hidden_size=...,
+        memory_attention_mlp_hidden_act=...,
+        memory_attention_dropout=...,
+        memory_attention_rope_theta=...,
+        memory_attention_rope_feat_sizes=...,
+        memory_attention_rope_k_sizes=...,
+        memory_attention_rope_dropout=...,
+        perceiver_resampler_num_latents=...,
+        perceiver_resampler_num_latents_2d=...,
+        perceiver_resampler_hidden_size=...,
+        perceiver_resampler_mlp_intermediate_size=...,
+        perceiver_resampler_num_attention_heads=...,
+        perceiver_resampler_attention_head_dim=...,
+        perceiver_resampler_num_layers=...,
+        perceiver_resampler_hidden_dropout=...,
+        perceiver_resampler_attention_dropout=...,
+        memory_encoder_hidden_size=...,
+        memory_encoder_output_channels=...,
+        mask_downsampler_embed_dim=...,
+        memory_fuser_intermediate_dim=...,
+        mask_downsampler_kernel_size=...,
+        mask_downsampler_stride=...,
+        mask_downsampler_padding=...,
+        mask_downsampler_total_stride=...,
+        mask_downsampler_hidden_act=...,
+        memory_fuser_num_layers=...,
+        memory_fuser_embed_dim=...,
+        memory_fuser_kernel_size=...,
+        memory_fuser_padding=...,
+        memory_fuser_layer_scale_init_value=...,
+        memory_fuser_hidden_act=...,
+        **kwargs,
+    ) -> None: ...
+
+__all__ = [
+    "EdgeTamVideoConfig",
+    "EdgeTamVideoMaskDecoderConfig",
+    "EdgeTamVideoPromptEncoderConfig",
+]

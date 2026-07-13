@@ -1,0 +1,16 @@
+import operator
+
+from torch.onnx._internal.exporter._torchlib._tensor_typing import TReal, TRealOrUInt8
+from torch.onnx._internal.exporter._torchlib._torchlib_registry import onnx_impl
+
+"""torch.ops.aten operators under the `core` module."""
+aten = ...
+
+@onnx_impl((aten.abs.default, operator.abs), trace_only=True)
+def aten_abs(self: TRealOrUInt8) -> TRealOrUInt8: ...
+@onnx_impl(aten.abs.default, complex=True, trace_only=True)
+def aten_abs_complex(self: TRealOrUInt8) -> TRealOrUInt8: ...
+@onnx_impl((aten.add.Tensor, aten.add.Scalar, operator.add), trace_only=True)
+def aten_add(self: TReal, other: TReal, alpha: float = ...) -> TReal: ...
+@onnx_impl((aten.add.Tensor, aten.add.Scalar), trace_only=True, complex=True)
+def aten_add_complex(self: TReal, other: TReal, alpha: float = ...) -> TReal: ...

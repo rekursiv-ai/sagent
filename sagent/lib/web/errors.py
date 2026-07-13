@@ -14,10 +14,11 @@ how to proceed. One class per kind of response we can identify from the body:
 
 - :class:`PuzzleChallengeError` -- a solve-a-puzzle page (reCAPTCHA/hCaptcha) or
   an interactive challenge form. Cleared by a human/solver completing a puzzle.
-- :class:`CloudflareChallengeError` -- Cloudflare's managed challenge (``cf_chl``
-  / ``challenge-platform`` / ``cf-ray``). Detectable as Cloudflare, but its mode
-  (checkbox / puzzle / invisible-JS) is decided client-side in the served JS, so
-  the mechanism is not further splittable from the body.
+- :class:`CloudflareChallengeError` -- Cloudflare's managed challenge, detected by
+  its challenge-only DOM markup (``#cf-challenge-running`` / ``#turnstile-wrapper``
+  / ``cf-turnstile`` / the ``/cdn-cgi/challenge-platform/`` script) or a block
+  ``<title>`` (``Just a moment...``). Its mode (checkbox / puzzle / invisible-JS)
+  is decided client-side in the served JS, so it is not further splittable.
 - :class:`GoogleSorryError` -- Google's ``/sorry`` interstitial: a refusal
   served when Google treats the traffic as automated, not a solve-this challenge.
 - :class:`GoogleJavascriptRequiredError` -- Google's ``enablejs`` shell: an
@@ -33,9 +34,22 @@ required" page).
 :func:`classify_bot_detection` returns the most specific class the body matches
 (or ``None`` for ordinary content); :func:`classify_http_error` uses it at the
 fetch boundary to raise the matching :class:`BotDetectionError` subclass.
+
+Its Cloudflare challenge markers (the challenge-only DOM selectors and the block
+``<title>`` values) are ported from FlareSolverr's ``CHALLENGE_SELECTORS`` /
+``CHALLENGE_TITLES`` / ``ACCESS_DENIED_TITLES`` -- the same STRUCTURAL model (a
+challenge is challenge-only markup or a block title, never a keyword in body
+prose), which is why a real page that merely mentions "turnstile"/"just a
+moment" is not misclassified.
+
+    FlareSolverr -- MIT License, Copyright (c) 2025 Diego Heras (ngosang).
+    https://github.com/FlareSolverr/FlareSolverr
+    src/flaresolverr_service.py @ 237faf1730e7de4d126532a75b9ac16bd5f7539b
 """
 
 from __future__ import annotations
+
+import re
 
 
 __all__ = [
@@ -207,6 +221,20 @@ def _text(content: str | bytes) -> str:
     return decoded.lower()
 
 
+_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.DOTALL)
+
+
+def _page_title(text: str) -> str | None:
+    """The stripped text of the first ``<title>`` in ``text`` (already lowered).
+
+    Title matching (not body-substring) is how a block ``<title>`` is told from a
+    real page that merely mentions the phrase -- FlareSolverr checks ``<title>``
+    exactly for the same reason.
+    """
+    match = _TITLE_RE.search(text)
+    return match.group(1).strip() if match is not None else None
+
+
 def classify_bot_detection(
     content: str | bytes,
     *,
@@ -219,18 +247,38 @@ def classify_bot_detection(
         "hcaptcha",
         "data-sitekey",
     ),
+    # STRUCTURAL Cloudflare challenge markers: id/class/name tokens the challenge
+    # interstitial injects, which never appear in ordinary page prose. Ported
+    # from FlareSolverr's CHALLENGE_SELECTORS (MIT; see module note). Matched as
+    # substrings because each is a distinctive HTML attribute value -- the bare
+    # word "turnstile" is DELIBERATELY absent (it appears in real content, e.g. a
+    # README about Turnstile); only the widget markup ``cf-turnstile`` /
+    # ``cf-turnstile-response`` / ``turnstile-wrapper`` counts.
     cloudflare: tuple[str, ...] = (
         "cf_chl",
         "cf-challenge",
-        "just a moment",
+        "cf-challenge-running",
+        "cf-please-wait",
+        "challenge-spinner",
+        "trk_jschal_js",
+        "turnstile-wrapper",
         "cf-turnstile",
-        "turnstile",
+        "cf-turnstile-response",
     ),
     # Cloudflare's ambient "JavaScript Detections" beacon
-    # (``/cdn-cgi/challenge-platform/scripts/jsd/main.js``) is injected into
-    # EVERY proxied page, served 200s included -- so it corroborates a block only
-    # on an ERROR body, never on a success body (mirrors ``puzzle_widget``).
-    cloudflare_ambient: tuple[str, ...] = ("challenge-platform",),
+    # (``/cdn-cgi/challenge-platform/scripts/jsd/main.js``) is injected into EVERY
+    # proxied page, 200s included, so it corroborates a block ONLY on an error
+    # body -- never a success body (a real article carries it too).
+    cloudflare_ambient: tuple[str, ...] = ("/cdn-cgi/challenge-platform/",),
+    # TITLE markers: matched against the page <title> ONLY (not body prose), per
+    # FlareSolverr's CHALLENGE_TITLES/ACCESS_DENIED_TITLES. A real page whose body
+    # merely contains "just a moment" or "attention required" is not a challenge;
+    # the interstitial's whole <title> IS one of these.
+    cloudflare_titles: tuple[str, ...] = (
+        "just a moment...",
+        "attention required! | cloudflare",
+        "access denied",
+    ),
     # ``google.com/sorry`` (not a bare ``/sorry/``): the host qualifier avoids
     # misclassifying a benign page that merely links to its own apology path.
     google_sorry: tuple[str, ...] = ("google.com/sorry",),
@@ -238,63 +286,83 @@ def classify_bot_detection(
     # (not a bare ``enablejs``) avoids misclassifying a page that merely mentions
     # enabling JavaScript.
     google_enablejs: tuple[str, ...] = ("/httpservice/retry/enablejs",),
-    generic: tuple[str, ...] = (
-        "checking your browser",
-        "attention required",
-        "security check required",
-        "unusual activity from your network",
-    ),
 ) -> type[BotDetectionError] | None:
     """Return the block class ``content`` matches, or ``None`` if it is not one.
 
     Returns the most specific class the body matches (puzzle, Cloudflare, or
-    Google /sorry), else the root :class:`BotDetectionError` when the response is
-    clearly a block but the kind is indeterminate. ``None`` for ordinary content.
+    Google /sorry), or ``None`` for ordinary content. A prose-only block with no
+    structural marker is not classifiable from the body alone -- the fetch
+    boundary catches it by error status + Cloudflare-front headers instead (see
+    :func:`classify_http_error`).
 
     The marker groups are load-bearing keyword defaults on this function (NOT
     module state) so the one function that consumes them owns them, and a caller
     can retune any group.
+
+    Detection mirrors FlareSolverr's STRUCTURAL model (MIT-licensed; ported --
+    see the module-level note): a challenge is identified by challenge-only DOM
+    markup (id/class/name tokens the interstitial injects) or by the page
+    ``<title>`` being a known block title -- NOT by a challenge-related WORD
+    appearing anywhere in body prose. This is why a real 405 KB page whose
+    content merely mentions "turnstile" or "just a moment" is ordinary content:
+    it carries no challenge DOM markup and its ``<title>`` is its own.
 
     Args:
       content: The response body.
       on_success_body: Set when classifying a body that arrived with a SUCCESS
         (HTTP 200) status, e.g. a reader-proxy 200. In that mode an embedded
         CAPTCHA WIDGET is NOT a block (a legitimate login/contact page hosts
-        one), so only ``puzzle_page`` signatures count. On an error response
-        leave it False (a widget in a 403 body IS the block).
+        one), so only whole-page/structural signatures count. On an error
+        response leave it False (a widget in a 403 body IS the block).
       puzzle_page: Whole-page challenge signatures (the page IS a challenge:
         DuckDuckGo ``challenge-form``, Scholar ``gs_captcha_f``).
       puzzle_widget: Embeddable CAPTCHA widgets a legit page hosts; a block only
         on an ERROR body (see ``on_success_body``).
-      cloudflare: Cloudflare managed-challenge signatures (the interstitial page
-        itself; always a block).
-      cloudflare_ambient: Cloudflare's telemetry beacon, injected into normal
-        served pages too; a block only on an ERROR body (see ``on_success_body``).
+      cloudflare: Structural Cloudflare challenge markers (challenge-only DOM
+        id/class/name tokens); always a block, on any status.
+      cloudflare_titles: Whole-page block ``<title>`` values (matched against the
+        page title only, never body prose).
+      cloudflare_ambient: Cloudflare's JS-Detections beacon path, present on
+        normal pages too; a block only on an ERROR body (see ``on_success_body``).
       google_sorry: Google ``/sorry`` refusal.
       google_enablejs: Google ``enablejs`` JavaScript-required shell.
-      generic: The response is clearly a block but the kind is indeterminate.
 
     """
     text = _text(content)
-    # A whole-page puzzle challenge (the page IS a challenge form) is
-    # unambiguous, so it wins first. Then Cloudflare -- BEFORE the puzzle
-    # WIDGET markers, because real Turnstile markup carries ``data-sitekey``
-    # (a widget marker) and must classify as Cloudflare (run-JS remedy), not a
-    # solve-a-CAPTCHA puzzle. Google /sorry sits between as its own refusal.
-    if any(m in text for m in puzzle_page):
-        return PuzzleChallengeError
+    title = _page_title(text)
+    # Google's own refusals are host/path-qualified (unambiguous), so they win
+    # first on any status. Then the page <title>: a whole-page block title is
+    # sound on ANY status -- a real page's title is its own, and a reader-proxy
+    # 200 of a challenge still carries "Just a moment...".
     if any(m in text for m in google_sorry):
         return GoogleSorryError
     if any(m in text for m in google_enablejs):
         return GoogleJavascriptRequiredError
-    if any(m in text for m in cloudflare):
+    if title is not None and any(title.startswith(t) for t in cloudflare_titles):
         return CloudflareChallengeError
-    if not on_success_body and any(m in text for m in cloudflare_ambient):
-        return CloudflareChallengeError
-    if not on_success_body and any(m in text for m in puzzle_widget):
+    # A whole-page challenge FORM (the page IS the challenge: DuckDuckGo's
+    # ``challenge-form``, Scholar's ``gs_captcha_f``) is a specific form id, not a
+    # token a page documents in passing -- sound on any status.
+    if any(m in text for m in puzzle_page):
         return PuzzleChallengeError
-    if any(m in text for m in generic):
-        return BotDetectionError
+    # Everything below matches challenge MARKUP as a substring, which a page that
+    # merely DOCUMENTS the markup (a wiki about Cloudflare selectors, a README)
+    # also contains. On a SUCCESS body that ambiguity is unacceptable -- a real
+    # challenge arrives as an error status (403/429/503) or as the title above,
+    # so these fire only on an error body (``on_success_body`` False). This
+    # mirrors FlareSolverr, which queries the live DOM (a doc page has no such
+    # ELEMENT); lacking a DOM here, restricting to error bodies is the sound
+    # approximation.
+    if not on_success_body:
+        # Cloudflare BEFORE the puzzle widget: real Turnstile markup carries
+        # ``data-sitekey`` (a widget marker) but its remedy is run-JS/rotate-IP,
+        # not solve-a-CAPTCHA, so it must classify as Cloudflare.
+        if any(m in text for m in cloudflare):
+            return CloudflareChallengeError
+        if any(m in text for m in cloudflare_ambient):
+            return CloudflareChallengeError
+        if any(m in text for m in puzzle_widget):
+            return PuzzleChallengeError
     return None
 
 

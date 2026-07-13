@@ -1,0 +1,140 @@
+from torch import nn
+
+import torch
+
+from .configuration_ijepa import IJepaConfig
+from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPooling,
+    ImageClassifierOutput,
+)
+from ...modeling_utils import PreTrainedModel
+from ...processing_utils import Unpack
+from ...utils import TransformersKwargs, auto_docstring
+from ...utils.generic import can_return_tuple, check_model_inputs
+
+class IJepaPatchEmbeddings(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+    ) -> torch.Tensor: ...
+
+class IJepaEmbeddings(nn.Module):
+    def __init__(self, config: IJepaConfig, use_mask_token: bool = ...) -> None: ...
+    def interpolate_pos_encoding(
+        self, embeddings: torch.Tensor, height: int, width: int
+    ) -> torch.Tensor: ...
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+    ) -> torch.Tensor: ...
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = ...,
+    **kwargs,
+):  # -> tuple[Tensor, Tensor]:
+    ...
+
+class IJepaSelfAttention(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+class IJepaSelfOutput(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class IJepaAttention(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def prune_heads(self, heads: set[int]):  # -> None:
+        ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> torch.Tensor: ...
+
+class IJepaIntermediate(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class IJepaOutput(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class IJepaLayer(GradientCheckpointingLayer):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> torch.Tensor: ...
+
+@auto_docstring
+class IJepaPreTrainedModel(PreTrainedModel):
+    config: IJepaConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _no_split_modules = ...
+    _supports_sdpa = ...
+    _supports_flash_attn = ...
+    _supports_flex_attn = ...
+    _supports_attention_backend = ...
+    _can_record_outputs = ...
+
+class IJepaEncoder(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> BaseModelOutput: ...
+
+class IJepaPooler(nn.Module):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+@auto_docstring
+class IJepaModel(IJepaPreTrainedModel):
+    def __init__(
+        self,
+        config: IJepaConfig,
+        add_pooling_layer: bool = ...,
+        use_mask_token: bool = ...,
+    ) -> None: ...
+    def get_input_embeddings(self) -> IJepaPatchEmbeddings: ...
+    @check_model_inputs
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool | None = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPooling: ...
+
+@auto_docstring(custom_intro=...)
+class IJepaForImageClassification(IJepaPreTrainedModel):
+    def __init__(self, config: IJepaConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        labels: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool | None = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> ImageClassifierOutput: ...
+
+__all__ = ["IJepaForImageClassification", "IJepaModel", "IJepaPreTrainedModel"]

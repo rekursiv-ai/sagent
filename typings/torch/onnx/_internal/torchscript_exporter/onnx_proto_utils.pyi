@@ -1,0 +1,9 @@
+from typing import Any
+
+"""Utilities for manipulating the onnx and onnx-script dependencies and ONNX proto."""
+
+def export_as_test_case(
+    model_bytes: bytes, inputs_data, outputs_data, name: str, dir: str
+) -> str: ...
+def load_test_case(dir: str) -> tuple[bytes, Any, Any]: ...
+def export_data(data, value_info_proto, f: str) -> None: ...

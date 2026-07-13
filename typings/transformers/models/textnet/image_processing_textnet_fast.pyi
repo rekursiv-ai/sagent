@@ -1,0 +1,49 @@
+from torchvision.transforms.v2 import functional as F
+
+import torch
+
+from ...image_processing_utils import BatchFeature
+from ...image_processing_utils_fast import (
+    BaseImageProcessorFast,
+    DefaultFastImageProcessorKwargs,
+)
+from ...image_utils import ImageInput, SizeDict
+from ...processing_utils import Unpack
+from ...utils import auto_docstring
+
+"""Fast Image processor class for TextNet."""
+
+class TextNetFastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
+    size_divisor: int | None
+
+@auto_docstring
+class TextNetImageProcessorFast(BaseImageProcessorFast):
+    resample = ...
+    image_mean = ...
+    image_std = ...
+    size = ...
+    default_to_square = ...
+    crop_size = ...
+    do_resize = ...
+    do_center_crop = ...
+    do_rescale = ...
+    do_normalize = ...
+    do_convert_rgb = ...
+    size_divisor = ...
+    valid_kwargs = TextNetFastImageProcessorKwargs
+    def __init__(self, **kwargs: Unpack[TextNetFastImageProcessorKwargs]) -> None: ...
+    @auto_docstring
+    def preprocess(
+        self, images: ImageInput, **kwargs: Unpack[TextNetFastImageProcessorKwargs]
+    ) -> BatchFeature: ...
+    def resize(
+        self,
+        image: torch.Tensor,
+        size: SizeDict,
+        interpolation: F.InterpolationMode | None = ...,
+        antialias: bool = ...,
+        size_divisor: int = ...,
+        **kwargs,
+    ) -> torch.Tensor: ...
+
+__all__ = ["TextNetImageProcessorFast"]

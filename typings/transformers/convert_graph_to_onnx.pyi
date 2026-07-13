@@ -1,0 +1,55 @@
+from argparse import ArgumentParser
+from pathlib import Path
+
+from packaging.version import Version
+from transformers.pipelines import Pipeline
+from transformers.tokenization_utils import BatchEncoding
+
+ORT_QUANTIZE_MINIMUM_VERSION = ...
+SUPPORTED_PIPELINES = ...
+
+class OnnxConverterArgumentParser(ArgumentParser):
+    def __init__(self) -> None: ...
+
+def generate_identified_filename(filename: Path, identifier: str) -> Path: ...
+def check_onnxruntime_requirements(minimum_version: Version):  # -> None:
+    ...
+def ensure_valid_input(
+    model, tokens, input_names
+):  # -> tuple[list[Any], tuple[Any, ...]]:
+    ...
+def infer_shapes(
+    nlp: Pipeline, framework: str
+) -> tuple[list[str], list[str], dict, BatchEncoding]: ...
+def load_graph_from_args(
+    pipeline_name: str,
+    framework: str,
+    model: str,
+    tokenizer: str | None = ...,
+    **models_kwargs,
+) -> Pipeline: ...
+def convert_pytorch(
+    nlp: Pipeline, opset: int, output: Path, use_external_format: bool
+):  # -> None:
+    ...
+def convert_tensorflow(nlp: Pipeline, opset: int, output: Path):  # -> None:
+    ...
+def convert(
+    framework: str,
+    model: str,
+    output: Path,
+    opset: int,
+    tokenizer: str | None = ...,
+    use_external_format: bool = ...,
+    pipeline_name: str = ...,
+    **model_kwargs,
+):  # -> None:
+    ...
+def optimize(onnx_model_path: Path) -> Path: ...
+def quantize(onnx_model_path: Path) -> Path: ...
+def verify(path: Path):  # -> None:
+    ...
+
+if __name__ == "__main__":
+    parser = ...
+    args = ...

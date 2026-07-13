@@ -1,0 +1,6 @@
+logger = ...
+
+class MMBTConfig:
+    def __init__(self, config, num_labels=..., modal_hidden_size=...) -> None: ...
+
+__all__ = ["MMBTConfig"]

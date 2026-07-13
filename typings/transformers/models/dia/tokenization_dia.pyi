@@ -1,0 +1,26 @@
+from ...tokenization_utils import PreTrainedTokenizer
+
+"""Tokenization class for Dia."""
+logger = ...
+
+class DiaTokenizer(PreTrainedTokenizer):
+    model_input_names = ...
+    def __init__(
+        self,
+        pad_token: str | None = ...,
+        unk_token: str | None = ...,
+        max_length: int | None = ...,
+        offset: int = ...,
+        **kwargs,
+    ) -> None: ...
+    @property
+    def vocab_size(self):  # -> int:
+        ...
+    def get_vocab(self):  # -> dict[str, int]:
+        ...
+    def convert_tokens_to_string(self, tokens: list[str]) -> str: ...
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: str | None = ...
+    ) -> tuple[str]: ...
+
+__all__ = ["DiaTokenizer"]

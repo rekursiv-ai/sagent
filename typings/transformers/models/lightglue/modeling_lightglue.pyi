@@ -1,0 +1,126 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_lightglue import LightGlueConfig
+from ...modeling_flash_attention_utils import FlashAttentionKwargs
+from ...modeling_utils import PreTrainedModel
+from ...processing_utils import Unpack
+from ...utils import ModelOutput, TransformersKwargs, auto_docstring
+from ...utils.deprecation import deprecate_kwarg
+from ...utils.generic import can_return_tuple
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class LightGlueKeypointMatchingOutput(ModelOutput):
+    loss: torch.FloatTensor | None = ...
+    matches: torch.FloatTensor | None = ...
+    matching_scores: torch.FloatTensor | None = ...
+    keypoints: torch.FloatTensor | None = ...
+    prune: torch.IntTensor | None = ...
+    mask: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+
+class LightGluePositionalEncoder(nn.Module):
+    def __init__(self, config: LightGlueConfig) -> None: ...
+    def forward(
+        self, keypoints: torch.Tensor, output_hidden_states: bool | None = ...
+    ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
+
+def rotate_half(x):  # -> Tensor:
+    ...
+def apply_rotary_pos_emb(
+    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+):  # -> tuple[Any, Any]:
+    ...
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = ...,
+    **kwargs: Unpack[TransformersKwargs],
+):  # -> tuple[Tensor, Tensor]:
+    ...
+
+class LightGlueAttention(nn.Module):
+    def __init__(self, config: LightGlueConfig, layer_idx: int) -> None: ...
+    @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
+        attention_mask: torch.Tensor | None = ...,
+        encoder_hidden_states: torch.Tensor | None = ...,
+        encoder_attention_mask: torch.Tensor | None = ...,
+        **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+
+class LightGlueMLP(nn.Module):
+    def __init__(self, config: LightGlueConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class LightGlueTransformerLayer(nn.Module):
+    def __init__(self, config: LightGlueConfig, layer_idx: int) -> None: ...
+    def forward(
+        self,
+        descriptors: torch.Tensor,
+        keypoints: torch.Tensor,
+        attention_mask: torch.Tensor,
+        output_hidden_states: bool | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[
+        torch.Tensor, tuple[torch.Tensor] | None, tuple[torch.Tensor] | None
+    ]: ...
+
+def sigmoid_log_double_softmax(
+    similarity: torch.Tensor, matchability0: torch.Tensor, matchability1: torch.Tensor
+) -> torch.Tensor: ...
+
+class LightGlueMatchAssignmentLayer(nn.Module):
+    def __init__(self, config: LightGlueConfig) -> None: ...
+    def forward(
+        self, descriptors: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor: ...
+    def get_matchability(self, descriptors: torch.Tensor) -> torch.Tensor: ...
+
+class LightGlueTokenConfidenceLayer(nn.Module):
+    def __init__(self, config: LightGlueConfig) -> None: ...
+    def forward(self, descriptors: torch.Tensor) -> torch.Tensor: ...
+
+@auto_docstring
+class LightGluePreTrainedModel(PreTrainedModel):
+    config: LightGlueConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _supports_flash_attn = ...
+    _supports_sdpa = ...
+
+def get_matches_from_scores(
+    scores: torch.Tensor, threshold: float
+) -> tuple[torch.Tensor, torch.Tensor]: ...
+def normalize_keypoints(
+    keypoints: torch.Tensor, height: int, width: int
+) -> torch.Tensor: ...
+
+@auto_docstring(custom_intro=...)
+class LightGlueForKeypointMatching(LightGluePreTrainedModel):
+    def __init__(self, config: LightGlueConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        labels: torch.LongTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+    ) -> tuple | LightGlueKeypointMatchingOutput: ...
+
+__all__ = ["LightGlueForKeypointMatching", "LightGluePreTrainedModel"]

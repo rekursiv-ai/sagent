@@ -1,0 +1,109 @@
+from torch import nn
+
+import torch
+
+from .configuration_convnext import ConvNextConfig
+from ...modeling_outputs import (
+    BackboneOutput,
+    BaseModelOutputWithNoAttention,
+    BaseModelOutputWithPoolingAndNoAttention,
+    ImageClassifierOutputWithNoAttention,
+)
+from ...modeling_utils import PreTrainedModel
+from ...utils import auto_docstring
+from ...utils.backbone_utils import BackboneMixin
+from ...utils.generic import can_return_tuple
+
+"""PyTorch ConvNext model."""
+logger = ...
+
+def drop_path(
+    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+) -> torch.Tensor: ...
+
+class ConvNextDropPath(nn.Module):
+    def __init__(self, drop_prob: float | None = ...) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def extra_repr(self) -> str: ...
+
+class ConvNextLayerNorm(nn.LayerNorm):
+    def __init__(
+        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+    ) -> None: ...
+    def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+
+class ConvNextEmbeddings(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor: ...
+
+class ConvNextLayer(nn.Module):
+    def __init__(self, config, dim, drop_path=...) -> None: ...
+    def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+
+class ConvNextStage(nn.Module):
+    def __init__(
+        self,
+        config,
+        in_channels,
+        out_channels,
+        kernel_size=...,
+        stride=...,
+        depth=...,
+        drop_path_rates=...,
+    ) -> None: ...
+    def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+
+class ConvNextEncoder(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, output_hidden_states: bool | None = ...
+    ) -> BaseModelOutputWithNoAttention: ...
+
+@auto_docstring
+class ConvNextPreTrainedModel(PreTrainedModel):
+    config: ConvNextConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    _no_split_modules = ...
+    _can_record_outputs = ...
+
+@auto_docstring
+class ConvNextModel(ConvNextPreTrainedModel):
+    def __init__(self, config) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        output_hidden_states: bool | None = ...,
+    ) -> BaseModelOutputWithPoolingAndNoAttention: ...
+
+@auto_docstring(custom_intro=...)
+class ConvNextForImageClassification(ConvNextPreTrainedModel):
+    accepts_loss_kwargs = ...
+    def __init__(self, config) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        labels: torch.LongTensor | None = ...,
+        **kwargs,
+    ) -> ImageClassifierOutputWithNoAttention: ...
+
+@auto_docstring(custom_intro=...)
+class ConvNextBackbone(ConvNextPreTrainedModel, BackboneMixin):
+    has_attentions = ...
+    def __init__(self, config) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self, pixel_values: torch.Tensor, output_hidden_states: bool | None = ...
+    ) -> BackboneOutput: ...
+
+__all__ = [
+    "ConvNextBackbone",
+    "ConvNextForImageClassification",
+    "ConvNextModel",
+    "ConvNextPreTrainedModel",
+]

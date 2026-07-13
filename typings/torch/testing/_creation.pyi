@@ -1,0 +1,23 @@
+import torch
+
+"""
+This module contains tensor creation utilities.
+"""
+_INTEGRAL_TYPES = ...
+_FLOATING_TYPES = ...
+_FLOATING_8BIT_TYPES = ...
+_COMPLEX_TYPES = ...
+_BOOLEAN_OR_INTEGRAL_TYPES = ...
+_FLOATING_OR_COMPLEX_TYPES = ...
+
+def make_tensor(
+    *shape: int | torch.Size | list[int] | tuple[int, ...],
+    dtype: torch.dtype,
+    device: str | torch.device,
+    low: float | None = ...,
+    high: float | None = ...,
+    requires_grad: bool = ...,
+    noncontiguous: bool = ...,
+    exclude_zero: bool = ...,
+    memory_format: torch.memory_format | None = ...,
+) -> torch.Tensor: ...
