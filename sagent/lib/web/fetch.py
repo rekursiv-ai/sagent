@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Literal, cast, override
 from urllib.parse import unquote, urlencode, urljoin, urlparse
 
 import base64
@@ -54,6 +54,11 @@ from sagent.lib.web.chrome_headers import (
     impersonate_version_platform,
 )
 from sagent.lib.web.errors import BotDetectionError, FetchError, classify_http_error
+from sagent.lib.web.fetch_zendriver import (
+    default_profile_dir,
+    fetch_zendriver,
+    shutdown_browsers,
+)
 from sagent.lib.web.profile import (
     Profile,
     ProfileStore,
@@ -86,6 +91,7 @@ __all__ = [
     "egress_ip",
     "fetch",
     "last_known_egress_ip",
+    "on_egress_rotation",
     "set_last_egress_ip",
 ]
 
@@ -219,8 +225,15 @@ class RequestParams:
         Observational; must not raise.
       validated_hosts: Resolver returning a validated IP per hostname; receives
         the bare hostname and must resolve it to the same IP for the call.
-      use_curl: Use the curl_cffi transport; ``False`` selects the stdlib
-        reference path.
+      backend: Transport backend. ``"curl"`` (default) is the curl_cffi
+        impersonated path; ``"stdlib"`` is the http.client reference path;
+        ``"zendriver"`` drives a real headless Chrome via
+        :mod:`sagent.lib.web.fetch_zendriver` (opt-in, for JS/challenge-walled
+        pages); ``"curl-then-zendriver"`` tries curl first and falls back to zendriver ONLY when
+        curl is bot-blocked (a :class:`BotDetectionError`) -- a non-block failure
+        propagates unchanged. ``"zendriver"`` and ``"curl-then-zendriver"`` are GET-only,
+        header-level-headers-free, and cannot honor ``validated_hosts`` (the
+        browser leg has no per-call connect-IP pin), so those are rejected.
 
     """
 
@@ -237,7 +250,7 @@ class RequestParams:
     on_redirect: Callable[[str], None] | None = None
     on_response: Callable[[int, dict[str, str]], None] | None = None
     validated_hosts: ValidatedHosts | None = None
-    use_curl: bool = True
+    backend: Literal["curl", "stdlib", "zendriver", "curl-then-zendriver"] = "curl"
 
     def __post_init__(self) -> None:
         """Reject contradictory or out-of-range parameters at construction."""
@@ -249,6 +262,26 @@ class RequestParams:
             raise ValueError(f"'max_redirects' must be >= 0, got {self.max_redirects}.")
         if self.timeout_sec <= 0:
             raise ValueError(f"'timeout_sec' must be > 0, got {self.timeout_sec}.")
+        if self.backend in ("zendriver", "curl-then-zendriver"):
+            # A browser owns cookies, redirects, TLS, and header order itself and
+            # exposes no per-hop response headers or per-call connect-IP pin, so
+            # the header-level knobs are meaningless (or an SSRF footgun) there.
+            # "curl-then-zendriver" may fall back to the browser, so it carries
+            # the SAME limits: a POST or SSRF-pinned fetch has no browser leg.
+            if self.method != "GET":
+                raise ValueError(
+                    f"The {self.backend} backend supports only GET requests."
+                )
+            if self.data is not None or self.json is not None:
+                raise ValueError(
+                    f"The {self.backend} backend cannot send a request body."
+                )
+            if self.validated_hosts is not None:
+                raise ValueError(
+                    f"The {self.backend} backend cannot honor 'validated_hosts' "
+                    "(no per-call connect-IP pin); use the curl or stdlib backend "
+                    "for SSRF-validated fetches."
+                )
 
     def backoff_delay(self, attempt: int, headers: dict[str, str]) -> float:
         """Retry backoff in seconds for ``attempt``, honoring any ``Retry-After``.
@@ -415,6 +448,21 @@ def _fetch_with_identity(
     caller_cookies: dict[str, str] | None,
 ) -> bytes:
     """Send ``request`` under the stored per-``(egress, domain)`` identity."""
+    if request.params.backend == "zendriver":
+        return _send_via_zendriver(request)
+    if request.params.backend == "curl-then-zendriver":
+        # Curl first (fast, cheap); fall back to the real browser ONLY when curl
+        # is bot-blocked -- the one case the browser can clear that curl cannot.
+        # A non-block failure (404, timeout) propagates: the browser would not
+        # help and must not silently pay Chrome's launch cost.
+        try:
+            return _fetch_with_identity(
+                replace(request, params=replace(request.params, backend="curl")),
+                caller_headers=caller_headers,
+                caller_cookies=caller_cookies,
+            )
+        except BotDetectionError:
+            return _send_via_zendriver(request)
     domain = request.domain
     if not domain:
         return _send_as(request, None, None, caller_headers, caller_cookies)
@@ -463,7 +511,7 @@ def _send_as(
     # override it and make the two disagree (a bot tell). Let impersonate own the
     # UA on curl; only the stdlib reference path (no impersonation) needs one.
     seeded_headers: dict[str, str] = {**(caller_headers or {})}
-    if not request.params.use_curl:
+    if request.params.backend == "stdlib":
         seeded_headers = {"User-Agent": ua, **seeded_headers}
     captured: dict[str, str] = {}
 
@@ -482,7 +530,7 @@ def _send_as(
 
     curl = (
         curl_session(egress, request.domain, impersonate)
-        if egress is not None and request.params.use_curl
+        if egress is not None and request.params.backend == "curl"
         else None
     )
     # Single cookie source to avoid a duplicated Cookie header: when a curl
@@ -514,6 +562,42 @@ def _send_as(
     elif captured:
         store.update_cookies(egress, request.domain, captured)
     return body
+
+
+def _send_via_zendriver(request: _Request) -> bytes:
+    """Fetch ``request`` through the headless-Chrome backend, warming the session.
+
+    Reuses the identity layer's egress resolution and ProfileStore so a browser
+    fetch and a curl fetch on the same ``(egress, domain)`` share cookies. The
+    cookies the browser acquired are folded back through the per-hop observer, so
+    the :class:`FetchSession` the caller receives is warm and a following curl
+    fetch reuses them.
+    """
+    egress = egress_ip(cache=True) or egress_ip(cache=False)
+    result = fetch_zendriver(
+        request.url,
+        profile_dir=default_profile_dir(),
+        egress=egress or "",
+        timeout_sec=request.params.timeout_sec,
+        on_redirect=request.params.on_redirect,
+    )
+    if result.cookies and request.observer is not None:
+        # Fold the harvested jar into the returned session (and the caller's
+        # on_response) as a synthesized Set-Cookie for this origin, so the
+        # session warms exactly as a header-level backend's would.
+        synthesized = "\n".join(f"{k}={v}" for k, v in result.cookies.items())
+        request.observer(200, {"set-cookie": synthesized}, request.url)
+    if egress is not None and request.domain and result.cookies:
+        store = ProfileStore.shared()
+        if store.load(egress, request.domain) is None:
+            store.save(
+                egress,
+                request.domain,
+                Profile(ua="", cookies=dict(result.cookies)),
+            )
+        else:
+            store.update_cookies(egress, request.domain, result.cookies)
+    return result.body
 
 
 # Live curl_cffi Sessions keyed by identity, so a session reuses one connection
@@ -643,19 +727,51 @@ def last_known_egress_ip() -> str | None:
         return _last_egress_ip
 
 
+# Callbacks fired when the egress rolls, so any transport that pools live,
+# egress-keyed resources (open connections, running browsers) can invalidate
+# them WITHOUT fetch.py naming that transport. fetch.py tears down its OWN curl
+# pool inline; other backends (e.g. the zendriver browser pool) register here.
+# config-globals: ignore -- observer registry, not a tunable.
+_on_egress_rotation: list[Callable[[str | None], None]] = []
+
+
+def on_egress_rotation(callback: Callable[[str | None], None]) -> None:
+    """Register ``callback`` to run when the egress IP rolls (a VPN change).
+
+    Called with the new IP whenever :func:`set_last_egress_ip` observes a change.
+    A backend that pools egress-keyed live resources registers its teardown here,
+    so this module never has to know that backend exists to invalidate it.
+    """
+    _on_egress_rotation.append(callback)
+
+
 def set_last_egress_ip(ip: str | None) -> None:
     """Set the process-wide last-known egress IP (e.g. after a known VPN roll).
 
     A changed IP means the exit rolled, so every pooled Session for a DIFFERENT
     egress is now dead (its connection went out the old exit) -- close and drop
-    them, leaving only the new egress's sessions.
+    them, leaving only the new egress's sessions. Registered rotation callbacks
+    (:func:`on_egress_rotation`) then fire so other backends invalidate their own
+    egress-keyed pools.
     """
     global _last_egress_ip  # noqa: PLW0603 -- memoize shared observed state.
     with _egress_lock:
-        if ip != _last_egress_ip:
+        rolled = ip != _last_egress_ip
+        if rolled:
             for key in [k for k in _curl_sessions if k[0] != ip]:
                 _curl_sessions.pop(key).close()
         _last_egress_ip = ip
+    if rolled:
+        for callback in _on_egress_rotation:
+            callback(ip)
+
+
+# The zendriver browser pool is egress-keyed live state (running Chromes), so a
+# roll invalidates it exactly like the curl pool. shutdown_browsers is a no-op
+# when no pool exists, so this subscription is free until a browser fetch runs.
+# Registered via the rotation hook so the teardown mechanism is uniform, not a
+# special case wired into set_last_egress_ip.
+on_egress_rotation(lambda _ip: shutdown_browsers())
 
 
 def egress_ip(
@@ -762,7 +878,7 @@ def _fetch_once(
         extra=headers,
         raw_headers=raw_headers,
         impersonate=impersonate,
-        use_curl=params.use_curl,
+        use_curl=params.backend == "curl",
         accept_ch=accept_ch,
     )
     if basic_auth is not None:
@@ -779,7 +895,7 @@ def _fetch_once(
     if cookie_parts:
         merged["Cookie"] = "; ".join(cookie_parts)
     method = params.method
-    backend = _fetch_curl if params.use_curl else _fetch_stdlib
+    backend = _fetch_curl if params.backend == "curl" else _fetch_stdlib
     for attempt in range(1 + params.retries):
         try:
             return backend(
