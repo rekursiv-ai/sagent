@@ -79,7 +79,6 @@ slack = [
 selfhosted = [
     "accelerate>=1.13.0",
     "auto-round>=0.12.3",
-    "causal-conv1d ; sys_platform == 'linux'",
     "compressed-tensors",
     "kernels>=0.13.0",
     "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
