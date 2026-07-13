@@ -51,6 +51,7 @@ from sagent.lib.web.fetch import (
     last_known_egress_ip as _last_known_egress_ip,
     set_last_egress_ip as _set_last_egress_ip,
 )
+from sagent.lib.web.fetch_zendriver import BrowserResult
 from sagent.lib.web.profile import Profile, ProfileStore
 
 
@@ -489,7 +490,7 @@ class TestFetchStdlibPath:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
         # These tests pin the stdlib (http.client connection) transport by
-        # passing use_curl=False on each fetch call.
+        # passing backend="stdlib" on each fetch call.
         return
 
     def _mock_http_response(
@@ -516,7 +517,7 @@ class TestFetchStdlibPath:
         mock_conn = self._mock_conn(self._mock_http_response())
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             result, _ = fetch(
-                "https://example.com", request=RequestParams(use_curl=False)
+                "https://example.com", request=RequestParams(backend="stdlib")
             )
         assert result == b"hello"
         mock_conn.request.assert_called_once()
@@ -530,7 +531,7 @@ class TestFetchStdlibPath:
         mock_conn = self._mock_conn(resp)
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             assert (
-                fetch("https://example.com", request=RequestParams(use_curl=False))[0]
+                fetch("https://example.com", request=RequestParams(backend="stdlib"))[0]
                 == b"hello"
             )
 
@@ -540,7 +541,7 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    method="POST", data={"q": "test"}, use_curl=False
+                    method="POST", data={"q": "test"}, backend="stdlib"
                 ),
             )
         assert mock_conn.request.call_args.args[0] == "POST"
@@ -552,7 +553,7 @@ class TestFetchStdlibPath:
             fetch(
                 "https://example.com",
                 request=RequestParams(
-                    method="POST", json={"key": "value"}, use_curl=False
+                    method="POST", json={"key": "value"}, backend="stdlib"
                 ),
             )
         assert mock_conn.request.call_args.kwargs["body"] == b'{"key": "value"}'
@@ -563,7 +564,7 @@ class TestFetchStdlibPath:
         with pytest.raises(ValueError, match="mutually exclusive"):
             fetch(
                 "https://example.com",
-                request=RequestParams(data={"a": "1"}, json={"b": 2}, use_curl=False),
+                request=RequestParams(data={"a": "1"}, json={"b": 2}, backend="stdlib"),
             )
 
     def test_cookies_serialized(self) -> None:
@@ -571,7 +572,7 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com",
-                request=RequestParams(cookies={"a": "1", "b": "2"}, use_curl=False),
+                request=RequestParams(cookies={"a": "1", "b": "2"}, backend="stdlib"),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert "a=1" in headers["Cookie"]
@@ -582,7 +583,9 @@ class TestFetchStdlibPath:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com",
-                request=RequestParams(headers={"User-Agent": "custom"}, use_curl=False),
+                request=RequestParams(
+                    headers={"User-Agent": "custom"}, backend="stdlib"
+                ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
         assert headers["User-Agent"] == "custom"
@@ -597,7 +600,7 @@ class TestFetchStdlibPath:
                     data={"q": "test"},
                     headers={"User-Agent": "custom"},
                     raw_headers=True,
-                    use_curl=False,
+                    backend="stdlib",
                 ),
             )
         assert mock_conn.request.call_args.kwargs["headers"] == {"User-Agent": "custom"}
@@ -611,7 +614,7 @@ class TestFetchStdlibPath:
                     headers={"User-Agent": "custom"},
                     cookies={"a": "1"},
                     raw_headers=True,
-                    use_curl=False,
+                    backend="stdlib",
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -628,7 +631,7 @@ class TestFetchStdlibPath:
         ) as mock_open:
             fetch(
                 "https://u:p@example.com:8443/x",
-                request=RequestParams(use_curl=False),
+                request=RequestParams(backend="stdlib"),
             )
         # userinfo stripped: the connection opens on the bare host:port, and the
         # request path carries no credentials.
@@ -644,7 +647,7 @@ class TestFetchStdlibPath:
             fetch(
                 "https://u:p@example.com/",
                 request=RequestParams(
-                    headers={"Authorization": "Bearer xyz"}, use_curl=False
+                    headers={"Authorization": "Bearer xyz"}, backend="stdlib"
                 ),
             )
         headers = mock_conn.request.call_args.kwargs["headers"]
@@ -657,7 +660,7 @@ class TestFetchStdlibPath:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError, match="403"),
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
 
     def test_timeout_passed(self) -> None:
         mock_conn = self._mock_conn(self._mock_http_response())
@@ -666,7 +669,7 @@ class TestFetchStdlibPath:
         ) as mock_open:
             fetch(
                 "https://example.com",
-                request=RequestParams(timeout_sec=60, use_curl=False),
+                request=RequestParams(timeout_sec=60, backend="stdlib"),
             )
         assert mock_open.call_args.args[2] == 60
 
@@ -674,7 +677,7 @@ class TestFetchStdlibPath:
 class TestFetchRetry:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        # Stdlib path is selected per-call via use_curl=False, not a global.
+        # Stdlib path is selected per-call via backend="stdlib", not a global.
         return
 
     def _mock_http_response(
@@ -705,7 +708,7 @@ class TestFetchRetry:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(retries=1, use_curl=False),
+                    request=RequestParams(retries=1, backend="stdlib"),
                 )[0]
                 == b"ok"
             )
@@ -720,7 +723,8 @@ class TestFetchRetry:
             pytest.raises(FetchError, match="404"),
         ):
             fetch(
-                "https://example.com", request=RequestParams(retries=3, use_curl=False)
+                "https://example.com",
+                request=RequestParams(retries=3, backend="stdlib"),
             )
 
     def test_error_body_is_decompressed(self) -> None:
@@ -741,7 +745,7 @@ class TestFetchRetry:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://x.com", request=RequestParams(use_curl=False))
+            fetch("https://x.com", request=RequestParams(backend="stdlib"))
         # The caller must receive readable HTML, not the raw zstd frame.
         assert exc.value.body == html
 
@@ -758,7 +762,7 @@ class TestFetchRetry:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(retries=1, use_curl=False),
+                    request=RequestParams(retries=1, backend="stdlib"),
                 )[0]
                 == b"ok"
             )
@@ -767,7 +771,7 @@ class TestFetchRetry:
 class TestConnectionClosedOnError:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        # Stdlib path is selected per-call via use_curl=False, not a global.
+        # Stdlib path is selected per-call via backend="stdlib", not a global.
         return
 
     def _mock_conn(self, status: int, body: bytes = b"nope") -> Mock:
@@ -788,7 +792,7 @@ class TestConnectionClosedOnError:
             patch("sagent.lib.web.fetch._open_connection", return_value=conn),
             pytest.raises(FetchError),
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
         conn.close.assert_called_once()
 
     def test_conn_closed_on_each_retried_attempt(self) -> None:
@@ -813,7 +817,7 @@ class TestConnectionClosedOnError:
             assert (
                 fetch(
                     "https://example.com",
-                    request=RequestParams(retries=1, use_curl=False),
+                    request=RequestParams(retries=1, backend="stdlib"),
                 )[0]
                 == b"ok"
             )
@@ -824,7 +828,7 @@ class TestFetchStdlibBackend:
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
         # The stdlib backend is http.client-only; each fetch call passes
-        # use_curl=False so these redirect/error/303/validated-host tests
+        # backend="stdlib" so these redirect/error/303/validated-host tests
         # exercise the stdlib path.
         return
 
@@ -858,7 +862,7 @@ class TestFetchStdlibBackend:
             return_value=mock_conn,
         ):
             body, _ = fetch(
-                "https://example.com/start", request=RequestParams(use_curl=False)
+                "https://example.com/start", request=RequestParams(backend="stdlib")
             )
         assert body == b"final"
 
@@ -880,7 +884,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com/start",
-                request=RequestParams(on_redirect=urls.append, use_curl=False),
+                request=RequestParams(on_redirect=urls.append, backend="stdlib"),
             )
         assert urls == ["https://example.com/final"]
 
@@ -901,7 +905,7 @@ class TestFetchStdlibBackend:
         mock_conn.getresponse.return_value = resp
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             _body, session = fetch(
-                "https://example.com/", request=RequestParams(use_curl=False)
+                "https://example.com/", request=RequestParams(backend="stdlib")
             )
         assert session.cookies.get("pref") == "a, b, c"
         assert session.cookies.get("SID") == "xyz"
@@ -928,7 +932,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com",
-                request=RequestParams(on_redirect=reject, use_curl=False),
+                request=RequestParams(on_redirect=reject, backend="stdlib"),
             )
 
     def test_max_redirects_zero_returns_3xx_body(self) -> None:
@@ -950,7 +954,7 @@ class TestFetchStdlibBackend:
         ):
             result, _ = fetch(
                 "https://example.com",
-                request=RequestParams(max_redirects=0, use_curl=False),
+                request=RequestParams(max_redirects=0, backend="stdlib"),
             )
         assert result == b"redirect body"
 
@@ -976,7 +980,7 @@ class TestFetchStdlibBackend:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
         ):
             result, _ = fetch(
-                "https://example.com", request=RequestParams(use_curl=False)
+                "https://example.com", request=RequestParams(backend="stdlib")
             )  # default max_redirects=10
         assert result == b"cap body"
 
@@ -1001,7 +1005,7 @@ class TestFetchStdlibBackend:
             side_effect=[mock_conn1, mock_conn2],
         ):
             body, _ = fetch(
-                "https://example.com/start", request=RequestParams(use_curl=False)
+                "https://example.com/start", request=RequestParams(backend="stdlib")
             )
         assert body == b"other"
         mock_conn1.close.assert_called_once()
@@ -1021,7 +1025,7 @@ class TestFetchStdlibBackend:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             body, _ = fetch(
                 "https://example.com/base/start",
-                request=RequestParams(on_redirect=urls.append, use_curl=False),
+                request=RequestParams(on_redirect=urls.append, backend="stdlib"),
             )
         assert body == b"landed"
         assert urls == ["https://example.com/base/next"]
@@ -1045,7 +1049,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://a.com/submit",
-                request=RequestParams(method="POST", data={"x": "1"}, use_curl=False),
+                request=RequestParams(method="POST", data={"x": "1"}, backend="stdlib"),
             )
         sent = conn_b.request.call_args.kwargs["headers"]
         assert sent.get("Origin") != "https://a.com"
@@ -1069,7 +1073,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://a.com/start",
-                request=RequestParams(headers={"host": "a.com"}, use_curl=False),
+                request=RequestParams(headers={"host": "a.com"}, backend="stdlib"),
             )
         sent = conn_b.request.call_args.kwargs["headers"]
         assert not any(k.lower() == "host" and v == "a.com" for k, v in sent.items())
@@ -1091,7 +1095,7 @@ class TestFetchStdlibBackend:
         ):
             body, _ = fetch(
                 "https://example.com/submit",
-                request=RequestParams(method="POST", data={"x": "1"}, use_curl=False),
+                request=RequestParams(method="POST", data={"x": "1"}, backend="stdlib"),
             )
         assert body == b"got it"
         second_call = mock_conn.request.call_args_list[1]
@@ -1115,7 +1119,7 @@ class TestFetchStdlibBackend:
             ),
             pytest.raises(FetchError, match="302"),
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
 
     def test_http_error_raises_fetch_error(self) -> None:
         resp = self._mock_http_response(status=404, body=b"not found")
@@ -1130,7 +1134,7 @@ class TestFetchStdlibBackend:
             ),
             pytest.raises(FetchError, match="404"),
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
 
     def test_error_body_is_decompressed(self) -> None:
         # RED: connection-path twin of the simple-path bug. A compressed error
@@ -1150,7 +1154,7 @@ class TestFetchStdlibBackend:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
         assert exc.value.body == html
 
     def test_undecodable_error_body_falls_back_to_raw(self) -> None:
@@ -1171,7 +1175,7 @@ class TestFetchStdlibBackend:
             patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn),
             pytest.raises(FetchError) as exc,
         ):
-            fetch("https://example.com", request=RequestParams(use_curl=False))
+            fetch("https://example.com", request=RequestParams(backend="stdlib"))
         assert exc.value.status == 500
         assert exc.value.body == garbage
 
@@ -1194,7 +1198,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com:8443/page",
-                request=RequestParams(validated_hosts=_vh, use_curl=False),
+                request=RequestParams(validated_hosts=_vh, backend="stdlib"),
             )
         assert seen == ["example.com"]
 
@@ -1214,7 +1218,7 @@ class TestFetchStdlibBackend:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com:8443/page",
-                request=RequestParams(validated_hosts=_vh, use_curl=False),
+                request=RequestParams(validated_hosts=_vh, backend="stdlib"),
             )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == (
             "example.com:8443"
@@ -1234,7 +1238,7 @@ class TestFetchStdlibBackend:
         with patch("sagent.lib.web.fetch._open_connection", return_value=mock_conn):
             fetch(
                 "https://example.com/page",
-                request=RequestParams(validated_hosts=_vh, use_curl=False),
+                request=RequestParams(validated_hosts=_vh, backend="stdlib"),
             )
         assert mock_conn.request.call_args.kwargs["headers"]["Host"] == "example.com"
 
@@ -1259,7 +1263,7 @@ class TestFetchStdlibBackend:
         ):
             fetch(
                 "https://example.com/start",
-                request=RequestParams(validated_hosts=_vh, use_curl=False),
+                request=RequestParams(validated_hosts=_vh, backend="stdlib"),
             )
         assert conn_b.request.call_args.kwargs["headers"]["Host"] == "other.com:8443"
 
@@ -1275,7 +1279,7 @@ class TestHeaderOrder:
 
     @pytest.fixture(autouse=True)
     def _force_stdlib(self) -> Any:
-        # Stdlib path is selected per-call via use_curl=False, not a global.
+        # Stdlib path is selected per-call via backend="stdlib", not a global.
         return
 
     def _capture_headers(self, **fetch_kwargs: Any) -> dict[str, str]:
@@ -1293,7 +1297,7 @@ class TestHeaderOrder:
         ):
             fetch(
                 "https://example.com/",
-                request=RequestParams(use_curl=False, **fetch_kwargs),
+                request=RequestParams(backend="stdlib", **fetch_kwargs),
             )
         return dict(mock_conn.request.call_args.kwargs["headers"])
 
@@ -1388,7 +1392,7 @@ class TestHeaderOrder:
         ):
             fetch(
                 "https://example.com/",
-                request=RequestParams(validated_hosts=_vh, use_curl=False),
+                request=RequestParams(validated_hosts=_vh, backend="stdlib"),
             )
 
         captured = dict(mock_conn.request.call_args.kwargs["headers"])
@@ -1857,7 +1861,7 @@ class TestFetchCurlBackend:
             patch("curl_cffi.requests.request") as mock_curl,
         ):
             body, _ = fetch(
-                "https://example.com", request=RequestParams(use_curl=False)
+                "https://example.com", request=RequestParams(backend="stdlib")
             )
         assert body == b"stdlib"
         mock_curl.assert_not_called()
@@ -1945,7 +1949,7 @@ class TestOnResponse:
             fetch(
                 "https://x.com",
                 request=RequestParams(
-                    on_response=lambda s, h: seen.append((s, h)), use_curl=False
+                    on_response=lambda s, h: seen.append((s, h)), backend="stdlib"
                 ),
             )
         assert len(seen) == 1
@@ -1967,7 +1971,7 @@ class TestOnResponse:
             fetch(
                 "https://x.com/1",
                 request=RequestParams(
-                    on_response=lambda s, _h: seen.append(s), use_curl=False
+                    on_response=lambda s, _h: seen.append(s), backend="stdlib"
                 ),
             )
         assert seen == [302, 200]
@@ -1985,7 +1989,7 @@ class TestOnResponse:
             fetch(
                 "https://x.com",
                 request=RequestParams(
-                    on_response=lambda s, _h: seen.append(s), use_curl=False
+                    on_response=lambda s, _h: seen.append(s), backend="stdlib"
                 ),
             )
         assert seen == [404]
@@ -2038,7 +2042,7 @@ class TestTransportConsistency:
         ):
             return fetch(
                 "https://a.com/start",
-                request=RequestParams(use_curl=False, **kwargs),
+                request=RequestParams(backend="stdlib", **kwargs),
             )[0]
 
     def _curl_result(
@@ -2768,6 +2772,133 @@ class TestSeedSessionJar:
         assert jar["__Host-GSP"].path == "/"
         # A plain cookie is seeded non-Secure (Chrome sends it over either).
         assert jar["NID"].secure is False
+
+
+class TestBrowserBackend:
+    """The opt-in ``backend="zendriver"`` path and its parameter guards."""
+
+    def test_rejects_non_get_method(self) -> None:
+        with pytest.raises(ValueError, match="zendriver backend supports only GET"):
+            RequestParams(backend="zendriver", method="POST")
+
+    def test_rejects_request_body(self) -> None:
+        with pytest.raises(ValueError, match="cannot send a request body"):
+            RequestParams(backend="zendriver", data={"a": "1"})
+
+    def test_rejects_validated_hosts(self) -> None:
+        with pytest.raises(ValueError, match="cannot honor 'validated_hosts'"):
+            RequestParams(
+                backend="zendriver",
+                validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
+            )
+
+    def test_default_backend_is_curl(self) -> None:
+        assert RequestParams().backend == "curl"
+
+    def test_browser_fetch_returns_body_and_warms_session(self) -> None:
+        # A browser fetch must return the rendered bytes AND fold the browser's
+        # harvested cookies into the returned FetchSession, so a following curl
+        # fetch on the same session is warm (the review's key requirement).
+        result = BrowserResult(body=b"<html>rendered</html>", cookies={"SID": "xyz"})
+        with (
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch("sagent.lib.web.fetch.fetch_zendriver", return_value=result) as via,
+        ):
+            body, session = fetch(
+                "https://walled.example/x",
+                request=RequestParams(backend="zendriver"),
+            )
+        assert body == b"<html>rendered</html>"
+        assert session.cookies == {"SID": "xyz"}  # session warmed
+        assert via.call_count == 1
+
+    def test_browser_fetch_persists_cookies_to_profile_store(self) -> None:
+        result = BrowserResult(body=b"ok", cookies={"cf_clearance": "tok"})
+        store = Mock()
+        store.load.return_value = None
+        with (
+            patch.object(fetch_mod, "egress_ip", return_value="5.5.5.5"),
+            patch("sagent.lib.web.fetch.fetch_zendriver", return_value=result),
+            patch("sagent.lib.web.profile.ProfileStore.shared", return_value=store),
+        ):
+            fetch(
+                "https://walled.example/x",
+                request=RequestParams(backend="zendriver"),
+            )
+        # A fresh (egress, domain) key is saved with the harvested cookies.
+        store.save.assert_called_once()
+        saved_profile = store.save.call_args.args[2]
+        assert saved_profile.cookies == {"cf_clearance": "tok"}
+
+
+class TestCurlThenZendriverBackend:
+    """``backend="curl-then-zendriver"``: curl first, zendriver only on a bot block."""
+
+    def test_curl_then_zendriver_inherits_zendriver_restrictions(self) -> None:
+        # curl-then-zendriver may fall back to the browser, so it carries the same GET-only /
+        # no-body / no-validated_hosts limits (nothing to fall back a POST to).
+        with pytest.raises(
+            ValueError, match="curl-then-zendriver backend supports only GET"
+        ):
+            RequestParams(backend="curl-then-zendriver", method="POST")
+        with pytest.raises(
+            ValueError, match="curl-then-zendriver backend cannot send a request"
+        ):
+            RequestParams(backend="curl-then-zendriver", data={"a": "1"})
+        with pytest.raises(
+            ValueError, match="curl-then-zendriver backend cannot honor"
+        ):
+            RequestParams(
+                backend="curl-then-zendriver",
+                validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
+            )
+
+    def test_curl_then_zendriver_returns_curl_body_without_touching_browser(
+        self,
+    ) -> None:
+        # When curl succeeds, the browser backend is never invoked.
+        with (
+            patch.object(fetch_mod, "_send_as", return_value=b"curl body"),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch("sagent.lib.web.fetch.fetch_zendriver") as via,
+        ):
+            body, _ = fetch(
+                "https://ok.example/",
+                request=RequestParams(backend="curl-then-zendriver"),
+            )
+        assert body == b"curl body"
+        via.assert_not_called()
+
+    def test_curl_then_zendriver_falls_back_to_zendriver_on_bot_block(self) -> None:
+        # A curl BotDetectionError triggers the zendriver leg; its body is returned.
+        result = BrowserResult(body=b"rendered", cookies={"cf_clearance": "t"})
+        with (
+            patch.object(fetch_mod, "_send_as", side_effect=CloudflareChallengeError()),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch("sagent.lib.web.fetch.fetch_zendriver", return_value=result) as via,
+        ):
+            body, _ = fetch(
+                "https://walled.example/",
+                request=RequestParams(backend="curl-then-zendriver"),
+            )
+        assert body == b"rendered"
+        assert via.call_count == 1
+
+    def test_curl_then_zendriver_does_not_fall_back_on_non_block_error(self) -> None:
+        # A plain 404 (not a bot block) propagates -- the browser would not help
+        # and must not silently pay Chrome's launch cost.
+        with (
+            patch.object(
+                fetch_mod,
+                "_send_as",
+                side_effect=FetchError("https://x/", 404, {}, b""),
+            ),
+            patch.object(fetch_mod, "egress_ip", return_value=None),
+            patch("sagent.lib.web.fetch.fetch_zendriver") as via,
+            pytest.raises(FetchError),
+        ):
+            fetch("https://x/", request=RequestParams(backend="curl-then-zendriver"))
+        via.assert_not_called()
 
 
 if __name__ == "__main__":
