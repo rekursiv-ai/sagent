@@ -153,6 +153,78 @@ class TestClassifyBotFlag:
         body = '<div class="cf-turnstile" data-sitekey="0x4AAA"></div>'
         assert classify_bot_detection(body) is CloudflareChallengeError
 
+    def test_word_turnstile_in_content_is_not_a_challenge(self) -> None:
+        # The bare word "turnstile" in page CONTENT (a README/article about
+        # Cloudflare Turnstile) is NOT a challenge -- only the challenge WIDGET
+        # markup is. GitHub's FlareSolverr README (405KB, title "FlareSolverr")
+        # false-positived on the word alone; it must classify as ordinary.
+        body = (
+            b"<html><head><title>FlareSolverr/FlareSolverr</title></head><body>"
+            b"<p>Number of times the Tab button is needed to be pressed to end up "
+            b"on the turnstile captcha, in order to verify it.</p>"
+            + b"x" * 200_000
+            + b"</body></html>"
+        )
+        assert classify_bot_detection(body, on_success_body=True) is None
+        assert classify_bot_detection(body) is None
+
+    def test_cloudflare_challenge_dom_selectors_detected_on_error_body(self) -> None:
+        # FlareSolverr's structural CHALLENGE_SELECTORS mark a Cloudflare
+        # challenge -- but only on an ERROR body (default), because a page that
+        # DOCUMENTS these tokens (a wiki about CF selectors) contains them too.
+        for markup in (
+            '<div id="cf-challenge-running"></div>',
+            '<div id="challenge-spinner"></div>',
+            '<div id="cf-please-wait"></div>',
+            '<div id="turnstile-wrapper"></div>',
+            "<input name='cf-turnstile-response' value='x'>",
+        ):
+            assert classify_bot_detection(markup) is CloudflareChallengeError, markup
+
+    def test_page_documenting_cf_selectors_is_not_a_challenge_on_200(self) -> None:
+        # A real 200 wiki/README that QUOTES challenge selectors in prose (e.g.
+        # DeepWiki's FlareSolverr page, GitHub's README) is content, not a block.
+        # Only the page <title> or an error status marks a real challenge.
+        body = (
+            "<html><head><title>FlareSolverr | DeepWiki</title></head><body>"
+            "Detection uses `'#cf-challenge-running'`, `'#turnstile-wrapper'`, "
+            "and `input[name='cf-turnstile-response']`."
+            + "x" * 100_000
+            + "</body></html>"
+        )
+        assert classify_bot_detection(body, on_success_body=True) is None
+
+    def test_just_a_moment_only_matches_as_the_title(self) -> None:
+        # "Just a moment..." is a challenge only as the page <title>, per
+        # FlareSolverr's CHALLENGE_TITLES == check -- not as prose in the body.
+        assert (
+            classify_bot_detection("<title>Just a moment...</title>")
+            is CloudflareChallengeError
+        )
+        # The same phrase in body prose of a real page is not a challenge.
+        prose = (
+            "<html><head><title>Blog</title></head><body>"
+            "Please wait just a moment while the page loads."
+            + "x" * 100_000
+            + "</body></html>"
+        )
+        assert classify_bot_detection(prose, on_success_body=True) is None
+
+    def test_attention_required_only_matches_as_the_title(self) -> None:
+        # "Attention Required! | Cloudflare" is a block TITLE (an access-denied
+        # ban), not the bare phrase "attention required" appearing in an article.
+        assert (
+            classify_bot_detection("<title>Attention Required! | Cloudflare</title>")
+            is CloudflareChallengeError
+        )
+        prose = (
+            "<html><head><title>News</title></head><body>"
+            "Attention required: read the safety notice below."
+            + "x" * 100_000
+            + "</body></html>"
+        )
+        assert classify_bot_detection(prose, on_success_body=True) is None
+
     def test_marker_groups_are_retunable_via_kwargs(self) -> None:
         # The marker groups are load-bearing keyword defaults (not module
         # globals): a caller can retune any group. Prove the contract -- a body
@@ -198,11 +270,13 @@ class TestClassifyBotFlag:
         body = "<html>Read our apology at example.com/sorry/ for the outage.</html>"
         assert classify_bot_detection(body) is None
 
-    def test_generic_block_is_root(self) -> None:
-        # A wall with no kind-specific marker -> the root, never a wrong leaf.
-        assert classify_bot_detection("Security check required. Ray ID: abc") is (
-            BotDetectionError
-        )
+    def test_prose_only_block_is_not_classifiable_from_body(self) -> None:
+        # A wall whose body carries NO structural challenge marker (only prose
+        # like "Security check required") is not detectable from the body alone;
+        # the fetch boundary catches it by error status + CF-front headers. So
+        # body classification returns None -- a real page with such prose is not
+        # misflagged as a block.
+        assert classify_bot_detection("Security check required. Ray ID: abc") is None
 
     def test_real_content_is_none(self) -> None:
         assert classify_bot_detection("<h1>Build isolation</h1> uv builds ...") is None
@@ -263,9 +337,13 @@ class TestOnSuccessBodyMode:
             is PuzzleChallengeError
         )
 
-    def test_cloudflare_still_flagged_on_success_body(self) -> None:
+    def test_cloudflare_interstitial_title_flagged_on_success_body(self) -> None:
+        # The real interstitial's whole <title> is "Just a moment...", flagged on
+        # any status. (A reader proxy can return the challenge HTML as a 200.)
         assert (
-            classify_bot_detection("just a moment", on_success_body=True)
+            classify_bot_detection(
+                "<title>Just a moment...</title>", on_success_body=True
+            )
             is CloudflareChallengeError
         )
 

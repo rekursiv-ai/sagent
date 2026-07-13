@@ -296,30 +296,37 @@ class SlidingWindowRateLimiter:
 
 
 class RandomUniformPacer:
-    """Sleep a fresh ``uniform(low, high)`` seconds before every grant.
+    """Space each grant a fresh ``uniform(low, high)`` seconds from the previous.
 
-    Unlike the fixed-interval limiters, this paces on a *randomized* gap: each
-    :meth:`acquire` waits an independent ``uniform(low, high)`` draw. The
-    irregular cadence is the point -- a scraper on a perfectly fixed interval is
-    itself a bot signal, and a target (e.g. Google Scholar) with adaptive
-    back-off trips on the regularity, not just the mean rate. This is the pacer
-    the Scholar harvest ran on for months without a CAPTCHA: a 1 req/s floor
-    plus ``uniform(6, 12)`` jitter on top. A fixed interval at the same *mean*
-    (9s) burned in testing at ~21 requests; the variance is load-bearing.
+    Paces on a *randomized* gap: each grant is spaced an independent
+    ``uniform(low, high)`` draw from the one before it. The irregular cadence is
+    the point -- a scraper on a perfectly fixed interval is itself a bot signal,
+    and a target (e.g. Google Scholar) with adaptive back-off trips on the
+    regularity, not just the mean rate. This is the pacer the Scholar harvest ran
+    on for months without a CAPTCHA: ``uniform(6, 12)`` jitter. A fixed interval
+    at the same *mean* burned in testing at ~21 requests; the variance is
+    load-bearing.
+
+    A pacer spaces call N from call N-1, so:
+
+    - The FIRST :meth:`acquire` has no predecessor and grants immediately (no
+      sleep).
+    - A later acquire sleeps only the drawn interval MINUS the time already
+      elapsed since the previous grant -- so work between calls (an HTTP
+      round-trip) counts toward the spacing rather than adding on top of it, and
+      a call that arrives after the interval already passed is free.
 
     Satisfies the :class:`RateLimiter` / :class:`AsyncRateLimiter` protocols, so
-    it drops into :class:`CooldownRateLimiter` as its ``limiter``. It keeps no
-    call history -- each grant's wait depends only on the draw, not on when the
-    previous grant fell -- so it is inherently process-local-agnostic (every
-    process paces independently). Pair it with a shared :class:`CooldownGate`
-    for the cross-process block signal; the jitter itself needs no shared state.
+    it drops into :class:`CooldownRateLimiter` as its ``limiter``. The last-grant
+    time is process-local (each process paces independently); pair it with a
+    shared :class:`CooldownGate` for the cross-process block signal.
 
     Args:
-      low: Minimum seconds to sleep before a grant (inclusive).
-      high: Maximum seconds to sleep before a grant (inclusive). Must be ``>=
+      low: Minimum inter-grant interval in seconds (inclusive).
+      high: Maximum inter-grant interval in seconds (inclusive). Must be ``>=
         low``.
-      clock: Time source, for its ``sleep`` / ``sleep_async``; injectable for
-        tests. Defaults to :class:`SystemClock`.
+      clock: Time source, for ``time`` / ``sleep`` / ``sleep_async``; injectable
+        for tests. Defaults to :class:`SystemClock`.
       rng: Draw source; defaults to :class:`random.SystemRandom` (the OG's
         ``_RNG``) so the sequence is unpredictable and un-seedable by an
         observer. Injectable for deterministic tests.
@@ -342,18 +349,29 @@ class RandomUniformPacer:
         self._high = high
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._rng: random.Random = rng if rng is not None else random.SystemRandom()
+        self._last_grant: float | None = None  # None until the first grant.
 
-    def _draw(self) -> float:
-        """Return a fresh ``uniform(low, high)`` wait in seconds."""
-        return self._rng.uniform(self._low, self._high)
+    def _wait(self) -> float:
+        """Seconds to sleep to space this grant from the last; 0 on the first."""
+        now = self._clock.time()
+        if self._last_grant is None:
+            return 0.0
+        elapsed = now - self._last_grant
+        return max(0.0, self._rng.uniform(self._low, self._high) - elapsed)
 
     def acquire(self) -> None:
-        """Sleep a fresh ``uniform(low, high)`` seconds, then grant."""
-        self._clock.sleep(self._draw())
+        """Sleep until spaced from the previous grant (first grant is free)."""
+        wait = self._wait()
+        if wait > 0:
+            self._clock.sleep(wait)
+        self._last_grant = self._clock.time()
 
     async def acquire_async(self) -> None:
         """Async twin of :meth:`acquire`."""
-        await self._clock.sleep_async(self._draw())
+        wait = self._wait()
+        if wait > 0:
+            await self._clock.sleep_async(wait)
+        self._last_grant = self._clock.time()
 
 
 class TokenBucketRateLimiter:

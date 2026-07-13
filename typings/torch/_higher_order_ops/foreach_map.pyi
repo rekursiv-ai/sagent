@@ -1,0 +1,14 @@
+from collections.abc import Callable
+from typing import Any
+
+from torch._higher_order_ops.base_hop import BaseHOP
+
+class ForeachMap(BaseHOP):
+    def __init__(self) -> None: ...
+    def __call__(self, fn, *operands, **kwargs) -> Any | None: ...
+
+_foreach_map = ...
+
+def foreach_map(
+    op: Callable, *operands: Any, **kwargs: dict[str, Any]
+) -> Any | None: ...

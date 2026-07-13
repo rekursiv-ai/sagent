@@ -1,0 +1,13 @@
+import torch
+import torch.utils._pytree as pytree
+
+def eq_spec(self: pytree.TreeSpec, other: pytree.TreeSpec) -> bool: ...
+
+class _StatefulGraphModuleFactory(type):
+    def __call__(cls, *args, **kwargs): ...
+
+class _StatefulGraphModule(torch.fx.GraphModule, metaclass=_StatefulGraphModuleFactory):
+    def __init__(self, root, graph, range_constraints=...) -> None: ...
+
+class GuardsFn(torch.nn.Module):
+    def forward(self, *args) -> None: ...

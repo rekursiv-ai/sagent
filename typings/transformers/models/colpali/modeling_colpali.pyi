@@ -1,0 +1,66 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_colpali import ColPaliConfig
+from ...cache_utils import Cache
+from ...modeling_utils import PreTrainedModel
+from ...utils import ModelOutput, auto_docstring, can_return_tuple
+
+"""PyTorch ColPali model"""
+
+@auto_docstring
+class ColPaliPreTrainedModel(PreTrainedModel):
+    config: ColPaliConfig
+    base_model_prefix = ...
+    _no_split_modules = ...
+    _supports_sdpa = ...
+    _supports_flash_attn = ...
+    _supports_flex_attn = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class ColPaliForRetrievalOutput(ModelOutput):
+    loss: torch.FloatTensor | None = ...
+    embeddings: torch.Tensor | None = ...
+    past_key_values: Cache | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+    image_hidden_states: torch.FloatTensor | None = ...
+
+@auto_docstring(custom_intro=...)
+class ColPaliForRetrieval(ColPaliPreTrainedModel):
+    _checkpoint_conversion_mapping = ...
+    def __init__(self, config: ColPaliConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = ...,
+        pixel_values: torch.FloatTensor | None = ...,
+        attention_mask: torch.Tensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+        **kwargs,
+    ) -> ColPaliForRetrievalOutput: ...
+    def get_input_embeddings(self):  # -> Any:
+        ...
+    def set_input_embeddings(self, value):  # -> None:
+        ...
+    def get_output_embeddings(self):  # -> Any:
+        ...
+    def set_output_embeddings(self, new_embeddings):  # -> None:
+        ...
+    def tie_weights(self):  # -> Any:
+        ...
+    def resize_token_embeddings(
+        self,
+        new_num_tokens: int | None = ...,
+        pad_to_multiple_of: int | None = ...,
+        mean_resizing: bool = ...,
+    ) -> nn.Embedding: ...
+
+__all__ = ["ColPaliForRetrieval", "ColPaliPreTrainedModel"]

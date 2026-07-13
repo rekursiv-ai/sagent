@@ -1,0 +1,316 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_janus import JanusConfig, JanusVisionConfig, JanusVQVAEConfig
+from ...cache_utils import Cache
+from ...generation import GenerationMixin, LogitsProcessorList
+from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ModelOutput
+from ...modeling_utils import PreTrainedModel
+from ...processing_utils import Unpack
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
+from ...utils.generic import check_model_inputs
+
+logger = ...
+
+@auto_docstring
+class JanusPreTrainedModel(PreTrainedModel):
+    config: JanusConfig
+    base_model_prefix = ...
+    supports_gradient_checkpointing = ...
+    _no_split_modules = ...
+    _skip_keys_device_placement = ...
+    _supports_flash_attn = ...
+    _supports_sdpa = ...
+    _can_compile_fullgraph = ...
+    _supports_param_buffer_assignment = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class JanusVQVAEOutput(ModelOutput):
+    decoded_pixel_values: torch.FloatTensor | None = ...
+    embedding_loss: torch.FloatTensor | None = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class JanusBaseModelOutputWithPast(ModelOutput):
+    last_hidden_state: torch.FloatTensor | None = ...
+    past_key_values: Cache | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+    image_hidden_states: tuple[torch.FloatTensor] | None = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class JanusCausalLMOutputWithPast(ModelOutput):
+    loss: torch.FloatTensor | None = ...
+    logits: torch.FloatTensor | None = ...
+    past_key_values: Cache | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+    image_hidden_states: tuple[torch.FloatTensor] | None = ...
+
+class JanusVisionEmbeddings(nn.Module):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    def interpolate_pos_encoding(
+        self, embeddings: torch.Tensor, height: int, width: int
+    ) -> torch.Tensor: ...
+    def forward(
+        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+    ) -> torch.Tensor: ...
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = ...,
+    **kwargs: Unpack[TransformersKwargs],
+):  # -> tuple[Tensor, Tensor]:
+    ...
+
+class JanusVisionAttention(nn.Module):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ):  # -> tuple[Any, Any]:
+        ...
+
+class JanusVisionMLP(nn.Module):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class JanusVisionEncoderLayer(GradientCheckpointingLayer):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.FloatTensor: ...
+
+class JanusVisionEncoder(nn.Module):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        inputs_embeds,
+        attention_mask: torch.Tensor | None = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutput: ...
+
+class JanusAttention(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+
+class JanusMLP(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class JanusEncoderLayer(GradientCheckpointingLayer):
+    def __init__(self, config: JanusConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.FloatTensor: ...
+
+@auto_docstring
+class JanusVisionModel(JanusPreTrainedModel):
+    main_input_name = ...
+    config: JanusVisionConfig
+    _can_record_outputs = ...
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    @check_model_inputs
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | BaseModelOutputWithPooling: ...
+    def get_input_embeddings(self):  # -> JanusVisionEmbeddings:
+        ...
+
+class JanusVisionAlignerMLP(nn.Module):
+    def __init__(self, config: JanusVisionConfig) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class JanusVQVAEVectorQuantizer(nn.Module):
+    def __init__(self, config: JanusVQVAEConfig) -> None: ...
+    def forward(
+        self, hidden_state: torch.Tensor
+    ):  # -> tuple[Any, Any | Tensor, Tensor]:
+        ...
+    def get_codebook_entry(
+        self, image_tokens: torch.LongTensor
+    ) -> torch.FloatTensor: ...
+
+class JanusVQVAEResnetBlock(nn.Module):
+    def __init__(
+        self, config, in_channels, out_channels=..., conv_shortcut=...
+    ) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class JanusVQVAEAttnBlock(nn.Module):
+    def __init__(self, in_channels) -> None: ...
+    def forward(self, hidden_states): ...
+
+class JanusVQVAEConvDownsample(nn.Module):
+    def __init__(self, in_channels) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class JanusVQVAEConvUpsample(nn.Module):
+    def __init__(self, in_channels) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class JanusVQVAEMidBlock(nn.Module):
+    def __init__(self, config: JanusVQVAEConfig, channels: int) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class JanusVQVAEEncoder(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, pixel_values: torch.LongTensor):  # -> Any:
+        ...
+
+class JanusVQVAEDecoder(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, hidden_state: torch.FloatTensor) -> torch.FloatTensor: ...
+
+@auto_docstring(custom_intro=...)
+class JanusVQVAE(JanusPreTrainedModel):
+    config: JanusVQVAEConfig
+    _no_split_modules = ...
+    main_input_name = ...
+    def __init__(self, config: JanusVQVAEConfig) -> None: ...
+    def encode(self, pixel_values: torch.LongTensor):  # -> tuple[Any, Any, Any]:
+        ...
+    def decode(self, image_tokens: torch.LongTensor) -> torch.FloatTensor: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self, pixel_values: torch.FloatTensor
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
+
+class JanusVQVAEAlignerMLP(nn.Module):
+    def __init__(self, config: JanusVQVAEConfig) -> None: ...
+    def forward(self, hidden_states):  # -> Any:
+        ...
+
+class JanusVQVAEHead(nn.Module):
+    def __init__(self, config: JanusVQVAEConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.tensor: ...
+
+@auto_docstring(custom_intro=...)
+class JanusModel(JanusPreTrainedModel):
+    def __init__(self, config: JanusConfig) -> None: ...
+    def get_input_embeddings(self):  # -> Any:
+        ...
+    def set_input_embeddings(self, value):  # -> None:
+        ...
+    def get_image_features(self, pixel_values):  # -> Any:
+        ...
+    def get_placeholder_mask(
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
+        image_features: torch.FloatTensor,
+    ):  # -> Tensor | Any:
+        ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = ...,
+        pixel_values: torch.FloatTensor | None = ...,
+        attention_mask: torch.Tensor | None = ...,
+        position_ids: torch.LongTensor | None = ...,
+        past_key_values: Cache | None = ...,
+        cache_position: torch.LongTensor | None = ...,
+        inputs_embeds: torch.FloatTensor | None = ...,
+        use_cache: bool | None = ...,
+        logits_to_keep: int | torch.Tensor = ...,
+        **kwargs,
+    ):  # -> JanusBaseModelOutputWithPast:
+        ...
+
+class JanusForConditionalGeneration(JanusPreTrainedModel, GenerationMixin):
+    _tied_weights_keys = ...
+    _can_compile_fullgraph = ...
+    def __init__(self, config: JanusConfig) -> None: ...
+    def get_input_embeddings(self):  # -> Any:
+        ...
+    def set_input_embeddings(self, value):  # -> None:
+        ...
+    def prepare_embeddings_for_image_generation(
+        self, inputs: torch.Tensor
+    ) -> torch.Tensor: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = ...,
+        pixel_values: torch.FloatTensor | None = ...,
+        attention_mask: torch.Tensor | None = ...,
+        position_ids: torch.LongTensor | None = ...,
+        past_key_values: Cache | None = ...,
+        cache_position: torch.LongTensor | None = ...,
+        inputs_embeds: torch.FloatTensor | None = ...,
+        labels: torch.LongTensor | None = ...,
+        use_cache: bool | None = ...,
+        logits_to_keep: int | torch.Tensor = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ):  # -> JanusCausalLMOutputWithPast:
+        ...
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        pixel_values=...,
+        past_key_values=...,
+        attention_mask=...,
+        inputs_embeds=...,
+        cache_position=...,
+        logits_to_keep=...,
+        **kwargs,
+    ):  # -> dict[Any, Any]:
+        ...
+    def decode_image_tokens(self, image_tokens: torch.Tensor):  # -> Tensor:
+        ...
+    @torch.no_grad
+    def generate(
+        self,
+        inputs: torch.Tensor | None = ...,
+        attention_mask: torch.LongTensor | None = ...,
+        logits_processor: LogitsProcessorList | None = ...,
+        **kwargs,
+    ):  # -> GenerateOutput | LongTensor | Tensor:
+        ...
+
+__all__ = [
+    "JanusForConditionalGeneration",
+    "JanusModel",
+    "JanusPreTrainedModel",
+    "JanusVQVAE",
+    "JanusVisionModel",
+]

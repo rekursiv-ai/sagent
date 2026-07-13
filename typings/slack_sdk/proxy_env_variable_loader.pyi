@@ -1,0 +1,6 @@
+import logging
+
+"""Internal module for loading proxy-related env variables"""
+_default_logger = ...
+
+def load_http_proxy_from_env(logger: logging.Logger = ...) -> str | None: ...

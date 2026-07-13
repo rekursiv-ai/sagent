@@ -1,0 +1,29 @@
+from torch.autograd import Function
+
+import torch
+
+class Broadcast(Function):
+    @staticmethod
+    def forward(ctx, target_gpus, *inputs) -> tuple[()] | tuple[Tensor, ...]: ...
+    @staticmethod
+    def backward(ctx, *grad_outputs) -> Any: ...
+
+class ReduceAddCoalesced(Function):
+    @staticmethod
+    def forward(ctx, destination, num_inputs, *grads) -> tuple[Any, ...]: ...
+    @staticmethod
+    def backward(ctx, *grad_outputs) -> Any: ...
+
+class Gather(Function):
+    @staticmethod
+    def forward(ctx, target_device, dim, *inputs) -> Tensor: ...
+    @staticmethod
+    def backward(ctx, grad_output) -> tuple[None, None, *tuple[Any, ...]] | Any: ...
+
+class Scatter(Function):
+    @staticmethod
+    def forward(ctx, target_gpus, chunk_sizes, dim, input) -> tuple[Tensor, ...]: ...
+    @staticmethod
+    def backward(ctx, *grad_output) -> tuple[None, None, None, Any | None]: ...
+
+_streams: list[torch.Stream | None] | None = ...

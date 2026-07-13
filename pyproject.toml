@@ -5,9 +5,7 @@ description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-authors = [
-    {name = "rekursiv.ai", email = "hello@rekursiv.ai"},
-]
+authors = [{name = "rekursiv.ai", email = "hello@rekursiv.ai"}]
 keywords = ["agent", "LLM"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -21,33 +19,48 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "Pillow",
-    "PyYAML>=6.0",
-    "Pygments",
-    "aiohttp",
-    "anthropic>=0.72.0",
-    "bashlex>=0.18",
-    "beautifulsoup4",
-    "brotli",
-    "cachetools",
-    "curl-cffi>=0.15",
-    "defusedxml>=0.7.1",
-    "httpx>=0.27",
+    # media
     "imagesize>=1.4",
-    "markdown-it-py",
-    "mcp>=1.10",
-    "openai",
-    "prompt-toolkit",
-    "pypdfium2",
-    "rich",
-    "slack-sdk>=3.33.0",
-    "starlette>=0.40",
-    "tiktoken",
-    "trafilatura",
-    "uvicorn>=0.30",
+    "pillow",
+    "pyturbojpeg>=1.8.2,<2",
     "webp>=0.4.0",
+    # data
+    "numpy>=2.1",
+    # nlp
+    "tiktoken>=0.12.0",
+    # web client / scraping
+    "beautifulsoup4",
+    "curl-cffi>=0.15",
+    "httpx>=0.27",
+    "trafilatura",
+    "zendriver>=0.15.4",
+    # web server / api
+    "uvicorn>=0.30.0",
+    # mcp
+    "mcp>=1.10",
+    "starlette>=0.40",
+    # llm
+    "anthropic>=0.72.0",
+    "openai",
+    # config
+    "pyyaml>=6.0",
+    # text / docs
+    "pypdfium2",
+    # markdown
+    "markdown-it-py",
+    "prompt-toolkit",
+    "pygments",
+    "rich",
+    # containers
+    "cachetools",
     "wrapt",
+    # compression
+    "brotli",
     "zstandard",
+    # misc
+    "bashlex>=0.18",
+    # security / auth
+    "defusedxml>=0.7.1",
 ]
 
 [project.scripts]
@@ -55,6 +68,14 @@ sagent = "sagent.bin.cli:main"
 sagent-slack = "sagent.bin.slack:main"
 
 [project.optional-dependencies]
+# The `sagent-slack` entrypoint (bin/slack.py) is the only slack_sdk consumer
+# and is not reached by `import sagent` or the main CLI, so its deps are opt-in.
+# aiohttp is required transitively by slack_sdk.socket_mode.aiohttp. Install via
+# `pip install sagent[slack]`; the bin/slack.py shebang passes `--extra slack`.
+slack = [
+    "slack-sdk>=3.33.0",
+    "aiohttp>=3.13.5",
+]
 selfhosted = [
     "accelerate>=1.13.0",
     "auto-round>=0.12.3",
@@ -126,7 +147,7 @@ pythonpath = ["."]
 python_files = "*_test.py"
 markers = [
     "ci_smoke: slower package/CLI smoke tests run explicitly in CI",
-    "cuda: tests that require a real CUDA device (deselected by default)",
+    "cuda: tests that require a real CUDA device (skipped in hosted CI)",
     "integration: tests that require networking or external CLIs (deselected by default)",
     "performance: timing-sensitive tests (deselected by default)",
 ]
@@ -137,20 +158,26 @@ timeout = 60
 filterwarnings = [
     "error",
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
+    "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
+    "ignore:Your system is avx2 capable but pygame was not built with support for it:RuntimeWarning",  # pufferlib -> pygame import-time note: the PyPI wheel is baseline-compiled (no AVX2 wheel exists; PYGAME_DETECT_AVX2 is compile-time only). Real fix = build pygame from sdist with AVX2, but rl_ocean is headless (never blits) so it is pure noise here.
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
+    "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
 ]
 norecursedirs = [
+    "*.egg-info",
+    ".agents",
+    ".claude",
+    ".hypothesis",
     ".venv",
     "__pycache__",
-    "*.egg-info",
-    "typings",
     "third_party",
-    ".hypothesis",
+    "typings",
 ]
 
 [tool.coverage.run]
 omit = [
     "*_test.py",
+    "test_*.py",
     "*/tests/*",
     "*/.venv/*",
     "*/typings/*",
@@ -173,14 +200,20 @@ show-fixes = true
 line-length = 88
 output-format = "concise"
 target-version = "py312"
+# force-exclude makes ruff honor exclude lists even for files passed explicitly
+# (as pre-commit does). Required so lint.exclude below can skip typings/ on
+# explicit paths while ruff format still reformats them.
+# force-exclude = true
+# Global exclude applies to BOTH check and format. typings/ is intentionally
+# absent here: stubs are formatted but not linted (see lint.exclude).
 exclude = [
     ".venv/",
     "*.egg-info/",
     ".pytest_cache/",
     "build/",
     "dist/",
-    "typings/",
-    "**/typings/",
+    # "typings/",
+    # "**/typings/",
     "**/third_party/",
 ]
 extend-include = ["*.ipynb"]
@@ -266,24 +299,90 @@ ignore = [
     "TD004",   # Missing colon in TODO
     "TD005",   # Missing issue description after `TODO`
 ]
+exclude = [
+    "**/typings/**",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = [
     "F401",    # Unused import.
 ]
-"{*_test.py,tests/*}" = [
+"{*_test.py,**/tests/test*.py}" = [
     "INP001",  # Implicit namespace package. (Tests don't need __init__.py.)
     "PLR2004", # Magic value comparison.
     "S101",    # Use of `assert` detected.
     "S301",    # Pickle usage.
     "SLF001",  # Private member access.
 ]
-"docs/**" = [
-    "INP001",  # Standalone scripts.
-    "T201",    # Print found. (CLI tools use print for output.)
-]
+# Vendored third-party stubs generated by `pyright --createstub`. NEVER-FIX set:
+# every rule here either has no autofix at all (clearing it means risky manual
+# edits across thousands of mirrored files) or its fix would rename an exported
+# symbol / rebind an import -- breaking the stub's job of mirroring upstream.
+# Rules whose fix is type-preserving or improves correctness are deliberately
+# EXCLUDED (e.g. PYI036 __exit__ widening, RUF013 implicit-Optional); fix those
+# at the source instead of suppressing.
+#
+# Refresh workflow after a `pyright --createstub` regen (verified to keep
+# `ty check .` and `basedpyright .` clean).
+#    loop/tools/ruff_check_extra_autofix.py --select PYI002,PYI036,PYI051 typings
+#    uv --quiet run --frozen ruff check typings --fix --unsafe-fixes
+#    uv --quiet run --frozen ruff format typings
 "typings/**" = [
-    "PYI015", # Assignment default in stub — field specifiers (struct.field, module_field, dataclasses.field) are semantically meaningful to @dataclass_transform.
+    # === MUST NOT FIX (also in lint.unfixable): autofix corrupts stub types. ===
+    "PYI015",   #    41 -- assignment-default-in-stub -- strips dataclass_transform field-specifier; breaks synthesized __init__.
+    "PYI018",   #    39 -- unused-private-type-var -- deletes TypeVars used only in Generic[]/Protocol[] subscripts.
+    "UP046",    #    94 -- non-pep695-generic-class -- PEP 695 rewrite rebinds/drops TypeVar params.
+    "UP047",    #   342 -- non-pep695-generic-function -- PEP 695 rewrite breaks ParamSpec binding.
+    # === MUST VIOLATE: intrinsic to any faithful stub. ===
+    # Placement rule (by NATURE, not frequency -- count is irrelevant):
+    #   HERE when the rule is intrinsically unsatisfiable for a faithful stub --
+    #   the violation IS a naming / re-export / type-surface / stub-encoding
+    #   convention that mirrors upstream, so any fix would change the exported
+    #   surface. A single occurrence (e.g. N811, E743) still belongs here.
+    #   INLINE (`# noqa: CODE -- reason`) when the rule fires because a specific
+    #   line copies an upstream RUNTIME/style pattern (os.path call, debugger
+    #   import, lru_cache, hardcoded default, Union-vs-`|`) -- the justification
+    #   is per-site, not a property of being a stub.
+    "A004",     #    13 -- builtin-import-shadowing -- mirrors upstream import names; renaming rebinds.
+    "E743",     #     1 -- ambiguous-function-name -- mirrors upstream naming; renaming breaks callers.
+    "F403",     #  1950 -- undefined-local-with-import-star -- stub re-exports the whole namespace.
+    "F405",     #   712 -- undefined-local-with-import-star-usage -- re-export artifact of star import.
+    "F722",     #    14 -- forward-annotation-syntax-error -- intentional annotation strings.
+    "F811",     #    98 -- redefined-while-unused -- `@overload` / conditional re-binding.
+    "F821",     #  6651 -- undefined-name -- forward refs; "fixing" means inventing the missing symbol.
+    "F822",     #  1085 -- undefined-export -- name in `__all__` defined across a partial stub.
+    "N801",     #   607 -- invalid-class-name -- mirrors upstream naming; renaming breaks callers.
+    "N802",     #  3224 -- invalid-function-name -- mirrors camelCase upstream ops; renaming breaks callers.
+    "N803",     #  7265 -- invalid-argument-name -- mirrors upstream API (e.g. `X`, `Y`); renaming breaks the contract.
+    "N807",     #    22 -- dunder-function-name -- mirrors upstream names.
+    "N811",     #     1 -- constant-imported-as-non-constant -- mirrors upstream import alias.
+    "N812",     #    56 -- lowercase-imported-as-non-lowercase -- mirrors upstream import alias.
+    "N814",     #     1 -- camelcase-imported-as-constant -- mirrors upstream import alias.
+    "N815",     #   338 -- mixed-case-variable-in-class-scope -- mirrors upstream attribute names.
+    "N816",     #    38 -- mixed-case-variable-in-global-scope -- mirrors upstream names.
+    "N817",     #     5 -- camelcase-imported-as-acronym -- mirrors upstream import alias.
+    "N818",     #    84 -- error-suffix-on-exception-name -- mirrors upstream exception names.
+    "PLC0105",  #     9 -- type-name-incorrect-variance -- TypeVar name (e.g. `A`, `R`) is part of the exported surface; renaming to `A_co` breaks callers.
+    "PLE0604",  #    14 -- invalid-all-object -- upstream dynamic `__all__`; rewrite guesses.
+    "PLE0605",  #   124 -- invalid-all-format -- upstream builds `__all__` dynamically; rewrite guesses.
+    "PLW0211",  #    13 -- bad-staticmethod-argument -- renaming the arg changes the signature.
+    "PYI001",   #   307 -- unprefixed-type-param -- TypeVar name is part of the exported surface.
+    "PYI002",   #   209 -- complex-if-statement-in-stub -- after ruff_check_extra_autofix strips the dead/TYPE_CHECKING residue, only genuine runtime-predicate guards (is_x_available(), os.getenv) remain; no compile-time truth value, so no mechanical flatten is provably correct.
+    "PYI024",   #     5 -- collections-named-tuple -- stub encodes upstream `namedtuple(...)` definition; rewriting to NamedTuple restructures the class.
+    "PYI035",   #     1 -- unassigned-special-variable-in-stub -- mirrors upstream `__all__`.
+    "PYI042",   #    56 -- snake-case-type-alias -- mirrors upstream alias name.
+    "PYI048",   #   100 -- stub-body-multiple-statements -- collapsing could drop a real assignment.
+    "PYI063",   #     8 -- pep484-style-positional-only-parameter -- stub encodes positional-only via `__`-prefixed names mirroring upstream; PEP 570 rewrite renames params.
+    "SLF001",   #   348 -- private-member-access -- stub legitimately references upstream internals.
+    "TID252",   # 10272 -- relative-imports -- mirrors package layout; rewriting breaks intra-stub refs.
+    # === INTENTIONALLY VIOLATE: fixable in principle, kept by choice. ===
+    # Deleting a "locally unused" private is unsafe: it may be re-exported and
+    # consumed by another stub (e.g. `_size as _size`), and a stub must be correct
+    # independent of its consumers. loop/tools/ruff_check_extra_autofix.py can fix
+    # these with a `# noqa` escape hatch, but we leave them rather than risk it.
+    "PYI046",   #     4 -- unused-private-protocol -- may be re-exported cross-stub.
+    "PYI047",   #    45 -- unused-private-type-alias -- may be re-exported cross-stub.
+    "PYI049",   #     2 -- unused-private-typed-dict -- may be re-exported cross-stub.
 ]
 "*.ipynb" = [
     "ARG001",  # Unused function argument (callbacks).
@@ -326,9 +425,14 @@ section-order = [
 
 [tool.basedpyright]
 typeCheckingMode = "recommended"
-extraPaths = []
+# Don't infer types from .venv site-packages source; use bundled/local stubs
+# only. Stops basedpyright analyzing ~48k env files: full-repo run 74s -> 14s.
+# Tradeoff: stub-less libs report Unknown, so they need stubs in typings/
+# (e.g. boto3, datasets).
+useLibraryCodeForTypes = false
 exclude = [
     "**/.venv/",
+    "**/.venv-ci312/",
     "**/node_modules/",
     "*.egg-info/",
     "**/*.ipynb",
@@ -337,9 +441,11 @@ exclude = [
     "dist/",
     "typings/",
     "**/third_party/",
+    "**/typings/",
 ]
 ignore = [
     "**/.venv/",
+    "**/.venv-ci312/",
     "*.egg-info/",
     ".pytest_cache/",
     "build/",
@@ -362,19 +468,22 @@ reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedT
 reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
 reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
 reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
-reportAttributeAccessIssue = false         # Public package omits source-tree-only stubs for dynamic third-party ASTs.
-reportAssignmentType = false               # Public package keeps cachetools inference advisory.
-reportMissingImports = false               # Public package supports optional provider/runtime extras.
-reportMissingTypeStubs = false             # Public package should not require optional third-party stubs.
-reportPrivateImportUsage = false           # Some third-party packages expose runtime APIs without stubs.
-reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
-reportUnknownArgumentType = false          # Third-party dynamic ASTs do not carry useful static types.
-reportUnknownMemberType = false            # Third-party dynamic ASTs do not carry useful static types.
-reportUnknownParameterType = false         # Optional runtime accelerators may not ship stubs.
-reportUnknownVariableType = false          # Third-party dynamic ASTs do not carry useful static types.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
-reportConstantRedefinition = false         # Uppercase module-level dicts with internal-only overrides.
+# reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
+# We deliberately don't use `--all-extras` for ty and basedpyright because
+# pulling in the multi-GB torch/transformers stack into every export CI just to
+# type-check an opt-in backend isn't worth it.
+reportMissingModuleSource = false
+# Export-only: source `# pyright: ignore[reportUnknownMemberType]` on Pillow's
+# deferred-import Image.load / pypdfium2 members is load-bearing internally,
+# but the export's fuller stub set resolves the member, flagging the ignore as
+# unnecessary. The ignore must stay in source, so relax the rule here.
+reportUnnecessaryTypeIgnoreComment = false
 
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = false
+reportPrivateLocalImportUsage = false
 
 [tool.ty.src]
 exclude = [
@@ -385,11 +494,14 @@ exclude = [
     "dist/",
     "typings/",
     "**/third_party/",
+    "**/docs/",
 ]
 
 [tool.ty.environment]
 python-version = "3.12"
-extra-paths = []
+extra-paths = [
+  "typings",
+]
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -397,9 +509,6 @@ error-on-warning = true
 
 [tool.ty.rules]
 all = "warn"
-unused-ignore-comment = "ignore"
-unresolved-attribute = "ignore"
-unresolved-import = "ignore"
 
 [[tool.ty.overrides]]
 include = ["typings/**"]
@@ -416,7 +525,7 @@ invalid-key = "ignore"
 builtin = "clear,rare,code"
 ignore-words = ".codespell-ignore"
 # Pre-commit exclude handles most skips. This covers direct CLI invocations.
-# Don't add new folder paths here — add them to .pre-commit-config.yaml's
+# Don't add new folder paths here -- add them to .pre-commit-config.yaml's
 # codespell exclude regex instead. This list is only for file patterns.
 skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/,*/web/data.js,*/web/*_useragents.txt"
 
@@ -428,6 +537,21 @@ package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 [tool.uv.pip]
 compile-bytecode = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

@@ -1,0 +1,109 @@
+from torch import nn
+
+import torch
+
+from .configuration_swiftformer import SwiftFormerConfig
+from ...modeling_outputs import (
+    BaseModelOutputWithNoAttention,
+    ImageClassifierOutputWithNoAttention,
+)
+from ...modeling_utils import PreTrainedModel
+from ...utils import auto_docstring
+
+"""PyTorch SwiftFormer model."""
+logger = ...
+
+class SwiftFormerPatchEmbedding(nn.Module):
+    def __init__(self, config: SwiftFormerConfig) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+def drop_path(
+    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+) -> torch.Tensor: ...
+
+class SwiftFormerDropPath(nn.Module):
+    def __init__(self, config: SwiftFormerConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def extra_repr(self) -> str: ...
+
+class SwiftFormerEmbeddings(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, index: int) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+class SwiftFormerConvEncoder(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, dim: int) -> None: ...
+    def forward(self, x): ...
+
+class SwiftFormerMlp(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, in_features: int) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+class SwiftFormerEfficientAdditiveAttention(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, dim: int = ...) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+class SwiftFormerLocalRepresentation(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, dim: int) -> None: ...
+    def forward(self, x): ...
+
+class SwiftFormerEncoderBlock(nn.Module):
+    def __init__(
+        self, config: SwiftFormerConfig, dim: int, drop_path: float = ...
+    ) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+class SwiftFormerStage(nn.Module):
+    def __init__(self, config: SwiftFormerConfig, index: int) -> None: ...
+    def forward(self, input):  # -> Any:
+        ...
+
+class SwiftFormerEncoder(nn.Module):
+    def __init__(self, config: SwiftFormerConfig) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithNoAttention: ...
+
+@auto_docstring
+class SwiftFormerPreTrainedModel(PreTrainedModel):
+    config: SwiftFormerConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _no_split_modules = ...
+
+@auto_docstring
+class SwiftFormerModel(SwiftFormerPreTrainedModel):
+    def __init__(self, config: SwiftFormerConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithNoAttention: ...
+
+@auto_docstring
+class SwiftFormerForImageClassification(SwiftFormerPreTrainedModel):
+    def __init__(self, config: SwiftFormerConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        labels: torch.Tensor | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | ImageClassifierOutputWithNoAttention: ...
+
+__all__ = [
+    "SwiftFormerForImageClassification",
+    "SwiftFormerModel",
+    "SwiftFormerPreTrainedModel",
+]

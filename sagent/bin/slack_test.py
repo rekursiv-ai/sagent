@@ -18,6 +18,10 @@ import time
 
 import pytest
 
+
+# slack_sdk ships only in the optional `slack` extra; skip when it is absent.
+pytest.importorskip("slack_sdk")
+
 from sagent.agent import Agent as RealAgent
 from sagent.bin.slack import (
     SlackAdapter,

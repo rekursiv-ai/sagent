@@ -1,0 +1,33 @@
+import enum
+
+from torch.fx import GraphModule
+
+from .ns_types import NSNodeTargetType, NSSubgraph
+
+toq = ...
+
+class _NSGraphMatchableSubgraphsIterator:
+    def __init__(
+        self,
+        gm: GraphModule,
+        non_matchable_functions: set[NSNodeTargetType],
+        non_matchable_modules: set[NSNodeTargetType],
+        non_matchable_methods: set[NSNodeTargetType],
+    ) -> None: ...
+    def __iter__(self) -> Self: ...
+    def __next__(self) -> NSSubgraph: ...
+
+class GraphMatchingException(Exception): ...
+
+class SubgraphTypeRelationship(enum.Enum):
+    EQUAL = ...
+    EQUAL_BUT_UKNOWN = ...
+    RELATED_BUT_NOT_EQUAL = ...
+    NOT_RELATED = ...
+
+def get_matching_subgraph_pairs(
+    gm_a: GraphModule,
+    gm_b: GraphModule,
+    base_name_to_sets_of_related_ops: dict[str, set[NSNodeTargetType]] | None = ...,
+    unmatchable_types_map: dict[str, set[NSNodeTargetType]] | None = ...,
+) -> dict[str, tuple[NSSubgraph, NSSubgraph]]: ...

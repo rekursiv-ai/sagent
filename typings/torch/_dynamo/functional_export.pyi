@@ -1,0 +1,9 @@
+from typing import Any
+
+import torch
+
+class ModuleToTrace(torch.nn.Module):
+    def __init__(self, foo: Any, in_spec: Any) -> None: ...
+    def forward(self, *flat_args: Any) -> ExportTracerOutput: ...
+
+ExportTracerOutput = ...

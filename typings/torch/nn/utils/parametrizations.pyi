@@ -1,0 +1,56 @@
+from enum import Enum
+
+from torch import Tensor
+from torch.nn.modules import Module
+
+import torch
+
+__all__ = ["orthogonal", "spectral_norm", "weight_norm"]
+
+class _OrthMaps(Enum):
+    matrix_exp = ...
+    cayley = ...
+    householder = ...
+
+class _Orthogonal(Module):
+    base: Tensor
+    def __init__(
+        self, weight, orthogonal_map: _OrthMaps, *, use_trivialization=...
+    ) -> None: ...
+    def forward(self, X: torch.Tensor) -> torch.Tensor: ...
+    @torch.autograd.no_grad()
+    def right_inverse(self, Q: torch.Tensor) -> torch.Tensor: ...
+
+def orthogonal(
+    module: Module,
+    name: str = ...,
+    orthogonal_map: str | None = ...,
+    *,
+    use_trivialization: bool = ...,
+) -> Module: ...
+
+class _WeightNorm(Module):
+    def __init__(self, dim: int | None = ...) -> None: ...
+    def forward(self, weight_g, weight_v) -> Tensor: ...
+    def right_inverse(self, weight) -> tuple[Tensor, Any]: ...
+
+def weight_norm(module: Module, name: str = ..., dim: int = ...) -> Module: ...
+
+class _SpectralNorm(Module):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        n_power_iterations: int = ...,
+        dim: int = ...,
+        eps: float = ...,
+    ) -> None: ...
+    def forward(self, weight: torch.Tensor) -> torch.Tensor: ...
+    def right_inverse(self, value: torch.Tensor) -> torch.Tensor: ...
+
+def spectral_norm(
+    module: Module,
+    name: str = ...,
+    n_power_iterations: int = ...,
+    eps: float = ...,
+    dim: int | None = ...,
+) -> Module: ...

@@ -1,0 +1,23 @@
+from torch import Tensor
+from torch.distributions import Independent
+from torch.distributions.normal import Normal
+from torch.distributions.transformed_distribution import TransformedDistribution
+
+__all__ = ["LogisticNormal"]
+
+class LogisticNormal(TransformedDistribution):
+    arg_constraints = ...
+    support = ...
+    has_rsample = ...
+    base_dist: Independent[Normal]
+    def __init__(
+        self,
+        loc: Tensor | float,
+        scale: Tensor | float,
+        validate_args: bool | None = ...,
+    ) -> None: ...
+    def expand(self, batch_shape, _instance=...) -> Self: ...
+    @property
+    def loc(self) -> Tensor: ...
+    @property
+    def scale(self) -> Tensor: ...

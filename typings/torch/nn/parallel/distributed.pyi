@@ -1,0 +1,96 @@
+from collections.abc import Callable
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+from torch.autograd import Function
+from torch.distributed.algorithms.join import Joinable, JoinHook
+from torch.nn.modules import Module
+
+import torch
+import torch.distributed as dist
+
+RPC_AVAILABLE = ...
+if dist.rpc.is_available():
+    RPC_AVAILABLE = ...
+__all__ = ["DistributedDataParallel"]
+logger = ...
+
+@dataclass
+class _MixedPrecision:
+    param_dtype: torch.dtype | None = ...
+    reduce_dtype: torch.dtype | None = ...
+    buffer_dtype: torch.dtype | None = ...
+
+class _BufferCommHookLocation(Enum):
+    PRE_FORWARD = ...
+    POST_FORWARD = ...
+
+@dataclass
+class _BufferCommHook:
+    buffer_comm_hook: Callable
+    buffer_comm_hook_state: Any
+    buffer_comm_hook_location: _BufferCommHookLocation
+
+class _DDPSink(Function):
+    @staticmethod
+    def forward(
+        ctx, ddp_weakref, *inputs
+    ) -> tuple[Tensor | Any, ...] | tuple[Any, ...]: ...
+    @staticmethod
+    def backward(ctx, *grad_outputs) -> tuple[None, *tuple[Any, ...]]: ...
+
+class _DDPJoinHook(JoinHook):
+    def __init__(self, ddp, divide_by_initial_world_size) -> None: ...
+    def main_hook(self) -> None: ...
+    def post_hook(self, is_last_joiner: bool) -> None: ...
+
+class DistributedDataParallel(Module, Joinable):
+    _active_ddp_module: DistributedDataParallel | None = ...
+    def __init__(
+        self,
+        module,
+        device_ids=...,
+        output_device=...,
+        dim=...,
+        broadcast_buffers=...,
+        init_sync=...,
+        process_group=...,
+        bucket_cap_mb=...,
+        find_unused_parameters=...,
+        check_reduction=...,
+        gradient_as_bucket_view=...,
+        static_graph=...,
+        delay_all_reduce_named_params=...,
+        param_to_hook_all_reduce=...,
+        mixed_precision: _MixedPrecision | None = ...,
+        device_mesh=...,
+        skip_all_reduce_unused_params=...,
+    ) -> None: ...
+    def __getstate__(self) -> MappingProxyType[str, Any]: ...
+    def __setstate__(self, state) -> None: ...
+    @contextmanager
+    def no_sync(self) -> Generator[None, Any, None]: ...
+    def forward(self, *inputs, **kwargs) -> RRef[PyTree] | PyTree: ...
+    def scatter(
+        self, inputs, kwargs, device_ids
+    ) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...]]: ...
+    def to_kwargs(
+        self, inputs, kwargs, device_id
+    ) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...]]: ...
+    def gather(self, outputs, output_device) -> Any: ...
+    def train(self, mode=...) -> Self: ...
+    def join(
+        self,
+        divide_by_initial_world_size: bool = ...,
+        enable: bool = ...,
+        throw_on_early_termination: bool = ...,
+    ) -> Join: ...
+    def join_hook(self, **kwargs) -> _DDPJoinHook: ...
+    @property
+    def join_device(self): ...
+    @property
+    def join_process_group(self) -> ProcessGroup | None: ...
+    def register_comm_hook(self, state: object, hook: Callable) -> None: ...
+    def will_sync_module_buffers(self) -> bool: ...

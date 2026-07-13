@@ -1,0 +1,9 @@
+from pypdfium2_raw.version import _version_class
+
+__all__ = ("PDFIUM_INFO", "PYPDFIUM_INFO")
+
+class _version_pypdfium2(_version_class):
+    _FILE = ...
+    _TAG_FIELDS = ...
+
+PYPDFIUM_INFO = ...

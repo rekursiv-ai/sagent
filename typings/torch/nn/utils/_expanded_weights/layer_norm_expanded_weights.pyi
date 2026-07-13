@@ -1,0 +1,11 @@
+import torch
+import torch.nn.functional as F
+
+from .expanded_weights_impl import implements_per_sample_grads
+
+@implements_per_sample_grads(F.layer_norm)
+class LayerNormPerSampleGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, kwarg_names, _, *expanded_args_and_kwargs): ...
+    @staticmethod
+    def backward(ctx, grad_output) -> tuple[Tensor | None, ...]: ...

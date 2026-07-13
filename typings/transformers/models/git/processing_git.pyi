@@ -1,0 +1,13 @@
+from ...processing_utils import ProcessorMixin
+
+"""
+Image/Text processor class for GIT
+"""
+
+class GitProcessor(ProcessorMixin):
+    attributes = ...
+    image_processor_class = ...
+    tokenizer_class = ...
+    def __init__(self, image_processor, tokenizer) -> None: ...
+
+__all__ = ["GitProcessor"]

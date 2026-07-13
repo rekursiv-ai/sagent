@@ -1,0 +1,16 @@
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx import Node
+from torch.fx._compatibility import compatibility
+
+import torch.fx
+
+__all__ = ["FakeTensorProp"]
+
+@compatibility(is_backward_compatible=False)
+class FakeTensorProp(torch.fx.Interpreter):
+    def __init__(
+        self, module: torch.fx.GraphModule, mode: FakeTensorMode | None = ...
+    ) -> None: ...
+    def run_node(self, n: Node) -> Any: ...
+    def propagate(self, *args) -> Any: ...
+    def propagate_dont_convert_inputs(self, *args) -> Any: ...

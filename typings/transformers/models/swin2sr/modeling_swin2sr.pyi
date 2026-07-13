@@ -1,0 +1,218 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_swin2sr import Swin2SRConfig
+from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_outputs import BaseModelOutput, ImageSuperResolutionOutput
+from ...modeling_utils import PreTrainedModel
+from ...utils import ModelOutput, auto_docstring
+
+"""PyTorch Swin2SR Transformer model."""
+logger = ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class Swin2SREncoderOutput(ModelOutput):
+    last_hidden_state: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+
+def window_partition(input_feature, window_size): ...
+def window_reverse(windows, window_size, height, width): ...
+def drop_path(
+    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+) -> torch.Tensor: ...
+
+class Swin2SRDropPath(nn.Module):
+    def __init__(self, drop_prob: float | None = ...) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def extra_repr(self) -> str: ...
+
+class Swin2SREmbeddings(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(
+        self, pixel_values: torch.FloatTensor | None
+    ) -> tuple[torch.Tensor]: ...
+
+class Swin2SRPatchEmbeddings(nn.Module):
+    def __init__(self, config, normalize_patches=...) -> None: ...
+    def forward(
+        self, embeddings: torch.FloatTensor | None
+    ) -> tuple[torch.Tensor, tuple[int]]: ...
+
+class Swin2SRPatchUnEmbeddings(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, embeddings, x_size): ...
+
+class Swin2SRPatchMerging(nn.Module):
+    def __init__(
+        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+    ) -> None: ...
+    def maybe_pad(self, input_feature, height, width):  # -> Tensor:
+        ...
+    def forward(
+        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+    ) -> torch.Tensor: ...
+
+class Swin2SRSelfAttention(nn.Module):
+    def __init__(
+        self, config, dim, num_heads, window_size, pretrained_window_size=...
+    ) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class Swin2SRSelfOutput(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class Swin2SRAttention(nn.Module):
+    def __init__(
+        self, config, dim, num_heads, window_size, pretrained_window_size=...
+    ) -> None: ...
+    def prune_heads(self, heads):  # -> None:
+        ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class Swin2SRIntermediate(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class Swin2SROutput(nn.Module):
+    def __init__(self, config, dim) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class Swin2SRLayer(nn.Module):
+    def __init__(
+        self,
+        config,
+        dim,
+        input_resolution,
+        num_heads,
+        drop_path_rate=...,
+        shift_size=...,
+        pretrained_window_size=...,
+    ) -> None: ...
+    def get_attn_mask(self, height, width, dtype):  # -> Tensor | None:
+        ...
+    def maybe_pad(
+        self, hidden_states, height, width
+    ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
+        ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+class Swin2SRStage(GradientCheckpointingLayer):
+    def __init__(
+        self,
+        config,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        drop_path,
+        pretrained_window_size=...,
+    ) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+    ) -> tuple[torch.Tensor]: ...
+
+class Swin2SREncoder(nn.Module):
+    def __init__(self, config, grid_size) -> None: ...
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | Swin2SREncoderOutput: ...
+
+@auto_docstring
+class Swin2SRPreTrainedModel(PreTrainedModel):
+    config: Swin2SRConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+
+@auto_docstring
+class Swin2SRModel(Swin2SRPreTrainedModel):
+    def __init__(self, config) -> None: ...
+    def get_input_embeddings(self):  # -> Swin2SRPatchEmbeddings:
+        ...
+    def pad_and_normalize(self, pixel_values): ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        head_mask: torch.FloatTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutput: ...
+
+class Upsample(nn.Module):
+    def __init__(self, scale, num_features) -> None: ...
+    def forward(self, hidden_state):  # -> Any:
+        ...
+
+class UpsampleOneStep(nn.Module):
+    def __init__(self, scale, in_channels, out_channels) -> None: ...
+    def forward(self, x):  # -> Any:
+        ...
+
+class PixelShuffleUpsampler(nn.Module):
+    def __init__(self, config, num_features) -> None: ...
+    def forward(self, sequence_output):  # -> Any:
+        ...
+
+class NearestConvUpsampler(nn.Module):
+    def __init__(self, config, num_features) -> None: ...
+    def forward(self, sequence_output):  # -> Any:
+        ...
+
+class PixelShuffleAuxUpsampler(nn.Module):
+    def __init__(self, config, num_features) -> None: ...
+    def forward(self, sequence_output, bicubic, height, width):  # -> tuple[Any, Any]:
+        ...
+
+@auto_docstring(custom_intro=...)
+class Swin2SRForImageSuperResolution(Swin2SRPreTrainedModel):
+    def __init__(self, config) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor | None = ...,
+        head_mask: torch.FloatTensor | None = ...,
+        labels: torch.LongTensor | None = ...,
+        output_attentions: bool | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | ImageSuperResolutionOutput: ...
+
+__all__ = ["Swin2SRForImageSuperResolution", "Swin2SRModel", "Swin2SRPreTrainedModel"]

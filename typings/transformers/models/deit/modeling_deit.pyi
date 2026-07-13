@@ -1,0 +1,186 @@
+from dataclasses import dataclass
+
+from torch import nn
+
+import torch
+
+from .configuration_deit import DeiTConfig
+from ...modeling_layers import GradientCheckpointingLayer
+from ...modeling_outputs import (
+    BaseModelOutput,
+    BaseModelOutputWithPooling,
+    ImageClassifierOutput,
+    MaskedImageModelingOutput,
+)
+from ...modeling_utils import PreTrainedModel
+from ...processing_utils import Unpack
+from ...utils import ModelOutput, TransformersKwargs, auto_docstring
+from ...utils.generic import can_return_tuple, check_model_inputs
+
+"""PyTorch DeiT model."""
+logger = ...
+
+class DeiTEmbeddings(nn.Module):
+    def __init__(self, config: DeiTConfig, use_mask_token: bool = ...) -> None: ...
+    def interpolate_pos_encoding(
+        self, embeddings: torch.Tensor, height: int, width: int
+    ) -> torch.Tensor: ...
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+    ) -> torch.Tensor: ...
+
+class DeiTPatchEmbeddings(nn.Module):
+    def __init__(self, config) -> None: ...
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor: ...
+
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = ...,
+    **kwargs,
+):  # -> tuple[Tensor, Tensor]:
+    ...
+
+class DeiTSelfAttention(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+class DeiTSelfOutput(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class DeiTAttention(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def prune_heads(self, heads: set[int]):  # -> None:
+        ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> torch.Tensor: ...
+
+class DeiTIntermediate(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class DeiTOutput(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor: ...
+
+class DeiTLayer(GradientCheckpointingLayer):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> torch.Tensor: ...
+
+class DeiTEncoder(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(
+        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+    ) -> BaseModelOutput: ...
+
+@auto_docstring
+class DeiTPreTrainedModel(PreTrainedModel):
+    config: DeiTConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    _no_split_modules = ...
+    _supports_sdpa = ...
+    _supports_flash_attn = ...
+    _supports_flex_attn = ...
+    _supports_attention_backend = ...
+    _can_record_outputs = ...
+
+@auto_docstring
+class DeiTModel(DeiTPreTrainedModel):
+    def __init__(
+        self,
+        config: DeiTConfig,
+        add_pooling_layer: bool = ...,
+        use_mask_token: bool = ...,
+    ) -> None: ...
+    def get_input_embeddings(self) -> DeiTPatchEmbeddings: ...
+    @check_model_inputs
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPooling: ...
+
+class DeiTPooler(nn.Module):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+@auto_docstring(custom_intro=...)
+class DeiTForMaskedImageModeling(DeiTPreTrainedModel):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        bool_masked_pos: torch.BoolTensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> MaskedImageModelingOutput: ...
+
+@auto_docstring(custom_intro=...)
+class DeiTForImageClassification(DeiTPreTrainedModel):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        labels: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> ImageClassifierOutput: ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class DeiTForImageClassificationWithTeacherOutput(ModelOutput):
+    logits: torch.FloatTensor | None = ...
+    cls_logits: torch.FloatTensor | None = ...
+    distillation_logits: torch.FloatTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+    attentions: tuple[torch.FloatTensor] | None = ...
+
+@auto_docstring(custom_intro=...)
+class DeiTForImageClassificationWithTeacher(DeiTPreTrainedModel):
+    def __init__(self, config: DeiTConfig) -> None: ...
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.Tensor | None = ...,
+        head_mask: torch.Tensor | None = ...,
+        interpolate_pos_encoding: bool = ...,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> DeiTForImageClassificationWithTeacherOutput: ...
+
+__all__ = [
+    "DeiTForImageClassification",
+    "DeiTForImageClassificationWithTeacher",
+    "DeiTForMaskedImageModeling",
+    "DeiTModel",
+    "DeiTPreTrainedModel",
+]

@@ -1,0 +1,84 @@
+from dataclasses import dataclass
+
+from torch import nn
+from transformers import PreTrainedModel
+from transformers.modeling_outputs import BaseModelOutputWithNoAttention
+from transformers.models.superpoint.configuration_superpoint import SuperPointConfig
+
+import torch
+
+from ...utils import ModelOutput, auto_docstring
+
+"""PyTorch SuperPoint model."""
+logger = ...
+
+def remove_keypoints_from_borders(
+    keypoints: torch.Tensor, scores: torch.Tensor, border: int, height: int, width: int
+) -> tuple[torch.Tensor, torch.Tensor]: ...
+def top_k_keypoints(
+    keypoints: torch.Tensor, scores: torch.Tensor, k: int
+) -> tuple[torch.Tensor, torch.Tensor]: ...
+def simple_nms(scores: torch.Tensor, nms_radius: int) -> torch.Tensor: ...
+
+@dataclass
+@auto_docstring(custom_intro=...)
+class SuperPointKeypointDescriptionOutput(ModelOutput):
+    loss: torch.FloatTensor | None = ...
+    keypoints: torch.IntTensor | None = ...
+    scores: torch.FloatTensor | None = ...
+    descriptors: torch.FloatTensor | None = ...
+    mask: torch.BoolTensor | None = ...
+    hidden_states: tuple[torch.FloatTensor] | None = ...
+
+class SuperPointConvBlock(nn.Module):
+    def __init__(
+        self,
+        config: SuperPointConfig,
+        in_channels: int,
+        out_channels: int,
+        add_pooling: bool = ...,
+    ) -> None: ...
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+class SuperPointEncoder(nn.Module):
+    def __init__(self, config: SuperPointConfig) -> None: ...
+    def forward(
+        self,
+        input,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithNoAttention: ...
+
+class SuperPointInterestPointDecoder(nn.Module):
+    def __init__(self, config: SuperPointConfig) -> None: ...
+    def forward(self, encoded: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+class SuperPointDescriptorDecoder(nn.Module):
+    def __init__(self, config: SuperPointConfig) -> None: ...
+    def forward(
+        self, encoded: torch.Tensor, keypoints: torch.Tensor
+    ) -> torch.Tensor: ...
+
+@auto_docstring
+class SuperPointPreTrainedModel(PreTrainedModel):
+    config: SuperPointConfig
+    base_model_prefix = ...
+    main_input_name = ...
+    supports_gradient_checkpointing = ...
+    def extract_one_channel_pixel_values(
+        self, pixel_values: torch.FloatTensor
+    ) -> torch.FloatTensor: ...
+
+@auto_docstring(custom_intro=...)
+class SuperPointForKeypointDetection(SuperPointPreTrainedModel):
+    def __init__(self, config: SuperPointConfig) -> None: ...
+    @auto_docstring
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        labels: torch.LongTensor | None = ...,
+        output_hidden_states: bool | None = ...,
+        return_dict: bool | None = ...,
+    ) -> tuple | SuperPointKeypointDescriptionOutput: ...
+
+__all__ = ["SuperPointForKeypointDetection", "SuperPointPreTrainedModel"]
