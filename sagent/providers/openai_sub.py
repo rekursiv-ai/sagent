@@ -221,20 +221,31 @@ def _subscription_profile(profile: ModelProfile) -> ModelProfile:
 class OpenAISubscription(OpenAI):
     """OpenAI provider -- OAuth + ChatGPT subscription billing.
 
-    Inherits KNOWN_MODELS (limits + API pricing) from OpenAI.
+    Derives KNOWN_MODELS from OpenAI (API pricing inherited, token
+    limits clamped to the subscription wire contract, ``+1m`` ids
+    dropped -- see the ``KNOWN_MODELS`` comprehension below).
     Cost tracking uses standard API per-token pricing even though
     subscription users pay a flat fee. This is intentional: it gives
     a consistent "what would this session cost at API rates" metric
     regardless of auth mode.
     """
 
-    # ``DEFAULT_MODEL`` / ``DEFAULT_UTILITY_MODEL`` inherit from ``OpenAI``;
-    # sub users pay a flat fee so the most-capable model is the right default.
+    # Sub users pay a flat fee, so the most-capable model is the right default.
+    # ``+1m`` only widens the input window, which the subscription backend caps
+    # at ``_SUBSCRIPTION_MAX_REQUEST_TOKENS`` regardless -- so every ``+1m`` id
+    # would clamp to exactly its base id. Rather than accept a suffix that buys
+    # nothing (and silently mislead a caller expecting 1M), the catalog omits
+    # ``+1m`` ids entirely: the base id is the only honest handle here. The
+    # inherited ``OpenAI.DEFAULT_MODEL`` carries ``+1m``, so it is overridden
+    # below to the base id to stay resolvable against this narrowed catalog.
+    DEFAULT_MODEL: ClassVar[str] = "gpt-5.6-sol"
+
     # Keep pricing inherited from the public API profiles, but clamp limits
     # separately because subscription auth is a different backend contract.
     KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
         name: _subscription_profile(profile)
         for name, profile in OpenAI.KNOWN_MODELS.items()
+        if not name.endswith("+1m")
     }
 
     class Credentials(TypedDict):
@@ -468,9 +479,11 @@ class OpenAISubscription(OpenAI):
 
         """
         mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Fail fast -- every supported model must be in KNOWN_MODELS.
-        # Strip only latency tags. Inherited ``+1m`` ids are accepted, but
-        # their profiles remain clamped to the subscription backend contract.
+        # Fail fast -- every supported model must be in KNOWN_MODELS. Strip
+        # latency tags before lookup. ``+1m`` is NOT stripped and is absent
+        # from the narrowed subscription catalog, so a ``+1m`` id raises below
+        # rather than silently clamping (the suffix buys nothing under the
+        # subscription wire contract). Callers must use the base id.
         profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
             strip_latency_tags(mid),
         )

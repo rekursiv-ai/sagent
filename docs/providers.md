@@ -40,9 +40,11 @@ ProviderClass.from_env().utility_model()
 
 OpenAI supports the GPT-5.6 family as `gpt-5.6-sol`, `gpt-5.6-terra`, and
 `gpt-5.6-luna`; `gpt-5.6` is an alias for Sol. Append `+1m` to any of these
-IDs for Sagent's full-window API-key budget. `OpenAISubscription` accepts the
-same IDs for catalog compatibility but clamps every request to its 272K backend
-contract, so `+1m` does not widen that transport. GPT-5.6 accepts reasoning
+IDs for Sagent's full-window API-key budget. `OpenAISubscription` caps every
+request at its 272K backend contract, so `+1m` would widen nothing there; the
+subscription catalog therefore omits `+1m` IDs entirely and a `+1m` ID raises
+as unknown -- use the base ID (e.g. `gpt-5.6-sol`) under subscription auth.
+GPT-5.6 accepts reasoning
 efforts from `none` through `max`. The subscription Responses API sends `max`
 directly; the API-key Chat Completions transport maps it to that endpoint's
 highest accepted value, `xhigh`, for tool-free requests. GPT-5.6 Chat

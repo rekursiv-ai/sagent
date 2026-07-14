@@ -704,9 +704,12 @@ def test_subscription_model_uses_default_when_unset() -> None:
     assert m.model_id == OpenAISubscription.DEFAULT_MODEL
 
 
-def test_subscription_default_model_inherits_from_openai() -> None:
-    """``OpenAISubscription`` defers to ``OpenAI.DEFAULT_MODEL``."""
-    assert OpenAISubscription.DEFAULT_MODEL == OpenAI.DEFAULT_MODEL
+def test_subscription_default_model_is_openai_default_without_1m() -> None:
+    """Sub default = the API default's base id (``+1m`` is not in the catalog)."""
+    assert OpenAISubscription.DEFAULT_MODEL == "gpt-5.6-sol"
+    assert OpenAI.DEFAULT_MODEL == "gpt-5.6-sol+1m"
+    # The narrowed default must resolve against the narrowed catalog.
+    assert OpenAISubscription.DEFAULT_MODEL in OpenAISubscription.KNOWN_MODELS
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
@@ -727,8 +730,16 @@ def test_subscription_model_clamps_against_wire_contract() -> None:
 
 
 def test_subscription_model_override_cannot_bypass_wire_contract() -> None:
-    m = _make_provider().model("gpt-5.6-sol+1m", max_request_tokens=1_050_000)
+    m = _make_provider().model("gpt-5.6-sol", max_request_tokens=1_050_000)
     assert m.max_request_tokens == 272_000
+
+
+def test_subscription_rejects_1m_ids() -> None:
+    """``+1m`` buys nothing under the wire contract, so it is not a known id."""
+    p = _make_provider()
+    with pytest.raises(ValueError, match="Unknown model"):
+        _ = p.model("gpt-5.6-sol+1m")
+    assert not any(name.endswith("+1m") for name in OpenAISubscription.KNOWN_MODELS)
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
