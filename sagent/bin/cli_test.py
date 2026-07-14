@@ -24,25 +24,29 @@ from sagent.agent.session_io import (
 )
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
+    _DEFAULT_PROVIDER,
     DEFAULT_TOOLS,
     _apply_resume_model_defaults,
     _build_persistent_child,
+    _build_provider_model_once,
     _cli_provider_options,
     _configure_logging,
+    _default_allow_providers,
     _event_to_json_record,
     _install_repl_logging,
     _last_assistant_text,
     _parse_allow_providers,
     _parse_cli_args,
     _parse_stream_json,
-    _resolve_allow_providers,
     _resolve_cli_thinking_state,
+    _resolve_provider_and_allow,
     _resolve_session_dir,
     _resume_label,
     _run_headless,
     parse_agent_args,
     resolve_tools,
 )
+from sagent.providers import PROVIDER_NAMES
 from sagent.testing import FakeAgent
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
@@ -207,6 +211,55 @@ def test_build_persistent_child_restores_thinking_state(
     options = captured["options"]
     assert options is not None
     assert options.redact_thinking is True
+
+
+def test_default_allow_providers_leads_with_default_provider() -> None:
+    """Default allow-list's first entry is the zero-flag default provider."""
+    out = _default_allow_providers()
+    assert out[0] == _DEFAULT_PROVIDER
+    assert set(out) == set(PROVIDER_NAMES)
+    assert len(out) == len(PROVIDER_NAMES)  # no dup
+
+
+def test_implicit_provider_derives_auth_from_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth follows the resolved provider even when ``--auth`` is implicit.
+
+    The default provider now comes from the allow-list, so its auth must
+    be derived from the provider rather than the standalone ``--auth``
+    default (which would mismatch, e.g. ``Anthropic`` wants ``env`` but
+    the default auth is ``credentials``).
+    """
+    ns = _parse([])
+    ns.provider = "Anthropic"  # simulate allow-list default selection
+
+    class _Provider:
+        def model(self, model_id: str | None = None) -> object:
+            return argparse.Namespace(model_id=model_id or "m")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_build_provider(
+        provider_name: str,
+        auth: str,
+        *,
+        account: str | None = None,
+        **extra: object,
+    ) -> object:
+        del account, extra
+        calls.append((provider_name, auth))
+        return _Provider()
+
+    monkeypatch.setattr(
+        "sagent.bin.cli.build_provider",
+        fake_build_provider,
+    )
+
+    _, _, auth = _build_provider_model_once(ns, None)
+
+    assert calls == [("Anthropic", "env")]
+    assert auth == "env"
 
 
 def test_parse_cli_args_session_paths() -> None:
@@ -752,39 +805,34 @@ def test_parse_allow_providers_unknown_exits() -> None:
     assert exc.value.code == 1
 
 
-def test_resolve_allow_providers_does_not_union_default_primary() -> None:
-    """Default (non-explicit) ``--provider`` does not widen the allow-list.
-
-    Otherwise narrowing ``--allow-providers`` without changing
-    ``--provider`` would silently re-admit the default provider.
-    """
-    with pytest.raises(SystemExit) as exc:
-        _resolve_allow_providers(
-            "Anthropic",
-            primary="OpenAI",
-            primary_explicit=False,
-        )
-    assert exc.value.code == 1
+def test_resolve_provider_and_allow_default_picks_first_allowed() -> None:
+    """Default (``primary=None``) provider is the first allowed entry."""
+    provider, out = _resolve_provider_and_allow("OpenAI,Anthropic", primary=None)
+    assert provider == "OpenAI"
+    assert out == ("OpenAI", "Anthropic")
 
 
-def test_resolve_allow_providers_no_dup_when_already_present() -> None:
+def test_resolve_provider_and_allow_no_dup_when_already_present() -> None:
     """Idempotent: explicit primary already in CSV is a no-op."""
-    out = _resolve_allow_providers(
+    provider, out = _resolve_provider_and_allow(
         "Anthropic,OpenAI",
         primary="Anthropic",
-        primary_explicit=True,
     )
+    assert provider == "Anthropic"
     assert out == ("Anthropic", "OpenAI")
 
 
-def test_resolve_allow_providers_rejects_unknown_explicit_primary() -> None:
+def test_resolve_provider_and_allow_rejects_unknown_explicit_primary() -> None:
     """Unknown explicit primary still fails ``_parse_allow_providers`` validation."""
     with pytest.raises(SystemExit) as exc:
-        _resolve_allow_providers(
-            "Anthropic,OpenAI",
-            primary="NopeNotReal",
-            primary_explicit=True,
-        )
+        _resolve_provider_and_allow("Anthropic,OpenAI", primary="NopeNotReal")
+    assert exc.value.code == 1
+
+
+def test_resolve_provider_and_allow_rejects_empty_spec() -> None:
+    """Empty allow-list exits regardless of ``primary``."""
+    with pytest.raises(SystemExit) as exc:
+        _resolve_provider_and_allow("", primary=None)
     assert exc.value.code == 1
 
 

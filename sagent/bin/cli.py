@@ -99,6 +99,17 @@ from sagent.tools.core import set_recipe
 _DEFAULT_PROVIDER = "Anthropic"
 _DEFAULT_AUTH = "env"
 
+
+def _default_allow_providers() -> tuple[str, ...]:
+    """Default allow-list, led by ``_DEFAULT_PROVIDER``.
+
+    ``--provider`` defaults to the first allowed provider, so the lead
+    entry is the zero-flag default; the rest follow in declaration order.
+    """
+    rest = tuple(p for p in PROVIDER_NAMES if p != _DEFAULT_PROVIDER)
+    return (_DEFAULT_PROVIDER, *rest)
+
+
 DEFAULT_TOOLS = [
     "AgentSpawn",
     "AgentSend",
@@ -272,8 +283,9 @@ def parse_agent_args(
         "--provider",
         default=_DEFAULT_PROVIDER,
         help=(
-            "Provider class name from ``sagent.providers`` "
-            f"(default: {_DEFAULT_PROVIDER})."
+            "Provider class name from ``sagent.providers``. Default: the"
+            " first entry of ``--allow-providers``"
+            f" (``{_DEFAULT_PROVIDER}`` unless narrowed)."
         ),
     )
     parser.add_argument(
@@ -295,7 +307,9 @@ def parse_agent_args(
     )
     parser.add_argument(
         "--allow-providers",
-        default=os.environ.get("SAGENT_ALLOW_PROVIDERS", ",".join(PROVIDER_NAMES)),
+        default=os.environ.get(
+            "SAGENT_ALLOW_PROVIDERS", ",".join(_default_allow_providers())
+        ),
         metavar="LIST",
         help=(
             "Comma-separated provider names this agent and its spawned"
@@ -576,36 +590,28 @@ def _parse_allow_providers(spec: str) -> tuple[str, ...]:
     return parsed
 
 
-def _resolve_allow_providers(
+def _resolve_provider_and_allow(
     spec: str,
     *,
-    primary: str,
-    primary_explicit: bool,
-) -> tuple[str, ...]:
-    """Parse ``--allow-providers`` and union an explicit ``--provider``.
+    primary: str | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve the provider and its allow-list together from ``spec``.
 
-    The structural invariant is "primary provider is in the allow-set";
-    enforcing it implicitly when the user typed ``--provider`` removes
-    the redundant double-naming. The default-primary path keeps the
-    hard error so a narrowed allow-list isn't silently re-widened.
+    ``primary`` is the provider when the user passed ``--provider`` or a
+    resumed session pinned one; ``None`` means "use the default", which
+    is the first allowed provider. An explicit provider is unioned into
+    the allow-set so the caller need not name it twice. Unknown or empty
+    ``spec`` exits via :func:`_parse_allow_providers`.
     """
     parsed = _parse_allow_providers(spec)
-    if primary_explicit and primary not in parsed:
-        candidate = (*parsed, primary)
-        # Validate the unioned primary against the known provider list
-        # by routing it back through ``_parse_allow_providers`` rather
-        # than duplicating the check; on unknown ``primary`` this
-        # surfaces the same error and exit code the user would see for
-        # any other unknown entry in the CSV.
-        return _parse_allow_providers(",".join(candidate))
-    if primary not in parsed:
-        sys.stderr.write(
-            f"Error: --provider={primary!r} is not in"
-            f" --allow-providers {list(parsed)}; widen the allow"
-            " list or pick an allowed provider.\n"
-        )
-        sys.exit(1)
-    return parsed
+    if primary is None:
+        return parsed[0], parsed
+    if primary in parsed:
+        return primary, parsed
+    # Route the union back through ``_parse_allow_providers`` so an
+    # unknown ``primary`` surfaces the same error/exit as any other
+    # unknown CSV entry.
+    return primary, _parse_allow_providers(f"{spec},{primary}")
 
 
 def _build_provider_model(
@@ -626,9 +632,7 @@ def _build_provider_model_once(
     """Build one provider/model pair without fallback."""
     provider_name = str(args.provider)
     auth = str(args.auth)
-    if bool(getattr(args, "provider_explicit", False)) and not bool(
-        getattr(args, "auth_explicit", False)
-    ):
+    if not bool(getattr(args, "auth_explicit", False)):
         auth = default_auth_for_provider(provider_name)
     model_id = cast(str | None, args.model)
     model_lookup = model_id
@@ -1273,10 +1277,14 @@ def main() -> None:
         loaded_session = load_session(Path(session_dir), {})
         if loaded_session is not None:
             _apply_resume_model_defaults(args, loaded_session[0])
-    allow_providers = _resolve_allow_providers(
+    # The provider is "explicit" when the user passed ``--provider`` or a
+    # resumed session pinned one; otherwise it defaults to the first
+    # allowed provider (``primary=None``).
+    resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
+    explicit = bool(getattr(args, "provider_explicit", False)) or resumed_provider
+    args.provider, allow_providers = _resolve_provider_and_allow(
         args.allow_providers,
-        primary=args.provider,
-        primary_explicit=bool(getattr(args, "provider_explicit", False)),
+        primary=args.provider if explicit else None,
     )
     try:
         thinking_state = _resolve_cli_thinking_state(args)
