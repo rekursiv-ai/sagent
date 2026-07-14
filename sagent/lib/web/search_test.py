@@ -37,6 +37,7 @@ from sagent.lib.web.search import (
     _duckduckgo_extract_url,
     _duckduckgo_parse,
     _duckduckgo_quote_bangs,
+    _duckduckgo_user_agent,
     _searxng_url,
     _strip_scripts,
     duckduckgo,
@@ -739,6 +740,7 @@ class TestSearchDuckduckgo:
         assert results[0].title == "Example Title"
 
     def test_uses_normal_browser_request_contract(self) -> None:
+        _duckduckgo_user_agent.cache_clear()  # so the patched pool is drawn from
         with (
             patch(
                 "sagent.lib.web.search.user_agent_pool",
@@ -771,6 +773,19 @@ class TestSearchDuckduckgo:
         # default desktop Chrome sec-ch-ua headers.
         assert req.raw_headers is True
         assert req.retries == 2
+
+    def test_user_agent_is_process_stable_across_queries(self) -> None:
+        # DDG's vqd anti-bot token is keyed to (query, UA); a UA that shifts
+        # between requests is read as a bot. Unlike the per-query Google UA, the
+        # DDG UA must be the SAME for every query in the process.
+        _duckduckgo_user_agent.cache_clear()
+        with _patch_fetch(return_value=_NO_RESULTS_DDG.encode()) as mock:
+            duckduckgo("alpha")
+            duckduckgo("beta")
+        ua_a = mock.call_args_list[0].kwargs["request"].headers["User-Agent"]
+        ua_b = mock.call_args_list[1].kwargs["request"].headers["User-Agent"]
+        assert ua_a == ua_b
+        assert ua_a.endswith("NSTNWV")
 
     def test_quotes_bangs_before_request(self) -> None:
         with _patch_fetch(
