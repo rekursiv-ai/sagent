@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast, overload
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -670,6 +671,20 @@ _DUCKDUCKGO_URL = (
 )
 
 
+@cache
+def _duckduckgo_user_agent() -> str:
+    """A PROCESS-STABLE User-Agent for DuckDuckGo (drawn once, reused).
+
+    DuckDuckGo derives its ``vqd`` anti-bot token from ``(query, User-Agent)`` and
+    treats a UA that shifts between the results page and its follow-ups as a bot
+    (which lowers the IP's reputation and triggers CAPTCHAs). A stable UA keeps
+    the token valid across requests -- unlike the per-query UA the Google path
+    uses. Cached, so the whole process presents one consistent DDG client.
+    """
+    pool = user_agent_pool("chrome_android")
+    return f"{pool[0]} NSTNWV"
+
+
 def duckduckgo(
     query: str,
     num_results: int = 10,
@@ -699,7 +714,8 @@ def duckduckgo(
         raise SearchError(
             f"DuckDuckGo query exceeds {max_query_chars} characters (got {len(query)})."
         )
-    request_headers = gsa_headers_for_query(query) | {
+    request_headers = {
+        "User-Agent": _duckduckgo_user_agent(),
         "Accept": "*/*",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
