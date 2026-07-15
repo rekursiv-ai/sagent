@@ -329,7 +329,12 @@ def parse_agent_args(
     parser.add_argument(
         "--model",
         default=None,
-        help="Model ID (default per provider). Append +1m / +200k to set window.",
+        help=(
+            "Model ID, or a symbolic tier resolved per provider: 'default'"
+            " (the provider's default model) or 'utility' (its cheapest/fastest"
+            " model for summarizers and other internal tasks). Append +1m / +200k"
+            " to set window."
+        ),
     )
     parser.add_argument(
         "--system",
@@ -635,10 +640,11 @@ def _build_provider_model_once(
     if not bool(getattr(args, "auth_explicit", False)):
         auth = default_auth_for_provider(provider_name)
     model_id = cast(str | None, args.model)
-    model_lookup = model_id
+    # SelfHosted encodes the auth (a local snapshot path) in ``--model`` and has
+    # no symbolic tiers, so it always resolves to the provider's default model.
     if args.provider == "SelfHosted":
         auth = model_id or "env"
-        model_lookup = None
+        model_id = None
     options = _cli_provider_options(args)
     if thinking_state is not None and "redact_thinking" in (
         supported_provider_options(provider_name)
@@ -653,7 +659,10 @@ def _build_provider_model_once(
         account=args.account,
         options=options,
     )
-    model = provider.model(model_lookup)
+    if model_id == "utility":
+        model = provider.utility_model()
+    else:
+        model = provider.model(None if model_id == "default" else model_id)
     return provider, model, auth
 
 

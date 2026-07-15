@@ -18,8 +18,10 @@ import sys
 
 
 __all__ = [
+    "cache_dir",
     "config_dir",
     "data_dir",
+    "resolve_working_dir",
     "state_dir",
 ]
 
@@ -82,6 +84,36 @@ def config_dir(app: str, platform: str = sys.platform) -> Path:
     return base / app
 
 
+def cache_dir(app: str, platform: str = sys.platform) -> Path:
+    """Resolve the per-user cache directory for ``app``.
+
+    XDG ``$XDG_CACHE_HOME`` is for non-essential, regenerable data --
+    downloaded model weights, build artifacts, memoized computation. On
+    Linux/BSD distinct from :func:`data_dir` (``~/.cache`` vs
+    ``~/.local/share``); on macOS and Windows the two collapse.
+
+    Args:
+      app: Application name. Used as the leaf directory.
+      platform: ``sys.platform`` string. Override for testing; the
+        default closes over the host's ``sys.platform``.
+
+    Returns:
+      path: Absolute path to the application's cache directory. The
+        directory is not created.
+
+    References:
+      https://specifications.freedesktop.org/basedir-spec/latest/
+
+    """
+    if platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return base / app / "Cache"
+    if platform == "darwin":
+        return Path.home() / "Library" / "Caches" / app
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / app
+
+
 def state_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user state directory for ``app``.
 
@@ -108,3 +140,30 @@ def state_dir(app: str, platform: str = sys.platform) -> Path:
         return data_dir(app, platform=platform)
     base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
     return base / app
+
+
+def resolve_working_dir(
+    base_dir: Path | str | None,
+    working_dir: Path | str,
+) -> Path:
+    """Resolve a Config's ``working_dir`` against an optional ``base_dir``.
+
+    The one path-composition rule every path-owning Config shares: when
+    ``base_dir`` is ``None`` the ``working_dir`` is its own absolute logical
+    root; otherwise ``working_dir`` is made relative (its leading slash
+    stripped) and joined beneath ``base_dir``. Stripping the slash is required
+    because ``Path("/a") / "/b" == Path("/b")`` -- an absolute right operand
+    discards the base (POSIX semantics), so a logical root like
+    ``"/checkpoints"`` would otherwise ignore its owner's ``base_dir``.
+
+    Args:
+      base_dir: Owner-supplied root, or ``None`` when the Config is its own root.
+      working_dir: The Config's opinionated logical location.
+
+    Returns:
+      resolved: ``working_dir`` as a ``Path``, beneath ``base_dir`` when given.
+
+    """
+    if base_dir is None:
+        return Path(working_dir)
+    return Path(base_dir) / str(working_dir).lstrip("/")
