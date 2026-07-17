@@ -3003,7 +3003,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.1.8"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3136,7 +3136,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "webp", specifier = ">=0.4.0" },
     { name = "wrapt" },
-    { name = "zendriver", specifier = ">=0.15.4" },
+    { name = "zendriver", specifier = ">=0.15.5" },
     { name = "zstandard" },
 ]
 provides-extras = ["slack", "selfhosted"]
