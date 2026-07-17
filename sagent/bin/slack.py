@@ -1,8 +1,8 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300  -- Polyglot: #!/bin/sh + triple-single-quotes are intentional.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --extra slack python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 
 Slack service: deterministic message routing to persistent agents.
 
@@ -1084,14 +1084,15 @@ async def _run(args: argparse.Namespace) -> None:
     logger.info("Shutdown complete")
 
 
-def main() -> None:
-    """Parse args and run the Slack service event loop."""
+def main() -> int:
+    """Parse args, run the Slack service, and return the process exit code."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     parser = argparse.ArgumentParser(
-        description="Slack service -- deterministic multi-agent routing.",
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     args, remaining = parse_slack_args(parser)
     if remaining:
@@ -1100,7 +1101,9 @@ def main() -> None:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
         _ = sys.stderr.write("\n[interrupted]\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+# vim: ft=python

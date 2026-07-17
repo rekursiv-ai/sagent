@@ -1,9 +1,8 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300  -- Polyglot: #!/bin/sh + triple-single-quotes are intentional.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen python3 "$0" "$@"
-
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Verify KNOWN_MODELS limits against provider APIs and docs.
 
 Checks that every provider's KNOWN_MODELS entries have correct
@@ -238,7 +237,7 @@ def compare(
     return errors
 
 
-async def main() -> int:
+async def _run() -> int:
     """Verify all providers' KNOWN_MODELS against live APIs.
 
     Returns:
@@ -246,7 +245,8 @@ async def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description="Verify KNOWN_MODELS limits against provider APIs.",
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--provider",
@@ -287,5 +287,11 @@ async def main() -> int:
     return 1 if total_errors else 0
 
 
+def main() -> int:
+    """The main function. Return the process exit code."""
+    return asyncio.run(_run())
+
+
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    raise SystemExit(main())
+# vim: ft=python

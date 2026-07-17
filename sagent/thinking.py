@@ -146,11 +146,11 @@ def resolve_thinking_command(
 
     """
     if command in THINKING_STATES:
-        return cast(ThinkingState, command)  # pyright: ignore[reportUnnecessaryCast] -- ty does not narrow tuple membership to Literal.
+        return command
     if command not in THINKING_COMMANDS:
         valid = ", ".join(THINKING_COMMANDS)
         raise ValueError(f"thinking must be one of: {valid}")
-    typed_command = cast(ThinkingCommand, command)  # pyright: ignore[reportUnnecessaryCast] -- ty does not narrow tuple membership to Literal.
+    typed_command = command
     if current is None:
         return _startup_state(typed_command)
     return _live_state(typed_command, current)
