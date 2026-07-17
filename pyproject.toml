@@ -113,7 +113,7 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.10",
-    "ty>=0.0.56",
+    "ty>=0.0.60",
 ]
 dev = [
     {include-group = "debug"},

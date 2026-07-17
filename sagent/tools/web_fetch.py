@@ -203,12 +203,9 @@ class WebFetch:
                 ),
                 is_error=True,
             )
-        # The guard above admits only "GET"/"POST"; cast narrows the str to the
-        # HttpMethod literal. ty cannot follow the `in`-membership guard; pyright
-        # can, hence its reportUnnecessaryCast suppression.
-        method = cast(  # pyright: ignore[reportUnnecessaryCast] -- ty needs cast; pyright narrows from `in`
-            "HttpMethod", raw_method
-        )
+        # The guard above admits only "GET"/"POST", narrowing raw_method to
+        # the HttpMethod literal.
+        method: HttpMethod = raw_method
 
         try:
             json_body, form_body = _request_bodies(method, args)

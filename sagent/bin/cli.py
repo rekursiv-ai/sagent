@@ -1247,10 +1247,10 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
     return _on_signal
 
 
-def main() -> None:
-    """Parse args and launch the REPL or headless runner."""
+def main() -> int:
+    """Parse args, launch the agent, and return the process exit code."""
     parser = argparse.ArgumentParser(
-        description="CLI agent (REPL or headless).",
+        description=(__doc__ or "").split("\n", 2)[2],
         epilog=(
             "modes:\n"
             "  tty stdin       interactive REPL\n"
@@ -1270,7 +1270,7 @@ def main() -> None:
     args, remaining = _parse_cli_args(parser)
     if remaining == ["login"]:
         _do_login(args)
-        return
+        return 0
     if remaining:
         parser.error(f"unrecognized arguments: {' '.join(remaining)}")
     _configure_logging(args.log_level)
@@ -1301,7 +1301,7 @@ def main() -> None:
         _validate_cli_thinking_state(model, thinking_state)
     except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
-        sys.exit(1)
+        return 1
     model_spec = types.model.ModelSpec(
         provider=args.provider,
         auth=resolved_auth,
@@ -1406,6 +1406,7 @@ def main() -> None:
                 ),
             )
         )
+    return 0
 
 
 def _do_login(args: argparse.Namespace) -> None:
@@ -1429,5 +1430,5 @@ def _do_login(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 # vim: ft=python

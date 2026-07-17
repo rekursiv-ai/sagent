@@ -1,10 +1,15 @@
-#!/usr/bin/env python3
-"""Validate that `uv build` produced a runnable Sagent wheel.
+#!/bin/sh
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Validate that `uv build` produced a runnable Sagent wheel.
 
 The static required-entry list covers import and entry-point structure. Prompt
 assets are validated from ``sagent/assets/sagent.yaml`` so recipe changes cannot
 drift from packaged files.
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -151,3 +156,4 @@ def _normalize_asset(path: str, context: str) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# vim: ft=python

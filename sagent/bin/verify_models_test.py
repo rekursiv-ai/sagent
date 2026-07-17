@@ -215,7 +215,7 @@ class TestMain:
     ) -> None:
         monkeypatch.setattr(sys, "argv", ["verify", "--provider", "google"])
         monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        assert await verify_models.main() == 0
+        assert await verify_models._run() == 0
         assert "GOOGLE_API_KEY not set" in capsys.readouterr().out
 
     @pytest.mark.anyio
@@ -236,7 +236,7 @@ class TestMain:
             }
 
         monkeypatch.setattr(verify_models, "fetch_openai", fake_fetch_openai)
-        assert await verify_models.main() == 1
+        assert await verify_models._run() == 1
 
     @pytest.mark.anyio
     async def test_runs_google_when_key_set(
@@ -253,7 +253,7 @@ class TestMain:
             return {}
 
         monkeypatch.setattr(verify_models, "fetch_google", fake_fetch_google)
-        assert await verify_models.main() == 0
+        assert await verify_models._run() == 0
         assert "Google" in capsys.readouterr().out
 
     @pytest.mark.anyio
@@ -264,7 +264,7 @@ class TestMain:
     ) -> None:
         monkeypatch.setattr(sys, "argv", ["verify", "--provider", "anthropic"])
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        assert await verify_models.main() == 0
+        assert await verify_models._run() == 0
         assert "ANTHROPIC_API_KEY not set" in capsys.readouterr().out
 
     @pytest.mark.anyio
@@ -283,7 +283,7 @@ class TestMain:
             return {}
 
         monkeypatch.setattr(verify_models, "fetch_anthropic", fake_fetch_anthropic)
-        assert await verify_models.main() == 0
+        assert await verify_models._run() == 0
         assert "Anthropic" in capsys.readouterr().out
 
 

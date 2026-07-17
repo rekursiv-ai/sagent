@@ -9,7 +9,6 @@ limiting.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
 
 import asyncio
 
@@ -185,15 +184,11 @@ class PaperSearch:
         if cached is not None:
             return ToolResult(call_id="", content=cached)
 
-        # ty cannot narrow ``src: str`` through the ``in _VALID_SOURCES`` guard
-        # (pyright can); cast so ty keeps tracing the literal, and suppress
-        # pyright's resulting "unnecessary cast" -- per fix-types decision tree.
-        source = cast("Source", src)  # pyright: ignore[reportUnnecessaryCast] -- ty needs cast; pyright narrows from `in`
         try:
             result = await asyncio.to_thread(
                 search,
                 q,
-                source=source,
+                source=src,
                 limit=limit,
                 year_from=year_from,
                 year_to=year_to,
