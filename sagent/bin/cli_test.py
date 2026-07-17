@@ -776,7 +776,7 @@ def test_direct_script_bootstraps_dependencies() -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "CLI agent (REPL or headless)." in proc.stdout
+    assert proc.stdout.startswith("usage: cli.py")
 
 
 def test_parse_allow_providers_ok() -> None:
