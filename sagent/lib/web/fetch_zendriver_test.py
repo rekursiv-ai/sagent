@@ -12,12 +12,17 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import socket
 
 import pytest
 
 from sagent.lib.web import fetch_zendriver as fz_mod
-from sagent.lib.web.errors import CloudflareChallengeError, PuzzleChallengeError
-from sagent.lib.web.fetch_zendriver import BrowserResult, _BrowserPool, _navigate
+from sagent.lib.web.fetch_zendriver import (
+    BrowserResult,
+    _BrowserPool,
+    _navigate,
+    _ProxyServer,
+)
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
@@ -35,9 +40,13 @@ class _FakeCookie:
 class _FakeCookieJar:
     def __init__(self, cookies: list[_FakeCookie]) -> None:
         self._cookies = cookies
+        self.seeded: list[Any] = []
 
     async def get_all(self) -> list[_FakeCookie]:
         return self._cookies
+
+    async def set_all(self, cookies: list[Any]) -> None:
+        self.seeded = cookies
 
 
 class _FakeTab:
@@ -45,6 +54,17 @@ class _FakeTab:
         self._content = content
         self._href = href
         self.closed = False
+        self.navigations: list[str] = []
+        self.commands: list[Any] = []
+
+    async def send(self, command: Any) -> None:
+        self.commands.append(command)
+
+    async def get(self, url: str) -> _FakeTab:
+        self.navigations.append(url)
+        if not self._href:
+            self._href = url
+        return self
 
     async def wait_for_ready_state(
         self,
@@ -86,7 +106,7 @@ class _FakeBrowser:
     async def get(self, url: str, new_tab: bool = False) -> _FakeTab:
         del new_tab
         self.gets.append(url)
-        self.last_tab = _FakeTab(content=self._content, href=self._href or url)
+        self.last_tab = _FakeTab(content=self._content, href=self._href)
         return self.last_tab
 
     async def stop(self) -> None:
@@ -99,6 +119,10 @@ class _StubPool:
 
     def __init__(self, browser: _FakeBrowser) -> None:
         self._browser = browser
+        self.pins: list[tuple[str, str]] = []
+
+    def pin(self, hostname: str, ip: str) -> None:
+        self.pins.append((hostname, ip))
 
     async def browser(
         self, egress: str, profile_dir: Path, *, headless: bool
@@ -107,8 +131,91 @@ class _StubPool:
         return self._browser
 
 
-def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> None:
-    monkeypatch.setattr(fz_mod, "_pool", lambda: _StubPool(browser))
+def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _StubPool:
+    pool = _StubPool(browser)
+    monkeypatch.setattr(fz_mod, "_pool", lambda: pool)
+    return pool
+
+
+def test_proxy_rejects_private_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    def private_resolution(
+        *_args: object, **_kwargs: object
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+    server = _ProxyServer()
+    monkeypatch.setattr(socket, "getaddrinfo", private_resolution)
+    try:
+        with pytest.raises(ValueError, match="non-public"):
+            server.resolve("internal.example")
+        with pytest.raises(ValueError, match="Refusing browser connection"):
+            server.pin("internal.example", "10.0.0.1")
+    finally:
+        server.server_close()
+
+
+# -- headed/backend navigation parity -----------------------------------------
+
+
+def test_open_instance_uses_blank_tab_before_requested_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://scholar.google.com/scholar?q=x"
+    browser = _FakeBrowser()
+    browser.stopped = True
+
+    async def fake_launch(
+        profile_dir: Path, *, headless: bool, proxy_url: str = ""
+    ) -> _FakeBrowser:
+        assert profile_dir == _PROFILE
+        assert headless is False
+        assert proxy_url
+        return browser
+
+    monkeypatch.setattr(fz_mod, "_launch_browser", fake_launch)
+    asyncio.run(fz_mod._open_instance(url, _PROFILE, proxy_url="http://proxy"))
+
+    assert browser.gets == ["about:blank"]
+    assert browser.last_tab is not None
+    assert browser.last_tab.navigations == [url]
+
+
+def test_open_instance_releases_remote_profile_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakePool:
+        proxy_url = "http://proxy"
+
+        def run(self, coroutine: Any) -> None:
+            events.append("launch")
+            coroutine.close()
+
+    def release(_profile: Path) -> None:
+        events.append("release")
+
+    monkeypatch.setattr(
+        fz_mod,
+        "_request_pool_release",
+        release,
+        raising=False,
+    )
+    monkeypatch.setattr(fz_mod, "_pool", FakePool)
+
+    fz_mod.open_instance("about:blank", profile_dir=_PROFILE)
+
+    assert events == ["release", "launch"]
+
+
+def test_pool_control_releases_profile() -> None:
+    releases: list[bool] = []
+    server = fz_mod._PoolControlServer(_PROFILE, lambda: releases.append(True))
+    try:
+        fz_mod._request_pool_release(_PROFILE)
+    finally:
+        server.close()
+    assert releases == [True]
 
 
 # -- _navigate: body + cookie harvest ----------------------------------------
@@ -146,24 +253,159 @@ def test_navigate_returns_body_and_domain_cookies(
     assert browser.last_tab.closed is True
 
 
-def test_navigate_closes_tab_even_on_challenge(
+def test_navigate_seeds_request_identity_and_pins_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A challenge raises, but the tab must STILL close (finally), so an errored
-    # fetch never leaks a resident page.
-    browser = _FakeBrowser(content="<html><title>Just a moment...</title></html>")
-    _patch_pool(monkeypatch, browser)
-    with pytest.raises(CloudflareChallengeError):
+    browser = _FakeBrowser()
+    pool = _patch_pool(monkeypatch, browser)
+    asyncio.run(
+        _navigate(
+            "https://google.com/search?q=x",
+            profile_dir=_PROFILE,
+            egress="1.2.3.4",
+            timeout_sec=5.0,
+            headless=True,
+            headers={"X-Test": "yes"},
+            cookies={"CONSENT": "YES+"},
+            resolve_host=lambda _host: "8.8.8.8",
+        )
+    )
+    assert pool.pins == [("google.com", "8.8.8.8")]
+    assert len(browser.cookies.seeded) == 1
+    assert browser.cookies.seeded[0].name == "CONSENT"
+    assert browser.cookies.seeded[0].value == "YES+"
+    assert browser.last_tab is not None
+    assert len(browser.last_tab.commands) == 2
+
+
+def test_navigate_timeout_includes_browser_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SlowPool:
+        async def browser(
+            self, egress: str, profile_dir: Path, *, headless: bool
+        ) -> _FakeBrowser:
+            del egress, profile_dir, headless
+            await asyncio.Event().wait()
+            raise AssertionError("Browser acquisition escaped the timeout.")
+
+    slow_pool = _SlowPool()
+    monkeypatch.setattr(fz_mod, "_pool", lambda: slow_pool)
+    with pytest.raises(TimeoutError):
         asyncio.run(
             _navigate(
-                "https://walled.example/",
+                "https://example.com/",
                 profile_dir=_PROFILE,
                 egress="e",
-                timeout_sec=5.0,
+                timeout_sec=0.001,
                 headless=True,
                 on_redirect=None,
             )
         )
+
+
+def test_navigate_uses_one_overall_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = _FakeBrowser()
+    _patch_pool(monkeypatch, browser)
+
+    async def reject_step_timeout(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("Per-step timeout resets the request budget.")
+
+    monkeypatch.setattr(asyncio, "wait_for", reject_step_timeout)
+    asyncio.run(
+        _navigate(
+            "https://example.com/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+
+def test_navigate_opens_blank_tab_before_requested_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = "https://scholar.google.com/scholar?q=x"
+    browser = _FakeBrowser()
+    _patch_pool(monkeypatch, browser)
+
+    asyncio.run(
+        _navigate(
+            url,
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert browser.gets == ["about:blank"]
+    assert browser.last_tab is not None
+    assert browser.last_tab.navigations == [url]
+
+
+def test_navigate_returns_rendered_page_without_semantic_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = '<html><div id="cf_chl_widget"></div></html>'
+    browser = _FakeBrowser(content=body)
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://example.com/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == body.encode()
+
+
+def test_navigate_allows_embedded_captcha_on_rendered_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = _FakeBrowser(content='<html><div class="g-recaptcha"></div></html>')
+    _patch_pool(monkeypatch, browser)
+
+    result = asyncio.run(
+        _navigate(
+            "https://example.com/login",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
+
+    assert result.body == b'<html><div class="g-recaptcha"></div></html>'
+
+
+def test_navigate_closes_tab_after_returning_rendered_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browser = _FakeBrowser(content="<html><title>Just a moment...</title></html>")
+    _patch_pool(monkeypatch, browser)
+    asyncio.run(
+        _navigate(
+            "https://walled.example/",
+            profile_dir=_PROFILE,
+            egress="e",
+            timeout_sec=5.0,
+            headless=True,
+            on_redirect=None,
+        )
+    )
     assert browser.last_tab is not None
     assert browser.last_tab.closed is True
 
@@ -187,47 +429,6 @@ def test_navigate_matches_exact_host_cookie(
         )
     )
     assert result.cookies == {"H": "1"}
-
-
-# -- _navigate: challenge detection ------------------------------------------
-
-
-def test_navigate_raises_on_cloudflare_challenge(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    browser = _FakeBrowser(content="<html><title>Just a moment...</title></html>")
-    _patch_pool(monkeypatch, browser)
-    with pytest.raises(CloudflareChallengeError):
-        asyncio.run(
-            _navigate(
-                "https://walled.example/",
-                profile_dir=_PROFILE,
-                egress="e",
-                timeout_sec=5.0,
-                headless=True,
-                on_redirect=None,
-            )
-        )
-
-
-def test_navigate_raises_on_scholar_captcha(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    browser = _FakeBrowser(content='<form id="gs_captcha_f"></form>')
-    _patch_pool(monkeypatch, browser)
-    with pytest.raises(PuzzleChallengeError):
-        asyncio.run(
-            _navigate(
-                "https://scholar.google.com/scholar?q=x",
-                profile_dir=_PROFILE,
-                egress="e",
-                timeout_sec=5.0,
-                headless=True,
-                on_redirect=None,
-            )
-        )
 
 
 # -- _navigate: redirect callback --------------------------------------------
@@ -289,7 +490,7 @@ def test_pool_reuses_browser_per_key(monkeypatch: pytest.MonkeyPatch) -> None:
         return b
 
     monkeypatch.setattr(_BrowserPool, "_launch", fake_launch)
-    pool = _BrowserPool()
+    pool = _BrowserPool(serve_control=False)
     try:
 
         async def go() -> bool:
@@ -299,6 +500,66 @@ def test_pool_reuses_browser_per_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
         assert pool.run(go())
         assert len(launched) == 1
+    finally:
+        pool.shutdown()
+
+
+def test_pool_rejects_mode_change_for_live_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[_FakeBrowser] = []
+
+    async def fake_launch(
+        self: _BrowserPool, profile_dir: Path, *, headless: bool
+    ) -> _FakeBrowser:
+        del self, profile_dir, headless
+        browser = _FakeBrowser()
+        launched.append(browser)
+        return browser
+
+    monkeypatch.setattr(_BrowserPool, "_launch", fake_launch)
+    pool = _BrowserPool(serve_control=False)
+    try:
+
+        async def go() -> None:
+            await pool.browser("e", _PROFILE, headless=True)
+            with pytest.raises(RuntimeError, match="launch mode"):
+                await pool.browser("e", _PROFILE, headless=False)
+
+        pool.run(go())
+        assert len(launched) == 1
+    finally:
+        pool.shutdown()
+
+
+def test_pool_serializes_concurrent_mode_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[_FakeBrowser] = []
+
+    async def fake_launch(
+        self: _BrowserPool, profile_dir: Path, *, headless: bool
+    ) -> _FakeBrowser:
+        del self, profile_dir, headless
+        await asyncio.sleep(0)
+        browser = _FakeBrowser()
+        launched.append(browser)
+        return browser
+
+    monkeypatch.setattr(_BrowserPool, "_launch", fake_launch)
+    pool = _BrowserPool(serve_control=False)
+    try:
+
+        async def go() -> tuple[object, object]:
+            return await asyncio.gather(
+                pool.browser("e", _PROFILE, headless=True),
+                pool.browser("e", _PROFILE, headless=False),
+                return_exceptions=True,
+            )
+
+        results = pool.run(go())
+        assert len(launched) == 1
+        assert sum(isinstance(result, RuntimeError) for result in results) == 1
     finally:
         pool.shutdown()
 
@@ -315,7 +576,7 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
         return b
 
     monkeypatch.setattr(_BrowserPool, "_launch", fake_launch)
-    pool = _BrowserPool()
+    pool = _BrowserPool(serve_control=False)
     try:
 
         async def go() -> None:
@@ -330,6 +591,14 @@ def test_pool_relaunches_stopped_browser(monkeypatch: pytest.MonkeyPatch) -> Non
         pool.shutdown()
 
 
+def test_pool_shutdown_joins_thread_and_closes_loop() -> None:
+    pool = _BrowserPool(serve_control=False)
+    pool.shutdown()
+
+    assert not pool._thread.is_alive()
+    assert pool._loop.is_closed()
+
+
 def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:
     launched: list[_FakeBrowser] = []
 
@@ -342,7 +611,7 @@ def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:
         return b
 
     monkeypatch.setattr(_BrowserPool, "_launch", fake_launch)
-    pool = _BrowserPool()
+    pool = _BrowserPool(serve_control=False)
     try:
 
         async def go() -> None:

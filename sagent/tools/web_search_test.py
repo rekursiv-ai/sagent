@@ -220,6 +220,32 @@ def test_run_valid_backend_passes_through() -> None:
     assert captured["categories"] == "general"
 
 
+def test_run_explicit_transport_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_search(
+        q: str,
+        *,
+        backend: object,
+        categories: object,
+        transport: object,
+    ) -> list[SearchResult]:
+        del q, backend, categories
+        captured["transport"] = transport
+        return []
+
+    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+        result = asyncio.run(WebSearch().run({"query": "x", "transport": "stdlib"}))
+    assert not result.is_error
+    assert captured["transport"] == "stdlib"
+
+
+def test_run_rejects_invalid_transport() -> None:
+    result = asyncio.run(WebSearch().run({"query": "x", "transport": "requests"}))
+    assert result.is_error
+    assert "Invalid transport" in result.content
+
+
 def test_run_with_allowed_and_blocked_domains() -> None:
     captured: dict[str, object] = {}
 
