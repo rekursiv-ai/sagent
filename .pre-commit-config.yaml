@@ -9,6 +9,16 @@
 # May need: git config --unset-all core.hooksPath
 # if: [ERROR] Cowardly refusing to install hooks with `core.hooksPath` set.
 
+# Tool settings: single source of truth.
+# Preferred location for any tool setting, in order:
+#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
+# Put a setting as high in this chain as the tool allows. Only drop to a lower
+# file when the higher one cannot express it (e.g. a CLI-only flag with no
+# config key). pyproject.toml holds tool config; .pre-commit-config.yaml is the
+# sole source for how hooks run (thread/worker counts, heap caps);
+# .github/workflows/tests.yml only invokes the hooks and must not redefine any
+# of these.
+#
 # Philosophy: Only fail if there's things which cannot be auto-fixed.
 # Hooks fix files in place; if anything changes, pre-commit reports
 # "files were modified" and the commit is aborted. Run `git add -u`
@@ -37,7 +47,7 @@ repos:
 
       - id: check-added-large-files
         stages: [pre-commit]
-        args: [--maxkb=500]
+        args: [--maxkb=500, --enforce-all]
         exclude: |
           (?x)^(
             |typings/
@@ -46,6 +56,7 @@ repos:
 
       - id: check-merge-conflict
         stages: [pre-commit]
+        args: [--assume-in-merge]
 
       - id: check-yaml
         stages: [pre-commit]
@@ -60,8 +71,7 @@ repos:
     hooks:
       - id: uv-lock
         stages: [pre-commit]
-        files: pyproject.toml
-        args: [--locked]
+        files: ^(pyproject\.toml|uv\.lock)$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.18
@@ -103,7 +113,7 @@ repos:
         #     Pro: Only what you touch is checked.
         #     Con: pyproject.toml ``[tool.ty.src].exclude`` are ignored.
         #   pass_filenames: false
-        #     Pro: pyproject.toml ``[tool.ty.src].exclude`` are ignored.
+        #     Pro: pyproject.toml ``[tool.ty.src].exclude`` is honored.
         #     Con: repo-wide
         # Compromise: duplication; the exclusion list below must mirror
         # pyproject.toml's ``[tool.ty.src]``.
@@ -126,42 +136,63 @@ repos:
 
   - repo: local
     hooks:
-      - id: basedpyright
-        name: basedpyright
+      - id: basedpyright-global
+        name: basedpyright-global
         language: system
-        types: [python]
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: uv --quiet run --frozen --group typecheck basedpyright
-        args: [--threads=6]
+        entry: >-
+          bash -c '
+            workers=$(nproc);
+            workers=$((workers / 2));
+            ((workers < 2)) && workers=2;
+            ((workers > 32)) && workers=32;
+            exec env NODE_OPTIONS=--max-old-space-size=2048
+            uv --quiet run --frozen --group typecheck
+            basedpyright --threads="$workers"
+          '
 
   - repo: local
     hooks:
       - id: pytest
         name: pytest
         language: system
-        types: [python]
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: uv --quiet run --frozen --group test pytest
-        args: [-q, --tb=short, -n=8]
+        entry: &pytest-entry >-
+          bash -c '
+            if [ -n "$CI" ]; then
+              workers=1;
+            else
+              workers=$(nproc);
+              workers=$((workers / 2));
+              ((workers < 2)) && workers=2;
+              ((workers > 32)) && workers=32;
+            fi;
+            exec uv --quiet run --frozen --group test
+            pytest -n="$workers" "$@"
+          ' pytest
+        args: [-q, --tb=short]
 
-  # Integration tests are deselected by default (pytest.ini sets
-  # `-m "not integration"`), so the hook above skips them.
-  # We therefore re-enable them here as part of pre-push gates.
-  - repo: local
-    hooks:
+      - id: pytest-slow
+        name: pytest (slow)
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: *pytest-entry
+        args: [-q, --tb=short, -m, "slow and not cluster and not cuda and not integration and not performance"]
+
       - id: pytest-integration
         name: pytest (integration)
         language: system
-        types: [python]
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: uv --quiet run --frozen --group test pytest
-        args: [-q, --tb=short, -n=8, -m, "integration and not cuda and not performance"]
+        entry: *pytest-entry
+        args: [-q, --tb=short, -m, integration]
 
   - repo: local
     hooks:
