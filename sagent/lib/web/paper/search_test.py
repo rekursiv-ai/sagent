@@ -32,6 +32,11 @@ class TestSearchDispatch:
         assert result.total == 1
         assert result.complete
 
+    def test_transport_forwarded_to_provider(self) -> None:
+        with patch.object(openalex, "search", return_value=([], 0)) as provider:
+            search("q", source="openalex", transport="stdlib")
+        assert provider.call_args.kwargs["transport"] == "stdlib"
+
     def test_unknown_source_raises(self) -> None:
         with pytest.raises(PaperError, match="Unknown search source"):
             search("q", source=cast(Source, "bogus"))
@@ -85,7 +90,13 @@ class TestS2SearchParams:
     def test_year_and_open_access_params(self) -> None:
         captured: dict[str, str | int] = {}
 
-        def fake_get(path: str, params: dict[str, str | int]) -> MutableJSON:
+        def fake_get(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            transport: object = "auto",
+        ) -> MutableJSON:
+            del transport
             del path
             captured.update(params)
             return {"total": 0, "data": []}
@@ -106,7 +117,13 @@ class TestS2SearchParams:
     def test_open_year_bounds(self) -> None:
         captured: dict[str, str | int] = {}
 
-        def fake_get(path: str, params: dict[str, str | int]) -> MutableJSON:
+        def fake_get(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            transport: object = "auto",
+        ) -> MutableJSON:
+            del transport
             del path
             captured.update(params)
             return {"total": 0, "data": []}
@@ -120,7 +137,13 @@ class TestS2SearchParams:
         # caller asking for 200 must never send limit>100 on a single request.
         seen: list[int] = []
 
-        def fake_get(path: str, params: dict[str, str | int]) -> MutableJSON:
+        def fake_get(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            transport: object = "auto",
+        ) -> MutableJSON:
+            del transport
             del path
             lim = params.get("limit")
             if isinstance(lim, int):
@@ -135,7 +158,13 @@ class TestS2SearchParams:
     def test_limit_over_ceiling_paginates(self) -> None:
         # A limit above 100 walks multiple 100-row pages (offset advances) and
         # collects the full requested count -- not just one clamped page.
-        def fake_get(path: str, params: dict[str, str | int]) -> MutableJSON:
+        def fake_get(
+            path: str,
+            params: dict[str, str | int],
+            *,
+            transport: object = "auto",
+        ) -> MutableJSON:
+            del transport
             del path
             offset = int(params.get("offset", 0))
             rows = [{"title": f"p{offset + i}"} for i in range(100)]

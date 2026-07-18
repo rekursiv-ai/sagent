@@ -14,6 +14,7 @@ there is no per-IP scrape budget to gate here, so this backend takes no
 
 from __future__ import annotations
 
+from sagent.lib.web.fetch import Transport
 from sagent.lib.web.paper.custom_types import PaperRecord
 from sagent.lib.web.paper.errors import BackendError
 from sagent.lib.web.paper.ids import ARXIV_URL_RE, looks_like_paper_id
@@ -31,6 +32,7 @@ def search(
     year_to: int | None,
     open_access_only: bool,
     default_fetch: int = 20,
+    transport: Transport = "auto",
 ) -> tuple[list[PaperRecord], int]:
     """Query SearXNG's ``science`` category and return (records, total).
 
@@ -46,6 +48,7 @@ def search(
       year_to: Inclusive upper publication-year bound, applied client-side.
       open_access_only: Keep only records with an open-access PDF (client-side).
       default_fetch: Candidate count requested when ``limit`` is ``None``.
+      transport: Retrieval transport forwarded to SearXNG.
 
     Raises:
       BackendError: When the SearXNG request fails.
@@ -57,6 +60,7 @@ def search(
                 query,
                 num_results=limit if limit is not None else default_fetch,
                 categories="science",
+                transport=transport,
             )
         )
     except (SearchError, RuntimeError) as e:

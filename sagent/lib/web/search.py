@@ -34,7 +34,7 @@ from sagent.lib.web.errors import (
     FetchError,
     PuzzleChallengeError,
 )
-from sagent.lib.web.fetch import RequestParams, fetch
+from sagent.lib.web.fetch import RequestParams, Transport, fetch
 from sagent.lib.web.useragents import user_agent_pool
 
 
@@ -325,6 +325,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["science"],
+    transport: Transport = ...,
 ) -> Sequence[PaperResult]: ...
 
 
@@ -335,6 +336,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["images"],
+    transport: Transport = ...,
 ) -> Sequence[ImageResult]: ...
 
 
@@ -345,6 +347,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["videos"],
+    transport: Transport = ...,
 ) -> Sequence[VideoResult]: ...
 
 
@@ -355,6 +358,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["news", "music"],
+    transport: Transport = ...,
 ) -> Sequence[MediaResult]: ...
 
 
@@ -365,6 +369,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["map"],
+    transport: Transport = ...,
 ) -> Sequence[MapResult]: ...
 
 
@@ -375,6 +380,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["it"],
+    transport: Transport = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
 
@@ -385,6 +391,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["files"],
+    transport: Transport = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
 
@@ -395,6 +402,7 @@ def searxng(
     headers: dict[str, str] | None = ...,
     *,
     categories: SearxngCategory = ...,
+    transport: Transport = ...,
 ) -> Sequence[SearchResult]: ...
 
 
@@ -405,6 +413,7 @@ def searxng(
     *,
     categories: SearxngCategory = "general",
     timeout_sec: float = 15.0,
+    transport: Transport = "auto",
 ) -> Sequence[SearxngResult]:
     """Query a SearXNG instance and return parsed, typed JSON results.
 
@@ -431,6 +440,7 @@ def searxng(
         multi-engine ``it``/``science`` tabs hit a premature client-side timeout
         mid-aggregation (observed live). 15s clears the common tail while still
         bounding an interactive turn.
+      transport: Retrieval transport; ``"auto"`` applies domain routing.
 
     Returns:
       results: One typed record per hit -- a :class:`SearchResult` or a
@@ -448,6 +458,7 @@ def searxng(
         request=RequestParams(
             headers=headers,
             timeout_sec=timeout_sec,
+            transport=transport,
         ),
     )
     payload = cast("object", json.loads(body))
@@ -691,6 +702,7 @@ def duckduckgo(
     headers: dict[str, str] | None = None,
     *,
     max_query_chars: int = 499,
+    transport: Transport = "auto",
 ) -> list[SearchResult]:
     """Scrape DuckDuckGo's HTML-only endpoint.
 
@@ -703,6 +715,7 @@ def duckduckgo(
       headers: Optional override headers forwarded to fetch.
       max_query_chars: Reject a query longer than this. DuckDuckGo's HTML
         endpoint silently drops overlong queries, so fail loudly instead.
+      transport: Retrieval transport; ``"auto"`` applies domain routing.
 
     Returns:
       results: Parsed search results.
@@ -741,6 +754,7 @@ def duckduckgo(
             headers=request_headers,
             raw_headers=True,
             retries=2,
+            transport=transport,
         ),
     )
     html = body.decode("utf-8")
@@ -834,6 +848,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["science"],
+    transport: Transport = ...,
 ) -> Sequence[PaperResult]: ...
 
 
@@ -845,6 +860,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["images"],
+    transport: Transport = ...,
 ) -> Sequence[ImageResult]: ...
 
 
@@ -856,6 +872,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["videos"],
+    transport: Transport = ...,
 ) -> Sequence[VideoResult]: ...
 
 
@@ -867,6 +884,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["news", "music"],
+    transport: Transport = ...,
 ) -> Sequence[MediaResult]: ...
 
 
@@ -878,6 +896,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["map"],
+    transport: Transport = ...,
 ) -> Sequence[MapResult]: ...
 
 
@@ -889,6 +908,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["it"],
+    transport: Transport = ...,
 ) -> Sequence[PackageResult | CodeResult | SearchResult]: ...
 
 
@@ -900,6 +920,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: Literal["files"],
+    transport: Transport = ...,
 ) -> Sequence[FileResult | TorrentResult | SearchResult]: ...
 
 
@@ -911,6 +932,7 @@ def search(
     headers: dict[str, str] | None = ...,
     *,
     categories: SearxngCategory = ...,
+    transport: Transport = ...,
 ) -> Sequence[SearchResult]: ...
 
 
@@ -921,6 +943,7 @@ def search(
     headers: dict[str, str] | None = None,
     *,
     categories: SearxngCategory = "general",
+    transport: Transport = "auto",
 ) -> Sequence[SearxngResult]:
     """Dispatch to the named search backend.
 
@@ -932,6 +955,7 @@ def search(
       categories: SearXNG result category; only the ``"searxng"`` backend
         honors a non-default value (the HTML-scraping backends serve general
         web results only). Defaults to ``"general"``.
+      transport: Retrieval transport forwarded to the selected backend.
 
     Returns:
       results: One typed record per hit. SearXNG categories with extra
@@ -947,9 +971,15 @@ def search(
         )
     try:
         if backend == "searxng":
-            return searxng(query, num_results, headers, categories=categories)
+            return searxng(
+                query,
+                num_results,
+                headers,
+                categories=categories,
+                transport=transport,
+            )
         if backend == "duckduckgo":
-            return duckduckgo(query, num_results, headers)
+            return duckduckgo(query, num_results, headers, transport=transport)
 
     except BotDetectionError:
         # A bot-detection block carries actionable, type-specific guidance
@@ -965,4 +995,6 @@ def search(
         json.JSONDecodeError,
     ) as e:
         raise SearchError(f"{backend} search failed: {e}") from e
-    raise ValueError(f"Unknown backend: {backend!r}")  # pyright: ignore[reportUnreachable] -- reachable at runtime
+    raise ValueError(  # pyright: ignore[reportUnreachable] -- export build omits the internal Google branch.
+        f"Unknown backend: {backend!r}"
+    )

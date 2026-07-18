@@ -128,6 +128,11 @@ class TestSearchDispatch:
             search("cats", backend="duckduckgo")
         assert "captcha" in exc.value.guidance.lower()
 
+    def test_transport_forwarded_to_backend(self) -> None:
+        with patch("sagent.lib.web.search.duckduckgo", return_value=[]) as provider:
+            search("cats", backend="duckduckgo", transport="stdlib")
+        assert provider.call_args.kwargs["transport"] == "stdlib"
+
     def test_negative_num_results_rejected_duckduckgo(self) -> None:
         # O-WEB-003: negative num_results was accepted inconsistently (ddg had no
         # guard, searxng sliced items[:-1], scholar raised). Reject uniformly.

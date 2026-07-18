@@ -24,7 +24,7 @@ import os
 from sagent.lib.custom_json import MutableJSON, int_val
 from sagent.lib.ratelimit import cross_process_limiter
 from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import RequestParams, fetch
+from sagent.lib.web.fetch import RequestParams, Transport, fetch
 from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
 from sagent.lib.web.paper.errors import BackendError, translate_http_error
 from sagent.lib.web.paper.paginate import (
@@ -172,6 +172,7 @@ def get(
     max_retries: int = 2,
     backoff_base_sec: float = 1.0,
     timeout_sec: float = 10.0,
+    transport: Transport = "auto",
 ) -> MutableJSON:
     """GET an S2 Graph API path, rate-gated, with key injection and backoff.
 
@@ -184,6 +185,7 @@ def get(
       max_retries: 429 retry budget before surfacing the throttle.
       backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
       timeout_sec: Per-request HTTP timeout.
+      transport: Retrieval transport forwarded to the HTTP layer.
 
     Returns:
       data: Parsed JSON object.
@@ -199,6 +201,7 @@ def get(
                 params=params,
                 headers=_headers(),
                 timeout_sec=timeout_sec,
+                transport=transport,
             ),
         )[0],
         source=source,
@@ -222,6 +225,7 @@ def batch(
     max_retries: int = 2,
     backoff_base_sec: float = 1.0,
     timeout_sec: float = 10.0,
+    transport: Transport = "auto",
 ) -> list[MutableJSON | None]:
     """Fetch metadata for many ids in one batched ``POST /{endpoint}/batch``.
 
@@ -242,6 +246,7 @@ def batch(
       max_retries: 429 retry budget before surfacing the throttle.
       backoff_base_sec: Base of the exponential 429 backoff (``base*2**attempt``).
       timeout_sec: Per-request HTTP timeout.
+      transport: Retrieval transport forwarded to the HTTP layer.
 
     Returns:
       records: One entry per input id, in order; ``None`` for unresolved ids.
@@ -261,6 +266,7 @@ def batch(
                 json={"ids": ids},
                 headers=_headers(),
                 timeout_sec=timeout_sec,
+                transport=transport,
             ),
         )[0],
         source=source,
@@ -281,6 +287,7 @@ def paginate(
     limit: int | None,
     keep: Callable[[MutableJSON], bool] = lambda _e: True,
     page_rows: int = 1000,
+    transport: Transport = "auto",
 ) -> Page:
     """Walk an S2 ``offset``/``next`` list endpoint via the shared cursor walker.
 
@@ -292,6 +299,7 @@ def paginate(
       keep: Predicate selecting entries to retain. Defaults to keep-all.
       page_rows: List-endpoint page size; large to gather matches in the fewest
         gated calls (S2 signals its depth ceiling with a 400).
+      transport: Retrieval transport forwarded to the HTTP layer.
 
     Returns:
       page: A :class:`Page` (entries + completeness).
@@ -300,7 +308,14 @@ def paginate(
       PaperError: From any request other than the depth-ceiling 400.
 
     """
-    return _paginate(path, params, limit=limit, keep=keep, page_size=page_rows)
+    return _paginate(
+        path,
+        params,
+        limit=limit,
+        keep=keep,
+        page_size=page_rows,
+        transport=transport,
+    )
 
 
 def _paginate(
@@ -310,10 +325,16 @@ def _paginate(
     limit: int | None,
     keep: Callable[[MutableJSON], bool],
     page_size: int,
+    transport: Transport,
 ) -> Page:
     """Build an S2 offset/next :class:`Cursor` and delegate to the walker."""
     cursor = Cursor(
-        fetch=functools.partial(_fetch_offset_page, path, params),
+        fetch=functools.partial(
+            _fetch_offset_page,
+            path,
+            params,
+            transport=transport,
+        ),
         rows=lambda body: cast(list[MutableJSON], body.get("data") or []),
         advance=_next_offset_advance,
         page_size_max=page_size,
@@ -325,10 +346,16 @@ def _paginate(
 
 
 def _fetch_offset_page(
-    path: str, params: dict[str, str | int], offset: int, size: int
+    path: str,
+    params: dict[str, str | int],
+    offset: int,
+    size: int,
+    *,
+    transport: Transport,
 ) -> MutableJSON:
     """GET one offset/limit page of an S2 list endpoint."""
-    return get(path, {**params, "offset": offset, "limit": size})
+    page_params = {**params, "offset": offset, "limit": size}
+    return get(path, page_params, transport=transport)
 
 
 def _next_offset_advance(body: MutableJSON, _offset: int, _size: int) -> int | None:
@@ -343,6 +370,7 @@ def search_paginate(
     *,
     limit: int | None,
     search_page_max: int = 100,
+    transport: Transport = "auto",
 ) -> tuple[Page, int]:
     """Walk ``/paper/search`` (offset/total paging, capped at the search ceiling).
 
@@ -356,6 +384,7 @@ def search_paginate(
       limit: Max hits, or ``None`` for a single page.
       search_page_max: ``/paper/search`` page-size ceiling (S2 rejects a search
         limit above 100 with a 400).
+      transport: Retrieval transport forwarded to the HTTP layer.
 
     Returns:
       page: A :class:`Page` (hits + completeness).
@@ -366,7 +395,8 @@ def search_paginate(
 
     def fetch_page(offset: int, size: int) -> MutableJSON:
         nonlocal total
-        body = get("/paper/search", {**params, "offset": offset, "limit": size})
+        page_params = {**params, "offset": offset, "limit": size}
+        body = get("/paper/search", page_params, transport=transport)
         total = int_val(body.get("total"), 0)
         return body
 
@@ -485,6 +515,7 @@ def author_papers(
     *,
     limit: int | None,
     keep: Callable[[MutableJSON], bool] = lambda _e: True,
+    transport: Transport = "auto",
 ) -> Page:
     """Fetch an author's publications, walking the cursor for filtered matches.
 
@@ -492,6 +523,7 @@ def author_papers(
       author_id: S2 author id whose papers to fetch.
       limit: Maximum kept records to return, or ``None`` for one page.
       keep: Predicate selecting which paper entries to retain.
+      transport: Retrieval transport forwarded to the HTTP layer.
 
     """
     return paginate(
@@ -499,6 +531,7 @@ def author_papers(
         {"fields": S2_PAPER_FIELDS_STR},
         limit=limit,
         keep=keep,
+        transport=transport,
     )
 
 

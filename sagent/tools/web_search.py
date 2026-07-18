@@ -10,6 +10,7 @@ import re
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze
 from sagent.lib.web.errors import BotDetectionError
+from sagent.lib.web.fetch import Transport
 from sagent.lib.web.search import (
     DEFAULT_SEARCH_BACKEND,
     CodeResult,
@@ -71,6 +72,15 @@ class WebSearch:
                     "enum": get_args(SearchBackends),
                     "description": (
                         f'Search backend (default: "{DEFAULT_SEARCH_BACKEND}").'
+                    ),
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": get_args(Transport),
+                    "description": (
+                        "Retrieval path. 'auto' uses Zendriver for google.com and "
+                        "curl-then-Zendriver elsewhere. Set an explicit transport "
+                        "to stress a path."
                     ),
                 },
                 "categories": {
@@ -159,6 +169,19 @@ class WebSearch:
                 ),
                 is_error=True,
             )
+        transport: Transport = "auto"
+        transport_val = args.get("transport")
+        if isinstance(transport_val, str) and transport_val in get_args(Transport):
+            transport = cast(Transport, transport_val)
+        elif transport_val is not None:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid transport {transport_val!r}."
+                    f" Valid: {', '.join(get_args(Transport))}."
+                ),
+                is_error=True,
+            )
         valid_categories = get_args(SearxngCategory.__value__)
         categories: SearxngCategory = "general"
         categories_val = args.get("categories")
@@ -183,9 +206,21 @@ class WebSearch:
             args.get("blocked_domains"),
         )
         try:
-            results = await asyncio.to_thread(
-                search, q, backend=backend, categories=categories
-            )
+            if transport == "auto":
+                results = await asyncio.to_thread(
+                    search,
+                    q,
+                    backend=backend,
+                    categories=categories,
+                )
+            else:
+                results = await asyncio.to_thread(
+                    search,
+                    q,
+                    backend=backend,
+                    categories=categories,
+                    transport=transport,
+                )
         except BotDetectionError as err:
             # Surface the class guidance (which captcha / IP-rotation remedy)
             # AND the per-instance reason when it carries extra detail (e.g. the

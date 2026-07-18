@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, get_args
 from urllib.parse import quote, urlparse
 from xml.etree.ElementTree import Element, ParseError
 
@@ -21,8 +21,9 @@ import defusedxml.common
 import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
-from sagent.lib.web.errors import BotDetectionError, FetchError, classify_bot_detection
-from sagent.lib.web.fetch import RequestParams, ValidatedHost, fetch
+from sagent.lib.web.challenge import classify_challenge
+from sagent.lib.web.errors import BotDetectionError, FetchError
+from sagent.lib.web.fetch import RequestParams, Transport, ValidatedHost, fetch
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -84,6 +85,15 @@ class WebFetch:
                         " JSON or form APIs."
                     ),
                 },
+                "transport": {
+                    "type": "string",
+                    "enum": get_args(Transport),
+                    "description": (
+                        "Retrieval path. 'auto' uses Zendriver for google.com and "
+                        "curl-then-Zendriver elsewhere. Set an explicit transport "
+                        "to stress a path."
+                    ),
+                },
                 "json": {
                     "description": (
                         "JSON-serializable body for POST requests. Sets"
@@ -106,7 +116,9 @@ class WebFetch:
     )
 
     def __init__(self) -> None:
-        self._cache = cachetools.TTLCache[str, str](maxsize=128, ttl=15 * 60)
+        self._cache = cachetools.TTLCache[tuple[Transport, str], str](
+            maxsize=128, ttl=15 * 60
+        )
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
@@ -177,13 +189,11 @@ class WebFetch:
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Fetch the URL, extract main content, and return as text.
 
-        GET responses are cached per-URL for 15 minutes. The cache key
-        is the raw URL alone, so a URL whose server-side extraction
-        path changes during the TTL window (e.g. a Reddit page that
-        starts returning a different shape and falls into a different
-        adapter) will continue to serve the previously-extracted body
-        until the entry expires. Callers that need to bypass a stale
-        cache entry can switch to ``POST`` or wait out the TTL.
+        GET responses are cached per URL and transport for 15 minutes. A URL
+        whose server-side extraction path changes during the TTL window (e.g. a
+        Reddit page that starts returning a different shape and falls into a
+        different adapter) continues to serve the previously-extracted body
+        until the entry expires. Switching transport bypasses that cache entry.
 
         Args:
           args: Directive with ``url`` and optional ``method`` / ``json``
@@ -206,13 +216,26 @@ class WebFetch:
         # The guard above admits only "GET"/"POST", narrowing raw_method to
         # the HttpMethod literal.
         method: HttpMethod = raw_method
+        raw_transport = args.get("transport", "auto")
+        if not isinstance(raw_transport, str) or raw_transport not in get_args(
+            Transport
+        ):
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid transport {raw_transport!r}."
+                    f" Valid: {', '.join(get_args(Transport))}."
+                ),
+                is_error=True,
+            )
+        transport = cast(Transport, raw_transport)
 
         try:
             json_body, form_body = _request_bodies(method, args)
         except ValueError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
 
-        cache_key = raw_url if method == "GET" else None
+        cache_key = (transport, raw_url) if method == "GET" else None
         if cache_key is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -224,6 +247,7 @@ class WebFetch:
                 method=method,
                 json_body=json_body,
                 form_body=form_body,
+                transport=transport,
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
@@ -232,18 +256,6 @@ class WebFetch:
             return ToolResult(call_id="", content=e.explain(raw_url), is_error=True)
         except (FetchError, ValueError, OSError) as e:
             return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
-
-        # A block/challenge page can arrive as apparent success on any rung -- a
-        # reader proxy returns Cloudflare's "security check" HTML with HTTP 200,
-        # or a site soft-blocks with a 200 body. Detect it on the raw body (the
-        # markers survive there even if extraction strips the title) and surface
-        # it as an error, so block-page prose is never rendered as the document.
-        flag = classify_bot_detection(body, on_success_body=True)
-        if flag is not None:
-            # Surface the SPECIFIC kind of block (Cloudflare vs puzzle vs Google
-            # /sorry), each with its own actionable guidance, rather than a
-            # generic "blocked" -- the class knows what it is and how to clear it.
-            return ToolResult(call_id="", content=flag.explain(raw_url), is_error=True)
 
         text = await _extract_text(
             body,
@@ -261,10 +273,12 @@ def _request_bodies(
     args: Mapping[str, object],
 ) -> tuple[JSONValue, dict[str, str] | None]:
     """Return POST request bodies from a tool directive."""
-    if method != "POST":
-        return None, None
     raw_json = args.get("json")
     raw_form = args.get("form")
+    if method != "POST":
+        if raw_json is not None or raw_form is not None:
+            raise ValueError("'json' and 'form' require method='POST'.")
+        return None, None
     if raw_json is not None and raw_form is not None:
         raise ValueError("'json' and 'form' are mutually exclusive.")
     if raw_json is not None:
@@ -321,6 +335,7 @@ async def _fetch_body(
     method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
+    transport: Transport = "auto",
 ) -> tuple[bytes, str]:
     """Fetch a URL and classify the response for downstream extraction.
 
@@ -336,6 +351,7 @@ async def _fetch_body(
       method: HTTP method (``GET`` or ``POST``).
       json_body: JSON-serializable body for POST requests.
       form_body: Form-encoded body for POST requests.
+      transport: Retrieval transport for this request.
 
     Returns:
       body: Raw response bytes.
@@ -346,13 +362,14 @@ async def _fetch_body(
     if method == "GET":
         for adapter in _ADAPTERS:
             if adapter.matches(raw_url):
-                return await adapter.fetch(raw_url)
+                return await adapter.fetch(raw_url, transport=transport)
     return await asyncio.to_thread(
         _fetch_with_fallback,
         raw_url,
         method=method,
         json_body=json_body,
         form_body=form_body,
+        transport=transport,
     )
 
 
@@ -362,6 +379,7 @@ def _fetch_with_fallback(
     method: HttpMethod,
     json_body: JSONValue,
     form_body: dict[str, str] | None,
+    transport: Transport = "auto",
 ) -> tuple[bytes, str]:
     """Fetch ``url`` through a bot-wall-aware fallback ladder.
 
@@ -379,6 +397,7 @@ def _fetch_with_fallback(
       method: HTTP method; the fallback path is GET-only.
       json_body: POST JSON body (initial-rung only).
       form_body: POST form body (initial-rung only).
+      transport: Retrieval transport for every fallback rung.
 
     Returns:
       body_kind: ``(bytes, kind)`` where kind is ``_KIND_HTML`` from
@@ -394,7 +413,9 @@ def _fetch_with_fallback(
             method=method,
             json_body=json_body,
             form_body=form_body,
+            transport=transport,
         )
+        _raise_success_challenge(url, body)
         return body, _KIND_HTML
     except FetchError as e:
         if e.status not in _FALLBACK_STATUSES or method != "GET":
@@ -406,12 +427,12 @@ def _fetch_with_fallback(
     # curl retry would present an identical fingerprint and hit the same wall;
     # the proxy is the only rung with a genuinely different egress.
     try:
-        return _reader_proxy_fetch(url), _KIND_MARKDOWN
+        return _reader_proxy_fetch(url, transport=transport), _KIND_MARKDOWN
     except (FetchError, ValueError, OSError) as e:
         raise rung1_err from e
 
 
-def _reader_proxy_fetch(url: str) -> bytes:
+def _reader_proxy_fetch(url: str, *, transport: Transport = "auto") -> bytes:
     """Fetch ``url`` through the r.jina.ai reader proxy.
 
     The proxy receives the target URL as a path segment, fetches it
@@ -427,7 +448,7 @@ def _reader_proxy_fetch(url: str) -> bytes:
     that looks like an article but is actually a proxy diagnostic.
     """
     proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/"))
-    body = _safe_fetch(proxy_url)
+    body = _safe_fetch(proxy_url, transport=transport)
     if _READER_PROXY_SOFT_FAIL_RE.search(body):
         raise FetchError(
             url=url,
@@ -435,7 +456,15 @@ def _reader_proxy_fetch(url: str) -> bytes:
             headers={},
             body=body[:200],
         )
+    _raise_success_challenge(url, body)
     return body
+
+
+def _raise_success_challenge(url: str, body: bytes) -> None:
+    """Raise when a successful retrieval is a cross-site interstitial."""
+    error_type = classify_challenge(body, on_success_body=True)
+    if error_type is not None:
+        raise error_type(url=url, status=200, headers={}, body=body)
 
 
 def _safe_fetch(
@@ -445,16 +474,24 @@ def _safe_fetch(
     json_body: JSONValue = None,
     form_body: dict[str, str] | None = None,
     headers: dict[str, str] | None = None,
+    transport: Transport = "auto",
 ) -> bytes:
     """Fetch with SSRF check on the initial URL and every redirect.
 
     Delegates the transport -- Chrome TLS/HTTP-2 impersonation, redirect
     following, retry, decompression -- to :func:`sagent.lib.web.fetch.fetch`. This
-    tool supplies only the app-level SSRF policy (via the ``validated_hosts`` and
-    ``on_redirect`` hooks) and, when a caller passes ``headers`` (e.g. Reddit's
-    Android app User-Agent + bearer token), the identity to present.
+    tool supplies only the app-level SSRF policy via ``validated_hosts`` and,
+    when a caller passes ``headers`` (e.g. Reddit's Android app User-Agent +
+    bearer token), the identity to present.
     """
-    _check_ssrf(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as e:
+        raise ValueError(f"Invalid URL: {e}") from e
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported scheme {parsed.scheme!r}; only http(s) allowed.")
+    if not parsed.hostname:
+        raise ValueError("URL has no host.")
     body, _session = fetch(
         url,
         request=RequestParams(
@@ -462,19 +499,12 @@ def _safe_fetch(
             json=json_body,
             data=form_body,
             headers=headers,
-            on_redirect=_check_ssrf,
             validated_hosts=_validated_host,
             timeout_sec=15,
+            transport=transport,
         ),
     )
     return body
-
-
-def _check_ssrf(url: str) -> None:
-    """Raise if ``url`` resolves to a non-public address."""
-    err = _url_is_safe(url)
-    if err is not None:
-        raise ValueError(err)
 
 
 def _validated_host(hostname: str) -> ValidatedHost:
@@ -493,42 +523,21 @@ def _validated_host(hostname: str) -> ValidatedHost:
     host = parsed.hostname
     if not host:
         raise ValueError("URL has no host.")
-    err = _url_is_safe(f"http://{hostname}")
-    if err is not None:
-        raise ValueError(err)
-    infos = socket.getaddrinfo(host, None)
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError) as e:
+        raise ValueError(f"DNS resolution failed for {host!r}: {e}") from e
     ips = [str(info[4][0]) for info in infos]
+    for candidate in ips:
+        err = _ip_is_safe(host, candidate)
+        if err is not None:
+            raise ValueError(err)
     # Prefer the first IPv4; else the first address of any family.
     ip = next((a for a in ips if ":" not in a), ips[0] if ips else "")
-    err = _ip_is_safe(host, ip)
-    if err is not None:
-        raise ValueError(err)
     # Return the BARE host (never the raw netloc-with-port): the transport
     # re-appends any port via _host_header, so returning a port here would
     # double it on the wire.
     return ValidatedHost(host=host, ip=ip)
-
-
-def _url_is_safe(url: str) -> str | None:
-    """Return an error string if ``url`` is unsafe to fetch, else None."""
-    try:
-        parsed = urlparse(url)
-    except ValueError as e:
-        return f"Invalid URL: {e}"
-    if parsed.scheme not in ("http", "https"):
-        return f"Unsupported scheme {parsed.scheme!r}; only http(s) allowed."
-    host = parsed.hostname
-    if not host:
-        return "URL has no host."
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except (socket.gaierror, UnicodeError) as e:
-        return f"DNS resolution failed for {host!r}: {e}"
-    for info in infos:
-        err = _ip_is_safe(host, str(info[4][0]))
-        if err is not None:
-            return err
-    return None
 
 
 def _ip_is_safe(host: str, raw_ip: str) -> str | None:
@@ -564,12 +573,15 @@ class HostAdapter(Protocol):
         """Return True iff this adapter handles ``url``."""
         ...
 
-    async def fetch(self, url: str) -> tuple[bytes, str]:
+    async def fetch(
+        self, url: str, *, transport: Transport = "auto"
+    ) -> tuple[bytes, str]:
         """Fetch ``url`` through host-specific logic.
 
         Args:
           url: Target URL (already SSRF-checked by the inner call to
             ``_safe_fetch``).
+          transport: Retrieval transport for the adapter's requests.
 
         Returns:
           body: Raw response bytes.
@@ -598,9 +610,12 @@ class _RedditAdapter:
         hostname = urlparse(url).hostname or ""
         return hostname == "reddit.com" or hostname.endswith(".reddit.com")
 
-    async def fetch(self, url: str) -> tuple[bytes, str]:
+    async def fetch(
+        self, url: str, *, transport: Transport = "auto"
+    ) -> tuple[bytes, str]:
         """Fetch the Reddit feed (RSS), or richer JSON when configured."""
-        body = await asyncio.to_thread(_safe_fetch, _rss_url(url))
+        body = await asyncio.to_thread(_safe_fetch, _rss_url(url), transport=transport)
+        _raise_success_challenge(url, body)
         return body, _KIND_RSS
 
 
@@ -626,11 +641,14 @@ class _GoogleNewsAdapter:
         """Match the exact ``news.google.com`` hostname (no subdomains)."""
         return urlparse(url).hostname == "news.google.com"
 
-    async def fetch(self, url: str) -> tuple[bytes, str]:
+    async def fetch(
+        self, url: str, *, transport: Transport = "auto"
+    ) -> tuple[bytes, str]:
         """Fetch via RSS if the path has a known rewrite, else HTML."""
         rewritten = self._rewrite(url)
         target = rewritten if rewritten is not None else url
-        body = await asyncio.to_thread(_safe_fetch, target)
+        body = await asyncio.to_thread(_safe_fetch, target, transport=transport)
+        _raise_success_challenge(url, body)
         kind = _KIND_RSS if urlparse(target).path.startswith("/rss") else _KIND_HTML
         return body, kind
 
@@ -681,7 +699,9 @@ class _XAdapter:
             return True
         return hostname.endswith((".x.com", ".twitter.com"))
 
-    async def fetch(self, url: str) -> tuple[bytes, str]:
+    async def fetch(
+        self, url: str, *, transport: Transport = "auto"
+    ) -> tuple[bytes, str]:
         """Fetch via reader proxy and tag as already-extracted markdown."""
         if not _third_party_render_allowed():
             message = (
@@ -690,7 +710,7 @@ class _XAdapter:
                 f" set {_ALLOW_THIRD_PARTY_RENDER_ENV}=1 to allow."
             )
             raise FetchError(url, 0, {}, message.encode("utf-8"))
-        body = await asyncio.to_thread(_reader_proxy_fetch, url)
+        body = await asyncio.to_thread(_reader_proxy_fetch, url, transport=transport)
         return body, _KIND_MARKDOWN
 
 

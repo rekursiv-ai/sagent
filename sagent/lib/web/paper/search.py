@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from sagent.lib.web.fetch import Transport
 from sagent.lib.web.paper.custom_types import PaperRecord
 from sagent.lib.web.paper.errors import PaperError
 from sagent.lib.web.paper.fuse import fuse
@@ -69,6 +70,7 @@ def search(
     year_from: int | None = None,
     year_to: int | None = None,
     open_access_only: bool = False,
+    transport: Transport = "auto",
 ) -> SearchResult:
     """Search the scholarly literature and return ranked paper records.
 
@@ -79,6 +81,7 @@ def search(
       year_from: Inclusive lower publication-year bound.
       year_to: Inclusive upper publication-year bound.
       open_access_only: Restrict to papers with a known open-access PDF.
+      transport: Retrieval transport forwarded to each selected provider.
 
     Returns:
       result: A :class:`SearchResult`.
@@ -94,6 +97,7 @@ def search(
             year_from=year_from,
             year_to=year_to,
             open_access_only=open_access_only,
+            transport=transport,
         )
     records, total = _single_backend(source)(
         query,
@@ -101,6 +105,7 @@ def search(
         year_from=year_from,
         year_to=year_to,
         open_access_only=open_access_only,
+        transport=transport,
     )
     return SearchResult(records=records, total=total, complete=True)
 
@@ -112,6 +117,7 @@ def _s2_search(
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
+    transport: Transport = "auto",
 ) -> tuple[list[PaperRecord], int]:
     """Query Semantic Scholar and return (records, total)."""
     params: dict[str, str | int] = {
@@ -123,7 +129,7 @@ def _s2_search(
         params["year"] = year_spec
     if open_access_only:
         params["openAccessPdf"] = ""  # S2 treats it as a presence flag.
-    page, total = s2.search_paginate(params, limit=limit)
+    page, total = s2.search_paginate(params, limit=limit, transport=transport)
     records = [s2.paper_record_from(row) for row in page.entries]
     return records, total
 
@@ -157,6 +163,7 @@ def _fused(
     year_from: int | None,
     year_to: int | None,
     open_access_only: bool,
+    transport: Transport = "auto",
 ) -> SearchResult:
     """Run S2 and OpenAlex, degrading gracefully when one fails."""
     s2_hits: list[PaperRecord] = []
@@ -172,6 +179,7 @@ def _fused(
             year_from=year_from,
             year_to=year_to,
             open_access_only=open_access_only,
+            transport=transport,
         )
         answered += 1
     except PaperError as e:
@@ -183,6 +191,7 @@ def _fused(
             year_from=year_from,
             year_to=year_to,
             open_access_only=open_access_only,
+            transport=transport,
         )
         answered += 1
     except PaperError as e:

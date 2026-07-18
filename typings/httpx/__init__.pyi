@@ -82,6 +82,10 @@ class Cookies(Mapping[str, str]):
 
 class Auth: ...
 
+class AsyncByteStream:
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+    async def aclose(self) -> None: ...
+
 class Timeout:
     def __init__(
         self,

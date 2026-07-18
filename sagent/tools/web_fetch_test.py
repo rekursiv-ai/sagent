@@ -43,7 +43,7 @@ from sagent.tools.web_fetch import (
     _RedditAdapter,
     _request_bodies,
     _rss_url,
-    _url_is_safe,
+    _safe_fetch,
     _validated_host,
     _XAdapter,
 )
@@ -98,43 +98,43 @@ def test_prompt_empty() -> None:
     assert WebFetch().prompt() == ""
 
 
-def test_url_is_safe_bad_scheme() -> None:
-    err = _url_is_safe("ftp://example.com")
-    assert err is not None
-    assert "Unsupported scheme" in err
+def test_safe_fetch_rejects_bad_scheme() -> None:
+    with pytest.raises(ValueError, match="Unsupported scheme"):
+        _safe_fetch("ftp://example.com")
 
 
-def test_url_is_safe_no_host() -> None:
-    err = _url_is_safe("https:///abc")
-    assert err is not None
-    assert "no host" in err
+def test_safe_fetch_rejects_missing_host() -> None:
+    with pytest.raises(ValueError, match="no host"):
+        _safe_fetch("https:///abc")
 
 
-def test_url_is_safe_dns_failure() -> None:
-    with patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")):
-        err = _url_is_safe("https://does-not-exist.invalid")
-    assert err is not None
-    assert "DNS" in err
+def test_validated_host_rejects_dns_failure() -> None:
+    with (
+        patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
+        pytest.raises(ValueError, match="DNS"),
+    ):
+        _validated_host("does-not-exist.invalid")
 
 
-def test_url_is_safe_localhost_rejected() -> None:
-    with patch("socket.getaddrinfo", return_value=_addrinfo("127.0.0.1")):
-        err = _url_is_safe("https://localhost")
-    assert err is not None
-    assert "non-public" in err
+def test_validated_host_rejects_localhost() -> None:
+    with (
+        patch("socket.getaddrinfo", return_value=_addrinfo("127.0.0.1")),
+        pytest.raises(ValueError, match="non-public"),
+    ):
+        _validated_host("localhost")
 
 
-def test_url_is_safe_public_passes() -> None:
+def test_validated_host_accepts_public_address() -> None:
     with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")):
-        err = _url_is_safe("https://example.com")
-    assert err is None
+        validated = _validated_host("example.com")
+    assert validated.ip == "8.8.8.8"
 
 
-def test_validated_host_rejects_rebound_private_ip() -> None:
+def test_validated_host_rejects_any_private_resolution() -> None:
     with (
         patch(
             "socket.getaddrinfo",
-            side_effect=[_addrinfo("8.8.8.8"), _addrinfo("127.0.0.1")],
+            return_value=_addrinfo_multi("8.8.8.8", "127.0.0.1"),
         ),
         pytest.raises(ValueError, match="non-public"),
     ):
@@ -148,21 +148,18 @@ def test_validated_host_prefers_ipv4_when_resolver_lists_ipv6_first() -> None:
     # pick a v4 address when one exists rather than blindly taking infos[0].
     with patch(
         "socket.getaddrinfo",
-        # _url_is_safe call, then the pin-selection call: both dual-family, v6 first.
-        side_effect=[
-            _addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
-            _addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
-        ],
-    ):
+        return_value=_addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
+    ) as resolve:
         vh = _validated_host("docs.astral.sh")
     assert vh.ip == "104.26.13.77"
+    assert resolve.call_count == 1
 
 
 def test_validated_host_uses_ipv6_when_only_family() -> None:
     # v6-only host: pin the v6 address (bracketing is the transport's job).
     with patch(
         "socket.getaddrinfo",
-        side_effect=[_addrinfo("2606:4700:20::1"), _addrinfo("2606:4700:20::1")],
+        return_value=_addrinfo("2606:4700:20::1"),
     ):
         vh = _validated_host("v6only.example")
     assert vh.ip == "2606:4700:20::1"
@@ -174,7 +171,7 @@ def test_validated_host_returns_bare_host_not_netloc() -> None:
     # would double the port on the wire. So .host must never carry a port.
     with patch(
         "socket.getaddrinfo",
-        side_effect=[_addrinfo("1.2.3.4"), _addrinfo("1.2.3.4")],
+        return_value=_addrinfo("1.2.3.4"),
     ):
         vh = _validated_host("example.com:8443")
     assert vh.host == "example.com"
@@ -279,6 +276,40 @@ def test_run_fetch_error_returns_tool_result_error() -> None:
     assert "Fetch failed" in result.content
 
 
+def test_run_explicit_transport_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+        transport: object,
+    ) -> tuple[bytes, str]:
+        del raw_url, method, json_body, form_body
+        captured["transport"] = transport
+        return b"{}", _KIND_HTML
+
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ):
+        result = asyncio.run(
+            WebFetch().run({"url": "https://example.com", "transport": "zendriver"})
+        )
+    assert not result.is_error
+    assert captured["transport"] == "zendriver"
+
+
+def test_run_rejects_invalid_transport() -> None:
+    result = asyncio.run(
+        WebFetch().run({"url": "https://example.com", "transport": "requests"})
+    )
+    assert result.is_error
+    assert "Invalid transport" in result.content
+
+
 def test_run_json_response_skips_extraction() -> None:
     """JSON-looking content is returned as-is (no trafilatura involvement)."""
     body = b'{"hello": "world"}'
@@ -289,8 +320,9 @@ def test_run_json_response_skips_extraction() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
+        del raw_url, method, json_body, form_body, transport
         return body, _KIND_HTML
 
     with patch(
@@ -310,21 +342,10 @@ def test_run_flags_challenge_page_returned_as_success() -> None:
         b"<html><head><title>Just a moment...</title></head>"
         b"<body>Security check required. Ray ID: abc123</body></html>"
     )
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
-        return challenge, _KIND_HTML
-
     url = "https://blocked.example"
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
+        "sagent.tools.web_fetch._safe_fetch",
+        return_value=challenge,
     ):
         result = asyncio.run(WebFetch().run({"url": url}))
     assert result.is_error
@@ -345,8 +366,9 @@ def test_run_does_not_flag_real_content() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
+        del raw_url, method, json_body, form_body, transport
         return body, _KIND_HTML
 
     with (
@@ -381,8 +403,9 @@ def test_run_does_not_flag_page_that_merely_embeds_recaptcha() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
+        del raw_url, method, json_body, form_body, transport
         return body, _KIND_HTML
 
     with (
@@ -408,8 +431,9 @@ def test_run_cache_hit_skips_second_fetch() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
+        del raw_url, method, json_body, form_body, transport
         return html, _KIND_HTML
 
     tool = WebFetch()
@@ -428,6 +452,30 @@ def test_run_cache_hit_skips_second_fetch() -> None:
     assert mock_body.call_count == 1
 
 
+def test_run_cache_separates_transports() -> None:
+    async def fake_fetch_body(
+        raw_url: str,
+        *,
+        method: str,
+        json_body: object,
+        form_body: object,
+        transport: object = "auto",
+    ) -> tuple[bytes, str]:
+        del raw_url, method, json_body, form_body, transport
+        return b"{}", _KIND_HTML
+
+    tool = WebFetch()
+    with patch(
+        "sagent.tools.web_fetch._fetch_body",
+        side_effect=fake_fetch_body,
+    ) as mock_body:
+        _ = asyncio.run(tool.run({"url": "https://example.com"}))
+        _ = asyncio.run(
+            tool.run({"url": "https://example.com", "transport": "zendriver"})
+        )
+    assert mock_body.call_count == 2
+
+
 def test_run_post_json_passes_through() -> None:
     captured: dict[str, object] = {}
 
@@ -437,11 +485,12 @@ def test_run_post_json_passes_through() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
         captured["method"] = method
         captured["json_body"] = json_body
         captured["form_body"] = form_body
-        del raw_url
+        del raw_url, transport
         return b'{"ok": 1}', _KIND_HTML
 
     with patch(
@@ -471,9 +520,10 @@ def test_run_post_form_passes_through() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
         captured["form_body"] = form_body
-        del raw_url, method, json_body
+        del raw_url, method, json_body, transport
         return b"ok", _KIND_HTML
 
     with patch(
@@ -520,8 +570,9 @@ def test_run_handles_reddit_thread_via_rss() -> None:
         method: str,
         json_body: object,
         form_body: object,
+        transport: object = "auto",
     ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
+        del raw_url, method, json_body, form_body, transport
         return feed, _KIND_RSS
 
     with patch(
@@ -703,7 +754,7 @@ def test_fetch_with_fallback_403_falls_to_reader_proxy() -> None:
         )
     assert body == b"# extracted"
     assert kind == _KIND_MARKDOWN
-    proxy.assert_called_once_with("https://x")
+    proxy.assert_called_once_with("https://x", transport="auto")
 
 
 def test_fetch_with_fallback_429_and_503_also_trigger_fallback() -> None:
@@ -859,6 +910,18 @@ def test_fetch_with_fallback_jina_soft_failure_surfaces_rung1_error() -> None:
         )
     assert exc_info.value.status == 403
     assert exc_info.value.body == b"akamai"
+
+
+def test_reader_proxy_fetch_rejects_cloudflare_interstitial() -> None:
+    challenge = b"<html><title>Just a moment...</title></html>"
+    with (
+        patch(
+            "sagent.tools.web_fetch._safe_fetch",
+            return_value=challenge,
+        ),
+        pytest.raises(CloudflareChallengeError),
+    ):
+        _reader_proxy_fetch("https://www.example.org/article")
 
 
 def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
@@ -1233,7 +1296,9 @@ def test_x_adapter_routes_through_reader_proxy(
         body, kind = asyncio.run(
             _XAdapter().fetch("https://x.com/user/status/123"),
         )
-    mock_proxy.assert_called_once_with("https://x.com/user/status/123")
+    mock_proxy.assert_called_once_with(
+        "https://x.com/user/status/123", transport="auto"
+    )
     assert body == b"# tweet content"
     assert kind == _KIND_MARKDOWN
 
@@ -1301,6 +1366,12 @@ def test_post_form_non_object_rejected(bad_form: object) -> None:
     """
     with pytest.raises(ValueError, match="form"):
         _request_bodies("POST", {"form": bad_form})
+
+
+@pytest.mark.parametrize("body_key", ["json", "form"])
+def test_get_body_rejected(body_key: str) -> None:
+    with pytest.raises(ValueError, match="POST"):
+        _request_bodies("GET", {body_key: {"key": "value"}})
 
 
 if __name__ == "__main__":
