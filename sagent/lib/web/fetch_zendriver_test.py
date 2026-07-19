@@ -12,17 +12,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
-import socket
 
 import pytest
+import zendriver
 
 from sagent.lib.web import fetch_zendriver as fz_mod
-from sagent.lib.web.fetch_zendriver import (
-    BrowserResult,
-    _BrowserPool,
-    _navigate,
-    _ProxyServer,
-)
+from sagent.lib.web.fetch_zendriver import BrowserResult, _BrowserPool, _navigate
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
@@ -119,13 +114,13 @@ class _StubPool:
 
     def __init__(self, browser: _FakeBrowser) -> None:
         self._browser = browser
-        self.pins: list[tuple[str, str]] = []
-
-    def pin(self, hostname: str, ip: str) -> None:
-        self.pins.append((hostname, ip))
 
     async def browser(
-        self, egress: str, profile_dir: Path, *, headless: bool
+        self,
+        egress: str,
+        profile_dir: Path,
+        *,
+        headless: bool,
     ) -> _FakeBrowser:
         del egress, profile_dir, headless
         return self._browser
@@ -137,21 +132,27 @@ def _patch_pool(monkeypatch: pytest.MonkeyPatch, browser: _FakeBrowser) -> _Stub
     return pool
 
 
-def test_proxy_rejects_private_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
-    def private_resolution(
-        *_args: object, **_kwargs: object
-    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
-        return [(2, 1, 6, "", ("127.0.0.1", 0))]
+def test_launch_browser_uses_vanilla_zendriver_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    browser = _FakeBrowser()
+    browser_args: list[str] = []
 
-    server = _ProxyServer()
-    monkeypatch.setattr(socket, "getaddrinfo", private_resolution)
-    try:
-        with pytest.raises(ValueError, match="non-public"):
-            server.resolve("internal.example")
-        with pytest.raises(ValueError, match="Refusing browser connection"):
-            server.pin("internal.example", "10.0.0.1")
-    finally:
-        server.server_close()
+    async def fake_start(config: Any) -> _FakeBrowser:
+        browser_args.extend(config())
+        return browser
+
+    monkeypatch.setattr(zendriver, "start", fake_start)
+    result = asyncio.run(fz_mod._launch_browser(tmp_path, headless=True))
+
+    assert result is browser
+    assert not any(argument.startswith("--proxy-server=") for argument in browser_args)
+    assert not any(
+        argument.startswith("--proxy-bypass-list=") for argument in browser_args
+    )
+    assert not any(
+        argument.startswith("--host-resolver-rules=") for argument in browser_args
+    )
 
 
 # -- headed/backend navigation parity -----------------------------------------
@@ -164,16 +165,13 @@ def test_open_instance_uses_blank_tab_before_requested_url(
     browser = _FakeBrowser()
     browser.stopped = True
 
-    async def fake_launch(
-        profile_dir: Path, *, headless: bool, proxy_url: str = ""
-    ) -> _FakeBrowser:
+    async def fake_launch(profile_dir: Path, *, headless: bool) -> _FakeBrowser:
         assert profile_dir == _PROFILE
         assert headless is False
-        assert proxy_url
         return browser
 
     monkeypatch.setattr(fz_mod, "_launch_browser", fake_launch)
-    asyncio.run(fz_mod._open_instance(url, _PROFILE, proxy_url="http://proxy"))
+    asyncio.run(fz_mod._open_instance(url, _PROFILE))
 
     assert browser.gets == ["about:blank"]
     assert browser.last_tab is not None
@@ -186,8 +184,6 @@ def test_open_instance_releases_remote_profile_before_launch(
     events: list[str] = []
 
     class FakePool:
-        proxy_url = "http://proxy"
-
         def run(self, coroutine: Any) -> None:
             events.append("launch")
             coroutine.close()
@@ -208,14 +204,71 @@ def test_open_instance_releases_remote_profile_before_launch(
     assert events == ["release", "launch"]
 
 
-def test_pool_control_releases_profile() -> None:
+def test_pool_control_releases_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     releases: list[bool] = []
+    checked: list[Path] = []
+    monkeypatch.setattr(fz_mod, "_close_orphan_browser", checked.append)
     server = fz_mod._PoolControlServer(_PROFILE, lambda: releases.append(True))
     try:
         fz_mod._request_pool_release(_PROFILE)
     finally:
         server.close()
     assert releases == [True]
+    assert checked == [_PROFILE]
+
+
+def test_pool_release_closes_orphan_when_control_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    closed: list[Path] = []
+    monkeypatch.setattr(fz_mod, "_close_orphan_browser", closed.append)
+
+    fz_mod._request_pool_release(tmp_path)
+
+    assert closed == [tmp_path]
+
+
+def test_devtools_port_falls_back_to_singleton_owner(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    process = tmp_path / "proc" / "123"
+    profile.mkdir()
+    process.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("tron-123")
+    (process / "cmdline").write_bytes(
+        b"/opt/google/chrome/chrome\0"
+        + f"--user-data-dir={profile}\0".encode()
+        + b"--remote-debugging-port=4567\0"
+        + b"about:blank\0"
+    )
+
+    assert fz_mod._devtools_port(profile, proc_root=tmp_path / "proc") == 4567
+
+
+def test_devtools_port_rejects_different_profile_with_shared_prefix(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    process = tmp_path / "proc" / "123"
+    profile.mkdir()
+    process.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("tron-123")
+    (process / "cmdline").write_text(
+        "/opt/google/chrome/chrome "
+        f"--user-data-dir={profile}-other "
+        "--remote-debugging-port=4567"
+    )
+
+    assert fz_mod._devtools_port(profile, proc_root=tmp_path / "proc") is None
+
+
+def test_devtools_port_rejects_stale_marker_without_profile_owner(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("4567\n/devtools/browser/id\n")
+
+    assert fz_mod._devtools_port(profile, proc_root=tmp_path / "proc") is None
 
 
 # -- _navigate: body + cookie harvest ----------------------------------------
@@ -253,11 +306,11 @@ def test_navigate_returns_body_and_domain_cookies(
     assert browser.last_tab.closed is True
 
 
-def test_navigate_seeds_request_identity_and_pins_host(
+def test_navigate_seeds_request_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     browser = _FakeBrowser()
-    pool = _patch_pool(monkeypatch, browser)
+    _patch_pool(monkeypatch, browser)
     asyncio.run(
         _navigate(
             "https://google.com/search?q=x",
@@ -267,10 +320,8 @@ def test_navigate_seeds_request_identity_and_pins_host(
             headless=True,
             headers={"X-Test": "yes"},
             cookies={"CONSENT": "YES+"},
-            resolve_host=lambda _host: "8.8.8.8",
         )
     )
-    assert pool.pins == [("google.com", "8.8.8.8")]
     assert len(browser.cookies.seeded) == 1
     assert browser.cookies.seeded[0].name == "CONSENT"
     assert browser.cookies.seeded[0].value == "YES+"
@@ -283,7 +334,11 @@ def test_navigate_timeout_includes_browser_acquisition(
 ) -> None:
     class _SlowPool:
         async def browser(
-            self, egress: str, profile_dir: Path, *, headless: bool
+            self,
+            egress: str,
+            profile_dir: Path,
+            *,
+            headless: bool,
         ) -> _FakeBrowser:
             del egress, profile_dir, headless
             await asyncio.Event().wait()
