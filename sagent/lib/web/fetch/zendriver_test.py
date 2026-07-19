@@ -1,4 +1,4 @@
-"""Tests for ``sagent.lib.web.fetch_zendriver`` (zendriver headless fetch backend).
+"""Tests for ``sagent.lib.web.fetch.zendriver`` (zendriver headless fetch backend).
 
 Hermetic: a fake async browser stands in for zendriver, so the transport logic
 (cookie-domain filtering, challenge detection, redirect callback, pool reuse)
@@ -12,17 +12,33 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import subprocess
 
 import pytest
 import zendriver
 
-from sagent.lib.web import fetch_zendriver as fz_mod
-from sagent.lib.web.fetch_zendriver import BrowserResult, _BrowserPool, _navigate
+from sagent.lib.web.fetch.zendriver import BrowserResult, _BrowserPool, _navigate
+
+import sagent.lib.web.fetch.zendriver as fz_mod
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
 # touched on disk.
 _PROFILE = Path("test-profile")
+
+
+def test_direct_executable_reexecutes_as_module() -> None:
+    script = Path(__file__).with_name("zendriver.py")
+    result = subprocess.run(  # noqa: S603 -- fixed argv runs this repo-owned script.
+        ["/bin/sh", "-x", str(script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "python3 -m sagent.lib.web.fetch.zendriver --help" in result.stderr
+    assert "RuntimeWarning" not in result.stderr
 
 
 @dataclass(slots=True, kw_only=True)

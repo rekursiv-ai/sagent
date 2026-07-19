@@ -672,8 +672,9 @@ def cross_process_limiter(
         source name). Names the two lockfiles and the cache entry.
       per_seconds: Minimum seconds between grants (one token per window).
       state_dir: Directory for the ``{key}_ratelimit.lock`` /
-        ``{key}_cooldown.lock`` files. Defaults to ``data_dir("ratelimit")``.
-        Created on first write by :class:`FileStore`.
+        ``{key}_cooldown.lock`` files. Defaults to
+        ``data_dir("loop") / "lib" / "web" / "ratelimit"``. Created on first
+        write by :class:`FileStore`.
       cooldown_sec: Default seconds a triggered cooldown holds the shared window
         open (a caller may override per :meth:`CooldownRateLimiter.trigger_cooldown`).
       max_cooldown_wait_sec: When set, :meth:`CooldownRateLimiter.acquire` raises
@@ -685,7 +686,11 @@ def cross_process_limiter(
       limiter: The shared cross-process cooldown-rate-limiter for ``key``.
 
     """
-    base = state_dir if state_dir is not None else data_dir("ratelimit")
+    base = (
+        state_dir
+        if state_dir is not None
+        else data_dir("loop") / "lib" / "web" / "ratelimit"
+    )
     clock = SystemClock(source=time.time)
     return CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(

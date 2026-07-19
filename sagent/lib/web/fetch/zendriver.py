@@ -2,8 +2,9 @@
 # ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
-Real-browser fetch backend for ``sagent.lib.web`` (opt-in).
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync \
+  python3 -m sagent.lib.web.fetch.zendriver "$@"
+Real-browser fetch backend for ``sagent.lib.web.fetch`` (opt-in).
 
 Drives a headless Chrome via ``zendriver`` so pages gated behind a run-the-JS
 challenge (Cloudflare, Google Scholar CAPTCHA) load where the curl/stdlib
@@ -444,8 +445,7 @@ class _BrowserPool:
     The hot spare justifies this lifecycle machinery: eight matched
     ``https://example.com/`` requests measured a 0.130-second median with one
     reused browser versus 4.196 seconds when launching Chrome per request, a
-    32.28x speedup. Rerun ``scripts/benchmark_zendriver_hot_spares.py`` to
-    reproduce the benchmark.
+    32.28x speedup.
     """
 
     def __init__(self, *, serve_control: bool = True) -> None:
@@ -565,7 +565,7 @@ def _main() -> int:
         prog="loop-web-fetch-zendriver",
         description=(
             "Open a URL in a headed Chrome on the zendriver backend's dedicated "
-            "profile -- the same profile the headless RequestParams(backend="
+            "profile -- the same profile the headless RequestParams(transport="
             '"zendriver") fetch uses. Use it to debug a fetch that errored: you '
             "see exactly what Chrome renders (a challenge, a login wall, a broken "
             "page), and any cookies you seat while there (e.g. by logging in) "
@@ -573,10 +573,10 @@ def _main() -> int:
         ),
         epilog=(
             "Examples:\n"
-            "  sh fetch_zendriver.py https://accounts.google.com/\n"
-            "  sh fetch_zendriver.py https://scholar.google.com/\n"
-            "  sh fetch_zendriver.py https://the-site-that-failed.example/\n"
-            "  sh fetch_zendriver.py # opens blank; navigate by hand"
+            "  sh zendriver.py https://accounts.google.com/\n"
+            "  sh zendriver.py https://scholar.google.com/\n"
+            "  sh zendriver.py https://the-site-that-failed.example/\n"
+            "  sh zendriver.py # opens blank; navigate by hand"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

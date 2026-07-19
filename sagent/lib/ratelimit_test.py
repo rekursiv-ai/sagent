@@ -583,6 +583,14 @@ def test_cross_process_limiter_writes_keyed_lockfiles(tmp_path: Path) -> None:
     assert (tmp_path / "s2_ratelimit.lock").exists()
 
 
+def test_cross_process_limiter_defaults_inside_loop_web(tmp_path: Path) -> None:
+    cross_process_limiter.cache_clear()
+    with patch("sagent.lib.ratelimit.data_dir", return_value=tmp_path):
+        limiter = cross_process_limiter("s2", per_seconds=1.0)
+        limiter.acquire()
+    assert (tmp_path / "lib" / "web" / "ratelimit" / "s2_ratelimit.lock").exists()
+
+
 def test_cross_process_limiter_shares_cooldown_across_instances(
     tmp_path: Path,
 ) -> None:
