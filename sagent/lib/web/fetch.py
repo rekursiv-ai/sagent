@@ -103,24 +103,17 @@ Transport = Literal["auto", "curl", "curl-then-zendriver", "zendriver", "stdlib"
 
 
 def resolve_transport(
-    url: str,
     transport: Transport,
     *,
     method: HttpMethod = "GET",
     raw_headers: bool = False,
     has_body: bool = False,
-    zendriver_domains: tuple[str, ...] = ("google.com",),
 ) -> Transport:
     """Resolve ``auto`` to a concrete transport for this request."""
     if transport != "auto":
         return transport
     if method != "GET" or raw_headers or has_body:
         return "curl"
-    host = (urlparse(url).hostname or "").lower()
-    if any(
-        host == domain or host.endswith(f".{domain}") for domain in zendriver_domains
-    ):
-        return "zendriver"
     return "curl-then-zendriver"
 
 
@@ -250,18 +243,18 @@ class RequestParams:
       on_response: Called with ``(status, headers)`` for every received response.
         Observational; must not raise.
       validated_hosts: Resolver returning a validated IP per hostname; receives
-        the bare hostname and must resolve it to the same IP for the call.
-      transport: Retrieval transport. ``"auto"`` (default) selects Zendriver
-        for ``google.com`` and its subdomains, curl-then-Zendriver for other GETs,
-        and curl for requests a browser cannot replay. ``"curl"`` is the
+        the bare hostname and must resolve it to the same IP for the call. Browser
+        transports reject this option because Chrome owns its DNS connections.
+      transport: Retrieval transport. ``"auto"`` (default) selects
+        curl-then-Zendriver for eligible GETs and curl for requests a browser
+        cannot replay or requests using ``validated_hosts``. ``"curl"`` is the
         curl_cffi impersonated path; ``"stdlib"`` is the http.client reference path;
         ``"zendriver"`` drives a real headless Chrome via
         :mod:`sagent.lib.web.fetch_zendriver` (opt-in, for JS/challenge-walled
         pages); ``"curl-then-zendriver"`` tries curl first and falls back to zendriver ONLY when
         curl is bot-blocked (a :class:`BotDetectionError`) -- a non-block failure
         propagates unchanged. ``"zendriver"`` and ``"curl-then-zendriver"`` are
-        GET-only and reject raw-header mode. A filtering proxy preserves
-        ``validated_hosts`` DNS pinning for the browser leg.
+        GET-only and reject raw-header mode.
 
     """
 
@@ -426,13 +419,22 @@ class _Request:
     def fetch(self) -> tuple[bytes, FetchSession]:
         """Perform the request; return the body and the updated session."""
         p = self.params
-        resolved = resolve_transport(
-            self.url,
-            p.transport,
-            method=p.method,
-            raw_headers=p.raw_headers,
-            has_body=p.data is not None or p.json is not None,
+        resolved = (
+            "curl"
+            if p.transport == "auto" and p.validated_hosts is not None
+            else resolve_transport(
+                p.transport,
+                method=p.method,
+                raw_headers=p.raw_headers,
+                has_body=p.data is not None or p.json is not None,
+            )
         )
+        if resolved in ("zendriver", "curl-then-zendriver") and (
+            p.validated_hosts is not None
+        ):
+            raise ValueError(
+                f"The {resolved} transport cannot honor 'validated_hosts'."
+            )
         if resolved != p.transport:
             p = replace(p, transport=resolved)
         learner = _ResponseLearner(url=self.url, caller=p.on_response)
@@ -620,12 +622,6 @@ def _send_via_zendriver(
     """
     egress = egress_ip(cache=True) or egress_ip(cache=False)
     browser_url = _url_with_params(request.url, request.params.params)
-    validated_hosts = request.params.validated_hosts
-
-    def resolve_host(hostname: str) -> str:
-        assert validated_hosts is not None
-        return validated_hosts(hostname).ip
-
     result = fetch_zendriver(
         browser_url,
         profile_dir=default_profile_dir(),
@@ -633,7 +629,6 @@ def _send_via_zendriver(
         timeout_sec=request.params.timeout_sec,
         headers=headers,
         cookies=cookies,
-        resolve_host=None if validated_hosts is None else resolve_host,
         on_redirect=request.params.on_redirect,
     )
     if result.cookies and request.observer is not None:

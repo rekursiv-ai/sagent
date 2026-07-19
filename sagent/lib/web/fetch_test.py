@@ -2794,33 +2794,22 @@ class TestBrowserBackend:
         with pytest.raises(ValueError, match="cannot send a request body"):
             RequestParams(transport="zendriver", data={"a": "1"})
 
-    def test_accepts_validated_hosts(self) -> None:
+    def test_rejects_validated_hosts(self) -> None:
         params = RequestParams(
             transport="zendriver",
             validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
         )
-        assert params.validated_hosts is not None
+        with pytest.raises(ValueError, match="validated_hosts"):
+            fetch("https://example.com", request=params)
 
     def test_default_transport_is_auto(self) -> None:
         assert RequestParams().transport == "auto"
 
-    @pytest.mark.parametrize(
-        ("url", "expected"),
-        [
-            ("https://google.com/search", "zendriver"),
-            ("https://scholar.google.com/scholar", "zendriver"),
-            ("https://notgoogle.com/", "curl-then-zendriver"),
-            ("https://google.com.evil.test/", "curl-then-zendriver"),
-        ],
-    )
-    def test_auto_resolves_by_google_domain(self, url: str, expected: str) -> None:
-        assert fetch_mod.resolve_transport(url, "auto") == expected
+    def test_auto_uses_general_curl_then_browser_fallback(self) -> None:
+        assert fetch_mod.resolve_transport("auto") == "curl-then-zendriver"
 
     def test_auto_uses_curl_for_post(self) -> None:
-        assert (
-            fetch_mod.resolve_transport("https://google.com/api", "auto", method="POST")
-            == "curl"
-        )
+        assert fetch_mod.resolve_transport("auto", method="POST") == "curl"
 
     def test_auto_uses_curl_for_get_body(self) -> None:
         with patch.object(
@@ -2833,9 +2822,8 @@ class TestBrowserBackend:
         assert body == b"ok"
         assert direct.call_args.args[0].params.transport == "curl"
 
-    def test_browser_fetch_forwards_url_params_headers_cookies_and_pin(self) -> None:
+    def test_browser_fetch_forwards_url_params_headers_and_cookies(self) -> None:
         result = BrowserResult(body=b"ok", cookies={})
-        resolver = Mock(return_value=ValidatedHost(host="google.com", ip="8.8.8.8"))
         with (
             patch.object(fetch_mod, "egress_ip", return_value=None),
             patch("sagent.lib.web.fetch.fetch_zendriver", return_value=result) as via,
@@ -2848,7 +2836,6 @@ class TestBrowserBackend:
                     params={"q": "test query"},
                     headers={"X-Test": "yes"},
                     cookies={"CONSENT": "YES+"},
-                    validated_hosts=resolver,
                 ),
             )
         assert via.call_args.args[0] == ("https://google.com/search?hl=en&q=test+query")
@@ -2857,7 +2844,7 @@ class TestBrowserBackend:
             "SID": "session",
             "CONSENT": "YES+",
         }
-        assert via.call_args.kwargs["resolve_host"]("google.com") == "8.8.8.8"
+        assert "resolve_host" not in via.call_args.kwargs
 
     def test_browser_fetch_returns_body_and_warms_session(self) -> None:
         # A browser fetch must return the rendered bytes AND fold the browser's
@@ -2904,7 +2891,7 @@ class TestCurlThenZendriverBackend:
 
     def test_curl_then_zendriver_inherits_zendriver_restrictions(self) -> None:
         # curl-then-zendriver may fall back to the browser, so it remains GET-only
-        # and body-free. Validated hosts are enforced by the browser proxy.
+        # and body-free.
         with pytest.raises(
             ValueError, match="curl-then-zendriver backend supports only GET"
         ):
@@ -2917,7 +2904,8 @@ class TestCurlThenZendriverBackend:
             transport="curl-then-zendriver",
             validated_hosts=lambda h: ValidatedHost(host=h, ip="1.2.3.4"),
         )
-        assert params.validated_hosts is not None
+        with pytest.raises(ValueError, match="validated_hosts"):
+            fetch("https://example.com", request=params)
 
     def test_curl_then_zendriver_returns_curl_body_without_touching_browser(
         self,

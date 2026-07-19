@@ -23,18 +23,16 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast, override
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import urlparse
 
 import asyncio
-import contextlib
 import hashlib
-import ipaddress
 import logging
 import os
-import select
 import socket
 import socketserver
 import threading
+import time
 import warnings
 
 from sagent.lib.userdirs import data_dir
@@ -62,140 +60,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
-
-
-class _ProxyServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-    daemon_threads = True
-
-    def __init__(self) -> None:
-        self._pins: dict[str, str] = {}
-        self._pins_lock = threading.Lock()
-        super().__init__(("127.0.0.1", 0), _ProxyHandler)
-
-    def pin(self, hostname: str, ip: str) -> None:
-        """Pin ``hostname`` to a caller-validated public IP."""
-        _require_public_ip(hostname, ip)
-        with self._pins_lock:
-            self._pins[hostname.lower()] = ip
-
-    def resolve(self, hostname: str) -> str:
-        """Resolve to a public IP at connect time."""
-        with self._pins_lock:
-            pinned = self._pins.get(hostname.lower())
-        if pinned is not None:
-            return pinned
-        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-        for info in infos:
-            ip = str(info[4][0])
-            try:
-                _require_public_ip(hostname, ip)
-            except ValueError:
-                continue
-            return ip
-        raise ValueError(
-            f"Refusing browser connection to non-public host {hostname!r}."
-        )
-
-
-class _ProxyHandler(socketserver.StreamRequestHandler):
-    @override
-    def handle(self) -> None:
-        """Proxy one Chrome request while pinning DNS at connect time."""
-        request_line = self.rfile.readline(65_537)
-        if not request_line or len(request_line) > 65_536:
-            return
-        try:
-            method, target, version = (
-                request_line.decode("latin-1").rstrip().split(" ", 2)
-            )
-            headers = self._read_headers()
-            if method.upper() == "CONNECT":
-                self._tunnel(target)
-            else:
-                self._forward_http(method, target, version, headers)
-        except (OSError, UnicodeError, ValueError):
-            with contextlib.suppress(OSError):
-                self.wfile.write(
-                    b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
-                )
-
-    def _read_headers(self) -> list[bytes]:
-        headers: list[bytes] = []
-        total = 0
-        while True:
-            line = self.rfile.readline(65_537)
-            total += len(line)
-            if len(line) > 65_536 or total > 262_144:
-                raise ValueError("proxy request headers too large")
-            if line in (b"\r\n", b"\n", b""):
-                return headers
-            headers.append(line)
-
-    def _tunnel(self, authority: str) -> None:
-        host, port = _authority(authority, 443)
-        server = cast("_ProxyServer", self.server)
-        upstream = socket.create_connection((server.resolve(host), port), timeout=30)
-        try:
-            self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            self.wfile.flush()
-            _relay(self.connection, upstream)
-        finally:
-            upstream.close()
-
-    def _forward_http(
-        self,
-        method: str,
-        target: str,
-        version: str,
-        headers: list[bytes],
-    ) -> None:
-        parsed = urlsplit(target)
-        if parsed.scheme not in ("http", "https") or parsed.hostname is None:
-            raise ValueError("proxy expected an absolute HTTP URL")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        upstream = socket.create_connection(
-            (cast("_ProxyServer", self.server).resolve(parsed.hostname), port),
-            timeout=30,
-        )
-        try:
-            path = parsed.path or "/"
-            if parsed.query:
-                path = f"{path}?{parsed.query}"
-            upstream.sendall(f"{method} {path} {version}\r\n".encode("latin-1"))
-            for header in headers:
-                if header.lower().startswith((b"proxy-connection:", b"connection:")):
-                    continue
-                upstream.sendall(header)
-            upstream.sendall(b"Connection: close\r\n\r\n")
-            while chunk := upstream.recv(65_536):
-                self.connection.sendall(chunk)
-        finally:
-            upstream.close()
-
-
-class _FilteringProxy:
-    def __init__(self) -> None:
-        self._server = _ProxyServer()
-        self._thread = threading.Thread(
-            target=lambda: self._server.serve_forever(poll_interval=0.01),
-            name="loop-web-browser-proxy",
-            daemon=True,
-        )
-        self._thread.start()
-
-    @property
-    def url(self) -> str:
-        address = cast("tuple[str, int]", self._server.server_address)
-        return f"http://{address[0]}:{address[1]}"
-
-    def pin(self, hostname: str, ip: str) -> None:
-        self._server.pin(hostname, ip)
-
-    def close(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join()
 
 
 class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
@@ -243,35 +107,72 @@ def _request_pool_release(profile_dir: Path) -> None:
         if client.recv(64) != b"":
             raise RuntimeError("Zendriver browser pool returned an invalid response.")
     except (ConnectionRefusedError, FileNotFoundError):
-        return
+        pass
     finally:
         client.close()
+    # Another process can leave a stale control listener that acknowledges this
+    # profile without owning its Chrome. Verify and close the actual owner.
+    _close_orphan_browser(profile_dir)
 
 
-def _require_public_ip(hostname: str, raw_ip: str) -> None:
-    ip = ipaddress.ip_address(raw_ip)
-    if not ip.is_global:
-        raise ValueError(f"Refusing browser connection to {hostname!r} at {ip}.")
-
-
-def _authority(value: str, default_port: int) -> tuple[str, int]:
-    parsed = urlparse(f"//{value}")
-    if parsed.hostname is None:
-        raise ValueError("proxy authority has no hostname")
-    return parsed.hostname, parsed.port or default_port
-
-
-def _relay(left: socket.socket, right: socket.socket) -> None:
-    sockets = (left, right)
-    while True:
-        readable, _, _ = select.select(sockets, (), (), 30)
-        if not readable:
+def _close_orphan_browser(profile_dir: Path) -> None:
+    """Close a live Chrome whose owning pool no longer serves control."""
+    port = _devtools_port(profile_dir)
+    if port is None:
+        return
+    try:
+        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+    except OSError:
+        return
+    connection.close()
+    asyncio.run(_close_browser_on_port(port))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            connection = socket.create_connection(("127.0.0.1", port), timeout=0.1)
+        except OSError:
             return
-        for source in readable:
-            data = source.recv(65_536)
-            if not data:
-                return
-            (right if source is left else left).sendall(data)
+        connection.close()
+        time.sleep(0.05)
+    raise RuntimeError(f"Chrome on DevTools port {port} did not close.")
+
+
+def _devtools_port(profile_dir: Path, *, proc_root: Path = Path("/proc")) -> int | None:
+    """Read the verified profile owner's active DevTools port."""
+    try:
+        owner = (profile_dir / "SingletonLock").readlink()
+        pid = int(str(owner).rsplit("-", 1)[1])
+        command = (
+            (proc_root / str(pid) / "cmdline")
+            .read_bytes()
+            .replace(b"\0", b" ")
+            .decode()
+        )
+    except (FileNotFoundError, IndexError, OSError, UnicodeError, ValueError):
+        return None
+    if _command_flag(command, "--user-data-dir=") != str(profile_dir.resolve()):
+        return None
+    try:
+        port_text = _command_flag(command, "--remote-debugging-port=") or ""
+        port = int(port_text.split(maxsplit=1)[0])
+        if port:
+            return port
+        return int((profile_dir / "DevToolsActivePort").read_text().splitlines()[0])
+    except (FileNotFoundError, IndexError, ValueError):
+        return None
+
+
+def _command_flag(command: str, marker: str) -> str | None:
+    """Extract a Chrome flag value from NUL- or space-flattened proc args."""
+    _, found, suffix = command.partition(marker)
+    if not found:
+        return None
+    return suffix.split(" --", 1)[0].strip()
+
+
+async def _close_browser_on_port(port: int) -> None:
+    browser = await zendriver.start(host="127.0.0.1", port=port)
+    await browser.stop()
 
 
 def _sandbox() -> bool:
@@ -318,7 +219,6 @@ def fetch_zendriver(
     headless: bool = True,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
-    resolve_host: Callable[[str], str] | None = None,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Fetch ``url`` in a pooled headless Chrome; return its body and cookies.
@@ -337,8 +237,6 @@ def fetch_zendriver(
       headless: Run Chrome headless (the default); ``False`` opens a window.
       headers: Extra headers applied to this tab before navigation.
       cookies: Cookies seeded for ``url`` before navigation.
-      resolve_host: Optional resolver returning the pinned connect IP for the
-        initial hostname. The browser proxy independently rejects non-public IPs.
       on_redirect: Called with the final URL when navigation lands somewhere
         other than ``url`` (a redirect); observational.
 
@@ -355,7 +253,6 @@ def fetch_zendriver(
             headless=headless,
             headers=headers,
             cookies=cookies,
-            resolve_host=resolve_host,
             on_redirect=on_redirect,
         )
     )
@@ -398,17 +295,12 @@ def open_instance(url: str, *, profile_dir: Path | None = None) -> None:
     """
     target = default_profile_dir() if profile_dir is None else profile_dir
     _request_pool_release(target)
-    pool = _pool()
-    pool.run(_open_instance(url, target, proxy_url=pool.proxy_url))
+    _pool().run(_open_instance(url, target))
 
 
-async def _open_instance(url: str, profile_dir: Path, *, proxy_url: str) -> None:
+async def _open_instance(url: str, profile_dir: Path) -> None:
     """Open a headed browser, navigate to ``url``, and block until it is closed."""
-    browser = await _launch_browser(
-        profile_dir,
-        headless=False,
-        proxy_url=proxy_url,
-    )
+    browser = await _launch_browser(profile_dir, headless=False)
     try:
         await _navigate_tab(browser, url)
         # Block until the user closes the window (Chrome exits, so the browser reports
@@ -425,19 +317,16 @@ async def _launch_browser(
     profile_dir: Path,
     *,
     headless: bool,
-    proxy_url: str = "",
 ) -> zendriver.Browser:
-    """Launch Chrome through the filtering proxy."""
+    """Launch vanilla Chrome on the persistent profile."""
     profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
     return await zendriver.start(
-        headless=headless,
-        user_data_dir=str(profile_dir),
-        browser_args=(
-            [f"--proxy-server={proxy_url}", "--proxy-bypass-list=<-loopback>"]
-            if proxy_url
-            else []
-        ),
-        sandbox=_sandbox(),
+        zendriver.Config(
+            headless=headless,
+            user_data_dir=str(profile_dir),
+            sandbox=_sandbox(),
+            browser_connection_timeout=1.0,
+        )
     )
 
 
@@ -474,7 +363,6 @@ async def _navigate(
     headless: bool,
     headers: dict[str, str] | None = None,
     cookies: dict[str, str] | None = None,
-    resolve_host: Callable[[str], str] | None = None,
     on_redirect: Callable[[str], None] | None = None,
 ) -> BrowserResult:
     """Drive a pooled browser to ``url`` in a fresh tab; harvest body + cookies.
@@ -490,11 +378,7 @@ async def _navigate(
     returns what Chrome rendered without assigning provider semantics to it.
     """
     async with asyncio.timeout(timeout_sec):
-        pool = _pool()
-        host = urlparse(url).hostname or ""
-        if host and resolve_host is not None:
-            pool.pin(host, resolve_host(host))
-        browser = await pool.browser(egress, profile_dir, headless=headless)
+        browser = await _pool().browser(egress, profile_dir, headless=headless)
         if cookies:
             await browser.cookies.set_all(
                 [
@@ -556,11 +440,16 @@ class _BrowserPool:
     loop on a background thread and dispatches every browser coroutine to it via
     :meth:`run`, keeping one warm :class:`zendriver.Browser` per
     ``(egress, profile_dir)`` key and rejecting incompatible launch modes.
+
+    The hot spare justifies this lifecycle machinery: eight matched
+    ``https://example.com/`` requests measured a 0.130-second median with one
+    reused browser versus 4.196 seconds when launching Chrome per request, a
+    32.28x speedup. Rerun ``scripts/benchmark_zendriver_hot_spares.py`` to
+    reproduce the benchmark.
     """
 
     def __init__(self, *, serve_control: bool = True) -> None:
         self._loop = asyncio.new_event_loop()
-        self._proxy = _FilteringProxy()
         self._serve_control = serve_control
         self._controls: dict[str, _PoolControlServer] = {}
         self._browsers: dict[tuple[str, str], tuple[bool, zendriver.Browser]] = {}
@@ -572,28 +461,26 @@ class _BrowserPool:
         )
         self._thread.start()
 
-    @property
-    def proxy_url(self) -> str:
-        return self._proxy.url
-
-    def pin(self, hostname: str, ip: str) -> None:
-        self._proxy.pin(hostname, ip)
-
     def run(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Run a coroutine on the pool's loop from a sync caller; return its result."""
         future: Future[_T] = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
     async def browser(
-        self, egress: str, profile_dir: Path, *, headless: bool
+        self,
+        egress: str,
+        profile_dir: Path,
+        *,
+        headless: bool,
     ) -> zendriver.Browser:
-        """Return the warm browser for a key, launching one on first use.
-
-        A stopped browser (its Chrome exited or crashed) is replaced, so a dead
-        entry never wedges the pool.
-        """
+        """Return the warm browser for one egress and profile."""
         key = (egress, str(profile_dir))
         async with self._launch_lock:
+            control_key = _control_address(profile_dir)
+            with self._lock:
+                owns_profile = control_key in self._controls
+            if self._serve_control and not owns_profile:
+                await asyncio.to_thread(_request_pool_release, profile_dir)
             self._ensure_control(profile_dir)
             with self._lock:
                 existing = self._browsers.get(key)
@@ -625,7 +512,6 @@ class _BrowserPool:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
         self._loop.close()
-        self._proxy.close()
         for control in controls:
             control.close()
 
@@ -633,19 +519,20 @@ class _BrowserPool:
         """Serve graceful cross-process release requests for ``profile_dir``."""
         if not self._serve_control:
             return
-        key = str(profile_dir.resolve())
+        key = _control_address(profile_dir)
         with self._lock:
             if key in self._controls:
                 return
             self._controls[key] = _PoolControlServer(profile_dir, shutdown_browsers)
 
-    async def _launch(self, profile_dir: Path, *, headless: bool) -> zendriver.Browser:
+    async def _launch(
+        self,
+        profile_dir: Path,
+        *,
+        headless: bool,
+    ) -> zendriver.Browser:
         """Launch one Chrome under ``profile_dir`` on the pool's loop."""
-        return await _launch_browser(
-            profile_dir,
-            headless=headless,
-            proxy_url=self.proxy_url,
-        )
+        return await _launch_browser(profile_dir, headless=headless)
 
     def _run_loop(self) -> None:
         """Run the pool's loop until :meth:`shutdown`, muting zendriver's warnings.
