@@ -1,4 +1,4 @@
-"""Cross-site HTTP challenge detection for ``sagent.lib.web``.
+"""Cross-site HTTP challenge detection for ``sagent.lib.web.fetch``.
 
 This module recognizes only challenge technology shared across providers:
 Cloudflare interstitials and generic CAPTCHA widgets. Provider page states belong

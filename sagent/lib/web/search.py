@@ -29,13 +29,13 @@ from sagent.lib.custom_json import (
     str_map_val,
     str_val,
 )
+from sagent.lib.web.chrome.useragents import user_agent_pool
 from sagent.lib.web.errors import (
     BotDetectionError,
     FetchError,
     PuzzleChallengeError,
 )
 from sagent.lib.web.fetch import RequestParams, Transport, fetch
-from sagent.lib.web.useragents import user_agent_pool
 
 
 if TYPE_CHECKING:

@@ -30,7 +30,8 @@ _BASE_FILES = {
     "sagent/__init__.py": "",
     "sagent/bin/cli.py": "",
     "sagent/bin/slack.py": "",
-    "sagent/lib/web/fetch.py": "",
+    "sagent/lib/web/fetch/__init__.py": "",
+    "sagent/lib/web/fetch/fetch.py": "",
     "sagent/lib/web/search.py": "",
     "sagent/assets/slack/default.md": "slack",
     "sagent-0.1.0.dist-info/entry_points.txt": _ENTRY_POINTS,
@@ -46,6 +47,13 @@ _RECIPE_FILES = {
 }
 
 
+_PYPROJECT = """\
+[tool.hatch.build.targets.wheel]
+packages = ["sagent"]
+exclude = ["**/*_test.py", "**/conftest.py"]
+"""
+
+
 def _write_wheel(path: Path, files: dict[str, str]) -> None:
     """Write a minimal zip file with the requested files."""
     with zipfile.ZipFile(path, "w") as archive:
@@ -53,8 +61,27 @@ def _write_wheel(path: Path, files: dict[str, str]) -> None:
             archive.writestr(name, content)
 
 
+def _write_source_tree(tmp_path: Path) -> None:
+    """Materialize ``pyproject.toml`` and the canonical source ``.py`` tree.
+
+    ``check_wheel`` derives the modules it expects from the build config and
+    the on-disk package, so the check needs a source tree to scan. The tree
+    mirrors the ``.py`` entries in ``_BASE_FILES`` plus test/conftest files
+    the wheel exclude globs must drop.
+    """
+    (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
+    modules = [name for name in _BASE_FILES if name.endswith(".py")]
+    # Excluded by the wheel globs: present in source, must not be required.
+    modules += ["sagent/lib/web/fetch/fetch_test.py", "sagent/lib/web/conftest.py"]
+    for name in modules:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+
 def _write_sagent_wheel(tmp_path: Path, files: dict[str, str]) -> None:
-    """Write one candidate Sagent wheel under a temporary dist directory."""
+    """Write one candidate Sagent wheel plus the source tree it validates."""
+    _write_source_tree(tmp_path)
     dist = tmp_path / "dist"
     dist.mkdir()
     _write_wheel(dist / "sagent-0.1.0-py3-none-any.whl", files)
@@ -174,14 +201,18 @@ class TestCheckWheelErrors:
         with pytest.raises(SystemExit, match=r"entry_points\.txt"):
             _ = check_wheel.main()
 
-    def test_rejects_missing_required_entry(
+    def test_rejects_source_module_missing_from_wheel(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """Reject a wheel that dropped a ``.py`` present in the source tree."""
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)
-        del files["sagent/lib/web/fetch.py"]
+        del files["sagent/lib/web/fetch/fetch.py"]
         _write_sagent_wheel(tmp_path, files)
-        with pytest.raises(SystemExit, match=r"sagent/lib/web/fetch\.py"):
+        with pytest.raises(
+            SystemExit,
+            match=r"missing source modules: sagent/lib/web/fetch/fetch\.py",
+        ):
             _ = check_wheel.main()
 
     def test_rejects_missing_console_script(

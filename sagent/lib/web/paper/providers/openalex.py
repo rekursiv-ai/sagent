@@ -27,7 +27,6 @@ import os
 import re
 
 from sagent.lib.custom_json import MutableJSON, int_val
-from sagent.lib.ratelimit import cross_process_limiter
 from sagent.lib.web.errors import FetchError
 from sagent.lib.web.fetch import RequestParams, Transport, fetch
 from sagent.lib.web.paper.custom_types import IdType, PaperRecord
@@ -37,6 +36,7 @@ from sagent.lib.web.paper.errors import (
     translate_http_error,
 )
 from sagent.lib.web.paper.paginate import Cursor, Page, paginate
+from sagent.lib.web.ratelimit import cross_process_limiter
 
 
 __all__ = [

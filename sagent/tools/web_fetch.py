@@ -21,9 +21,14 @@ import defusedxml.common
 import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
-from sagent.lib.web.challenge import classify_challenge
 from sagent.lib.web.errors import BotDetectionError, FetchError
-from sagent.lib.web.fetch import RequestParams, Transport, ValidatedHost, fetch
+from sagent.lib.web.fetch import (
+    RequestParams,
+    Transport,
+    ValidatedHost,
+    classify_challenge,
+    fetch,
+)
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,

@@ -9,7 +9,7 @@ the post-filter count.
 
 SearXNG's own HTTP timeout and (metasearch) pacing live in ``search.searxng``;
 there is no per-IP scrape budget to gate here, so this backend takes no
-:mod:`.ratelimit` gate.
+:mod:`sagent.lib.web.ratelimit` gate.
 """
 
 from __future__ import annotations

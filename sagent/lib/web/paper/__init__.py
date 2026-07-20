@@ -3,7 +3,7 @@
 The paper analogue of :mod:`sagent.lib.web.search`: sync, backend-agnostic
 functions over Semantic Scholar, OpenAlex, SearXNG, and (internal build only)
 Google Scholar. Per-source cross-process rate limiting is built in (each backend
-paces through :func:`sagent.lib.ratelimit.cross_process_limiter`). A coroutine call
+paces through :func:`sagent.lib.web.ratelimit.cross_process_limiter`). A coroutine call
 site lifts any function into a thread with ``asyncio.to_thread``.
 
 Import each name from the submodule that defines it (this package's

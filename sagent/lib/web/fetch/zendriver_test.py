@@ -1,4 +1,4 @@
-"""Tests for ``sagent.lib.web.fetch_zendriver`` (zendriver headless fetch backend).
+"""Tests for ``sagent.lib.web.fetch.zendriver`` (zendriver headless fetch backend).
 
 Hermetic: a fake async browser stands in for zendriver, so the transport logic
 (cookie-domain filtering, challenge detection, redirect callback, pool reuse)
@@ -12,17 +12,33 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import subprocess
 
 import pytest
 import zendriver
 
-from sagent.lib.web import fetch_zendriver as fz_mod
-from sagent.lib.web.fetch_zendriver import BrowserResult, _BrowserPool, _navigate
+from sagent.lib.web.fetch.zendriver import BrowserResult, _BrowserPool, _navigate
+
+import sagent.lib.web.fetch.zendriver as fz_mod
 
 
 # A fake profile dir; the browser is mocked in every test, so it is never
 # touched on disk.
 _PROFILE = Path("test-profile")
+
+
+def test_direct_executable_reexecutes_as_module() -> None:
+    script = Path(__file__).with_name("zendriver.py")
+    result = subprocess.run(  # noqa: S603 -- fixed argv runs this repo-owned script.
+        ["/bin/sh", "-x", str(script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "python3 -m sagent.lib.web.fetch.zendriver --help" in result.stderr
+    assert "RuntimeWarning" not in result.stderr
 
 
 @dataclass(slots=True, kw_only=True)
@@ -178,7 +194,7 @@ def test_open_instance_uses_blank_tab_before_requested_url(
     assert browser.last_tab.navigations == [url]
 
 
-def test_open_instance_releases_remote_profile_before_launch(
+def test_open_instance_releases_profile_then_clears_domain_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -191,17 +207,17 @@ def test_open_instance_releases_remote_profile_before_launch(
     def release(_profile: Path) -> None:
         events.append("release")
 
-    monkeypatch.setattr(
-        fz_mod,
-        "_request_pool_release",
-        release,
-        raising=False,
-    )
+    def clear(domain: str) -> int:
+        events.append(f"clear:{domain}")
+        return 1
+
+    monkeypatch.setattr(fz_mod, "_request_pool_release", release)
+    monkeypatch.setattr(fz_mod, "clear_domain_cooldowns", clear)
     monkeypatch.setattr(fz_mod, "_pool", FakePool)
 
-    fz_mod.open_instance("about:blank", profile_dir=_PROFILE)
+    fz_mod.open_instance("https://scholar.google.com/scholar", profile_dir=_PROFILE)
 
-    assert events == ["release", "launch"]
+    assert events == ["release", "launch", "clear:scholar.google.com"]
 
 
 def test_pool_control_releases_profile(monkeypatch: pytest.MonkeyPatch) -> None:

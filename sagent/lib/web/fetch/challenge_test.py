@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.lib.web.challenge import classify_challenge, classify_http_error
 from sagent.lib.web.errors import (
     BotDetectionError,
     CloudflareChallengeError,
     FetchError,
     PuzzleChallengeError,
 )
+from sagent.lib.web.fetch.challenge import classify_challenge, classify_http_error
 
 
 @pytest.mark.parametrize("marker", ["g-recaptcha", "h-captcha", "data-sitekey"])

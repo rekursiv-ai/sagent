@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+
 
 __all__ = [
     "BotDetectionError",
@@ -63,7 +65,18 @@ class BotDetectionError(FetchError):
         self.status = status
         self.headers = headers or {}
         self.body = body
-        Exception.__init__(self, reason or self.guidance)
+        message = reason or self.guidance
+        if url:
+            message = f"{message} {self.recovery(url)}"
+        Exception.__init__(self, message)
+
+    @classmethod
+    def recovery(cls, url: str) -> str:
+        """Return the interactive-browser recovery instruction for ``url``."""
+        return (
+            f"Run `fetch-zendriver {shlex.quote(url)}`, solve the challenge, "
+            "then close Chrome to clear this domain's cooldown."
+        )
 
     @classmethod
     def explain(cls, url: str) -> str:
@@ -76,7 +89,7 @@ class BotDetectionError(FetchError):
           message: User-facing explanation.
 
         """
-        return f"Fetch blocked: {url} -- {cls.guidance}"
+        return f"Fetch blocked: {url} -- {cls.guidance} {cls.recovery(url)}"
 
 
 class PuzzleChallengeError(BotDetectionError):

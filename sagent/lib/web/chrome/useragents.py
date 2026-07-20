@@ -10,7 +10,7 @@ The hot path (:func:`user_agent_pool`, :func:`draw_user_agent`,
 :func:`impersonate_target`) only reads local pool files. :func:`refresh`
 re-downloads and re-filters the dataset; run it as a maintenance step::
 
-    python -m sagent.lib.web.useragents
+    python -m sagent.lib.web.chrome.useragents
 """
 
 from __future__ import annotations

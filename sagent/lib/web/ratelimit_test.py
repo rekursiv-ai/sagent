@@ -1,4 +1,4 @@
-"""Tests for ``sagent.lib.ratelimit`` rate limiters."""
+"""Tests for ``sagent.lib.web.ratelimit`` rate limiters."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from sagent.lib.ratelimit import (
+from sagent.lib.web.ratelimit import (
     AsyncRateLimiter,
     CooldownActiveError,
     CooldownGate,
@@ -23,6 +23,7 @@ from sagent.lib.ratelimit import (
     RateLimiter,
     SlidingWindowRateLimiter,
     TokenBucketRateLimiter,
+    clear_domain_cooldowns,
     cross_process_limiter,
 )
 
@@ -466,6 +467,23 @@ def test_cooldown_shared_across_instances_via_filestore(tmp_path: Path) -> None:
     assert b.remaining() == 7.0
 
 
+def test_clear_domain_cooldowns_only_resets_matching_domain(tmp_path: Path) -> None:
+    matching = CooldownGate(
+        store=FileStore(tmp_path / "scholar.google.com:192.0.2.1_cooldown.lock"),
+        clock=FakeClock(),
+    )
+    unrelated = CooldownGate(
+        store=FileStore(tmp_path / "api.example:192.0.2.1_cooldown.lock"),
+        clock=FakeClock(),
+    )
+    matching.trigger(10.0)
+    unrelated.trigger(10.0)
+
+    assert clear_domain_cooldowns("scholar.google.com", state_dir=tmp_path) == 1
+    assert matching.remaining() == 0.0
+    assert unrelated.remaining() == 10.0
+
+
 # -- CooldownRateLimiter -----------------------------------------------------
 
 
@@ -581,6 +599,14 @@ def test_cross_process_limiter_writes_keyed_lockfiles(tmp_path: Path) -> None:
     limiter = cross_process_limiter("s2", per_seconds=1.0, state_dir=tmp_path)
     limiter.acquire()  # first token free; forces the FileStore to materialize.
     assert (tmp_path / "s2_ratelimit.lock").exists()
+
+
+def test_cross_process_limiter_defaults_inside_loop_web(tmp_path: Path) -> None:
+    cross_process_limiter.cache_clear()
+    with patch("sagent.lib.web.ratelimit.data_dir", return_value=tmp_path):
+        limiter = cross_process_limiter("s2", per_seconds=1.0)
+        limiter.acquire()
+    assert (tmp_path / "lib" / "web" / "ratelimit" / "s2_ratelimit.lock").exists()
 
 
 def test_cross_process_limiter_shares_cooldown_across_instances(
