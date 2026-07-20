@@ -1,4 +1,4 @@
-"""Tests for sagent.lib.web.chrome_headers."""
+"""Tests for sagent.lib.web.chrome.headers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import hashlib
 
 import pytest
 
-from sagent.lib.web.chrome_headers import (
+from sagent.lib.web.chrome.headers import (
     ChromePlatform,
     chrome_client_hints,
     chrome_headers_for_google,

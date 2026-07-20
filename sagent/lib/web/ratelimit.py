@@ -535,6 +535,10 @@ class CooldownGate:
 
         self._store.transact(write)
 
+    def clear(self) -> None:
+        """Close the shared cooldown immediately."""
+        self._store.transact(lambda _state: (0.0, 0.0))
+
     def wait(self, max_wait_sec: float | None = None) -> None:
         """Block the thread until the active cooldown elapses.
 
@@ -642,6 +646,41 @@ class CooldownRateLimiter:
         )
 
 
+def clear_domain_cooldowns(domain: str, *, state_dir: Path | None = None) -> int:
+    """Clear every persisted cooldown for ``domain`` across egress identities.
+
+    Args:
+      domain: Exact lower-case DNS hostname used as the cooldown-key prefix.
+      state_dir: Cooldown directory. Defaults to Loop's web rate-limit directory.
+
+    Returns:
+      count: Number of matching cooldown files cleared.
+
+    Raises:
+      ValueError: If ``domain`` is empty or contains a path separator.
+
+    """
+    if not domain or "/" in domain or "\\" in domain:
+        raise ValueError(f"Invalid cooldown domain: {domain!r}.")
+    base = (
+        state_dir
+        if state_dir is not None
+        else data_dir("loop") / "lib" / "web" / "ratelimit"
+    )
+    if not base.exists():
+        return 0
+    prefix = f"{domain.casefold()}:"
+    paths = [
+        path
+        for path in base.iterdir()
+        if path.name.casefold().startswith(prefix)
+        and path.name.endswith("_cooldown.lock")
+    ]
+    for path in paths:
+        CooldownGate(store=FileStore(path), clock=SystemClock(source=time.time)).clear()
+    return len(paths)
+
+
 @cache
 def cross_process_limiter(
     key: str,
@@ -672,8 +711,9 @@ def cross_process_limiter(
         source name). Names the two lockfiles and the cache entry.
       per_seconds: Minimum seconds between grants (one token per window).
       state_dir: Directory for the ``{key}_ratelimit.lock`` /
-        ``{key}_cooldown.lock`` files. Defaults to ``data_dir("ratelimit")``.
-        Created on first write by :class:`FileStore`.
+        ``{key}_cooldown.lock`` files. Defaults to
+        ``data_dir("loop") / "lib" / "web" / "ratelimit"``. Created on first
+        write by :class:`FileStore`.
       cooldown_sec: Default seconds a triggered cooldown holds the shared window
         open (a caller may override per :meth:`CooldownRateLimiter.trigger_cooldown`).
       max_cooldown_wait_sec: When set, :meth:`CooldownRateLimiter.acquire` raises
@@ -685,7 +725,11 @@ def cross_process_limiter(
       limiter: The shared cross-process cooldown-rate-limiter for ``key``.
 
     """
-    base = state_dir if state_dir is not None else data_dir("ratelimit")
+    base = (
+        state_dir
+        if state_dir is not None
+        else data_dir("loop") / "lib" / "web" / "ratelimit"
+    )
     clock = SystemClock(source=time.time)
     return CooldownRateLimiter(
         limiter=TokenBucketRateLimiter(

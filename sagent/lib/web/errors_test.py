@@ -41,6 +41,8 @@ class TestBotDetectionErrorConstruction:
         assert err.status == 403
         assert err.headers == {"server": "cloudflare", "cf-ray": "a1"}
         assert err.body == b"<title>Just a moment...</title>"
+        assert "fetch-zendriver https://x.com/doc" in str(err)
+        assert "close Chrome" in str(err)
 
     def test_reason_only(self) -> None:
         err = PuzzleChallengeError("DuckDuckGo returned a challenge form.")

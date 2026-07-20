@@ -5,18 +5,21 @@
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Validate that `uv build` produced a runnable Sagent wheel.
 
-The static required-entry list covers import and entry-point structure. Prompt
-assets are validated from ``sagent/assets/sagent.yaml`` so recipe changes cannot
-drift from packaged files.
+The set of modules that must ship is derived from the source tree and the
+build config in ``pyproject.toml`` -- no hand-maintained file list. Prompt
+assets are validated from ``sagent/assets/sagent.yaml`` so recipe changes
+cannot drift from packaged files.
 '''
 # fmt: on
 
 from __future__ import annotations
 
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 import re
+import tomllib
 import zipfile
 
 import yaml
@@ -25,15 +28,6 @@ import yaml
 _RECIPE_PATH = "sagent/assets/sagent.yaml"
 _ASSET_PREFIX = "sagent/assets/"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
-_REQUIRED_ENTRIES = (
-    "sagent/__init__.py",
-    "sagent/bin/cli.py",
-    "sagent/bin/slack.py",
-    _RECIPE_PATH,
-    "sagent/assets/slack/default.md",
-    "sagent/lib/web/fetch.py",
-    "sagent/lib/web/search.py",
-)
 _REQUIRED_ENTRY_POINTS = (
     "sagent = sagent.bin.cli:main",
     "sagent-slack = sagent.bin.slack:main",
@@ -49,28 +43,23 @@ def main() -> int:
         failure rather than returning non-zero.
 
     Raises:
-      SystemExit: If no wheel is found, required entries are missing, or
-        the recipe references missing/invalid assets.
+      SystemExit: If no wheel is found, source modules are missing from the
+        wheel, or the recipe references missing/invalid assets.
 
     """
     wheels = sorted(Path("dist").glob("sagent-*.whl"))
     if not wheels:
         raise SystemExit("uv build produced no Sagent wheel")
     with zipfile.ZipFile(wheels[-1]) as archive:
-        names = archive.namelist()
-        missing: list[str] = [name for name in _REQUIRED_ENTRIES if name not in names]
+        names = frozenset(archive.namelist())
+        missing = sorted(_expected_modules() - names)
+        if missing:
+            raise SystemExit("wheel is missing source modules: " + ", ".join(missing))
         entry_points_name = _entry_points_name(names)
         if entry_points_name is None:
-            missing.append("*.dist-info/entry_points.txt")
-        if missing:
-            raise SystemExit(
-                "wheel is missing required wheel entries: " + ", ".join(missing)
-            )
-        assert entry_points_name is not None
+            raise SystemExit("wheel is missing *.dist-info/entry_points.txt")
         entry_points = archive.read(entry_points_name).decode()
-        _validate_recipe_assets(archive, frozenset(names))
-    if not any(name.startswith("sagent/") and name.endswith(".py") for name in names):
-        raise SystemExit("wheel contains no sagent/*.py modules")
+        _validate_recipe_assets(archive, names)
     missing_entry_points = [
         entry for entry in _REQUIRED_ENTRY_POINTS if entry not in entry_points
     ]
@@ -82,7 +71,34 @@ def main() -> int:
     return 0
 
 
-def _entry_points_name(names: list[str]) -> str | None:
+def _expected_modules() -> frozenset[str]:
+    """Return package ``.py`` paths that must appear in the wheel.
+
+    Derived from ``[tool.hatch.build.targets.wheel]`` in ``pyproject.toml``:
+    every ``.py`` under each configured package, minus the wheel ``exclude``
+    globs. Reading the build config here keeps the check from drifting when
+    modules are added, renamed, or restructured.
+    """
+    config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    wheel = (
+        config.get("tool", {})
+        .get("hatch", {})
+        .get("build", {})
+        .get("targets", {})
+        .get("wheel", {})
+    )
+    packages: list[str] = wheel.get("packages", [])
+    excludes: list[str] = wheel.get("exclude", [])
+    expected: set[str] = set()
+    for package in packages:
+        for path in Path(package).rglob("*.py"):
+            posix = path.as_posix()
+            if not any(fnmatch(posix, pat) for pat in excludes):
+                expected.add(posix)
+    return frozenset(expected)
+
+
+def _entry_points_name(names: frozenset[str]) -> str | None:
     """Return the wheel entry-points path, if present."""
     for name in names:
         if name.endswith(".dist-info/entry_points.txt"):

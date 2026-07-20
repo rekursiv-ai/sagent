@@ -25,65 +25,57 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, cast, override
-from urllib.parse import unquote, urlencode, urljoin, urlparse
+from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import unquote, urlencode, urlparse
 
 import base64
-import gzip
-import http.client
-import io
 import ipaddress
 import json as json_lib
 import logging
 import random
-import ssl
 import threading
 import time
-import zlib
-
-import brotli
-import zstandard
 
 from sagent.lib.custom_json import JSONValue
-from sagent.lib.web.challenge import classify_http_error
-from sagent.lib.web.chrome_headers import (
+from sagent.lib.web.chrome.headers import (
     chrome_client_hints,
     chrome_navigation_headers,
     impersonate_version_platform,
 )
+from sagent.lib.web.chrome.useragents import draw_user_agent, kind_for_impersonate
 from sagent.lib.web.errors import BotDetectionError, FetchError
-from sagent.lib.web.fetch_zendriver import (
-    default_profile_dir,
-    fetch_zendriver,
-    shutdown_browsers,
+from sagent.lib.web.fetch import transport_routing
+from sagent.lib.web.fetch.common import Observer, ValidatedHosts
+from sagent.lib.web.fetch.curl import (
+    close_curl_session,
+    close_curl_sessions_except,
+    curl_session,
+    fetch_curl,
+    seed_session_jar,
+    set_session_cookies,
 )
+from sagent.lib.web.fetch.stdlib import fetch_stdlib
 from sagent.lib.web.profile import (
     Profile,
     ProfileStore,
     parse_set_cookie,
     parsedate_to_datetime_or_none,
 )
-from sagent.lib.web.useragents import draw_user_agent, kind_for_impersonate
 
 
 if TYPE_CHECKING:
     from curl_cffi import requests as cc_requests
     from curl_cffi.requests import Response
-    from curl_cffi.requests.impersonate import BrowserTypeLiteral
     from curl_cffi.requests.session import HttpMethod
 
-    import curl_cffi
+    import sagent.lib.web.fetch.zendriver as zendriver_backend
 else:
     from wrapt import lazy_import
 
-    # ~150ms import (importlib.metadata + asyncio); paid on first fetch, not at
-    # import. Runtime code reaches every symbol through this one module proxy
-    # (curl_cffi.Curl / .CurlError / .requests.request); a per-symbol lazy proxy
-    # cannot be used in ``except``/``isinstance`` (not seen as a real class).
-    curl_cffi = lazy_import("curl_cffi")
+    zendriver_backend = lazy_import("sagent.lib.web.fetch.zendriver")
 
 
 __all__ = [
@@ -94,6 +86,7 @@ __all__ = [
     "fetch",
     "last_known_egress_ip",
     "on_egress_rotation",
+    "resolve_transport",
     "set_last_egress_ip",
 ]
 
@@ -117,26 +110,7 @@ def resolve_transport(
     return "curl-then-zendriver"
 
 
-HTTPConn = http.client.HTTPConnection | http.client.HTTPSConnection
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ValidatedHost:
-    host: str
-    ip: str
-
-
-ValidatedHosts = Callable[[str], ValidatedHost]
-
-# Internal per-hop response sink: (status, response headers, responding URL).
-# The URL lets a sink scope what it learns (cookies, hints) to the hop's origin,
-# so a cross-origin redirect never mis-attributes the target's Set-Cookie to the
-# source. The public ``RequestParams.on_response`` stays (status, headers).
-_Observer = Callable[[int, dict[str, str], str], None]
-
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
-
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -242,6 +216,10 @@ class RequestParams:
         abort.
       on_response: Called with ``(status, headers)`` for every received response.
         Observational; must not raise.
+      body_validator: Called with every final response body before it is accepted.
+        Raise :class:`BotDetectionError` when a provider-specific success body
+        proves browser or human interaction is required; automatic transport
+        fallback then learns the domain.
       validated_hosts: Resolver returning a validated IP per hostname; receives
         the bare hostname and must resolve it to the same IP for the call. Browser
         transports reject this option because Chrome owns its DNS connections.
@@ -250,7 +228,7 @@ class RequestParams:
         cannot replay or requests using ``validated_hosts``. ``"curl"`` is the
         curl_cffi impersonated path; ``"stdlib"`` is the http.client reference path;
         ``"zendriver"`` drives a real headless Chrome via
-        :mod:`sagent.lib.web.fetch_zendriver` (opt-in, for JS/challenge-walled
+        :mod:`sagent.lib.web.fetch.zendriver` (opt-in, for JS/challenge-walled
         pages); ``"curl-then-zendriver"`` tries curl first and falls back to zendriver ONLY when
         curl is bot-blocked (a :class:`BotDetectionError`) -- a non-block failure
         propagates unchanged. ``"zendriver"`` and ``"curl-then-zendriver"`` are
@@ -270,6 +248,7 @@ class RequestParams:
     max_redirects: int = 10
     on_redirect: Callable[[str], None] | None = None
     on_response: Callable[[int, dict[str, str]], None] | None = None
+    body_validator: Callable[[bytes], None] | None = None
     validated_hosts: ValidatedHosts | None = None
     transport: Transport = "auto"
 
@@ -409,7 +388,7 @@ class _Request:
     url: str
     session: FetchSession
     params: RequestParams
-    observer: _Observer | None = None
+    observer: Observer | None = None
 
     @property
     def domain(self) -> str:
@@ -419,16 +398,20 @@ class _Request:
     def fetch(self) -> tuple[bytes, FetchSession]:
         """Perform the request; return the body and the updated session."""
         p = self.params
-        resolved = (
-            "curl"
-            if p.transport == "auto" and p.validated_hosts is not None
-            else resolve_transport(
+        if p.transport == "auto" and p.validated_hosts is not None:
+            resolved: Transport = "curl"
+        elif (
+            p.transport == "auto"
+            and self.domain in transport_routing.zendriver_domains()
+        ):
+            resolved = "zendriver"
+        else:
+            resolved = resolve_transport(
                 p.transport,
                 method=p.method,
                 raw_headers=p.raw_headers,
                 has_body=p.data is not None or p.json is not None,
             )
-        )
         if resolved in ("zendriver", "curl-then-zendriver") and (
             p.validated_hosts is not None
         ):
@@ -458,7 +441,7 @@ class _Request:
         headers: dict[str, str] | None,
         cookies: dict[str, str] | None,
         raw_headers: bool,
-        on_response: _Observer | None = None,
+        on_response: Observer | None = None,
         curl: cc_requests.Session[Response] | None = None,
     ) -> bytes:
         """Perform the request once (with retries) via the raw transport."""
@@ -475,6 +458,13 @@ class _Request:
         )
 
 
+def _validated_body(request: _Request, body: bytes) -> bytes:
+    """Validate and return ``body`` using the caller's provider-specific rule."""
+    if request.params.body_validator is not None:
+        request.params.body_validator(body)
+    return body
+
+
 def _fetch_with_identity(
     request: _Request,
     *,
@@ -483,10 +473,13 @@ def _fetch_with_identity(
 ) -> bytes:
     """Send ``request`` under the stored per-``(egress, domain)`` identity."""
     if request.params.transport == "zendriver":
-        return _send_via_zendriver(
+        return _validated_body(
             request,
-            headers=caller_headers,
-            cookies=caller_cookies,
+            _send_via_zendriver(
+                request,
+                headers=caller_headers,
+                cookies=caller_cookies,
+            ),
         )
     if request.params.transport == "curl-then-zendriver":
         # Curl first (fast, cheap); fall back to the real browser ONLY when curl
@@ -500,14 +493,22 @@ def _fetch_with_identity(
                 caller_cookies=caller_cookies,
             )
         except BotDetectionError:
-            return _send_via_zendriver(
+            if request.domain:
+                transport_routing.remember_zendriver_domain(request.domain)
+            return _validated_body(
                 request,
-                headers=caller_headers,
-                cookies=caller_cookies,
+                _send_via_zendriver(
+                    request,
+                    headers=caller_headers,
+                    cookies=caller_cookies,
+                ),
             )
     domain = request.domain
     if not domain:
-        return _send_as(request, None, None, caller_headers, caller_cookies)
+        return _validated_body(
+            request,
+            _send_as(request, None, None, caller_headers, caller_cookies),
+        )
 
     store = ProfileStore.shared()
     # A cheap last-known egress finds an existing session; a NEW session must pin
@@ -518,7 +519,10 @@ def _fetch_with_identity(
         egress = egress_ip(cache=False)
 
     try:
-        return _send_as(request, profile, egress, caller_headers, caller_cookies)
+        return _validated_body(
+            request,
+            _send_as(request, profile, egress, caller_headers, caller_cookies),
+        )
     except BotDetectionError:
         if profile is None:
             raise  # First contact burned: no known identity to discard or retry.
@@ -526,8 +530,11 @@ def _fetch_with_identity(
         store.discard(egress, domain)
         close_curl_session(egress, domain, request.session.impersonate)
         # The burn may be a VPN rotation: re-resolve live before the fresh retry.
-        return _send_as(
-            request, None, egress_ip(cache=False), caller_headers, caller_cookies
+        return _validated_body(
+            request,
+            _send_as(
+                request, None, egress_ip(cache=False), caller_headers, caller_cookies
+            ),
         )
 
 
@@ -584,8 +591,8 @@ def _send_as(
     # already holds (a bot tell). On the stdlib path (no jar) both are seeded
     # into the header.
     if curl is not None:
-        _seed_session_jar(curl, request.domain, jar)
-        _set_session_cookies(curl, request.domain, caller_cookies or {})
+        seed_session_jar(curl, request.domain, jar)
+        set_session_cookies(curl, request.domain, caller_cookies or {})
         seeded_cookies = None
     else:
         seeded_cookies = {**jar, **(caller_cookies or {})}
@@ -622,9 +629,9 @@ def _send_via_zendriver(
     """
     egress = egress_ip(cache=True) or egress_ip(cache=False)
     browser_url = _url_with_params(request.url, request.params.params)
-    result = fetch_zendriver(
+    result = zendriver_backend.fetch_zendriver(
         browser_url,
-        profile_dir=default_profile_dir(),
+        profile_dir=zendriver_backend.default_profile_dir(),
         egress=egress or "",
         timeout_sec=request.params.timeout_sec,
         headers=headers,
@@ -655,119 +662,7 @@ def _send_via_zendriver(
     return result.body
 
 
-# Live curl_cffi Sessions keyed by identity, so a session reuses one connection
-# across requests -- the connection continuity a real browser has, and which a
-# per-call request() (fresh TLS each time) lacks. Keyed on impersonate too.
-# config-globals: ignore -- live pool of open connections, not a tunable.
-_curl_sessions: dict[tuple[str, str, str], cc_requests.Session[Response]] = {}
-# Guards EVERY mutation of _curl_sessions AND the _last_egress_ip global as one
-# unit, so a VPN-roll close-sweep never races a pooled-session insert or drop.
-_egress_lock = threading.Lock()  # config-globals: ignore -- shared observed state.
-
-
-def curl_session(
-    egress: str, domain: str, impersonate: str
-) -> cc_requests.Session[Response]:
-    """Return the pooled curl_cffi Session for an identity, creating it once.
-
-    Keyed on the REGISTRABLE domain (eTLD+1), not the exact host, so sibling
-    subdomains of one site share a single connection + cookie jar -- the HTTP/2
-    connection coalescing a real browser does for hosts on one certificate.
-    ``www.google.com`` and ``scholar.google.com`` therefore reuse one session,
-    so a warm-up GET to the apex carries its TLS handshake and Set-Cookie into a
-    later request to the subdomain (a cold second connection is a bot tell that
-    Scholar, in particular, budgets against).
-    """
-    key = (egress, _registrable_domain(domain), impersonate)
-    with _egress_lock:
-        session = _curl_sessions.get(key)
-        if session is None:
-            session = cast(
-                "cc_requests.Session[Response]",
-                curl_cffi.requests.Session(
-                    impersonate=cast("BrowserTypeLiteral", impersonate)
-                ),
-            )
-            _curl_sessions[key] = session
-        return session
-
-
-def _seed_session_jar(
-    session: cc_requests.Session[Response], domain: str, cookies: dict[str, str]
-) -> None:
-    """Load stored profile cookies into a curl session jar it does not yet hold.
-
-    Cross-process persistence: the profile store outlives the in-memory session,
-    so a fresh process seeds the jar from disk. Only names absent from the jar
-    are added, so a live rotating cookie (curl tracking Scholar's NID/GSP) is
-    never clobbered by a stale stored copy.
-    """
-    if not cookies:
-        return
-    present = {c.name for c in session.cookies.jar}
-    for name, value in cookies.items():
-        if name not in present:  # never clobber a live jar cookie with a stale copy
-            _jar_set(session, domain, name, value)
-
-
-def _set_session_cookies(
-    session: cc_requests.Session[Response], domain: str, cookies: dict[str, str]
-) -> None:
-    """Set caller cookies into a curl session jar, OVERWRITING any prior value.
-
-    Unlike :func:`_seed_session_jar` (which preserves live jar cookies), a caller
-    cookie is an explicit per-call override and must win, so it replaces a
-    same-named jar entry. This keeps the jar the single cookie source on the curl
-    path: sending the cookie via a header too would duplicate a name the jar
-    already holds.
-    """
-    for name, value in cookies.items():
-        _jar_set(session, domain, name, value)
-
-
-def _jar_set(
-    session: cc_requests.Session[Response], domain: str, name: str, value: str
-) -> None:
-    """Set one cookie in a curl jar, honoring RFC 6265bis name-prefix rules."""
-    # RFC 6265bis 4.1.3 cookie-name prefixes, which curl_cffi enforces (and warns
-    # + coerces when violated): a __Secure- cookie must be Secure; a __Host-
-    # cookie must additionally be host-only (no Domain) with Path=/. Chrome only
-    # ever sends these over https, so set them to match.
-    if name.startswith("__Host-"):
-        session.cookies.set(name, value, path="/", secure=True)
-    elif name.startswith("__Secure-"):
-        session.cookies.set(name, value, domain=domain, secure=True)
-    else:
-        session.cookies.set(name, value, domain=domain)
-
-
-def _registrable_domain(host: str) -> str:
-    """Return the eTLD+1 of a host (``a.b.example.co.uk`` -> ``example.co.uk``).
-
-    A coarse public-suffix approximation: a two-label tail is the registrable
-    domain, unless the last label is a 2-letter ccTLD and the second-to-last is
-    a short (<=3-char) second-level label (``co.uk``, ``com.au``), in which case
-    the tail is three labels. Sufficient for connection coalescing -- an
-    over-broad grouping only shares a connection, never crosses a real origin
-    boundary for cookies (those stay domain-scoped by the jar).
-    """
-    labels = host.split(".")
-    if len(labels) <= 2:
-        return host
-    tail = labels[-2:]
-    if len(labels[-1]) == 2 and len(labels[-2]) <= 3:
-        return ".".join(labels[-3:])
-    return ".".join(tail)
-
-
-def close_curl_session(egress: str, domain: str, impersonate: str) -> None:
-    """Close and drop an identity's pooled Session (a burn ends the connection)."""
-    key = (egress, _registrable_domain(domain), impersonate)
-    with _egress_lock:
-        session = _curl_sessions.pop(key, None)
-    if session is not None:
-        session.close()  # I/O outside the lock; the pop already removed it.
-
+_egress_lock = threading.Lock()  # config-globals: ignore -- guards egress state.
 
 # Memoized from the most recent successful probe by any :func:`egress_ip` call,
 # so the whole process shares one observed egress. ``None`` until the first
@@ -812,11 +707,9 @@ def set_last_egress_ip(ip: str | None) -> None:
     global _last_egress_ip  # noqa: PLW0603 -- memoize shared observed state.
     with _egress_lock:
         rolled = ip != _last_egress_ip
-        if rolled:
-            for key in [k for k in _curl_sessions if k[0] != ip]:
-                _curl_sessions.pop(key).close()
         _last_egress_ip = ip
     if rolled:
+        close_curl_sessions_except(ip)
         for callback in _on_egress_rotation:
             callback(ip)
 
@@ -826,7 +719,7 @@ def set_last_egress_ip(ip: str | None) -> None:
 # when no pool exists, so this subscription is free until a browser fetch runs.
 # Registered via the rotation hook so the teardown mechanism is uniform, not a
 # special case wired into set_last_egress_ip.
-on_egress_rotation(lambda _ip: shutdown_browsers())
+on_egress_rotation(lambda _ip: zendriver_backend.shutdown_browsers())
 
 
 def egress_ip(
@@ -901,6 +794,18 @@ def _url_with_params(
     return f"{url}{separator}{urlencode(params)}"
 
 
+def _split_userinfo(url: str) -> tuple[str, str | None]:
+    """Strip ``user:pass@`` from a URL; return the URL and Basic auth."""
+    parsed = urlparse(url)
+    if not (parsed.username or parsed.password):
+        return url, None
+    user = unquote(parsed.username or "")
+    password = unquote(parsed.password or "")
+    credentials = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+    netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
+    return parsed._replace(netloc=netloc).geturl(), f"Basic {credentials}"
+
+
 def _fetch_once(
     url: str,
     params: RequestParams,
@@ -910,7 +815,7 @@ def _fetch_once(
     raw_headers: bool,
     impersonate: str,
     accept_ch: Mapping[str, frozenset[str]],
-    on_response: _Observer | None,
+    on_response: Observer | None,
     session: cc_requests.Session[Response] | None,
 ) -> bytes:
     """Build and send one request (with retries), no profile layer.
@@ -959,7 +864,7 @@ def _fetch_once(
     if cookie_parts:
         merged["Cookie"] = "; ".join(cookie_parts)
     method = params.method
-    backend = _fetch_curl if params.transport == "curl" else _fetch_stdlib
+    backend = fetch_curl if params.transport == "curl" else fetch_stdlib
     for attempt in range(1 + params.retries):
         try:
             return backend(
@@ -1115,674 +1020,3 @@ def _curl_structural_headers(
     if extra:
         h.update(extra)
     return h
-
-
-def _decompress(body: bytes, encoding: str) -> bytes:
-    """Decompress a response body per Content-Encoding; raise ValueError if bad.
-
-    ``Content-Encoding`` may chain several codings (RFC 9110 SS 8.4.1, e.g.
-    ``gzip, br``); they are applied left-to-right on encode, so decode
-    right-to-left. Each token is one coding.
-    """
-    for enc in reversed([tok.strip().lower() for tok in encoding.split(",")]):
-        body = _decompress_one(body, enc)
-    return body
-
-
-def _decompress_one(body: bytes, enc: str) -> bytes:
-    """Decompress ``body`` under a SINGLE Content-Encoding token."""
-    if enc in ("", "identity"):
-        return body
-    try:
-        if enc == "gzip":
-            return gzip.decompress(body)
-        if enc == "deflate":
-            # RFC 7230 says zlib-wrapped, but some servers emit RAW DEFLATE (no
-            # header); browsers retry with a negative window. Try zlib first,
-            # fall back to raw so a header-less stream still decodes.
-            try:
-                return zlib.decompress(body)
-            except zlib.error:
-                return zlib.decompress(body, -zlib.MAX_WBITS)
-        if enc == "br":
-            return brotli.decompress(body)
-        if enc == "zstd":
-            # stream_reader handles frames without an embedded size,
-            # which `.decompress()` rejects. Servers (e.g. Cloudflare)
-            # commonly emit such frames.
-            return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body)).read()
-    except (OSError, zlib.error, brotli.error, zstandard.ZstdError) as e:
-        raise ValueError(f"Decompression failed ({enc}): {e}") from None
-    raise ValueError(f"Unknown Content-Encoding: {enc!r}")
-
-
-def _decompress_error_body(body: bytes, headers: dict[str, str]) -> bytes:
-    """Decompress an ERROR response body best-effort, never raising."""
-    # Error pages are compressed like any success body (Cloudflare serves its
-    # challenge pages zstd/br), so a raw FetchError.body is undecodable garbage
-    # and a caller cannot tell a challenge from a genuine 404. This must NOT
-    # raise: an undecodable body must still surface the original HTTP error, so
-    # a decompression failure returns the raw bytes rather than mask the status.
-    encoding = headers.get("content-encoding", "identity")
-    try:
-        return _decompress(body, encoding)
-    except ValueError:
-        return body
-
-
-def _split_userinfo(url: str) -> tuple[str, str | None]:
-    """Strip ``user:pass@`` from *url*; return cleaned URL plus Basic auth."""
-    # http.client would getaddrinfo() the whole "u:p@host" as a hostname
-    # (Errno -2), so pre-strip userinfo into an Authorization: Basic header.
-    # The split keys off the final "@" (a literal "@" in userinfo is invalid
-    # per RFC 3986), so a bracketed "u:p@[::1]:8443" cleanly yields "[::1]:8443".
-    parsed = urlparse(url)
-    if not (parsed.username or parsed.password):
-        return url, None
-    user = unquote(parsed.username or "")
-    password = unquote(parsed.password or "")
-    creds = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
-    new_netloc = parsed.netloc[parsed.netloc.rfind("@") + 1 :]
-    return parsed._replace(netloc=new_netloc).geturl(), f"Basic {creds}"
-
-
-def _curl_set_cookies(resp: Response) -> list[str]:
-    """The individual ``Set-Cookie`` headers of a curl response, unfolded.
-
-    ``resp.headers.items()`` folds duplicates with ``", "`` (lossy for cookies);
-    ``get_list`` returns each header separately. Returns ``[]`` when the response
-    set no cookie.
-    """
-    get_list = getattr(resp.headers, "get_list", None)
-    if get_list is None:
-        value = resp.headers.get("set-cookie")
-        return [value] if value else []
-    return list(cast("list[str]", get_list("set-cookie")))
-
-
-def _join_headers(pairs: Iterable[tuple[str, str]]) -> dict[str, str]:
-    """Lowercase header pairs, folding duplicates into one value.
-
-    Duplicates join with ``", "`` per RFC 9110 SS 5.3 -- EXCEPT ``set-cookie``,
-    which that RFC explicitly exempts (a cookie value may itself contain ``", "``,
-    so folding then re-splitting mis-parses it). Multiple ``set-cookie`` headers
-    join with a newline instead -- a byte that never appears in a header value --
-    so :func:`sagent.lib.web.profile.parse_set_cookie` can split them back exactly.
-    """
-    out: dict[str, str] = {}
-    for k, v in pairs:
-        key = k.lower()
-        if key not in out:
-            out[key] = v
-        elif key == "set-cookie":
-            out[key] = f"{out[key]}\n{v}"
-        else:
-            out[key] = f"{out[key]}, {v}"
-    return out
-
-
-@dataclass(slots=True, kw_only=True)
-class _CurlLoop:
-    """Mutable per-hop state shared by both curl backends' redirect loops.
-
-    Holds the current URL, method, headers, body, and remaining redirect budget.
-    :meth:`follow` runs the identical post-response decision both backends make:
-    fire ``on_response``, and if the status is a followable redirect within
-    budget, advance the state to the next hop (via :func:`_apply_redirect`) and
-    report ``True``. A ``False`` return means the response is terminal, leaving
-    each backend to classify/return its (differently decompressed) body.
-    """
-
-    url: str
-    method: str
-    headers: dict[str, str]
-    body: bytes | None
-    remaining: int
-
-    def follow(
-        self,
-        status: int,
-        resp_headers: dict[str, str],
-        *,
-        on_response: _Observer | None,
-        on_redirect: Callable[[str], None] | None,
-    ) -> bool:
-        """Fire ``on_response``; advance to the next hop on a redirect within budget."""
-        if on_response is not None:
-            on_response(status, resp_headers, self.url)
-        # A redirect is followed only while the budget allows; at 0 the contract
-        # is "do not follow, return the 3xx body" (matching the stdlib path).
-        if status not in _REDIRECT_STATUSES or self.remaining <= 0:
-            return False
-        self.remaining -= 1
-        redirect_url = _redirect_target(self.url, status, resp_headers)
-        if on_redirect is not None:
-            on_redirect(redirect_url)
-        self.headers, self.method, self.body = _apply_redirect(
-            self.url, self.headers, self.method, self.body, status, redirect_url
-        )
-        self.url = redirect_url
-        return True
-
-
-def _fetch_curl(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: _Observer | None,
-    validated_hosts: ValidatedHosts | None,
-    session: cc_requests.Session[Response] | None = None,
-) -> bytes:
-    """Dispatch to the SSRF-pinned curl handle, or the plain one if unvalidated."""
-    if validated_hosts is not None:
-        # The pinned path owns a raw Curl handle for SSRF; no Session reuse.
-        return _fetch_curl_pinned(
-            url,
-            method=method,
-            headers=headers,
-            body=body,
-            timeout_sec=timeout_sec,
-            max_redirects=max_redirects,
-            impersonate=impersonate,
-            on_redirect=on_redirect,
-            on_response=on_response,
-            validated_hosts=validated_hosts,
-        )
-    return _fetch_curl_simple(
-        url,
-        method=method,
-        headers=headers,
-        body=body,
-        timeout_sec=timeout_sec,
-        max_redirects=max_redirects,
-        impersonate=impersonate,
-        on_redirect=on_redirect,
-        on_response=on_response,
-        session=session,
-    )
-
-
-def _fetch_curl_simple(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: _Observer | None,
-    session: cc_requests.Session[Response] | None = None,
-) -> bytes:
-    """High-level curl path: ``requests.request`` with manual redirects."""
-    # requests auto-decompresses .content, so no _decompress call is needed.
-    # Cookies are already in headers["Cookie"], so NO cookies= kwarg is passed
-    # (curl would emit a second Cookie source -- verified both are sent).
-    loop = _CurlLoop(
-        url=url, method=method, headers=headers, body=body, remaining=max_redirects
-    )
-    impers = cast("BrowserTypeLiteral", impersonate)
-    while True:
-        try:
-            verb = cast("HttpMethod", loop.method)  # curl types verb as a Literal.
-            resp = (
-                session.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
-                    verb,
-                    loop.url,
-                    headers=loop.headers,
-                    data=loop.body,
-                    impersonate=impers,
-                    timeout=timeout_sec,
-                    allow_redirects=False,
-                )
-                if session is not None
-                else curl_cffi.requests.request(  # pyright: ignore[reportUnknownMemberType] -- curl_cffi's **Unpack[RequestParams] TypedDict is unstubbed
-                    verb,
-                    loop.url,
-                    headers=loop.headers,
-                    data=loop.body,
-                    impersonate=impers,
-                    timeout=timeout_sec,
-                    allow_redirects=False,
-                )
-            )
-        except curl_cffi.CurlError as e:
-            raise FetchError(loop.url, 0, {}, str(e).encode()) from e
-        # curl_cffi's request/Session.request type a None return for the
-        # thread/stream overloads; the sync call here always yields a Response.
-        assert resp is not None
-        status = int(resp.status_code)
-        resp_headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
-        # curl_cffi's Headers.items() lossily folds duplicate Set-Cookie with
-        # ", " (and Set-Cookie values may contain ", "); get_list preserves the
-        # individual headers, newline-joined to match _join_headers so
-        # parse_set_cookie splits them back exactly.
-        cookies_list = _curl_set_cookies(resp)
-        if cookies_list:
-            resp_headers["set-cookie"] = "\n".join(cookies_list)
-        content = bytes(resp.content or b"")
-        current_url = loop.url
-        if loop.follow(
-            status, resp_headers, on_response=on_response, on_redirect=on_redirect
-        ):
-            continue
-        if status >= 400:
-            raise classify_http_error(current_url, status, resp_headers, content)
-        return content
-
-
-def _fetch_curl_pinned(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: _Observer | None,
-    validated_hosts: ValidatedHosts,
-) -> bytes:
-    """Low-level curl path: SSRF-pinned ``Curl`` handle, manual redirects."""
-    # The connect IP is pinned to validated_hosts(host).ip via CurlOpt.RESOLVE
-    # ("host:port:ip") so the socket hits exactly the validated address
-    # regardless of DNS, re-pinned on a cross-host redirect. Bodies arrive raw
-    # (no auto-decompression at this layer), so they are decompressed here.
-    # Bind the lazy curl_cffi symbols once at entry (materializes the module).
-    Curl, CurlError, CurlInfo, CurlOpt = (
-        curl_cffi.Curl,
-        curl_cffi.CurlError,
-        curl_cffi.CurlInfo,
-        curl_cffi.CurlOpt,
-    )
-    handle = Curl()
-    try:
-        loop = _CurlLoop(
-            url=url, method=method, headers=headers, body=body, remaining=max_redirects
-        )
-        # Cache the last resolution: a same-origin redirect must reuse it without
-        # re-invoking the resolver (the resolver contract, honored by the stdlib
-        # path). Keyed on (hostname, port) so only an origin change re-resolves.
-        resolved_key: tuple[str, int] | None = None
-        validated: ValidatedHost | None = None
-        while True:
-            parsed = urlparse(loop.url)
-            hostname = parsed.hostname or parsed.netloc
-            port = parsed.port or _default_port(parsed.scheme)
-            if resolved_key != (hostname, port):
-                validated = validated_hosts(hostname)
-                resolved_key = (hostname, port)
-            assert validated is not None
-            write_buf = io.BytesIO()
-            header_buf = io.BytesIO()
-            handle.reset()
-            handle.setopt(CurlOpt.URL, loop.url.encode())
-            handle.setopt(CurlOpt.CUSTOMREQUEST, loop.method.encode())
-            handle.setopt(CurlOpt.TIMEOUT_MS, int(timeout_sec * 1000))
-            # Bracket a v6 pin: curl's RESOLVE is "host:port:ip" and an
-            # unbracketed IPv6 collides with those colon delimiters.
-            handle.setopt(
-                CurlOpt.RESOLVE,
-                [f"{hostname}:{port}:{_bracket_ipv6(validated.ip)}"],
-            )
-            handle.setopt(
-                CurlOpt.HTTPHEADER,
-                [f"{k}: {v}".encode() for k, v in loop.headers.items()],
-            )
-            if loop.body is not None:
-                handle.setopt(CurlOpt.POSTFIELDS, loop.body)
-                handle.setopt(CurlOpt.POSTFIELDSIZE, len(loop.body))
-            handle.setopt(CurlOpt.WRITEDATA, write_buf)
-            handle.setopt(CurlOpt.HEADERDATA, header_buf)
-            handle.impersonate(impersonate)
-            try:
-                handle.perform()
-            except CurlError as e:
-                raise FetchError(loop.url, 0, {}, str(e).encode()) from e
-            status = int(_curl_response_code(handle, CurlInfo.RESPONSE_CODE))
-            resp_headers = _parse_raw_headers(header_buf.getvalue())
-            raw_body = write_buf.getvalue()
-            current_url = loop.url
-            if loop.follow(
-                status, resp_headers, on_response=on_response, on_redirect=on_redirect
-            ):
-                continue
-            if status >= 400:
-                raise classify_http_error(
-                    current_url,
-                    status,
-                    resp_headers,
-                    _decompress_error_body(raw_body, resp_headers),
-                )
-            return _decompress(
-                raw_body, resp_headers.get("content-encoding", "identity")
-            )
-    finally:
-        handle.close()
-
-
-def _curl_response_code(handle: object, info: object) -> int:
-    """Read an integer ``CurlInfo`` (e.g. response code) off a ``Curl`` handle."""
-    assert isinstance(handle, curl_cffi.Curl)
-    assert isinstance(info, curl_cffi.CurlInfo)
-    value = handle.getinfo(info)
-    assert isinstance(value, int)
-    return value
-
-
-def _redirect_target(current_url: str, status: int, headers: dict[str, str]) -> str:
-    """Resolve a redirect ``Location`` against *current_url*; raise if absent."""
-    location = headers.get("location")
-    if not location:
-        raise FetchError(
-            current_url, status, headers, b"Redirect with no Location header"
-        )
-    # RFC 3986 relative resolution: handles absolute, scheme-relative, and
-    # path-relative Locations without corrupting the host.
-    return urljoin(current_url, location)
-
-
-def _parse_raw_headers(block: bytes) -> dict[str, str]:
-    """Parse a raw CRLF response-header block into a merged lowercase dict."""
-    pairs: list[tuple[str, str]] = []
-    for line in block.split(b"\r\n"):
-        if not line or b":" not in line:
-            continue
-        k, _, v = line.partition(b":")
-        pairs.append((k.decode("latin-1").strip(), v.decode("latin-1").strip()))
-    return _join_headers(pairs)
-
-
-class _ValidatedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(
-        self,
-        host: str,
-        *,
-        port: int | None = None,
-        server_hostname: str,
-        timeout: float,
-        context: ssl.SSLContext,
-    ) -> None:
-        super().__init__(host, port=port, timeout=timeout, context=context)
-        self._server_hostname = server_hostname
-        self._ssl_context = context
-
-    @override
-    def connect(self) -> None:
-        http.client.HTTPConnection.connect(self)
-        assert self.sock is not None
-        self.sock = self._ssl_context.wrap_socket(
-            self.sock,
-            server_hostname=self._server_hostname,
-        )
-
-
-def _default_port(scheme: str) -> int:
-    """Return the default TCP port for an HTTP scheme."""
-    return 443 if scheme == "https" else 80
-
-
-def _netloc(hostname: str, port: int | None) -> str:
-    """Recombine a hostname and optional port into a netloc."""
-    return f"{hostname}:{port}" if port is not None else hostname
-
-
-def _host_header(host: str, port: int | None, scheme: str) -> str:
-    """The ``Host`` header value: bare host, plus a non-default port."""
-    # RFC 9110 requires the port in Host only when it is not the scheme default;
-    # a real browser omits :443/:80. The ONE place this rule lives, so the
-    # initial hop and the cross-host-redirect rebuild cannot disagree.
-    if port is not None and port != _default_port(scheme):
-        return _netloc(host, port)
-    return host
-
-
-def _bracket_ipv6(host: str) -> str:
-    """Wrap an IPv6 literal in brackets; pass hostnames and IPv4 through."""
-    # http.client splits host on the last ':' for a port, misparsing a bare
-    # "2606:4700::6810:7c60" as host+port. Bracketing avoids that heuristic.
-    if ":" in host and not host.startswith("["):
-        return f"[{host}]"
-    return host
-
-
-def _rewrite_origin(headers: dict[str, str], target_url: str) -> dict[str, str]:
-    """Return ``headers`` with ``Origin`` reset to ``target_url``'s origin."""
-    # A cross-origin redirect must NOT leak the source Origin to the new host (a
-    # real browser sets it to the new origin, never the old). A GET carries no
-    # Origin and passes through. Field names are case-insensitive, so a
-    # caller-supplied "origin" in any case is matched and rewritten in place.
-    origin_key = next((k for k in headers if k.lower() == "origin"), None)
-    if origin_key is None:
-        return headers
-    parsed = urlparse(target_url)
-    scheme = parsed.scheme or "https"
-    # Bracket a v6 host: an unbracketed IPv6 literal is not a valid Origin
-    # (the colons collide with the scheme/port delimiters).
-    netloc = _netloc(_bracket_ipv6(parsed.hostname or ""), parsed.port)
-    return {**headers, origin_key: f"{scheme}://{netloc}"}
-
-
-def _apply_redirect(
-    current_url: str,
-    headers: dict[str, str],
-    method: str,
-    body: bytes | None,
-    status: int,
-    redirect_url: str,
-) -> tuple[dict[str, str], str, bytes | None]:
-    """Compute the (headers, method, body) for the next hop of a redirect.
-
-    The ONE place the per-hop transform lives, called by every transport's
-    redirect loop so the rules cannot drift, mirroring what a real browser does:
-
-    - Rewrite ``Origin`` to the new target.
-    - On 301/302/303 of a non-GET, convert to a bodyless GET dropping
-      Content-Type (browsers downgrade all three; only 307/308 preserve the
-      method -- that is why 307/308 exist).
-    - On a CROSS-ORIGIN hop, drop every origin-bound header (``Cookie`` and the
-      extended client hints), since those belong to the source origin and must
-      not leak to the target. Same-origin hops keep them.
-
-    Casing-insensitive throughout.
-    """
-    headers = _rewrite_origin(headers, redirect_url)
-    if status in (301, 302, 303) and method != "GET":
-        method = "GET"
-        body = None
-        headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-    if _origin(current_url) != _origin(redirect_url):
-        headers = {k: v for k, v in headers.items() if k.lower() not in _ORIGIN_BOUND}
-    return headers, method, body
-
-
-# Headers scoped to the origin that set/opted-into them; dropped on a
-# cross-origin redirect so the source origin's Cookie and extended client hints
-# never leak to the target (a real browser scopes both per origin).
-_ORIGIN_BOUND: frozenset[str] = frozenset(
-    {"cookie"} | {name.lower() for name in chrome_client_hints(major=1)}
-)
-
-
-def _open_connection(
-    scheme: str,
-    hostname: str,
-    timeout_sec: float,
-    *,
-    port: int | None = None,
-    resolved_ip: str = "",
-) -> HTTPConn:
-    """Open a new HTTP/HTTPS connection; pin to ``resolved_ip`` when given."""
-    connect_host = _bracket_ipv6(resolved_ip or hostname)
-    if scheme == "https":
-        ctx = ssl.create_default_context()
-        if resolved_ip:
-            return _ValidatedHTTPSConnection(
-                connect_host,
-                port=port,
-                server_hostname=hostname,
-                timeout=timeout_sec,
-                context=ctx,
-            )
-        return http.client.HTTPSConnection(
-            connect_host,
-            port=port,
-            timeout=timeout_sec,
-            context=ctx,
-        )
-    return http.client.HTTPConnection(connect_host, port=port, timeout=timeout_sec)
-
-
-def _fetch_stdlib(
-    url: str,
-    *,
-    method: str,
-    headers: dict[str, str],
-    body: bytes | None,
-    timeout_sec: float,
-    max_redirects: int,
-    impersonate: str,
-    on_redirect: Callable[[str], None] | None,
-    on_response: _Observer | None,
-    validated_hosts: ValidatedHosts | None,
-    session: cc_requests.Session[Response] | None = None,
-) -> bytes:
-    """Stdlib transport: http.client with manual redirect following.
-
-    A drop-in peer of :func:`_fetch_curl` with the identical signature, so
-    :func:`_fetch_once` dispatches to either by name. This backend has no TLS
-    impersonation and no pooled connection, so ``impersonate`` and ``session``
-    are accepted for interface parity and ignored; the coherent Chrome header set
-    is instead hand-built upstream in :func:`_build_headers`.
-    """
-    del impersonate, session  # No impersonation or connection pooling here.
-    # The connection is owned entirely here: opened locally and closed in the
-    # finally on every exit (success, HTTP error, redirect/decompress failure),
-    # so no socket leaks. Nothing escapes to the caller.
-    parsed = urlparse(url)
-    scheme = parsed.scheme
-    hostname = parsed.hostname or parsed.netloc
-    port = parsed.port
-    path = parsed.path or "/"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-
-    validated = validated_hosts(hostname) if validated_hosts is not None else None
-    connect_host = validated.ip if validated is not None else ""
-    request_headers = headers
-    if validated is not None:
-        # Host first: real browsers and http.client's own auto-generated
-        # Host header both place it before User-Agent/Accept/etc. Servers
-        # that observe header order return 403 when Host is trailing. The
-        # resolver returns the bare host (its contract), so _host_header
-        # re-appends any non-default port.
-        request_headers = {
-            "Host": _host_header(validated.host, port, scheme),
-            **headers,
-        }
-
-    raw_conn = _open_connection(
-        scheme, hostname, timeout_sec, port=port, resolved_ip=connect_host
-    )
-    try:
-        current_url = url
-        remaining = max_redirects
-        while True:
-            raw_conn.request(method, path, body=body, headers=request_headers)
-            response = raw_conn.getresponse()
-            resp_headers = _join_headers(response.getheaders())
-            if on_response is not None:
-                on_response(response.status, resp_headers, current_url)
-
-            is_redirect = response.status in (301, 302, 303, 307, 308)
-            if is_redirect and remaining > 0:
-                remaining -= 1
-                location = resp_headers.get("location")
-                response.read()
-                if not location:
-                    raise FetchError(
-                        current_url,
-                        response.status,
-                        resp_headers,
-                        b"Redirect with no Location header",
-                    )
-                # RFC 3986 relative resolution against the current URL: handles
-                # absolute, scheme-relative (//host/p), and path-relative (both
-                # "/p" and bare "p") Locations without corrupting the host.
-                redirect_url = urljoin(current_url, location)
-                redir = urlparse(redirect_url)
-                redir_scheme = redir.scheme or scheme
-                if on_redirect is not None:
-                    on_redirect(redirect_url)
-                redir_parsed = urlparse(redirect_url)
-                redir_hostname = redir_parsed.hostname or hostname
-                redir_port = redir_parsed.port
-                # Per-hop transform (Origin rewrite, 303 -> bodyless GET) via the
-                # ONE shared helper, so the stdlib and curl paths cannot drift.
-                # Applied to request_headers (which carries any validated Host).
-                request_headers, method, body = _apply_redirect(
-                    current_url,
-                    request_headers,
-                    method,
-                    body,
-                    response.status,
-                    redirect_url,
-                )
-                if (
-                    redir_hostname != hostname
-                    or redir_port != port
-                    or redir_scheme != scheme
-                ):
-                    raw_conn.close()
-                    scheme = redir_scheme
-                    hostname = redir_hostname
-                    port = redir_port
-                    validated = (
-                        validated_hosts(hostname)
-                        if validated_hosts is not None
-                        else None
-                    )
-                    connect_host = validated.ip if validated is not None else ""
-                    # New host: replace the Host header (drop any prior first).
-                    # HTTP field names are case-insensitive, so drop any casing.
-                    request_headers = {
-                        k: v for k, v in request_headers.items() if k.lower() != "host"
-                    }
-                    if validated is not None:
-                        request_headers = {
-                            "Host": _host_header(validated.host, port, scheme),
-                            **request_headers,
-                        }
-                    raw_conn = _open_connection(
-                        scheme,
-                        hostname,
-                        timeout_sec,
-                        port=port,
-                        resolved_ip=connect_host,
-                    )
-                path = redir.path or "/"
-                if redir.query:
-                    path = f"{path}?{redir.query}"
-                current_url = redirect_url
-                continue
-
-            raw_body = response.read()
-            if response.status >= 400:
-                raise classify_http_error(
-                    current_url,
-                    response.status,
-                    resp_headers,
-                    _decompress_error_body(raw_body, resp_headers),
-                )
-            encoding = resp_headers.get("content-encoding", "identity")
-            return _decompress(raw_body, encoding)
-    finally:
-        raw_conn.close()

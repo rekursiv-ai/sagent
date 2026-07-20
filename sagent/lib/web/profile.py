@@ -49,8 +49,8 @@ def parse_set_cookie(header_value: str) -> dict[str, str]:
     zero or less, or a past ``Expires``, marks a deletion and is omitted.
 
     Multiple ``Set-Cookie`` headers are newline-separated by
-    :func:`sagent.lib.web.fetch._join_headers` -- Set-Cookie is RFC-exempt from
-    comma folding because a cookie value may itself contain ``", "``, so a
+    :func:`sagent.lib.web.fetch.common.join_headers` -- Set-Cookie is RFC-exempt
+    from comma folding because a cookie value may itself contain ``", "``, so a
     newline (never present in a header value) is the unambiguous separator.
 
     Args:

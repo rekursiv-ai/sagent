@@ -11,14 +11,14 @@ import json
 
 import pytest
 
-from sagent.lib.web import useragents
-from sagent.lib.web.fetch import FetchSession
-from sagent.lib.web.useragents import (
+from sagent.lib.web.chrome import useragents
+from sagent.lib.web.chrome.useragents import (
     UserAgentKind,
     draw_user_agent,
     impersonate_target,
     user_agent_pool,
 )
+from sagent.lib.web.fetch import FetchSession
 
 
 @pytest.fixture(autouse=True)

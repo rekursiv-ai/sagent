@@ -3,7 +3,7 @@
 Wraps the S2 Graph API: paper search, metadata (single + batched), the
 reference/citation graph, and author search / metadata / papers. Every request
 is paced through the shared per-source cross-process gate
-(:func:`sagent.lib.ratelimit.cross_process_limiter`) and retries a 429 with the
+(:func:`sagent.lib.web.ratelimit.cross_process_limiter`) and retries a 429 with the
 exponential backoff S2 requires, recording the backoff into the shared cooldown
 so concurrent holders of the key wait together rather than each re-hammering.
 
@@ -22,7 +22,6 @@ import json
 import os
 
 from sagent.lib.custom_json import MutableJSON, int_val
-from sagent.lib.ratelimit import cross_process_limiter
 from sagent.lib.web.errors import FetchError
 from sagent.lib.web.fetch import RequestParams, Transport, fetch
 from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
@@ -32,6 +31,7 @@ from sagent.lib.web.paper.paginate import (
     Page,
     paginate as paginate_cursor,
 )
+from sagent.lib.web.ratelimit import cross_process_limiter
 
 
 __all__ = [
@@ -54,7 +54,7 @@ __all__ = [
 # Named here in prose so the rationale lives once:
 #   base="https://api.semanticscholar.org/graph/v1" -- S2 Graph API base URL.
 #   source="s2" -- rate-limit gate key
-#     (see :func:`sagent.lib.ratelimit.cross_process_limiter`). Every holder of the
+#     (see :func:`sagent.lib.web.ratelimit.cross_process_limiter`). Every holder of the
 #     S2 budget must pass the same key to share one gate.
 #   timeout_sec=10.0 -- healthy S2 latency is sub-second to a few seconds even
 #     for a 100-item page; 10s clears the slow tail (batch POST, deep
