@@ -5,6 +5,7 @@ from typing import (
     Optional as Optional,
     TypeVar as TypeVar,
     Union as Union,
+    overload as overload,
 )
 from typing_extensions import ParamSpec as ParamSpec
 
@@ -59,9 +60,20 @@ def substitute_in_graph(
 ) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]: ...
 def list_backends(exclude_tags=...) -> list[str]: ...
 def assume_constant_result(fn: F) -> F: ...
+@overload
 def disable(
-    fn=..., recursive=..., *, reason=...
-) -> Callable[..., Any] | DisableContext | Callable[..., Callable[_P, _R]]: ...
+    fn: Callable[_P, _R],
+    recursive: bool = ...,
+    *,
+    reason: str | None = ...,
+) -> Callable[_P, _R]: ...
+@overload
+def disable(
+    fn: None = ...,
+    recursive: bool = ...,
+    *,
+    reason: str | None = ...,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]: ...
 def set_stance(
     stance: str = ...,
     *,

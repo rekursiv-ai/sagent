@@ -32,6 +32,8 @@ import logging
 import os
 import socket
 import socketserver
+import sys
+import tempfile
 import threading
 import time
 import warnings
@@ -53,6 +55,7 @@ else:
 
 __all__ = [
     "BrowserResult",
+    "BrowserUnavailableError",
     "default_profile_dir",
     "fetch_zendriver",
     "open_instance",
@@ -64,12 +67,24 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+class BrowserUnavailableError(RuntimeError):
+    """Chrome could not be launched or connected to on this host.
+
+    A capability condition (Chrome absent, incompatible, or unable to bind its
+    DevTools port), distinct from a fetch or parse failure: callers that need a
+    browser cannot proceed, and environments without a usable one (CI, headless
+    boxes) should treat it as "browser subsystem unavailable" rather than a bug.
+    """
+
+
 class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
     def __init__(self, profile_dir: Path, release: Callable[[], None]) -> None:
         self.release = release
-        super().__init__(_control_address(profile_dir), _PoolControlHandler)
+        address = _control_address(profile_dir)
+        self._control_path = None if address.startswith("\0") else Path(address)
+        super().__init__(address, _PoolControlHandler)
         self._thread = threading.Thread(
             target=lambda: self.serve_forever(poll_interval=0.01),
             name="loop-web-browser-control",
@@ -81,6 +96,8 @@ class _PoolControlServer(socketserver.ThreadingUnixStreamServer):
         self.shutdown()
         self.server_close()
         self._thread.join()
+        if self._control_path is not None:
+            self._control_path.unlink(missing_ok=True)
 
 
 class _PoolControlHandler(socketserver.StreamRequestHandler):
@@ -91,24 +108,30 @@ class _PoolControlHandler(socketserver.StreamRequestHandler):
         cast("_PoolControlServer", self.server).release()
 
 
-def _control_address(profile_dir: Path) -> str:
-    """Return the abstract Unix-socket address coordinating one profile."""
+def _control_address(profile_dir: Path, platform: str = sys.platform) -> str:
+    """Return the Unix-socket address coordinating one profile."""
     digest = hashlib.sha256(str(profile_dir.resolve()).encode()).hexdigest()[:24]
-    return f"\0loop-zendriver-{digest}"
+    if platform == "linux":
+        return f"\0loop-zendriver-{digest}"
+    return str(Path(tempfile.gettempdir()) / f"loop-zd-{digest}.sock")
 
 
 def _request_pool_release(profile_dir: Path) -> None:
     """Ask another process's browser pool to release ``profile_dir``."""
+    address = _control_address(profile_dir)
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(10)
     try:
-        client.connect(_control_address(profile_dir))
+        client.connect(address)
         client.sendall(b"release\n")
         # EOF is the acknowledgement: the handler closes only after the release
         # callback returns, including graceful browser and loop shutdown.
         if client.recv(64) != b"":
             raise RuntimeError("Zendriver browser pool returned an invalid response.")
-    except (ConnectionRefusedError, FileNotFoundError):
+    except ConnectionRefusedError:
+        if not address.startswith("\0"):
+            Path(address).unlink(missing_ok=True)
+    except FileNotFoundError:
         pass
     finally:
         client.close()
@@ -325,14 +348,20 @@ async def _launch_browser(
 ) -> zendriver.Browser:
     """Launch vanilla Chrome on the persistent profile."""
     profile_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-shot setup.
-    return await zendriver.start(
-        zendriver.Config(
-            headless=headless,
-            user_data_dir=str(profile_dir),
-            sandbox=_sandbox(),
-            browser_connection_timeout=1.0,
+    try:
+        return await zendriver.start(
+            zendriver.Config(
+                headless=headless,
+                user_data_dir=str(profile_dir),
+                sandbox=_sandbox(),
+                browser_connection_timeout=1.0,
+            )
         )
-    )
+    except Exception as error:
+        # zendriver raises a bare ``Exception`` when Chrome cannot start or the
+        # DevTools connection never comes up. Re-raise it typed so callers can
+        # tell "no usable browser here" apart from a fetch/parse failure.
+        raise BrowserUnavailableError(f"Could not launch Chrome: {error}") from error
 
 
 async def _navigate_tab(

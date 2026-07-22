@@ -431,6 +431,6 @@ async def test_peer_nudge_skipped_on_unparseable(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

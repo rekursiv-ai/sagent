@@ -1789,42 +1789,6 @@ def _preserve_corrupt_session(session_file: Path) -> None:
         logger.exception("Could not preserve corrupt session file %s.", session_file)
 
 
-def rebuild_content_cache(history: list[ModelContextEvent], state: ToolState) -> None:
-    """Reseed ``ToolState`` content cache from disk for previously-touched files.
-
-    Walks Read/Edit/Write tool calls in the resumed history, collects
-    every ``file_path`` referenced, and reads the current disk content
-    for each. Result: ``check_stale`` has a content baseline matching
-    real disk bytes, so subsequent reads don't fire spurious
-    ``stale`` warnings on mtime drift (cloud sync, lint, etc.).
-
-    Binary / unreadable files are marked read with no content -- the
-    cache only carries text we can diff against.
-
-    Args:
-      history: Conversation history loaded from session.jsonl.
-      state: ToolState to mutate in place.
-
-    """
-    paths: set[str] = set()
-    for entry in history:
-        if not isinstance(entry, AssistantMessage):
-            continue
-        for tc in entry.tool_calls:
-            if tc.name.lower() not in ("read", "edit", "write", "multiedit"):
-                continue
-            fp = tc.args.get("file_path")
-            if isinstance(fp, str) and fp:
-                paths.add(fp)
-    for fp in paths:
-        try:
-            content = Path(fp).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            state.mark_read(fp)
-            continue
-        state.mark_read(fp, content=content)
-
-
 def restore_model(
     meta: SessionMeta,
 ) -> tuple[Model, ModelSpec] | None:

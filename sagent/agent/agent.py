@@ -64,7 +64,6 @@ from sagent.agent.retry import send_with_retry, service_error_snapshot
 from sagent.agent.session_io import (
     SessionMeta,
     install_session_persistence,
-    rebuild_content_cache,
     restore_model,
 )
 from sagent.agent.state import (
@@ -1163,9 +1162,12 @@ class Agent:
         Restores cost / activity / compaction state, the original
         ``session_id`` and ``status``, and (when the persisted
         provider+model differ from the current one) swaps the model.
-        Repopulates ``tool_state`` and reseeds its content cache from
-        current disk for previously-touched files so post-resume
-        ``check_stale`` doesn't fire on mtime drift.
+        Repopulates ``tool_state`` from the persisted snapshot; its
+        ``_content_cache`` stays empty and reloads lazily on the first
+        post-resume ``check_stale`` / ``consume_changed_files`` against
+        disk (matching ``restore_tool_state``). Resume never eagerly
+        re-reads touched paths: a path that has migrated onto a hung
+        network mount would otherwise block the resume thread forever.
 
         Args:
           meta: Persisted ``SessionMeta``.
@@ -1178,7 +1180,6 @@ class Agent:
             self.runtime.session_id = meta.session_id
         self.runtime.replay_tape(tape)
         self.tool_state = tool_state
-        rebuild_content_cache(self.runtime.context().messages, self.tool_state)
         if meta.status:
             self._status = meta.status
         self.cost_tracker.restore_totals(

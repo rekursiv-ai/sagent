@@ -459,6 +459,6 @@ def test_run_ids_batch_cache_keys_on_canonical_id() -> None:
 # Google Scholar cited-by pivot (internal build only)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

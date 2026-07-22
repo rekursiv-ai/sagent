@@ -400,11 +400,6 @@ class _Request:
         p = self.params
         if p.transport == "auto" and p.validated_hosts is not None:
             resolved: Transport = "curl"
-        elif (
-            p.transport == "auto"
-            and self.domain in transport_routing.zendriver_domains()
-        ):
-            resolved = "zendriver"
         else:
             resolved = resolve_transport(
                 p.transport,
@@ -412,6 +407,15 @@ class _Request:
                 raw_headers=p.raw_headers,
                 has_body=p.data is not None or p.json is not None,
             )
+            # A domain learned to require the browser skips the curl-then-zendriver
+            # probe -- but only when the request is browser-eligible to begin with.
+            # A POST, body, or raw-header request resolves to plain curl, which the
+            # learned hint must NOT override into the GET-only browser leg.
+            if (
+                resolved == "curl-then-zendriver"
+                and self.domain in transport_routing.zendriver_domains()
+            ):
+                resolved = "zendriver"
         if resolved in ("zendriver", "curl-then-zendriver") and (
             p.validated_hosts is not None
         ):
@@ -848,6 +852,12 @@ def _fetch_once(
         raw_headers=raw_headers,
         impersonate=impersonate,
         use_curl=params.transport == "curl",
+        # The SSRF-pinned curl path drives a raw ``curl_cffi.Curl`` handle whose
+        # ``impersonate()`` replays only the TLS/HTTP-2 fingerprint, NOT the Chrome
+        # request headers the high-level ``requests`` layer injects. So a pinned
+        # request needs the full hand-built Chrome header set (like stdlib), not
+        # the structural-only set that assumes impersonate supplies UA/Accept/etc.
+        pinned_curl=params.transport == "curl" and params.validated_hosts is not None,
         accept_ch=accept_ch,
     )
     if basic_auth is not None:
@@ -921,25 +931,32 @@ def _build_headers(
     raw_headers: bool,
     impersonate: str,
     use_curl: bool,
+    pinned_curl: bool = False,
     accept_ch: Mapping[str, frozenset[str]],
 ) -> dict[str, str]:
     """Build canonical-order Chrome request headers.
 
-    On the curl transport, curl_cffi's ``impersonate`` supplies the coherent
-    Chrome fingerprint (User-Agent, ``sec-ch-ua`` hints, Accept, Sec-Fetch-*,
-    Priority) matching its TLS/HTTP-2 profile exactly. Overriding those with
-    hand-built values makes the identities disagree -- a bot tell -- so the curl
-    path emits ONLY the structural headers curl does not set (Origin/Content-Type
-    on a POST), the extended client hints an origin opted into via ``Accept-CH``,
-    and caller extras. The stdlib path has no impersonation, so it reproduces the
-    full hand-built Chrome set to look like a browser at all.
+    On the high-level curl transport, curl_cffi's ``impersonate`` supplies the
+    coherent Chrome fingerprint (User-Agent, ``sec-ch-ua`` hints, Accept,
+    Sec-Fetch-*, Priority) matching its TLS/HTTP-2 profile exactly. Overriding
+    those with hand-built values makes the identities disagree -- a bot tell --
+    so that path emits ONLY the structural headers curl does not set
+    (Origin/Content-Type on a POST), the extended client hints an origin opted
+    into via ``Accept-CH``, and caller extras.
+
+    The SSRF-pinned curl path (``pinned_curl``) drives a RAW ``curl_cffi.Curl``
+    handle whose ``impersonate()`` replays the TLS/HTTP-2 fingerprint but injects
+    NONE of those request headers (only the high-level ``requests`` layer does).
+    So it -- like the stdlib path -- must reproduce the full hand-built Chrome
+    set, or it sends a header-less request (no User-Agent) that UA-gated APIs
+    (e.g. GitHub) reject with 403.
     """
     # Host and Content-Length are omitted: http.client auto-adds both first on
     # the wire (the connection path overrides Host when validated_hosts splits
     # SNI/IP); curl adds them itself.
     if raw_headers:
         return dict(extra or {})
-    if use_curl:
+    if use_curl and not pinned_curl:
         return _curl_structural_headers(
             method=method,
             url=url,
@@ -948,10 +965,11 @@ def _build_headers(
             impersonate=impersonate,
             accept_ch=accept_ch,
         )
-    # The stdlib path has no impersonation, so it reproduces the full Chrome
+    # The stdlib path and the SSRF-pinned raw-handle curl path get no
+    # impersonation-injected request headers, so both reproduce the full Chrome
     # header set by hand -- from the SAME source (chrome_navigation_headers,
-    # matched to the impersonate target) the curl path's fingerprint uses, so
-    # the two transports present one coherent identity, not two drifting ones.
+    # matched to the impersonate target) the high-level curl path's fingerprint
+    # uses, so every transport presents one coherent identity, not drifting ones.
     parsed = urlparse(url)
     major, platform = impersonate_version_platform(impersonate)
     h = chrome_navigation_headers(

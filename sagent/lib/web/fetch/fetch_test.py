@@ -1315,6 +1315,27 @@ class TestBrowserBackend:
         assert body == b"ok"
         assert direct.call_args.args[0].params.transport == "curl"
 
+    def test_auto_post_to_learned_domain_uses_curl(self) -> None:
+        # A domain learned to require the browser must not override method/body
+        # eligibility: an automatic POST to it resolves to curl, not the GET-only
+        # zendriver leg (whose construction raises "supports only GET").
+        with (
+            patch.object(
+                fetch_mod.transport_routing,
+                "zendriver_domains",
+                return_value=frozenset({"walled.example"}),
+            ),
+            patch.object(
+                fetch_mod, "_fetch_with_identity", return_value=b"ok"
+            ) as direct,
+        ):
+            body, _ = fetch(
+                "https://walled.example/api",
+                request=RequestParams(json={"q": "v"}),
+            )
+        assert body == b"ok"
+        assert direct.call_args.args[0].params.transport == "curl"
+
     def test_browser_fetch_forwards_url_params_headers_and_cookies(self) -> None:
         result = BrowserResult(body=b"ok", cookies={})
         with (
@@ -1549,6 +1570,6 @@ class TestCurlThenZendriverBackend:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

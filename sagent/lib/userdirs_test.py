@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from sagent.lib.userdirs import config_dir, data_dir
+from sagent.lib.userdirs import cache_dir, config_dir, data_dir, state_dir
 
 
 @pytest.fixture
@@ -17,6 +17,8 @@ def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(Path, "home", classmethod(_home))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     return tmp_path
 
@@ -54,20 +56,44 @@ def test_data_dir_win32_single_leaf(home: Path) -> None:
     assert result.parent.name != "loop"
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_data_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    platform: str,
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "custom"))
-    assert data_dir("myapp", platform="linux") == tmp_path / "custom" / "myapp"
+    assert data_dir("myapp", platform=platform) == tmp_path / "custom" / "myapp"
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_config_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    platform: str,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-    assert config_dir("myapp", platform="linux") == tmp_path / "cfg" / "myapp"
+    assert config_dir("myapp", platform=platform) == tmp_path / "cfg" / "myapp"
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_cache_dir_xdg_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    assert cache_dir("myapp", platform=platform) == tmp_path / "cache" / "myapp"
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_state_dir_xdg_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert state_dir("myapp", platform=platform) == tmp_path / "state" / "myapp"
 
 
 def test_data_dir_localappdata_override(
@@ -81,6 +107,6 @@ def test_data_dir_localappdata_override(
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

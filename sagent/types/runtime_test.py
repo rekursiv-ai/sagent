@@ -94,6 +94,6 @@ def test_id_counter_lock_module_attribute_exists() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

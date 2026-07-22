@@ -907,6 +907,6 @@ async def test_grep_rejects_negative_pagination(field: str, tmp_path: Path) -> N
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

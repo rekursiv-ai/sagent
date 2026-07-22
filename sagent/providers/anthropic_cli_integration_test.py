@@ -49,9 +49,9 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.real_sleep,
     # Spawns the real ``claude`` binary: a heavy subprocess with model-latency
-    # turns. Runs in the low-parallelism ``real_llm`` gate so the CLI gets enough
-    # CPU to finish within the timeout instead of being starved under ``-n 8``.
-    pytest.mark.real_llm,
+    # turns. Availability is gated by ``_requires_claude`` (skips precisely when
+    # the CLI/credentials are absent), not an env var. Prefer low parallelism
+    # (avoid ``-n 8``) so the CLI gets enough CPU to finish within the timeout.
 ]
 
 
@@ -509,6 +509,6 @@ async def test_real_claude_drives_full_detach_path() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

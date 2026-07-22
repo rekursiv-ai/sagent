@@ -655,6 +655,6 @@ def test_paired_externally_does_not_hide_local_invalid_pair_order() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)
