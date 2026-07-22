@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import asyncio
 import subprocess
+import tempfile
 
 import pytest
 import zendriver
@@ -231,6 +232,16 @@ def test_pool_control_releases_profile(monkeypatch: pytest.MonkeyPatch) -> None:
         server.close()
     assert releases == [True]
     assert checked == [_PROFILE]
+
+
+def test_control_address_uses_platform_socket_namespace() -> None:
+    linux_address = fz_mod._control_address(_PROFILE, platform="linux")
+    darwin_address = fz_mod._control_address(_PROFILE, platform="darwin")
+
+    assert linux_address.startswith("\0loop-zendriver-")
+    assert Path(darwin_address).parent == Path(tempfile.gettempdir())
+    assert Path(darwin_address).name.startswith("loop-zd-")
+    assert darwin_address.endswith(".sock")
 
 
 def test_pool_release_closes_orphan_when_control_is_unreachable(
@@ -696,6 +707,6 @@ def test_pool_keys_separate_egress(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

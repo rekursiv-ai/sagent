@@ -12,6 +12,7 @@ import dataclasses
 import json
 import logging
 import os
+import threading
 
 import pytest
 
@@ -34,7 +35,6 @@ from sagent.agent.session_io import (
     append_session,
     load_persistent_agents,
     load_session,
-    rebuild_content_cache,
     repair_dangling_tool_calls,
     restore_model,
     restore_tool_state,
@@ -1856,19 +1856,51 @@ def test_repair_preserves_matching_tool_result_pair() -> None:
     assert repaired == history
 
 
-def test_rebuild_content_cache_from_read(tmp_path: Path) -> None:
-    """L5: Read tool result seeds _content_cache so post-resume reads are clean."""
-    f = tmp_path / "data.txt"
-    body = "hello world\n"
-    _ = f.write_text(body)
-    asst = AssistantMessage(
-        tool_calls=(ToolCall(id="c1", name="Read", args={"file_path": str(f)}),),
+def test_resume_does_not_eagerly_reread_touched_paths(tmp_path: Path) -> None:
+    """Resume must not block on a touched path that migrated to a hung mount.
+
+    Regression: resume used to eagerly re-read every Read/Edit/Write
+    ``file_path`` from the tape to warm the staleness cache. When one of
+    those paths now resolves onto a hung fuse.sshfs mount, the bare
+    ``read_text`` blocks the resume thread forever -- a hard freeze before
+    the REPL is interactive (session 82eb595a). A FIFO with no writer
+    reproduces the same indefinite block without a network mount. Resume
+    leaves ``_content_cache`` empty; content reloads lazily on first
+    ``check_stale`` instead.
+    """
+    fifo = tmp_path / "hung.md"
+    os.mkfifo(fifo)
+    tape: list[TapeRecord] = [
+        ReferrableTapeEvent(
+            ref=TapeRef(session_id="s", ordinal=0),
+            event=AssistantMessage(
+                tool_calls=(
+                    ToolCall(id="c1", name="Read", args={"file_path": str(fifo)}),
+                ),
+            ),
+        ),
+        ReferrableTapeEvent(
+            ref=TapeRef(session_id="s", ordinal=1),
+            event=ToolResult(call_id="c1", content="body"),
+        ),
+    ]
+    agent = Agent(model=_NoopModel(), session_dir=tmp_path)
+
+    done = threading.Event()
+
+    def _run() -> None:
+        agent.resume(SessionMeta(), tape, ToolState())
+        done.set()
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    assert done.wait(timeout=5.0), (
+        "resume blocked on a FIFO-touched path; a hung sshfs mount would "
+        "hard-freeze resume before the REPL is interactive"
     )
-    result_text = f"     1\t{body}"
-    res = ToolResult(call_id="c1", content=result_text)
-    state = ToolState()
-    rebuild_content_cache([asst, res], state)
-    assert state.has_been_read(str(f))
+    # Lazy by design: no eager content read of the touched path.
+    resolved = str(Path(fifo).resolve())
+    assert resolved not in agent.tool_state._content_cache
 
 
 def test_mask_runs_empty_returns_empty() -> None:
@@ -2008,6 +2040,6 @@ def test_unpersisted_session_error_flags_silent_data_loss(tmp_path: Path) -> Non
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

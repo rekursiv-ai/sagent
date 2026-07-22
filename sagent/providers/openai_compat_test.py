@@ -763,6 +763,6 @@ def test_build_body_skips_service_tier_when_not_supported() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

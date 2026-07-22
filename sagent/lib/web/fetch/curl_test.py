@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from typing import TYPE_CHECKING, Any, cast, override
 from unittest.mock import Mock, patch
 
 import importlib
@@ -566,6 +568,65 @@ class TestCurlSessionPoolLocking:
         assert list(curl_mod._curl_sessions) == [("1.2.3.4", "x.com", "chrome")]
         current.close.assert_not_called()
         stale.close.assert_called_once_with()
+
+
+class TestPinnedPathSendsUserAgent:
+    """The SSRF-pinned curl path must present the same browser identity as the
+    unpinned path -- each fallback rung is meant to look MORE authentic, never
+    less. A pinned request that omits the User-Agent is rejected by UA-gated
+    APIs (GitHub's REST API 403s UA-less requests), which surfaced as spurious
+    ``Fetch failed: HTTP 403`` on every WebFetch (WebFetch always passes
+    ``validated_hosts``, forcing the pinned path).
+
+    Hermetic: a loopback HTTP server echoes the request headers; ``validated_hosts``
+    pins the connection to 127.0.0.1, exercising the REAL ``curl_cffi.Curl``
+    handle (a mock handle cannot reveal curl_cffi's header injection behavior).
+    """
+
+    def test_pinned_get_sends_user_agent_header(self) -> None:
+        seen: dict[str, str] = {}
+
+        class _Echo(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                for k, v in self.headers.items():
+                    seen[k.lower()] = v
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            @override
+            def log_message(self, format: str, *args: Any) -> None:
+                del format, args
+
+        server = HTTPServer(("127.0.0.1", 0), _Echo)
+        port = server.server_address[1]
+        thread = Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        try:
+
+            def _vh(hostname: str) -> ValidatedHost:
+                return ValidatedHost(host=hostname, ip="127.0.0.1")
+
+            body, _ = fetch(
+                f"http://127.0.0.1:{port}/",
+                request=RequestParams(validated_hosts=_vh, transport="curl"),
+            )
+        finally:
+            server.server_close()
+            thread.join(timeout=5)
+
+        assert body == b"ok"
+        assert seen.get("user-agent"), (
+            "pinned curl path sent no User-Agent; UA-gated APIs (e.g. GitHub) "
+            f"403 such requests. headers seen: {sorted(seen)}"
+        )
+        assert "chrome" in seen["user-agent"].lower()
+        # Full coherent Chrome identity, not just a bare UA (a partial set is
+        # itself a bot tell): the pinned path must match what the other rungs send.
+        assert seen.get("accept"), f"pinned path missing Accept: {sorted(seen)}"
+        assert seen.get("sec-fetch-mode") == "navigate", (
+            f"pinned path missing Sec-Fetch navigation headers: {sorted(seen)}"
+        )
 
 
 class TestSeedSessionJar:

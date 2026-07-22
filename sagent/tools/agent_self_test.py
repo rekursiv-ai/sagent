@@ -894,6 +894,6 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

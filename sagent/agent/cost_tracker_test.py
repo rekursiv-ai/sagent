@@ -84,6 +84,6 @@ def test_cost_tracker_restore_totals_preserves_per_call_provenance() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

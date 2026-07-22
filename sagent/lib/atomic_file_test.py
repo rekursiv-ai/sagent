@@ -146,6 +146,6 @@ def test_atomic_write_bytes_symlink_to_nonexistent_does_not_create_target_dirs(
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

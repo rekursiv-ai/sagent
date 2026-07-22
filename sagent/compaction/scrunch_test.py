@@ -532,6 +532,6 @@ async def test_scrunch_to_fit_clamps_summary_estimate_below_cap() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)

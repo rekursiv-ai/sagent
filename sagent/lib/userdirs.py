@@ -29,8 +29,9 @@ __all__ = [
 def data_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user data directory for ``app``.
 
-    Linux/BSD honor the XDG Base Directory Specification; macOS uses
-    ``Application Support``; Windows uses ``LOCALAPPDATA``. The
+    POSIX systems honor an explicit ``XDG_DATA_HOME``. Without one, macOS uses
+    ``Application Support`` and Linux/BSD use ``~/.local/share``. Windows uses
+    ``LOCALAPPDATA``. The
     Windows branch reads the env var rather than calling
     ``SHGetKnownFolderPath``, so AppData redirected via group policy
     is not detected -- acceptable for development tools, not for
@@ -52,18 +53,19 @@ def data_dir(app: str, platform: str = sys.platform) -> Path:
     if platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         return base / app
+    if xdg_data_home := os.environ.get("XDG_DATA_HOME"):
+        return Path(xdg_data_home) / app
     if platform == "darwin":
         return Path.home() / "Library" / "Application Support" / app
-    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / app
+    return Path.home() / ".local" / "share" / app
 
 
 def config_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user config directory for ``app``.
 
-    On Linux/BSD, distinct from :func:`data_dir` per XDG
-    (``~/.config`` vs ``~/.local/share``); on macOS and Windows the
-    two collapse to the same location.
+    POSIX systems honor an explicit ``XDG_CONFIG_HOME``. Without one, this is
+    distinct from :func:`data_dir` on Linux/BSD (``~/.config`` vs
+    ``~/.local/share``), while macOS and Windows collapse the two locations.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -78,19 +80,22 @@ def config_dir(app: str, platform: str = sys.platform) -> Path:
       https://specifications.freedesktop.org/basedir-spec/latest/
 
     """
-    if platform in ("win32", "darwin"):
+    if platform == "win32":
         return data_dir(app, platform=platform)
-    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return base / app
+    if xdg_config_home := os.environ.get("XDG_CONFIG_HOME"):
+        return Path(xdg_config_home) / app
+    if platform == "darwin":
+        return data_dir(app, platform=platform)
+    return Path.home() / ".config" / app
 
 
 def cache_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user cache directory for ``app``.
 
     XDG ``$XDG_CACHE_HOME`` is for non-essential, regenerable data --
-    downloaded model weights, build artifacts, memoized computation. On
-    Linux/BSD distinct from :func:`data_dir` (``~/.cache`` vs
-    ``~/.local/share``); on macOS and Windows the two collapse.
+    downloaded model weights, build artifacts, memoized computation. POSIX
+    systems honor an explicit override. Without one, the cache is distinct from
+    :func:`data_dir` on Linux/BSD, while macOS and Windows use native locations.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -108,20 +113,21 @@ def cache_dir(app: str, platform: str = sys.platform) -> Path:
     if platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         return base / app / "Cache"
+    if xdg_cache_home := os.environ.get("XDG_CACHE_HOME"):
+        return Path(xdg_cache_home) / app
     if platform == "darwin":
         return Path.home() / "Library" / "Caches" / app
-    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / app
+    return Path.home() / ".cache" / app
 
 
 def state_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user state directory for ``app``.
 
-    XDG ``$XDG_STATE_HOME`` is for state that should persist between
-    runs but is not configuration or user data -- session captures,
-    logs, undo histories. On Linux/BSD distinct from
-    :func:`data_dir` and :func:`config_dir`; on macOS and
-    Windows the three collapse to the same location.
+    XDG ``$XDG_STATE_HOME`` is for state that should persist between runs but
+    is not configuration or user data -- session captures, logs, undo
+    histories. POSIX systems honor an explicit override. Without one, the
+    state directory is distinct on Linux/BSD, while macOS and Windows use their
+    native application-data location.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -136,10 +142,13 @@ def state_dir(app: str, platform: str = sys.platform) -> Path:
       https://specifications.freedesktop.org/basedir-spec/latest/
 
     """
-    if platform in ("win32", "darwin"):
+    if platform == "win32":
         return data_dir(app, platform=platform)
-    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
-    return base / app
+    if xdg_state_home := os.environ.get("XDG_STATE_HOME"):
+        return Path(xdg_state_home) / app
+    if platform == "darwin":
+        return data_dir(app, platform=platform)
+    return Path.home() / ".local" / "state" / app
 
 
 def resolve_working_dir(
