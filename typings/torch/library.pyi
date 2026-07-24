@@ -8,7 +8,7 @@ from typing_extensions import ParamSpec, deprecated
 
 import functools
 
-from torch._library.custom_ops import CustomOpDef, device_types_t
+from torch._library.custom_ops import CustomOpDef, custom_op, device_types_t
 from torch.types import _dtype
 
 import torch

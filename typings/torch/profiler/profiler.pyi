@@ -7,6 +7,7 @@ import json
 
 from torch._C._profiler import _ExperimentalConfig
 from torch.autograd import ProfilerActivity
+from torch.autograd.profiler_util import EventList
 
 __all__ = [
     "ExecutionTraceObserver",
