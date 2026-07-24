@@ -32,7 +32,7 @@ def anyio_backend(request: pytest.FixtureRequest) -> str:
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers.
 
-    Registered here (not only in ``pyproject.public.toml``) so they resolve in
+    Registered here (not only in ``.export/pyproject.toml``) so they resolve in
     every context the conftest is exported into: the public export runs with
     ``filterwarnings = ["error"]``, which turns an unregistered-mark warning into
     a collection-time error even for a deselected ``integration`` test.
