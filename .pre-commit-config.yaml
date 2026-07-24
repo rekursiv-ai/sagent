@@ -148,8 +148,8 @@ repos:
             workers=$((workers / 2));
             ((workers < 2)) && workers=2;
             ((workers > 32)) && workers=32;
-            exec env NODE_OPTIONS=--max-old-space-size=2048
-            uv --quiet run --frozen --group typecheck
+            exec env NODE_OPTIONS=--max-old-space-size=2048 \
+            uv --quiet run --frozen --group typecheck \
             basedpyright --threads="$workers"
           '
 
@@ -171,7 +171,7 @@ repos:
               ((workers < 2)) && workers=2;
               ((workers > 32)) && workers=32;
             fi;
-            exec uv --quiet run --frozen --group test
+            exec uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@"
           ' pytest
         args: [-q, --tb=short]
@@ -191,7 +191,22 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: *pytest-entry
+        # Tolerate pytest exit 5 (no tests collected): this package may ship no
+        # integration-marked tests, which is not a failure. Regular pytest above
+        # stays strict so an empty collection there still fails.
+        entry: >-
+          bash -c '
+            if [ -n "$CI" ]; then
+              workers=1;
+            else
+              workers=$(nproc);
+              workers=$((workers / 2));
+              ((workers < 2)) && workers=2;
+              ((workers > 32)) && workers=32;
+            fi;
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "$@" || test "$?" = 5
+          ' pytest
         args: [-q, --tb=short, -m, integration]
 
   - repo: local
