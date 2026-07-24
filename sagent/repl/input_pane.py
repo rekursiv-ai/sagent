@@ -204,7 +204,7 @@ async def _input_pump(
                 return
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 -- pump catches any slash-handler exception; UserFacingError routed to warning, others to exception
+        except Exception as exc:
             log_exception_or_warning(
                 logger, "REPL input pump raised; surfacing as error", exc
             )

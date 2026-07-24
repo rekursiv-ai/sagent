@@ -14,6 +14,14 @@ import os
 import re
 import socket
 
+from wesearch.errors import BotDetectionError, FetchError
+from wesearch.fetch import (
+    RequestParams,
+    Transport,
+    ValidatedHost,
+    classify_challenge,
+    fetch,
+)
 from wrapt import lazy_import
 
 import cachetools
@@ -21,14 +29,6 @@ import defusedxml.common
 import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
-from sagent.lib.web.errors import BotDetectionError, FetchError
-from sagent.lib.web.fetch import (
-    RequestParams,
-    Transport,
-    ValidatedHost,
-    classify_challenge,
-    fetch,
-)
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -388,7 +388,7 @@ def _fetch_with_fallback(
 ) -> tuple[bytes, str]:
     """Fetch ``url`` through a bot-wall-aware fallback ladder.
 
-    The direct path (``_safe_fetch`` -> :func:`sagent.lib.web.fetch.fetch`,
+    The direct path (``_safe_fetch`` -> :func:`wesearch.fetch.fetch`,
     Chrome TLS/HTTP-2 impersonation) is always tried first. On a 403/429/503
     response to a GET -- the signature of edge-side bot detection (Fastly,
     Akamai, Cloudflare) -- the ladder falls through to a reader-proxy hop that
@@ -428,7 +428,7 @@ def _fetch_with_fallback(
         rung1_err = e
 
     # Reader-proxy fallback (final rung). The first rung already fetches with
-    # Chrome TLS/HTTP-2 impersonation via sagent.lib.web.fetch, so a same-egress
+    # Chrome TLS/HTTP-2 impersonation via wesearch.fetch, so a same-egress
     # curl retry would present an identical fingerprint and hit the same wall;
     # the proxy is the only rung with a genuinely different egress.
     try:
@@ -484,7 +484,7 @@ def _safe_fetch(
     """Fetch with SSRF check on the initial URL and every redirect.
 
     Delegates the transport -- Chrome TLS/HTTP-2 impersonation, redirect
-    following, retry, decompression -- to :func:`sagent.lib.web.fetch.fetch`. This
+    following, retry, decompression -- to :func:`wesearch.fetch.fetch`. This
     tool supplies only the app-level SSRF policy via ``validated_hosts`` and,
     when a caller passes ``headers`` (e.g. Reddit's Android app User-Agent +
     bearer token), the identity to present.

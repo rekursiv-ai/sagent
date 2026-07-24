@@ -2261,7 +2261,7 @@ class AgentRuntime:
                         pending.apply()
                     except asyncio.CancelledError:
                         raise
-                    except Exception as exc:  # noqa: BLE001 -- surface swap errors without halting the engine
+                    except Exception as exc:
                         log_exception_or_warning(
                             logger, f"model swap rejected ({pending.label})", exc
                         )
@@ -2390,7 +2390,7 @@ class AgentRuntime:
                 self.publish(SaveSession())
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 -- master catch around the dispatch body; a sync raise (e.g. `pending.apply` for a queued ModelSwitch) must not tear down the engine
+            except Exception as exc:
                 log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
 
     async def run(self, msg: UserMessage) -> list[TapeEvent]:
@@ -2997,7 +2997,7 @@ class AgentRuntime:
             self.publish(
                 ModelResponseCancelled(output_chars_estimate=chars),
             )
-        except Exception as exc:  # noqa: BLE001 -- log_exception_or_warning routes UserFacingError to warning, others to exception; intentional catch-all for model-call failures
+        except Exception as exc:
             log_exception_or_warning(logger, "model call failed", exc)
             self.inbox.push_back(ModelResponseError(exc))
 
@@ -3164,7 +3164,7 @@ class AgentRuntime:
                 is_error=True,
                 kind=ToolResultKind.CANCELLED,
             )
-        except Exception as exc:  # noqa: BLE001 -- surface arbitrary tool errors
+        except Exception as exc:
             logger.debug(
                 "runtime tool failed: call_id=%s tool=%s parent_id=%s error=%s",
                 call.id,
@@ -3230,7 +3230,7 @@ class AgentRuntime:
             )
         except asyncio.CancelledError:
             return
-        except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
+        except Exception as exc:
             log_exception_or_warning(logger, "compaction failed", exc)
             if generation == self._compact_generation:
                 self.inbox.push_back(

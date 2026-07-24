@@ -410,7 +410,7 @@ class SummaryCompactor:
                     entries,
                     raw,
                 )
-            except Exception as exc:  # noqa: BLE001 -- verification is best-effort
+            except Exception as exc:
                 logger.warning("summary verification failed; using original: %s", exc)
         summary = _format_summary(raw)
         if summary is None:

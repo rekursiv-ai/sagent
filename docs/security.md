@@ -20,19 +20,19 @@ Use the smallest tool set that can solve the task. For untrusted prompts or repo
 For low-risk Q&A over copied text:
 
 ```python
-tools=[]
+tools = []
 ```
 
 For read-only repository analysis:
 
 ```python
-tools=[Read(), Glob(), Grep(), List()]
+tools = [Read(), Glob(), Grep(), List()]
 ```
 
 For local code editing:
 
 ```python
-tools=[Read(), Write(), Edit(), Glob(), Grep(), List(), Bash()]
+tools = [Read(), Write(), Edit(), Glob(), Grep(), List(), Bash()]
 ```
 
 For external service automation, add only the service tools required for the task and use narrowly scoped credentials.

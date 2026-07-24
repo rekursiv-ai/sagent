@@ -28,12 +28,13 @@ dependencies = [
     "numpy>=2.1",
     # nlp
     "tiktoken>=0.12.0",
+    # web tooling. Floor at 0.1.1: it is the first release shipping py.typed, so
+    # sagent's type-check (basedpyright/ty) sees wesearch's types instead of
+    # ~670 cascading Unknown warnings from an untyped 0.1.0.
+    "wesearch>=0.1.1",
     # web client / scraping
-    "beautifulsoup4",
-    "curl-cffi>=0.15",
     "httpx>=0.27",
     "trafilatura",
-    "zendriver>=0.15.5",
     # web server / api
     "uvicorn>=0.30.0",
     # mcp
@@ -54,9 +55,6 @@ dependencies = [
     # containers
     "cachetools",
     "wrapt",
-    # compression
-    "brotli",
-    "zstandard",
     # misc
     "bashlex>=0.18",
     # security / auth
@@ -247,6 +245,7 @@ ignore = [
 
     # Standard style relaxations.
     "A002",    # Builtin argument shadowing.
+    "BLE001",  # Blind exception (heterogeneous provider/cleanup handlers).
     "E501",    # Line too long. (Will be fixed by formatter.)
     "EM101",   # Raw string in exception.
     "EM102",   # F-string in exception.
@@ -536,6 +535,14 @@ package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 [tool.uv.pip]
 compile-bytecode = true
+
+# No wesearch git source override here: this is the PUBLIC pyproject, and its
+# committed uv.lock ships to the public repo where CI validates against it. A git
+# override pins wesearch to a branch SHA that can predate a released fix (e.g. the
+# 0.1.0 SHA that lacked py.typed, causing ~670 basedpyright warnings), so the
+# public export must resolve wesearch from the PyPI release named in
+# project.dependencies. Any dev-time git override belongs in the monorepo
+# checkout, not in the exported public package.
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

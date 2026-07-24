@@ -834,7 +834,7 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
             if task is not None:
                 try:
                     await asyncio.wait_for(task, timeout=2.0)
-                except (TimeoutError, Exception):  # noqa: BLE001
+                except (TimeoutError, Exception):
                     _ = task.cancel()
             agent_registry.pop("Agent", None)
             agent_registry.pop("child1", None)
@@ -1379,7 +1379,7 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
         child.shutdown(force=True)
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):
             _ = task.cancel()
 
 
@@ -1426,7 +1426,7 @@ async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
         child.shutdown(force=True)
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001
+        except (TimeoutError, Exception):
             _ = task.cancel()
 
 
@@ -1459,7 +1459,7 @@ async def test_persistent_spawn_augments_child_system_prompt() -> None:
         child.shutdown(force=True)
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- tear-down is best-effort
+        except (TimeoutError, Exception):
             _ = task.cancel()
 
 
@@ -1488,7 +1488,7 @@ async def test_persistent_spawn_return_value_names_reply_channel() -> None:
         if task is not None:
             try:
                 await asyncio.wait_for(task, timeout=2.0)
-            except (TimeoutError, Exception):  # noqa: BLE001 -- tear-down is best-effort
+            except (TimeoutError, Exception):
                 _ = task.cancel()
 
 

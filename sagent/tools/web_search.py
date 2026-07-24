@@ -8,10 +8,9 @@ from typing import cast, get_args
 import asyncio
 import re
 
-from sagent.lib.custom_json import JSON, JSONValue, json_freeze
-from sagent.lib.web.errors import BotDetectionError
-from sagent.lib.web.fetch import Transport
-from sagent.lib.web.search import (
+from wesearch.errors import BotDetectionError
+from wesearch.fetch import Transport
+from wesearch.search import (
     DEFAULT_SEARCH_BACKEND,
     CodeResult,
     FileResult,
@@ -28,6 +27,8 @@ from sagent.lib.web.search import (
     VideoResult,
     search,
 )
+
+from sagent.lib.custom_json import JSON, JSONValue, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,

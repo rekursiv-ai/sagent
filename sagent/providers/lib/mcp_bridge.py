@@ -347,7 +347,7 @@ class ToolsBridge:
             _ = task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- shutdown must not raise
+            except (asyncio.CancelledError, Exception) as exc:
                 logger.debug("MCP bridge stop: manager raised on cancel: %s", exc)
 
     def update_tools(self, tools: list[Tool]) -> None:
@@ -471,7 +471,7 @@ class ToolsBridge:
         if self._publish is not None:
             try:
                 label = tool.summary(clean_args)
-            except Exception:  # noqa: BLE001 -- best-effort label; any summary failure falls back to the tool name (CancelledError, a BaseException, still propagates).
+            except Exception:
                 label = tool.name
             self._publish(ToolLabel(call_id="", text=label))
 
@@ -491,7 +491,7 @@ class ToolsBridge:
         """
         try:
             return await tool.run(cast(Mapping[str, object], clean_args))
-        except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to result content; CancelledError propagates.
+        except Exception as exc:
             return ToolResult(
                 call_id="",
                 content=f"{type(exc).__name__}: {exc}",
@@ -540,7 +540,7 @@ class ToolsBridge:
                 self._bg_done[_id] = ToolResult(
                     call_id=_id, content="cancelled", is_error=True
                 )
-            except Exception as exc:  # noqa: BLE001 -- record any failure as the detached result.
+            except Exception as exc:
                 self._bg_done[_id] = ToolResult(
                     call_id=_id,
                     content=f"{type(exc).__name__}: {exc}",

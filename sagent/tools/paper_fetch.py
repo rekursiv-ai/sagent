@@ -1,6 +1,6 @@
 """PaperFetch tool - download a research paper PDF by identifier.
 
-Thin adapter over :func:`sagent.lib.web.paper.fetch.download`: the library owns the
+Thin adapter over :func:`wesearch.paper.fetch.download`: the library owns the
 source cascade (arXiv, open-access, and any source-only providers) and the
 rate-gated open-access lookups; the tool owns schema, the on-disk PDF cache,
 and result rendering.
@@ -13,16 +13,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import asyncio
 import logging
 
+from wesearch.paper.errors import PaperError
+from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
+from wesearch.paper.ids import id_slug, s2_wire_id
+
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.lib.web.paper.custom_types import IdType
-from sagent.lib.web.paper.errors import PaperError
-from sagent.lib.web.paper.fetch import batch_oa_urls, download, looks_like_pdf
-from sagent.lib.web.paper.ids import id_slug, s2_wire_id
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -31,6 +32,10 @@ from sagent.tools.paper_common import (
     summary_ids,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import IdType
 
 
 logger = logging.getLogger(__name__)

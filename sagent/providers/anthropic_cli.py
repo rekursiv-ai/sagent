@@ -1938,7 +1938,7 @@ def _dispatch_stream_event(
         if publish is not None:
             try:
                 publish(ToolLabel(call_id=tool_id, text=label_text))
-            except Exception:  # noqa: BLE001 -- never let a label publish break the stream
+            except Exception:
                 logger.debug(
                     "failed to publish ToolLabel for %r", tool_name, exc_info=True
                 )
