@@ -112,16 +112,16 @@ def log_exception_or_warning(
       -- no traceback. The exception's message is already polished
       remediation text the user can act on; a Python traceback is
       noise.
-    - Anything else: ``logger.exception(msg)`` -- traceback retained
-      so the operator can diagnose the unexpected failure.
+    - Anything else: ``logger.error(msg, exc_info=exc)`` -- traceback
+      retained so the operator can diagnose the unexpected failure.
 
-    Call from inside an ``except`` block so the ``exception`` path
-    can pick up ``sys.exc_info()``.
+    Passing ``exc_info=exc`` explicitly keeps the traceback even when
+    called outside an ``except`` block, where ``sys.exc_info()`` is empty.
     """
     if isinstance(exc, UserFacingError):
         logger.warning("%s: %s", msg, exc)
     else:
-        logger.exception(msg)
+        logger.error(msg, exc_info=exc)
 
 
 def log_task_exception(

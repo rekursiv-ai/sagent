@@ -130,6 +130,7 @@ class ToolState:
         path: str,
         offset: int = 0,
         limit: int = 0,
+        *,
         last_lines: int = 0,
         content: str | None = None,
         mtime: float | None = None,

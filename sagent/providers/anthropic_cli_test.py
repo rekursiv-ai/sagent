@@ -1240,8 +1240,10 @@ def test_is_event_retryable_classifies_organic_shapes() -> None:
         "stop_reason": "tool_use",
         "terminal_reason": "aborted_streaming",
         "errors": [
-            "[ede_diagnostic] result_type=user last_content_type=n/a "
-            "stop_reason=tool_use",
+            (
+                "[ede_diagnostic] result_type=user last_content_type=n/a "
+                "stop_reason=tool_use"
+            ),
         ],
     }
     assert _is_event_retryable(aborted_streaming) is True
@@ -1380,17 +1382,17 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         text_event,
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        publish,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=publish,
     )
     _dispatch_stream_event(
         thinking_event,
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        publish,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=publish,
     )
     assert text_parts == ["hello"]
     assert thinking_parts == ["reflecting"]
@@ -1427,9 +1429,9 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
         sig_event,
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        None,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=None,
     )
     assert signature_parts == ["abc123"]
     assert text_parts == []
@@ -1462,9 +1464,9 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         ),
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        published.append,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=published.append,
     )
     assert published == []  # nothing yet -- we wait for args
     # 2) deltas: stream the JSON in two chunks
@@ -1480,9 +1482,9 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
             ),
             text_parts,
             thinking_parts,
-            signature_parts,
-            tool_use_blocks,
-            published.append,
+            signature_parts=signature_parts,
+            tool_use_blocks=tool_use_blocks,
+            publish=published.append,
         )
     assert published == []  # still nothing
     # 3) stop: now we publish the rich label
@@ -1493,9 +1495,9 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         ),
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        published.append,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=published.append,
     )
     assert len(published) == 1
     label = published[0]
@@ -1520,18 +1522,18 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
         ),
         [],
         [],
-        [],
-        tool_use_blocks,
-        published.append,
+        signature_parts=[],
+        tool_use_blocks=tool_use_blocks,
+        publish=published.append,
     )
     # And a content_block_stop on the text block: no label.
     _dispatch_stream_event(
         cast(MutableJSON, {"type": "content_block_stop", "index": 1}),
         [],
         [],
-        [],
-        tool_use_blocks,
-        published.append,
+        signature_parts=[],
+        tool_use_blocks=tool_use_blocks,
+        publish=published.append,
     )
     assert published == []
 
@@ -1561,9 +1563,9 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
         ),
         text_parts,
         thinking_parts,
-        signature_parts,
-        tool_use_blocks,
-        None,
+        signature_parts=signature_parts,
+        tool_use_blocks=tool_use_blocks,
+        publish=None,
     )
     assert text_parts == []
     assert thinking_parts == []

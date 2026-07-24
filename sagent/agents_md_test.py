@@ -398,7 +398,9 @@ class TestProcessErrorPaths:
             return original_resolve(self, strict=strict)
 
         monkeypatch.setattr(Path, "resolve", fake_resolve)
-        out = agents_md._process(target, "Project", set(), 0, None, cfg)
+        out = agents_md._process(
+            target, "Project", set(), depth=0, parent=None, cfg=cfg
+        )
         assert out == []
 
     def test_unreadable_file_skipped(
@@ -406,7 +408,9 @@ class TestProcessErrorPaths:
     ) -> None:
         target = tmp_path / "AGENTS.md"
         _ = target.write_bytes(b"\xff\xfe\xfa not utf-8 \xc3\x28")
-        out = agents_md._process(target, "Project", set(), 0, None, cfg)
+        out = agents_md._process(
+            target, "Project", set(), depth=0, parent=None, cfg=cfg
+        )
         assert out == []
 
     def test_empty_body_skipped(
