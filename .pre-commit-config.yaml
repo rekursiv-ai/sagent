@@ -197,7 +197,7 @@ repos:
             uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
-        args: [-q, --tb=short, -m, "slow and not cluster and not cuda and not integration and not performance"]
+        args: [-q, --tb=short, --no-cov, -m, "slow and not cluster and not cuda and not integration and not performance"]
 
       - id: pytest-integration
         name: pytest (integration)
@@ -221,7 +221,7 @@ repos:
             uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
-        args: [-q, --tb=short, -m, integration]
+        args: [-q, --tb=short, --no-cov, -m, integration]
 
   - repo: local
     hooks:
