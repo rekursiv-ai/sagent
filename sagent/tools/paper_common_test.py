@@ -8,8 +8,9 @@ adaptation, and text rendering.
 
 from __future__ import annotations
 
+from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+
 from sagent.lib.userdirs import data_dir
-from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
 from sagent.tools.paper_common import (
     format_author_block,
     format_author_line,

@@ -928,7 +928,7 @@ def _request_id(e: BaseException) -> str | None:
     if headers is not None:
         try:
             return headers.get("request-id") or headers.get("x-request-id")
-        except Exception:  # noqa: BLE001 -- best-effort, must not mask the original error
+        except Exception:
             return None
     return None
 

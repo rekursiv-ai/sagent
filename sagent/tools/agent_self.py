@@ -254,13 +254,13 @@ class _PatchPlan:
     thinking: bool | None = None
     """Toggle for extended-thinking; ``None`` to keep."""
 
-    effort: str | None | object = _UNSET
+    effort: str | object | None = _UNSET
     """Effort hint; ``_UNSET`` means leave unchanged."""
 
     cache_ttl: str | None = None
     """Cache TTL (``"5m"`` / ``"1h"``); ``None`` to keep."""
 
-    service_tier: str | None | object = _UNSET
+    service_tier: str | object | None = _UNSET
     """OpenAI service-tier hint; ``_UNSET`` means leave unchanged."""
 
     max_request_tokens: int | None = None

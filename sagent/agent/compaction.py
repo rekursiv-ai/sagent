@@ -122,7 +122,7 @@ async def post_compact_enrich(
             max_chars=budget.reattach_max_chars,
             budget=budget.reattach_budget,
         )
-    except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
+    except Exception:
         logger.warning("reattach_files failed", exc_info=True)
 
     # 2. Run post-compact hooks on tools.
@@ -136,7 +136,7 @@ async def post_compact_enrich(
                     tool_state,
                     budget_chars=hook_budget,
                 )
-            except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
+            except Exception:
                 logger.warning(
                     "post_compact_restore failed for %s",
                     tool.__class__.__name__,
@@ -146,5 +146,5 @@ async def post_compact_enrich(
     # 3. Re-surface background job status.
     try:
         inject_background_status(history, background_tasks)
-    except Exception:  # noqa: BLE001 -- provider errors are heterogeneous
+    except Exception:
         logger.warning("inject_background_status failed", exc_info=True)

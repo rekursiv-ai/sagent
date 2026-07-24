@@ -1,7 +1,7 @@
 """Tests for ``tools.paper_fetch``: the thin adapter over ``paper.fetch``.
 
 The source cascade (arXiv/open-access/source-only) and the batched open-access
-URL resolve live in :mod:`sagent.lib.web.paper` and are tested there. These tests
+URL resolve live in :mod:`wesearch.paper` and are tested there. These tests
 cover only the adapter's concerns: schema/metadata, ``summary``, the on-disk PDF
 cache, the single- and multi-id orchestration, result rendering, and error
 mapping. The library surface is mocked where the adapter binds each name:
@@ -17,7 +17,8 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.lib.web.paper.errors import NotFoundError
+from wesearch.paper.errors import NotFoundError
+
 from sagent.tools.paper_fetch import PaperFetch, _is_cached_pdf
 from sagent.types.runtime import ToolResult
 

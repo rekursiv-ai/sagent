@@ -2,7 +2,7 @@
 
 The adapter owns schema, arg validation, the process cache, and text
 rendering; backend I/O / pagination / record shaping live in
-:mod:`sagent.lib.web.paper` and are covered by its own tests. These tests mock
+:mod:`wesearch.paper` and are covered by its own tests. These tests mock
 the library entry points where the adapter binds them
 (``paper_details.metadata`` etc.) and assert only the adapter's behavior.
 """
@@ -14,11 +14,12 @@ from unittest.mock import patch
 
 import asyncio
 
+from wesearch.paper.custom_types import PaperRecord
+from wesearch.paper.details import Listing
+from wesearch.paper.errors import PaperError
+
 import pytest
 
-from sagent.lib.web.paper.custom_types import PaperRecord
-from sagent.lib.web.paper.details import Listing
-from sagent.lib.web.paper.errors import PaperError
 from sagent.tools import paper_details
 from sagent.tools.paper_details import (
     PaperDetails,

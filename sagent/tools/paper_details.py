@@ -1,6 +1,6 @@
 """PaperDetails tool - metadata + citation graph.
 
-Thin adapter over :mod:`sagent.lib.web.paper`: metadata / references / citations
+Thin adapter over :mod:`wesearch.paper`: metadata / references / citations
 via Semantic Scholar, plus the Google Scholar cited-by pivot. The tool owns
 schema, arg validation, the process cache, and text rendering.
 """
@@ -8,14 +8,11 @@ schema, arg validation, the process cache, and text rendering.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import asyncio
 
-import cachetools
-
-from sagent.lib.custom_json import JSON, bool_val, json_freeze
-from sagent.lib.web.paper.custom_types import IdType
-from sagent.lib.web.paper.details import (
+from wesearch.paper.details import (
     GraphSource,
     Listing,
     citations,
@@ -23,8 +20,12 @@ from sagent.lib.web.paper.details import (
     metadata_batch,
     references,
 )
-from sagent.lib.web.paper.errors import PaperError
-from sagent.lib.web.paper.ids import s2_wire_id
+from wesearch.paper.errors import PaperError
+from wesearch.paper.ids import s2_wire_id
+
+import cachetools
+
+from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     format_block,
@@ -36,6 +37,10 @@ from sagent.tools.paper_common import (
     validate_limit,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import IdType
 
 
 # Paper metadata is effectively immutable on any timescale an agent cares

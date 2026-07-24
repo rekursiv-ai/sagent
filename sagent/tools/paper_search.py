@@ -1,6 +1,6 @@
 """PaperSearch tool - text search across scholarly backends.
 
-Thin adapter over :func:`sagent.lib.web.paper.search`: the tool owns schema,
+Thin adapter over :func:`wesearch.paper.search`: the tool owns schema,
 arg validation, the process result cache, and text rendering; the library owns
 every backend, reciprocal-rank fusion, and per-source cross-process rate
 limiting.
@@ -9,15 +9,16 @@ limiting.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import asyncio
+
+from wesearch.paper.errors import PaperError
+from wesearch.paper.search import Source, search
 
 import cachetools
 
 from sagent.lib.custom_json import JSON, bool_val, json_freeze
-from sagent.lib.web.paper.custom_types import PaperRecord
-from sagent.lib.web.paper.errors import PaperError
-from sagent.lib.web.paper.search import Source, search
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     format_record,
@@ -27,6 +28,10 @@ from sagent.tools.paper_common import (
     validate_year_range,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import PaperRecord
 
 
 _VALID_SOURCES: tuple[Source, ...] = (

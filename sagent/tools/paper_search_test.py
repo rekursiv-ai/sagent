@@ -1,6 +1,6 @@
 """Tests for ``tools.paper_search``: the thin adapter over ``lib.web.paper``.
 
-Backend I/O, fusion, and record extraction now live in ``sagent.lib.web.paper``
+Backend I/O, fusion, and record extraction now live in ``wesearch.paper``
 and are covered by that library's own tests. These tests exercise ONLY the
 adapter: schema/metadata, arg validation, the process cache, text rendering,
 empty-result hints, and error mapping. The library boundary is mocked where the
@@ -13,10 +13,11 @@ from unittest.mock import patch
 
 import asyncio
 
+from wesearch.paper.custom_types import PaperRecord
+from wesearch.paper.errors import PaperError
+from wesearch.paper.search import SearchResult
+
 from sagent.lib.custom_json import MutableJSON
-from sagent.lib.web.paper.custom_types import PaperRecord
-from sagent.lib.web.paper.errors import PaperError
-from sagent.lib.web.paper.search import SearchResult
 from sagent.tools import paper_search
 from sagent.tools.paper_search import PaperSearch, _empty_hint
 

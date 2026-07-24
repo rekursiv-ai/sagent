@@ -1,7 +1,7 @@
 """Shared adapter helpers for the Paper* tool family.
 
 The backend I/O, fusion, pagination, rate-limiting, and record shapes now live
-in :mod:`sagent.lib.web.paper`. This module keeps only the sagent-tool concerns:
+in :mod:`wesearch.paper`. This module keeps only the sagent-tool concerns:
 
 - **Tool arguments** -- :func:`resolve_id_args` / :func:`parse_optional_ids`
   (validate the ``ids`` list), :func:`validate_limit`,
@@ -11,7 +11,7 @@ in :mod:`sagent.lib.web.paper`. This module keeps only the sagent-tool concerns:
   :func:`format_author_line` / :func:`format_author_block` /
   :func:`truncation_notice`; the agent consumes text, not records.
 - **Errors** -- :func:`error_result` maps a library
-  :class:`~sagent.lib.web.paper.PaperError` to a ``ToolResult``.
+  :class:`~wesearch.paper.PaperError` to a ``ToolResult``.
 
 The record types and id helpers are re-exported from the library so the tools
 keep a single import site.
@@ -21,24 +21,28 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import json
 import re
 
-from sagent.lib.userdirs import data_dir
-from sagent.lib.web.paper.custom_types import AuthorRecord, IdType, PaperRecord
-from sagent.lib.web.paper.errors import (
+from wesearch.paper.errors import (
     InvalidIdError,
     NotFoundError,
     PaperError,
     RateLimitError,
 )
-from sagent.lib.web.paper.ids import (
+from wesearch.paper.ids import (
     looks_like_paper_id,
     normalize_id,
 )
+
+from sagent.lib.userdirs import data_dir
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from wesearch.paper.custom_types import AuthorRecord, IdType, PaperRecord
 
 
 __all__ = [
@@ -174,7 +178,7 @@ def normalize_id_arg(raw: str) -> tuple[IdType, str] | ToolResult:
         return ToolResult(call_id="", content=str(e), is_error=True)
 
 
-def validate_limit(limit: int | None) -> int | None | ToolResult:
+def validate_limit(limit: int | None) -> int | ToolResult | None:
     """Reject a non-positive ``limit``; pass ``None`` and positives through."""
     if limit is not None and limit < 1:
         return ToolResult(
@@ -198,7 +202,7 @@ def validate_year_range(
     return None
 
 
-def validate_abstract_chars(cap: int | None) -> int | None | ToolResult:
+def validate_abstract_chars(cap: int | None) -> int | ToolResult | None:
     """Reject a non-positive ``abstract_chars``; pass ``None`` and positives."""
     if cap is not None and cap < 1:
         return ToolResult(

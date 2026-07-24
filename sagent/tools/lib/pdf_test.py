@@ -235,7 +235,7 @@ def test_concurrent_extract_does_not_corrupt_heap(tmp_path: Path) -> None:
                 assert len(pages) == 3
                 assert get_pdf_page_count(p) == 3
                 results.append(len(pages))
-        except BaseException as e:  # noqa: BLE001 -- surface any thread fault to the assert below
+        except BaseException as e:
             errors.append(e)
 
     threads = [threading.Thread(target=work, args=(p,)) for p in paths]

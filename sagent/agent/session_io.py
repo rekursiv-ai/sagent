@@ -1817,7 +1817,7 @@ def restore_model(
         )
         logger.info("Restored model %s/%s", meta.provider, meta.model_id)
         return model, spec
-    except Exception:  # noqa: BLE001 -- provider construction may raise diverse exceptions (network / auth / sdk surprises); ``restore_model`` contract says: any failure -> caller keeps its default model, do not propagate
+    except Exception:
         logger.warning(
             "Failed to restore model %s/%s; keeping default",
             meta.provider,

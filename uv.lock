@@ -3008,10 +3008,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anthropic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "bashlex", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "brotli", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "cachetools", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "curl-cffi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "defusedxml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "imagesize", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3031,9 +3028,8 @@ dependencies = [
     { name = "trafilatura", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "uvicorn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "webp", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "wesearch", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "wrapt", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "zendriver", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
 
 [package.optional-dependencies]
@@ -3101,11 +3097,8 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.72.0" },
     { name = "auto-round", marker = "extra == 'selfhosted'", specifier = ">=0.12.3" },
     { name = "bashlex", specifier = ">=0.18" },
-    { name = "beautifulsoup4" },
-    { name = "brotli" },
     { name = "cachetools" },
     { name = "compressed-tensors", marker = "extra == 'selfhosted'" },
-    { name = "curl-cffi", specifier = ">=0.15" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "imagesize", specifier = ">=1.4" },
@@ -3135,9 +3128,8 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.8.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "webp", specifier = ">=0.4.0" },
+    { name = "wesearch", specifier = ">=0.1.1" },
     { name = "wrapt" },
-    { name = "zendriver", specifier = ">=0.15.5" },
-    { name = "zstandard" },
 ]
 provides-extras = ["slack", "selfhosted"]
 
@@ -3830,6 +3822,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/22/b9/0b5db9cbcf6e4970db4496893244a8d92e07f71a8ef27cf34b08aa02fef1/websockets-16.1-cp314-cp314t-musllinux_1_2_s390x.whl", hash = "sha256:7acb811fad08e611755800d1560e395c67e11a6bd563598ea6abb319afb86938", size = 187353, upload-time = "2026-07-10T06:32:42.501Z" },
     { url = "https://files.pythonhosted.org/packages/99/2e/254b2131a10d831b76e2c18dfe7add9729c6292c674a8085bf8de01ad151/websockets-16.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:c5cf88e3faa2f7931bc6baeee7599c97656a3f6ac7f831f4fccba233e141783a", size = 187784, upload-time = "2026-07-10T06:32:43.929Z" },
     { url = "https://files.pythonhosted.org/packages/66/58/bd83247f39ddc26ffc2c24eb05087a3b749e00cb4509fc6d19daa23c8495/websockets-16.1-py3-none-any.whl", hash = "sha256:c5149dfe490ec7e5ee5dbf624c642fb725f93a5575c7f00ab594ca9eddb8dd81", size = 174031, upload-time = "2026-07-10T06:32:56.079Z" },
+]
+
+[[package]]
+name = "wesearch"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "brotli", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "curl-cffi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "wrapt", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "zendriver", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cd/05/a649421c36b9d480097b3274f27dc09bf617ab6428d410bf769353bcf3ac/wesearch-0.1.1.tar.gz", hash = "sha256:71427cd73385f41fcb5e7b5862f886f7c3946133825f0cf8128c5fffa3901b83", size = 290003, upload-time = "2026-07-23T15:20:05.231Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/16/1b439f69caceace5a72b9fb88c0a07459838771d34b5320b763484f359a9/wesearch-0.1.1-py3-none-any.whl", hash = "sha256:f3d2ffbc284e212f01e02d5851e1c1b896a2cd1b7160baa6b698041d2e437d0e", size = 160362, upload-time = "2026-07-23T15:20:03.729Z" },
 ]
 
 [[package]]

@@ -1533,7 +1533,7 @@ async def _close_stream(stream: object) -> None:
         result = close()
         if inspect.isawaitable(result):
             await result
-    except Exception:  # noqa: BLE001 -- cleanup must not mask the original error
+    except Exception:
         logger.debug("stream close raised during cleanup", exc_info=True)
 
 

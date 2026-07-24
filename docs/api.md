@@ -167,6 +167,7 @@ Streaming tools implement:
 ```python
 streaming = True
 
+
 def run(self, msg: Message) -> AsyncGenerator[Message, None]: ...
 ```
 

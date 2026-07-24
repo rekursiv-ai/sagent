@@ -110,7 +110,7 @@ def decode_jpeg_turbojpeg(
         # BGR → RGB; flip is a view, ascontiguousarray materializes.
         return np.ascontiguousarray(np.flip(bgr, axis=2))
 
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -174,7 +174,7 @@ def decode_webp_libwebp(
 
         return rgb
 
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 

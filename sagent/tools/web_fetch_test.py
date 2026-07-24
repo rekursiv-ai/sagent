@@ -24,7 +24,8 @@ if "trafilatura" not in sys.modules:
     _stub.__dict__["extract"] = MagicMock(return_value="")
     sys.modules["trafilatura"] = _stub
 
-from sagent.lib.web.errors import CloudflareChallengeError, FetchError
+from wesearch.errors import CloudflareChallengeError, FetchError
+
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
     _ADAPTERS,
@@ -962,7 +963,7 @@ def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
 def test_fetch_with_fallback_bot_wall_falls_to_reader_proxy() -> None:
     """A 403 on the direct rung falls through to the reader proxy.
 
-    The direct rung (``_safe_fetch`` -> sagent.lib.web.fetch, Chrome
+    The direct rung (``_safe_fetch`` -> wesearch.fetch, Chrome
     impersonation) is the sole first-party fetch; the reader proxy is the only
     fallback, since a same-egress curl retry would present an identical
     fingerprint and hit the same wall.

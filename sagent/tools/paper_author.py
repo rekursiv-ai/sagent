@@ -1,6 +1,6 @@
 """PaperAuthor tool - Semantic Scholar author lookup.
 
-Thin adapter over :mod:`sagent.lib.web.paper`: author name search, batched author
+Thin adapter over :mod:`wesearch.paper`: author name search, batched author
 metadata, and an author's papers. The tool owns schema, arg validation, the
 process cache, and text rendering.
 """
@@ -11,11 +11,12 @@ from collections.abc import Mapping
 
 import asyncio
 
+from wesearch.paper.authors import author_metadata, author_papers, search_authors
+from wesearch.paper.errors import PaperError
+
 import cachetools
 
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.lib.web.paper.authors import author_metadata, author_papers, search_authors
-from sagent.lib.web.paper.errors import PaperError
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     format_author_block,

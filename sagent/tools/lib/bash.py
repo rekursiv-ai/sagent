@@ -99,7 +99,7 @@ def parse_bash(command: str) -> tuple[Node, ...] | None:
         )
     except (bashlex.errors.ParsingError, NotImplementedError, AttributeError):
         return None
-    except Exception:  # noqa: BLE001 -- bashlex raises various; treat all as parse fail
+    except Exception:
         return None
     if not trees:
         return None

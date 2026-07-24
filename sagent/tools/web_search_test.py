@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.lib.web.errors import GoogleSorryError, PuzzleChallengeError
-from sagent.lib.web.search import (
+from wesearch.errors import GoogleSorryError, PuzzleChallengeError
+from wesearch.search import (
     ImageResult,
     MapResult,
     PaperResult,
@@ -16,6 +16,7 @@ from sagent.lib.web.search import (
     TorrentResult,
     VideoResult,
 )
+
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.web_search import (
     WebSearch,

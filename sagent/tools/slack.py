@@ -25,9 +25,10 @@ import asyncio
 import json
 import logging
 
+from wesearch.errors import FetchError
+from wesearch.fetch import RequestParams, fetch
+
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
-from sagent.lib.web.errors import FetchError
-from sagent.lib.web.fetch import RequestParams, fetch
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 

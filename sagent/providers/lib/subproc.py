@@ -215,7 +215,7 @@ class Subproc:
             _ = self._stderr_task.cancel()
             try:
                 await self._stderr_task
-            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- drain failure must not mask close
+            except (asyncio.CancelledError, Exception) as exc:
                 logger.debug("subprocess close: stderr drain raised: %s", exc)
         if self._tmpdir is not None and self._tmpdir.exists():
             shutil.rmtree(self._tmpdir, ignore_errors=True)

@@ -1,7 +1,7 @@
 """Tests for ``tools.paper_author``: the S2 author-lookup adapter.
 
 Backend I/O, record shaping, pagination, and fusion live in
-:mod:`sagent.lib.web.paper` (covered by its own tests). These tests exercise only
+:mod:`wesearch.paper` (covered by its own tests). These tests exercise only
 the adapter: schema/metadata, arg validation, the id-bundle split, the process
 cache, rendering, and library-error mapping. The library is mocked where the
 adapter binds each name (``paper_author.search_authors`` etc.).
@@ -13,10 +13,11 @@ from unittest.mock import patch
 
 import asyncio
 
-from sagent.lib.web.paper.authors import AuthorSearchResult
-from sagent.lib.web.paper.custom_types import AuthorRecord, PaperRecord
-from sagent.lib.web.paper.details import Listing
-from sagent.lib.web.paper.errors import PaperError
+from wesearch.paper.authors import AuthorSearchResult
+from wesearch.paper.custom_types import AuthorRecord, PaperRecord
+from wesearch.paper.details import Listing
+from wesearch.paper.errors import PaperError
+
 from sagent.tools.paper_author import (
     PaperAuthor,
     _cache,
