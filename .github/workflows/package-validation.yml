@@ -22,21 +22,21 @@ jobs:
     name: Lint, type-check, test, and build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v6
       - name: Install ripgrep and fd-find
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
-          uv sync --frozen --all-groups
+          uv sync --frozen --all-groups --extra slack
           uv run ruff check --no-fix --no-cache .
           uv run ruff format --check --no-cache .
           uv run codespell .
           uv run ty check
-          uv run basedpyright --threads=6 sagent examples
+          uv run basedpyright --threads=6 sagent
           uv run pytest
           uv run pytest -m ci_smoke -o addopts="--durations=20"
           uv run python -c "import sagent"
