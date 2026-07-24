@@ -25,7 +25,7 @@ type JSONScalar = str | int | float | bool | None
 # Was:
 #   type JSONValue = JSONScalar | Sequence[JSONValue] | Mapping[str, JSONValue]
 type JSONValue = (
-    str | int | float | bool | None | Sequence[JSONValue] | Mapping[str, JSONValue]
+    str | int | float | bool | Sequence[JSONValue] | Mapping[str, JSONValue] | None
 )
 type JSON = Mapping[str, JSONValue]
 
@@ -42,9 +42,9 @@ type MutableJSONValue = (
     | int
     | float
     | bool
-    | None
     | MutableSequence[MutableJSONValue]
     | MutableMapping[str, MutableJSONValue]
+    | None
 )
 type MutableJSON = MutableMapping[str, MutableJSONValue]
 
@@ -230,8 +230,10 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
     if value in enum_values:
         return []
     return [
-        f"Parameter `{_json_schema_path_display(path)}` must be one of "
-        f"{_json_enum_values(enum_values)}."
+        (
+            f"Parameter `{_json_schema_path_display(path)}` must be one of "
+            f"{_json_enum_values(enum_values)}."
+        )
     ]
 
 
