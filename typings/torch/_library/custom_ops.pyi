@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
-from typing import Any, overload
+from typing import Any, TypeVar, overload
 
 import weakref
 
@@ -11,6 +11,7 @@ from torch.utils._exposed_in import exposed_in
 import torch
 
 type device_types_t = str | Sequence[str] | None
+_F = TypeVar("_F", bound=Callable[..., object])
 log = ...
 
 @overload
@@ -58,15 +59,22 @@ class CustomOpDef:
     def set_kernel_enabled(
         self, device_type: str, enabled: bool = ...
     ) -> Generator[None, Any, None]: ...
+    @overload
+    def register_kernel(self, device_types: device_types_t, fn: _F, /) -> _F: ...
+    @overload
     def register_kernel(
-        self, device_types: device_types_t, fn: Callable | None = ..., /
-    ) -> Callable: ...
-    def register_fake(self, fn: Callable, /) -> Callable: ...
+        self, device_types: device_types_t, fn: None = ..., /
+    ) -> Callable[[_F], _F]: ...
+    def register_fake(self, fn: _F, /) -> _F: ...
     def register_torch_dispatch(
         self, torch_dispatch_class: Any, fn: Callable | None = ..., /
     ) -> Callable: ...
     def register_autograd(
-        self, backward: Callable, /, *, setup_context: Callable | None = ...
+        self,
+        backward: Callable[..., object],
+        /,
+        *,
+        setup_context: Callable[..., object] | None = ...,
     ) -> None: ...
     def __call__(self, *args, **kwargs) -> Any: ...
     def register_vmap(
