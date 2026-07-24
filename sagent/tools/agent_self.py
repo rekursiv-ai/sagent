@@ -860,8 +860,10 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
         return [f"Known models: unknown provider {provider_name!r}."]
     if provider_name not in _allow_providers_var.get():
         return [
-            f"Known models: {provider_name!r} is not in the allowed list"
-            f" {list(_allow_providers_var.get())}."
+            (
+                f"Known models: {provider_name!r} is not in the allowed list"
+                f" {list(_allow_providers_var.get())}."
+            )
         ]
     default = getattr(provider_cls, "DEFAULT_MODEL", None)
     known = getattr(provider_cls, "KNOWN_MODELS", None)

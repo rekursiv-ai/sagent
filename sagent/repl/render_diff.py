@@ -142,7 +142,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     console,
                     old_ln,
                     "-",
-                    parts,
+                    parts=parts,
                     is_add=False,
                     width=width,
                     lexer=lexer,
@@ -153,9 +153,9 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     console,
                     old_ln,
                     "-",
-                    content_text,
-                    _DIFF_REMOVED_STYLE,
-                    width,
+                    content_text=content_text,
+                    bg_style=_DIFF_REMOVED_STYLE,
+                    width=width,
                 )
             old_ln += 1
         elif line.startswith("+"):
@@ -165,7 +165,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     console,
                     new_ln,
                     "+",
-                    parts,
+                    parts=parts,
                     is_add=True,
                     width=width,
                     lexer=lexer,
@@ -176,9 +176,9 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     console,
                     new_ln,
                     "+",
-                    content_text,
-                    _DIFF_ADDED_STYLE,
-                    width,
+                    content_text=content_text,
+                    bg_style=_DIFF_ADDED_STYLE,
+                    width=width,
                 )
             new_ln += 1
         else:
@@ -187,9 +187,9 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                 console,
                 new_ln,
                 " ",
-                content_text,
-                None,
-                width,
+                content_text=content_text,
+                bg_style=None,
+                width=width,
             )
             old_ln += 1
             new_ln += 1
@@ -350,6 +350,7 @@ def _render_diff_line(
     console: Console,
     lineno: int,
     sigil: str,
+    *,
     content_text: Text,
     bg_style: str | None,
     width: int,
@@ -376,6 +377,7 @@ def _render_word_diff_line(
     console: Console,
     lineno: int,
     sigil: str,
+    *,
     parts: list[tuple[str, str]],
     is_add: bool,
     width: int,

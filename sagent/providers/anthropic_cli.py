@@ -1256,9 +1256,9 @@ class _AnthropicCLIModel:
                     inner,
                     text_parts,
                     thinking_parts,
-                    signature_parts,
-                    tool_use_blocks,
-                    publish,
+                    signature_parts=signature_parts,
+                    tool_use_blocks=tool_use_blocks,
+                    publish=publish,
                 )
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
@@ -1856,6 +1856,7 @@ def _dispatch_stream_event(
     event: MutableJSON,
     text_parts: list[str],
     thinking_parts: list[str],
+    *,
     signature_parts: list[str],
     tool_use_blocks: dict[int, dict[str, object]],
     publish: Callable[[RuntimeEvent], None] | None,

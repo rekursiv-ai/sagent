@@ -205,12 +205,28 @@ def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
 
     # 1. Managed (system-wide).
     out.extend(
-        _process(cfg.system_dir / cfg.filename, "Managed", processed, 0, None, cfg)
+        _process(
+            cfg.system_dir / cfg.filename,
+            "Managed",
+            processed,
+            depth=0,
+            parent=None,
+            cfg=cfg,
+        )
     )
     out.extend(_load_md_dir(cfg.system_dir / "rules", "Managed", processed, cfg))
 
     # 2. User.
-    out.extend(_process(cfg.user_dir / cfg.filename, "User", processed, 0, None, cfg))
+    out.extend(
+        _process(
+            cfg.user_dir / cfg.filename,
+            "User",
+            processed,
+            depth=0,
+            parent=None,
+            cfg=cfg,
+        )
+    )
     out.extend(_load_md_dir(cfg.user_dir / "rules", "User", processed, cfg))
 
     # 3. Project + Local, root → cwd, interleaved per dir.
@@ -244,12 +260,23 @@ def _process_dir(
     p = Path(cfg.filename)
     local_filename = f"{p.stem}.local{p.suffix}"
     out: list[_AgentMdFile] = []
-    out.extend(_process(d / cfg.filename, "Project", processed, 0, None, cfg))
     out.extend(
-        _process(d / cfg.dot_dir / cfg.filename, "Project", processed, 0, None, cfg)
+        _process(d / cfg.filename, "Project", processed, depth=0, parent=None, cfg=cfg)
+    )
+    out.extend(
+        _process(
+            d / cfg.dot_dir / cfg.filename,
+            "Project",
+            processed,
+            depth=0,
+            parent=None,
+            cfg=cfg,
+        )
     )
     out.extend(_load_md_dir(d / cfg.dot_dir / "rules", "Project", processed, cfg))
-    out.extend(_process(d / local_filename, "Local", processed, 0, None, cfg))
+    out.extend(
+        _process(d / local_filename, "Local", processed, depth=0, parent=None, cfg=cfg)
+    )
     return out
 
 
@@ -269,7 +296,9 @@ def _load_md_dir(
         return []
     for p in md_files:
         if p.is_file():
-            out.extend(_process(p, memory_type, processed, 0, None, cfg))
+            out.extend(
+                _process(p, memory_type, processed, depth=0, parent=None, cfg=cfg)
+            )
     return out
 
 
@@ -277,6 +306,7 @@ def _process(
     path: Path,
     memory_type: MemoryType,
     processed: set[str],
+    *,
     depth: int,
     parent: Path | None,
     cfg: AgentsMdConfig,
@@ -318,7 +348,16 @@ def _process(
         ),
     ]
     for include in _extract_includes(body, resolved.parent):
-        out.extend(_process(include, memory_type, processed, depth + 1, resolved, cfg))
+        out.extend(
+            _process(
+                include,
+                memory_type,
+                processed,
+                depth=depth + 1,
+                parent=resolved,
+                cfg=cfg,
+            )
+        )
     return out
 
 

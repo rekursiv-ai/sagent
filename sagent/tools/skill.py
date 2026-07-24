@@ -140,16 +140,20 @@ def format_listing(skills: list[SkillInfo]) -> str:
         return ""
     lines = [
         "# Skills",
-        "The following user-authored skills are available. Invoke one by"
-        ' calling the `Skill` tool with `{"skill": "<name>"}`. Each skill'
-        " description states when to use it — match against user requests"
-        " and invoke when applicable.",
+        (
+            "The following user-authored skills are available. Invoke one by"
+            ' calling the `Skill` tool with `{"skill": "<name>"}`. Each skill'
+            " description states when to use it — match against user requests"
+            " and invoke when applicable."
+        ),
         "",
-        "Before each response, scan the skill list below. If any trigger"
-        " matches the current request or the direction of conversation,"
-        " invoke it before producing any other response. Do not describe"
-        " or reference a skill without invoking it. Do not re-invoke a"
-        " skill whose instructions are already active in the conversation.",
+        (
+            "Before each response, scan the skill list below. If any trigger"
+            " matches the current request or the direction of conversation,"
+            " invoke it before producing any other response. Do not describe"
+            " or reference a skill without invoking it. Do not re-invoke a"
+            " skill whose instructions are already active in the conversation."
+        ),
         "",
     ]
     for s in skills:
