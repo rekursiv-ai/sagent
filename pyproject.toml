@@ -223,6 +223,7 @@ ignore = [
     "C90",     # McCabe complexity. (One function slightly over threshold.)
     "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.)
                # https://github.com/astral-sh/ruff/issues/9216
+    "CPY001",  # Missing copyright notice. (License is in LICENSE, not per-file.)
 
     # Relax docstring rules.
     "D100",    # Undocumented public module.
