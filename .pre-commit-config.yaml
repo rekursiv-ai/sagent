@@ -67,7 +67,7 @@ repos:
   # Validates uv.lock matches pyproject.toml (no network needed).
   # Run `uv lock` manually when changing dependencies.
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.22
+    rev: 0.11.32
     hooks:
       - id: uv-lock
         stages: [pre-commit]
@@ -182,7 +182,21 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: *pytest-entry
+        # Tolerate pytest exit 5 (no tests collected): this package may ship no
+        # tests for this marker, which is not a failure. Regular pytest stays strict.
+        entry: >-
+          bash -c '
+            if [ -n "$CI" ]; then
+              workers=1;
+            else
+              workers=$(nproc);
+              workers=$((workers / 2));
+              ((workers < 2)) && workers=2;
+              ((workers > 32)) && workers=32;
+            fi;
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "$@" || test "$?" = 5
+          ' pytest
         args: [-q, --tb=short, -m, "slow and not cluster and not cuda and not integration and not performance"]
 
       - id: pytest-integration
