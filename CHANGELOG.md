@@ -4,6 +4,9 @@ All notable Sagent changes are documented here.
 
 ## Unreleased
 
+- Fixed CLI subscription authentication: `AnthropicCLI` now recognizes Claude
+  Code's native macOS login, `OpenAISubscription` honors `$CODEX_HOME`, and
+  zero-flag startup only tries allowed subscription providers.
 - Added GPT-5.6 Sol, Terra, and Luna to the OpenAI API-key and subscription
   providers, with GPT-5.6-specific `xhigh` and `max` effort handling. API-key
   users can select the 1.05M-window variants; subscription auth accepts the

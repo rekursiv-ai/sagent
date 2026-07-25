@@ -2267,6 +2267,50 @@ async def test_relogin_calls_login_classmethod() -> None:
 
 
 @pytest.mark.asyncio
+async def test_relogin_anthropic_cli_invokes_native_login() -> None:
+    """In-session ``/login`` reaches Claude Code instead of rejecting it."""
+    a = _build_agent_with_spec()
+    a.model_spec = types.model.ModelSpec(
+        provider="AnthropicCLI",
+        auth="credentials",
+        model_id="claude-opus-4-8",
+    )
+
+    with patch.object(providers_module.AnthropicCLI, "login") as login:
+        await a.relogin()
+
+    login.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_relogin_forwards_named_account() -> None:
+    """``/login`` refreshes the active credential slot, not the default one."""
+    a = _build_agent_with_spec()
+    a.model_spec = types.model.ModelSpec(
+        provider="OpenAISubscription",
+        auth="credentials",
+        model_id="gpt-5.6-sol",
+        account="work",
+    )
+    calls: list[str | None] = []
+
+    class _Provider:
+        @classmethod
+        def login(cls, *, account: str | None = None) -> None:
+            calls.append(account)
+
+    with patch.object(
+        providers_module,
+        "OpenAISubscription",
+        _Provider,
+        create=True,
+    ):
+        await a.relogin()
+
+    assert calls == ["work"]
+
+
+@pytest.mark.asyncio
 async def test_relogin_runs_blocking_login_off_event_loop() -> None:
     """``login`` blocks (browser/``input()`` wait); it must not freeze the loop.
 

@@ -134,7 +134,7 @@ pipx install sagent
 
 ```bash
 brew install ripgrep fd pipx
-pipx install sagent
+pipx install --backend pip sagent
 ```
 
 ### Library
@@ -183,8 +183,12 @@ sagent/bin/cli.py --help
 Use Claude backend,
 
 ```
+claude auth login --claudeai
 sagent/bin/cli.py --allow-providers AnthropicCLI --provider AnthropicCLI --auth credentials
 ```
+
+`AnthropicCLI` inherits your HOME for macOS Keychain access and runs Claude
+non-interactively, so use it only in trusted working directories.
 
 ```bash
 export GOOGLE_API_KEY=...

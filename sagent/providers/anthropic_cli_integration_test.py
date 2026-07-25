@@ -10,7 +10,8 @@ marked ``integration`` and DESELECTED by default (see ``pyproject.toml``
 
 Requirements (else the module skips):
   - ``claude`` on PATH,
-  - valid CLI credentials (``claude login`` / ``~/.claude/.credentials.json``).
+  - valid CLI credentials (``claude auth login --claudeai``; macOS may use
+    Keychain).
 
 What they cover (the production-correctness gaps the unit suite leaves):
   - a basic turn produces a non-empty ``ModelResponse``;
@@ -33,7 +34,7 @@ import uuid as _uuid
 
 import pytest
 
-from sagent.providers.anthropic_cli import AnthropicCLI
+from sagent.providers.anthropic_cli import AnthropicCLI, _claude_auth_status
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.subproc import SubprocessTransportError
 from sagent.tools import tool
@@ -56,13 +57,17 @@ pytestmark = [
 
 
 def _claude_available() -> bool:
-    if shutil.which("claude") is None:
+    binary = shutil.which("claude")
+    if binary is None:
         return False
+    status = _claude_auth_status(binary)
+    if status is not None:
+        return status
     creds = credentials_path(Path.home() / ".claude" / ".credentials.json", None)
     return creds.exists()
 
 
-_SKIP_REASON = "requires `claude` on PATH + CLI credentials"
+_SKIP_REASON = "requires `claude` on PATH + `claude auth login --claudeai`"
 _requires_claude = pytest.mark.skipif(not _claude_available(), reason=_SKIP_REASON)
 
 # The MCP bridge binds a local HTTP port; sandboxed/CI environments may
