@@ -1,9 +1,9 @@
 """OpenAI subscription provider (OAuth + Codex CLI billing).
 
-Loads OAuth credentials from ``$CODEX_HOME/auth.json`` (or
-``~/.codex/auth.json`` when unset), as written by ``codex login``, and uses
-the OpenAI Responses API via the official Python SDK. Subscription billing
-flows through the user's ChatGPT plan.
+Loads OAuth credentials from ``~/.codex/auth.json`` (written by
+``codex login``) and uses the OpenAI Responses API via the official
+Python SDK. Subscription billing flows through the user's ChatGPT
+plan.
 
 Usage::
 
@@ -70,7 +70,6 @@ import dataclasses
 import inspect
 import json
 import logging
-import os
 import secrets
 import sys
 import time
@@ -184,15 +183,6 @@ _STREAM_IDLE_TIMEOUT = 600.0
 # models. A bare ``"o"`` over-matches (e.g. a future ``omni-*`` id), diverging
 # from the API-key path -- pin the exact reasoning families instead.
 _EFFORT_PREFIXES = ("o1", "o3", "o4", "gpt-5")
-
-
-def _default_credentials_path() -> Path:
-    """Return the active Codex auth file, honoring ``CODEX_HOME``."""
-    codex_home = os.environ.get("CODEX_HOME")
-    if codex_home:
-        return Path(codex_home).expanduser() / "auth.json"
-    return DEFAULT_CREDENTIALS_PATH
-
 
 _FINISH_MAP: dict[str, str] = {
     "completed": "stop",
@@ -317,8 +307,8 @@ class OpenAISubscription(OpenAI):
 
         Args:
           creds: Pre-loaded credentials, or ``None`` to auto-load from disk.
-          account: Named credential slot. ``None`` uses the active Codex
-            ``auth.json`` under ``$CODEX_HOME`` or ``~/.codex``.
+          account: Named credential slot. ``None`` uses the legacy
+            ``~/.codex/auth.json`` path.
           refresh_buffer_sec: Seconds before token expiry to trigger
               proactive refresh.
 
@@ -351,8 +341,8 @@ class OpenAISubscription(OpenAI):
         Args:
           output: Stream for user-facing messages. ``None`` uses stdout.
           listener_timeout_sec: Seconds to wait for the browser callback.
-          account: Named credential slot. ``None`` writes to the active Codex
-            ``auth.json`` under ``$CODEX_HOME`` or ``~/.codex``.
+          account: Named credential slot. ``None`` writes to the legacy
+            ``~/.codex/auth.json`` path.
           manual: Print a URL and prompt for a pasted code without waiting for
             a browser callback.
 
@@ -648,7 +638,7 @@ class OpenAISubscription(OpenAI):
         """
         if not self.expired:
             return self._access_token
-        cred_path = credentials_path(_default_credentials_path(), self._account)
+        cred_path = credentials_path(DEFAULT_CREDENTIALS_PATH, self._account)
         async with self._lock, credential_file_lock(cred_path):
             if not self.expired:
                 return self._access_token
@@ -663,7 +653,7 @@ class OpenAISubscription(OpenAI):
         Holds the cross-process credential lock so a concurrent
         sibling can't refresh between our disk-check and POST.
         """
-        cred_path = credentials_path(_default_credentials_path(), self._account)
+        cred_path = credentials_path(DEFAULT_CREDENTIALS_PATH, self._account)
         async with self._lock, credential_file_lock(cred_path):
             # Adopt a sibling's fresher creds only if they are actually valid;
             # an adopted-but-expired token would 401 again on retry, so fall
@@ -726,7 +716,7 @@ class OpenAISubscription(OpenAI):
             logger.warning(
                 "OpenAI creds file at %s was unreadable; overwriting with "
                 "refreshed tokens",
-                credentials_path(_default_credentials_path(), self._account),
+                credentials_path(DEFAULT_CREDENTIALS_PATH, self._account),
             )
             creds = OpenAISubscription.Credentials(
                 access_token="",
@@ -752,8 +742,8 @@ class OpenAISubscription(OpenAI):
 
         Args:
           path: Explicit credentials file path, or ``None`` for default.
-          account: Named credential slot. ``None`` reads the active Codex
-            ``auth.json`` under ``$CODEX_HOME`` or ``~/.codex``.
+          account: Named credential slot. ``None`` reads the legacy
+            ``~/.codex/auth.json`` path.
 
         Returns:
           creds: Loaded OAuth credentials.
@@ -763,7 +753,7 @@ class OpenAISubscription(OpenAI):
           ValueError: If the file is not a complete OAuth credential record.
 
         """
-        p = path or credentials_path(_default_credentials_path(), account)
+        p = path or credentials_path(DEFAULT_CREDENTIALS_PATH, account)
         if not p.exists():
             raise FileNotFoundError(f"No credentials at {p}")
         decoded: object = json.loads(p.read_text(encoding="utf-8"))
@@ -825,11 +815,11 @@ class OpenAISubscription(OpenAI):
         Args:
           creds: OAuth credentials to persist.
           path: Explicit file path, or ``None`` for default.
-          account: Named credential slot. ``None`` writes to the active Codex
-            ``auth.json`` under ``$CODEX_HOME`` or ``~/.codex``.
+          account: Named credential slot. ``None`` writes to the legacy
+            ``~/.codex/auth.json`` path.
 
         """
-        p = path or credentials_path(_default_credentials_path(), account)
+        p = path or credentials_path(DEFAULT_CREDENTIALS_PATH, account)
         existing: MutableJSON = {}
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError, OSError):

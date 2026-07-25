@@ -23,15 +23,17 @@ _MODEL_PROVIDER_MAP: list[tuple[str, str]] = [
     ("minimax", "MiniMax"),
 ]
 
-# Maps API-key provider names to their same-vendor account-auth
-# (subscription / credentials-file) variant. ``infer_provider`` keeps
-# the current account variant only when the inferred model belongs to
-# that same vendor. Cross-vendor inference retains the destination's
-# API-key default; choosing another vendor's subscription provider must
-# be explicit.
+# Maps API-key provider names to their account-auth (subscription /
+# credentials-file) variant. When ``infer_provider`` sees a model_id
+# whose prefix maps to an API-key provider (e.g. ``claude-...`` →
+# ``Anthropic``) AND the user's *current* provider is the account
+# variant (e.g. ``AnthropicCLI``), the inference resolves to the
+# account variant + ``credentials`` auth instead of the API-key path.
+# Without this, ``AgentSelf(model_id="claude-sonnet-4-6")`` from an
+# AnthropicCLI-backed agent would silently try to build a fresh
+# Anthropic API provider, requiring ``ANTHROPIC_API_KEY`` to be set.
 _ACCOUNT_OVERRIDES: dict[str, str] = {
     "Anthropic": "AnthropicCLI",
-    "OpenAI": "OpenAISubscription",
 }
 _ACCOUNT_PROVIDERS: set[str] = set(_ACCOUNT_OVERRIDES.values())
 
@@ -55,12 +57,12 @@ def infer_provider(
     if _is_local_model_path(model_id):
         return ("SelfHosted", model_id)
 
+    prefer_account = current_provider in _ACCOUNT_PROVIDERS
     for prefix, base_prov in _MODEL_PROVIDER_MAP:
         if model_id.startswith(prefix):
-            account_target = _ACCOUNT_OVERRIDES.get(base_prov)
             target = (
-                account_target
-                if account_target is not None and current_provider == account_target
+                _ACCOUNT_OVERRIDES.get(base_prov, base_prov)
+                if prefer_account
                 else base_prov
             )
             if target == current_provider:
