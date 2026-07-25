@@ -667,10 +667,7 @@ async def test_account_default_string_is_preserved() -> None:
             result = await t.run({"model_id": "gpt-5", "account": "default"})
     assert not result.is_error
     build.assert_called_once_with(
-        "OpenAISubscription",
-        "credentials",
-        account="default",
-        options=ProviderOptions(),
+        "OpenAI", "env", account="default", options=ProviderOptions()
     )
 
 

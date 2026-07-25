@@ -38,7 +38,6 @@ import asyncio
 import contextlib
 import contextvars
 import dataclasses
-import inspect
 import itertools
 import json
 import logging
@@ -1098,12 +1097,7 @@ class Agent:
         # failed/never-returning auth wedges the whole session. Off-load
         # to a worker thread so the loop keeps servicing input and the
         # wait stays cancellable.
-        login_kwargs: dict[str, object] = {}
-        if spec.account is not None:
-            with contextlib.suppress(TypeError, ValueError):
-                if "account" in inspect.signature(login_fn).parameters:
-                    login_kwargs["account"] = spec.account
-        await asyncio.to_thread(login_fn, **login_kwargs)
+        await asyncio.to_thread(login_fn)
         # Reach the owning provider to hot-reload credentials after the
         # re-login. This is a deliberate private-attribute access, not a
         # capability probe: every rich provider model carries

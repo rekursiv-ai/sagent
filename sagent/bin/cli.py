@@ -15,14 +15,8 @@ Usage::
     # Anthropic API key (reads ANTHROPIC_API_KEY)
     ./cli.py --provider Anthropic
 
-    # Claude subscription (reuses `claude auth login --claudeai`)
-    ./cli.py --provider AnthropicCLI
-
     # OpenAI
     ./cli.py --provider OpenAI --model gpt-5.6-sol
-
-    # ChatGPT subscription (reuses `codex login`)
-    ./cli.py --provider OpenAISubscription --model gpt-5.6-sol
 
     # Google
     ./cli.py --provider Google --auth env --model gemini-3.1-pro-preview
@@ -57,7 +51,6 @@ import dataclasses
 import json
 import logging
 import os
-import shlex
 import signal
 import sys
 import time
@@ -105,11 +98,6 @@ from sagent.tools.core import set_recipe
 
 _DEFAULT_PROVIDER = "Anthropic"
 _DEFAULT_AUTH = "env"
-_PROVIDER_STARTUP_ERRORS = (FileNotFoundError, RuntimeError, ValueError)
-_PROVIDER_ENV_HINTS = {
-    "Anthropic": "ANTHROPIC_API_KEY",
-    "Google": "GOOGLE_API_KEY",
-}
 
 
 def _default_allow_providers() -> tuple[str, ...]:
@@ -634,19 +622,12 @@ def _resolve_provider_and_allow(
 def _build_provider_model(
     args: argparse.Namespace,
     thinking_state: ThinkingState | None,
-    *,
-    allow_providers: tuple[str, ...] = PROVIDER_NAMES,
 ) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Build the provider/model pair requested by CLI flags."""
     try:
         return _build_provider_model_once(args, thinking_state)
-    except _PROVIDER_STARTUP_ERRORS as error:
-        return _build_provider_model_fallback(
-            args,
-            thinking_state,
-            error,
-            allow_providers=allow_providers,
-        )
+    except (FileNotFoundError, ValueError) as error:
+        return _build_provider_model_fallback(args, thinking_state, error)
 
 
 def _build_provider_model_once(
@@ -689,46 +670,30 @@ def _build_provider_model_fallback(
     args: argparse.Namespace,
     thinking_state: ThinkingState | None,
     error: Exception,
-    *,
-    allow_providers: tuple[str, ...],
 ) -> tuple[types.providers.Provider, types.model.Model, str]:
     """Try another subscription provider for implicit startup auth failures."""
     if not _allow_implicit_provider_fallback(args):
         raise RuntimeError(
-            _credential_error_message(
-                str(args.provider),
-                error,
-                allow_providers=allow_providers,
-                account=args.account,
-            )
+            _credential_error_message(str(args.provider), error)
         ) from error
     original_provider = str(args.provider)
-    for fallback_provider in _credential_fallback_providers(
-        original_provider,
-        allow_providers=allow_providers,
-    ):
+    for fallback_provider in _credential_fallback_providers(original_provider):
         args.provider = fallback_provider
         args.auth = "credentials"
         args.model = None
         try:
             provider, model, auth = _build_provider_model_once(args, thinking_state)
-        except _PROVIDER_STARTUP_ERRORS:
+        except (FileNotFoundError, ValueError):
             continue
         sys.stderr.write(
             f"[provider] {original_provider} unavailable: {error}\n"
-            f"[provider] using {fallback_provider} subscription login "
-            f"({model.model_id}).\n"
+            f"[provider] falling back to {fallback_provider} ({model.model_id}).\n"
+            f"[provider] To use {original_provider}, run: "
+            f"sagent --provider {original_provider} login\n"
         )
         return provider, model, auth
     args.provider = original_provider
-    raise RuntimeError(
-        _credential_error_message(
-            original_provider,
-            error,
-            allow_providers=allow_providers,
-            account=args.account,
-        )
-    ) from error
+    raise RuntimeError(_credential_error_message(original_provider, error)) from error
 
 
 def _allow_implicit_provider_fallback(args: argparse.Namespace) -> bool:
@@ -737,7 +702,6 @@ def _allow_implicit_provider_fallback(args: argparse.Namespace) -> bool:
         bool(getattr(args, name, False))
         for name in (
             "provider_explicit",
-            "provider_from_resume",
             "auth_explicit",
             "account_explicit",
             "model_explicit",
@@ -745,77 +709,23 @@ def _allow_implicit_provider_fallback(args: argparse.Namespace) -> bool:
     )
 
 
-def _credential_fallback_providers(
-    provider_name: str,
-    *,
-    allow_providers: tuple[str, ...] = PROVIDER_NAMES,
-) -> tuple[str, ...]:
+def _credential_fallback_providers(provider_name: str) -> tuple[str, ...]:
     """Return implicit subscription providers to try after ``provider_name``."""
-    candidates = ("AnthropicCLI", "OpenAISubscription")
-    return tuple(
-        candidate
-        for candidate in candidates
-        if candidate != provider_name and candidate in allow_providers
-    )
+    candidates = ("OpenAISubscription",)
+    return tuple(p for p in candidates if p != provider_name and p in PROVIDER_NAMES)
 
 
-def _credential_setup_commands(
-    provider_name: str,
-    *,
-    account: str | None = None,
-) -> tuple[str, ...]:
-    """Return valid setup commands for one provider without inventing login APIs."""
-    account_name = account or "default"
-    account_args = (
-        "" if account_name == "default" else f" --account {shlex.quote(account_name)}"
-    )
-    if provider_name == "AnthropicCLI":
-        if account_args:
-            # Native Claude login writes only its default credential store;
-            # named AnthropicCLI accounts are legacy file slots and the
-            # provider error names their required path.
-            return ()
-        return ("claude auth login --claudeai", "sagent --provider AnthropicCLI")
-    if provider_name == "OpenAISubscription":
-        login = f"sagent --provider OpenAISubscription{account_args} login"
-        run = f"sagent --provider OpenAISubscription{account_args}"
-        if account_args:
-            return (login, run)
-        return ("codex login", login, run)
-    cls = getattr(providers, provider_name, None)
-    env_var = _PROVIDER_ENV_HINTS.get(
-        provider_name,
-        getattr(cls, "ENV_VAR", None),
-    )
-    if isinstance(env_var, str) and env_var:
-        return (f"export {env_var}=...",)
-    return ()
-
-
-def _credential_error_message(
-    provider_name: str,
-    error: Exception,
-    *,
-    allow_providers: tuple[str, ...] = PROVIDER_NAMES,
-    account: str | None = None,
-) -> str:
+def _credential_error_message(provider_name: str, error: Exception) -> str:
     """Return an actionable credential-startup error."""
-    commands = list(_credential_setup_commands(provider_name, account=account))
-    for fallback_provider in _credential_fallback_providers(
-        provider_name,
-        allow_providers=allow_providers,
-    ):
-        commands.extend(
-            _credential_setup_commands(
-                fallback_provider,
-                account=account,
-            )
-        )
-    commands = list(dict.fromkeys(commands))
-    lines = [f"{provider_name} credentials are unavailable: {error}"]
-    if commands:
-        lines.append("Try one of:")
-        lines.extend(f"  {command}" for command in commands)
+    lines = [
+        f"{provider_name} credentials are unavailable: {error}",
+        "Try one of:",
+        f"  sagent --provider {provider_name} login",
+    ]
+    lines.extend(
+        f"  sagent --provider {fallback_provider}"
+        for fallback_provider in _credential_fallback_providers(provider_name)
+    )
     return "\n".join(lines)
 
 
@@ -1380,7 +1290,6 @@ def main() -> int:
     # resumed session pinned one; otherwise it defaults to the first
     # allowed provider (``primary=None``).
     resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
-    args.provider_from_resume = resumed_provider
     explicit = bool(getattr(args, "provider_explicit", False)) or resumed_provider
     args.provider, allow_providers = _resolve_provider_and_allow(
         args.allow_providers,
@@ -1388,11 +1297,7 @@ def main() -> int:
     )
     try:
         thinking_state = _resolve_cli_thinking_state(args)
-        provider, model, resolved_auth = _build_provider_model(
-            args,
-            thinking_state,
-            allow_providers=allow_providers,
-        )
+        provider, model, resolved_auth = _build_provider_model(args, thinking_state)
         _validate_cli_thinking_state(model, thinking_state)
     except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
@@ -1513,18 +1418,6 @@ def _do_login(args: argparse.Namespace) -> None:
     login_fn = getattr(cls, "login", None)
     save_fn = getattr(cls, "save", None)
     if login_fn is None or save_fn is None:
-        if args.provider == "AnthropicCLI":
-            if args.account not in (None, "default"):
-                sys.stderr.write(
-                    "Error: AnthropicCLI named accounts use legacy credential "
-                    "files and do not support interactive login.\n"
-                )
-                sys.exit(1)
-            sys.stderr.write(
-                "Error: AnthropicCLI uses the Claude CLI login. Run:\n"
-                "  claude auth login --claudeai\n"
-            )
-            sys.exit(1)
         sys.stderr.write(
             f"Error: {args.provider} does not support interactive login.\n"
         )
