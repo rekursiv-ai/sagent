@@ -8,8 +8,6 @@ through the inbox.
 
 from __future__ import annotations
 
-from typing import Final
-
 import dataclasses
 
 from sagent.thinking import THINKING_COMMANDS
@@ -160,12 +158,6 @@ type SlashAction = (
 # Quit phrases recognized by both REPL paths.
 QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
-# Public list of supported commands; drives the unknown-command help line.
-_SUPPORTED: Final = (
-    "/help /clear /compact /recompact /model /provider /thinking /effort /login"
-    " /tasks /halt /kill /defer /send /quit /exit"
-)
-
 
 def parse_slash(line: str) -> SlashAction | None:
     """Translate a typed line into a :class:`SlashAction`.
@@ -239,7 +231,12 @@ def parse_slash(line: str) -> SlashAction | None:
         return Send(target=target, content=content.strip())
     if stripped.startswith("/"):
         cmd = stripped.split(maxsplit=1)[0]
-        return Unknown(text=f"unknown command: {cmd}. Supported: {_SUPPORTED}")
+        # Public list of supported commands; drives the unknown-command help line.
+        supported = (
+            "/help /clear /compact /recompact /model /provider /thinking /effort"
+            " /login /tasks /halt /kill /defer /send /quit /exit"
+        )
+        return Unknown(text=f"unknown command: {cmd}. Supported: {supported}")
     return Text(content=stripped)
 
 

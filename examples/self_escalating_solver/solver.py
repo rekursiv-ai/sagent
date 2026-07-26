@@ -46,8 +46,8 @@ from sagent.types.tools import Tool
 
 # --------------------------------------------------------------------------
 # Shared task + prompts. All three arms see TASK + SYS_BASE; the mutation arm
-# additionally sees the SYS_UPGRADE_BLOCK. The naive symmetric rule is seeded in
-# the shared TASK so every arm's *first pass* is the same biased sampler.
+# additionally sees the self-upgrade block. The naive symmetric rule is seeded
+# in the shared TASK so every arm's *first pass* is the same biased sampler.
 # --------------------------------------------------------------------------
 TASK: Final = (
     "Use Metropolis-Hastings to draw 40000 samples from a target distribution.\n"
@@ -71,25 +71,26 @@ SYS_BASE: Final = (
     "from the grader."
 )
 
-# MODEL-AGNOSTIC self-upgrade block (variant B empowerment + fresh-eyes ownership).
-# Only {strong_model} is injected — no model-specific or answer-specific content.
-SYS_UPGRADE_BLOCK: Final = (
-    "\n\nYou also have an ability most agents do not: you can upgrade your own model. "
-    "You are on a fast, lightweight model — fine for routine work, limited on subtle "
-    "problems. Call the AgentSelf tool with a stronger model's id to promote YOURSELF to "
-    "a more powerful reasoning model, keeping the problem and your diagnostics — like "
-    "levelling up.\n"
-    "Be decisive and FRUGAL: write your sampler and run it once. The moment the grader "
-    "returns FAIL, UPGRADE YOURSELF immediately — do NOT attempt fixes on this weak model "
-    "(every wasted attempt costs tokens the stronger model then has to re-read). After "
-    "upgrading you ARE the stronger model: re-derive the correct approach from first "
-    "principles and solve it. The stronger model available to you is '{strong_model}'."
-)
-
 
 def system_for(*, allow_upgrade: bool, strong_model: str = "") -> str:
     if allow_upgrade:
-        return SYS_BASE + SYS_UPGRADE_BLOCK.format(strong_model=strong_model)
+        # MODEL-AGNOSTIC self-upgrade block (variant B empowerment + fresh-eyes
+        # ownership). Only ``strong_model`` is injected — no model-specific or
+        # answer-specific content.
+        upgrade_block = (
+            "\n\nYou also have an ability most agents do not: you can upgrade your "
+            "own model. You are on a fast, lightweight model — fine for routine "
+            "work, limited on subtle problems. Call the AgentSelf tool with a "
+            "stronger model's id to promote YOURSELF to a more powerful reasoning "
+            "model, keeping the problem and your diagnostics — like levelling up.\n"
+            "Be decisive and FRUGAL: write your sampler and run it once. The moment "
+            "the grader returns FAIL, UPGRADE YOURSELF immediately — do NOT attempt "
+            "fixes on this weak model (every wasted attempt costs tokens the "
+            "stronger model then has to re-read). After upgrading you ARE the "
+            "stronger model: re-derive the correct approach from first principles "
+            f"and solve it. The stronger model available to you is '{strong_model}'."
+        )
+        return SYS_BASE + upgrade_block
     return SYS_BASE
 
 

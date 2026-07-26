@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
-from typing import Final, cast
+from typing import cast
 
 import asyncio
 import contextlib
@@ -36,10 +36,6 @@ logger = logging.getLogger(__name__)
 _STDERR_TAIL_LINES = 100  # config-globals: ignore -- stderr tail-line cap
 _TERMINATE_GRACE_SEC = 2.0  # config-globals: ignore -- terminate grace period
 _READ_IDLE_TIMEOUT_SEC = 60.0  # config-globals: ignore -- read-idle timeout dial
-# asyncio.StreamReader's stock per-line buffer (64 KiB). Kept as the
-# default so existing callers see no behaviour change; providers whose
-# wire protocol carries large single-line payloads pass a higher cap.
-_DEFAULT_STREAM_LIMIT: Final = 64 * 1024
 
 
 class SubprocessTransportError(RuntimeError):
@@ -72,7 +68,9 @@ class Subproc:
         tmpdir: Path | None = None,
         cwd: Path | None = None,
         read_timeout_sec: float = _READ_IDLE_TIMEOUT_SEC,
-        stream_limit: int = _DEFAULT_STREAM_LIMIT,
+        # asyncio.StreamReader's stock per-line buffer (64 KiB): existing
+        # callers see no change; large single-line-payload protocols pass more.
+        stream_limit: int = 64 * 1024,
     ) -> None:
         self._argv = argv
         self._env = env

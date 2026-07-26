@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 import asyncio
 import logging
@@ -40,14 +40,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MIN_PDF_BYTES: Final = 128
 
-
-def _is_cached_pdf(path: Path) -> bool:
+def _is_cached_pdf(path: Path, *, min_pdf_bytes: int = 128) -> bool:
     """True if ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
     try:
         with path.open("rb") as f:
-            return looks_like_pdf(f.read(_MIN_PDF_BYTES))
+            return looks_like_pdf(f.read(min_pdf_bytes))
     except OSError:
         return False
 

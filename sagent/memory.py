@@ -22,7 +22,6 @@ directory layout.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
 
 from sagent.sessions import project_dir
 
@@ -111,10 +110,27 @@ def load_index(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
     return text
 
 
-_MEMORY_SECTION: Final = """\
+def build_system_section(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
+    """Build the auto-memory section for the system prompt.
+
+    Args:
+      cwd: Current working directory.
+      projects_dir: Override for the projects root.
+
+    Returns:
+      section: Memory section string (always non-empty).
+
+    """
+    # The prompt template tells the model the directory exists; create
+    # it here so a Write to ``<memory_dir>/foo.md`` succeeds without an
+    # explicit mkdir step.
+    mdir = ensure_memory_dir(cwd, projects_dir=projects_dir)
+    index = load_index(cwd, projects_dir=projects_dir)
+    index_block = index.strip() if index else "(no memories yet - MEMORY.md is empty)"
+    return f"""\
 # auto memory
 
-Persistent memory lives at `{memory_dir}/`. The directory exists; \
+Persistent memory lives at `{mdir}/`. The directory exists; \
 use Write directly (no mkdir needed).
 
 Build this memory over time so future sessions have full context: \
@@ -182,26 +198,3 @@ or flag, verify it still exists with Read or Grep.
 
 {index_block}
 """
-
-
-def build_system_section(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
-    """Build the auto-memory section for the system prompt.
-
-    Args:
-      cwd: Current working directory.
-      projects_dir: Override for the projects root.
-
-    Returns:
-      section: Memory section string (always non-empty).
-
-    """
-    # The prompt template tells the model the directory exists; create
-    # it here so a Write to ``<memory_dir>/foo.md`` succeeds without an
-    # explicit mkdir step.
-    mdir = ensure_memory_dir(cwd, projects_dir=projects_dir)
-    index = load_index(cwd, projects_dir=projects_dir)
-    index_block = index.strip() if index else "(no memories yet - MEMORY.md is empty)"
-    return _MEMORY_SECTION.format(
-        memory_dir=str(mdir),
-        index_block=index_block,
-    )

@@ -106,10 +106,6 @@ from sagent.tools.core import set_recipe
 _DEFAULT_PROVIDER = "Anthropic"
 _DEFAULT_AUTH = "env"
 _PROVIDER_STARTUP_ERRORS = (FileNotFoundError, RuntimeError, ValueError)
-_PROVIDER_ENV_HINTS: Final = {
-    "Anthropic": "ANTHROPIC_API_KEY",
-    "Google": "GOOGLE_API_KEY",
-}
 
 
 def _default_allow_providers() -> tuple[str, ...]:
@@ -788,7 +784,10 @@ def _credential_setup_commands(
         return ("codex login", login, run)
 
     cls = getattr(providers, provider_name, None)
-    env_var = _PROVIDER_ENV_HINTS.get(
+    env_var = {
+        "Anthropic": "ANTHROPIC_API_KEY",
+        "Google": "GOOGLE_API_KEY",
+    }.get(
         provider_name,
         getattr(cls, "ENV_VAR", None),
     )

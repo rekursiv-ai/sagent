@@ -31,7 +31,6 @@ from sagent.types.runtime import ToolResult
 
 
 _NUDGE_PREFIX: Final = "ls via Bash is a bad UX. Use the List tool"
-_NUDGE_GLOB: Final = "ls glob via Bash is a bad UX. Use the Glob tool."
 
 _DEFAULT_SORT: Final = "name"
 
@@ -255,7 +254,7 @@ def _ls_to_hint(
 ) -> str | None:
     """Translate parsed ``ls`` args into a List-tool nudge string."""
     if _ls_has_glob_positional(args):
-        return _NUDGE_GLOB
+        return "ls glob via Bash is a bad UX. Use the Glob tool."
     parsed = _parse_ls(args)
     if parsed is None:
         return None

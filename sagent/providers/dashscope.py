@@ -31,19 +31,6 @@ from sagent.providers.openai_compat import (
 from sagent.types.model import ModelRequest
 
 
-# Qwen3 "thinking" models always emit reasoning. Hybrid models toggle.
-# Prefixes are stored WITHOUT a trailing hyphen so they match both the
-# hyphenated ids (``qwen3-32b``) and the dotted generation ids
-# (``qwen3.6-plus``, the default). A bare ``qwen3-`` silently excluded the
-# entire qwen3.6 family -- including ``DEFAULT_MODEL`` -- from the effort knob.
-_THINKING_PREFIXES: Final = (
-    "qwen3",
-    "qwen-plus",
-    "qwen-max",
-    "qwq",
-    "qvq",
-)
-
 # Non-reasoning variants that share a thinking prefix but reject the
 # ``enable_thinking`` / ``thinking_budget`` knobs: the ``instruct`` and
 # ``coder`` qwen3 ids (e.g. ``qwen3-235b-a22b-instruct-2507``,
@@ -61,20 +48,6 @@ def _is_non_reasoning_variant(model_id: str) -> bool:
     return bool(_NON_REASONING_MARKERS.intersection(model_id.split("-")))
 
 
-# Map sagent's effort levels onto Qwen's ``thinking_budget`` (max reasoning
-# tokens). ``none`` is absent: it toggles ``enable_thinking=False`` instead, so
-# no budget applies. Mirrors Google's per-level budget table so the effort knob
-# drives reasoning depth rather than collapsing to an on/off bool.
-_DASHSCOPE_THINKING_BUDGETS: Final = {
-    "minimal": 1_024,
-    "low": 4_096,
-    "medium": 8_192,
-    "high": 16_384,
-    "xhigh": 24_576,
-    "max": 32_768,
-}
-
-
 class _DashScopeModel(OpenAICompatModel):
     """DashScope backend - reasoning_content, enable_thinking routing."""
 
@@ -90,7 +63,14 @@ class _DashScopeModel(OpenAICompatModel):
         """
         if _is_non_reasoning_variant(model_id):
             return False
-        return any(model_id.startswith(p) for p in _THINKING_PREFIXES)
+        # Prefixes WITHOUT a trailing hyphen match both the hyphenated ids
+        # (``qwen3-32b``) and the dotted generation ids (``qwen3.6-plus``, the
+        # default). A bare ``qwen3-`` silently excluded the entire qwen3.6
+        # family -- including ``DEFAULT_MODEL`` -- from the effort knob.
+        return any(
+            model_id.startswith(p)
+            for p in ("qwen3", "qwen-plus", "qwen-max", "qwq", "qvq")
+        )
 
     @override
     def _transform_body(
@@ -119,7 +99,19 @@ class _DashScopeModel(OpenAICompatModel):
         effort = request.effort
         if effort is not None:
             body["enable_thinking"] = effort != "none"
-            budget = _DASHSCOPE_THINKING_BUDGETS.get(effort)
+            # Map sagent's effort levels onto Qwen's ``thinking_budget`` (max
+            # reasoning tokens). ``none`` is absent: it toggles
+            # ``enable_thinking=False`` instead, so no budget applies. Mirrors
+            # Google's per-level budget table so the effort knob drives
+            # reasoning depth rather than collapsing to an on/off bool.
+            budget = {
+                "minimal": 1_024,
+                "low": 4_096,
+                "medium": 8_192,
+                "high": 16_384,
+                "xhigh": 24_576,
+                "max": 32_768,
+            }.get(effort)
             if budget is not None:
                 body["thinking_budget"] = budget
         # The *-thinking suffix models are always-on reasoning: they reject the

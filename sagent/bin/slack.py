@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Protocol, cast, override
 
 import argparse
 import asyncio
@@ -789,20 +789,19 @@ def _extract_channel_from_text(text: str) -> str:
     return ""
 
 
-_SLACK_MSG_LIMIT: Final = 3900
-
-
 async def _flush_log(
     buffer: list[str],
     channel_id: str,
     slack: Slack,
+    *,
+    msg_limit: int = 3900,
 ) -> None:
     """Flush buffered log lines to Slack, splitting at line boundaries."""
     chunk: list[str] = []
     chunk_len = 0
     for line in buffer:
         line_len = len(line) + 1  # +1 for newline join
-        if chunk and chunk_len + line_len > _SLACK_MSG_LIMIT:
+        if chunk and chunk_len + line_len > msg_limit:
             _ = await slack.send(channel_id, "\n".join(chunk))
             chunk = []
             chunk_len = 0

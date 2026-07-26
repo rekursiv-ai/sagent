@@ -70,20 +70,19 @@ CONFIGS: Final = {
     },
 }
 
-_KEY_FILE: Final = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
-_KEY_ENV: Final = {
-    "Google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-    "Anthropic": ("ANTHROPIC_API_KEY",),
-}
-
 
 def _read_key(provider_name: str) -> str | None:
     # Prefer a file (so the key never has to be exported into the CLI's env);
     # fall back to env if already set for this process.
-    for e in _KEY_ENV[provider_name]:
+    env_names = {
+        "Google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "Anthropic": ("ANTHROPIC_API_KEY",),
+    }
+    key_files = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
+    for e in env_names[provider_name]:
         if os.environ.get(e):
             return os.environ[e]
-    kf = config_dir("sagent") / _KEY_FILE[provider_name]
+    kf = config_dir("sagent") / key_files[provider_name]
     return kf.read_text().strip() if kf.exists() else None
 
 
@@ -108,9 +107,11 @@ def build(provider_name: str, model_id: str):
     return model, spec
 
 
-# Canonical biased/fixed sampler histograms for the viz (illustrative — the same
-# bias the agent hits). Run in a subprocess so numpy/scipy need not be in this env.
-_CANON_HIST: Final = r"""
+def canonical_histograms() -> dict[str, Any]:
+    # Canonical biased/fixed sampler histograms for the viz (illustrative — the
+    # same bias the agent hits). Run in a subprocess so numpy/scipy need not be
+    # in this env.
+    canon_hist = r"""
 import json
 import numpy as np
 from scipy import stats
@@ -141,11 +142,8 @@ print("HIST " + json.dumps({
     "exp_ref": stats.expon.pdf(centers, scale=2).tolist(),
 }))
 """
-
-
-def canonical_histograms() -> dict[str, Any]:
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
-        fh.write(_CANON_HIST)
+        fh.write(canon_hist)
         path = fh.name
     try:
         r = subprocess.run(  # noqa: S603

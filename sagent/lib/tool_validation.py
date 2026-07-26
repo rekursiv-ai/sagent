@@ -3,23 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Final, cast
+from typing import cast
 
 from sagent.lib.custom_json import JSON, validate_json_schema
 
 
-_INPUT_VALIDATION_PREFIX: Final = "InputValidationError:"
-_TOOL_INPUT_RECOVERY_HINT: Final = (
-    "This tool call was not executed because its JSON directive was missing or "
-    "misstated required fields. Do not repeat the same empty or incomplete call. "
-    "Either retry this tool with the required fields, choose a different tool "
-    "that fits the task, or explain why the required value is unavailable."
-)
-# String prefix produced by ``sagent.lib.custom_json.validate_json_schema`` when
-# ``additionalProperties: false`` rejects a key. We branch on the literal
-# because the upstream function returns plain strings; changes to that prefix
-# must be reflected here.
-_UNEXPECTED_PARAMETER_PREFIX: Final = "Unexpected parameter"
 _MAX_ADVERTISED_KEYS = 50  # config-globals: ignore -- max advertised keys in error
 
 
@@ -44,7 +32,7 @@ def validate_tool_input(
         return None
     plural = "issues" if len(issues) > 1 else "issue"
     parts = [
-        f"{_INPUT_VALIDATION_PREFIX} {tool_name} failed due to the following {plural}:",
+        f"InputValidationError: {tool_name} failed due to the following {plural}:",
         *issues,
     ]
     required = _schema_strings(schema.get("required"))
@@ -53,12 +41,18 @@ def validate_tool_input(
     if required:
         keys = ", ".join(f"`{k}`" for k in required)
         parts.append(f"\n{tool_name} requires: {keys}.")
-    if (
-        any(issue.startswith(_UNEXPECTED_PARAMETER_PREFIX) for issue in issues)
-        and accepted
-    ):
+    # ``validate_json_schema`` returns this literal prefix when
+    # ``additionalProperties: false`` rejects a key; branch on it because the
+    # upstream function returns plain strings. Changes to that prefix must be
+    # reflected here.
+    if any(issue.startswith("Unexpected parameter") for issue in issues) and accepted:
         parts.append(f"{tool_name} accepts: {_format_keys(accepted)}.")
-    parts.append(f"\n{_TOOL_INPUT_RECOVERY_HINT}")
+    parts.append(
+        "\nThis tool call was not executed because its JSON directive was missing "
+        "or misstated required fields. Do not repeat the same empty or incomplete "
+        "call. Either retry this tool with the required fields, choose a different "
+        "tool that fits the task, or explain why the required value is unavailable."
+    )
     return "\n".join(parts)
 
 

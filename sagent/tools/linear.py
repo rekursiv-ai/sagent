@@ -34,72 +34,7 @@ from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
 
-_API_URL: Final = "https://api.linear.app/graphql"
 _DEFAULT_TIMEOUT = 30.0  # config-globals: ignore -- request timeout dial
-
-_LIST_ISSUES: Final = """
-query ListIssues($filter: IssueFilter, $first: Int!) {
-  issues(first: $first, filter: $filter) {
-    nodes {
-      identifier
-      title
-      state { name }
-      assignee { name email }
-      priority
-      url
-      updatedAt
-    }
-  }
-}
-"""
-
-_GET_ISSUE: Final = """
-query GetIssue($id: String!) {
-  issue(id: $id) {
-    identifier
-    title
-    description
-    state { name }
-    assignee { name email }
-    priority
-    url
-    createdAt
-    updatedAt
-    comments(first: 20) { nodes { body user { name } createdAt } }
-  }
-}
-"""
-
-_CREATE_ISSUE: Final = """
-mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
-  issueCreate(input: { teamId: $teamId, title: $title, description: $description }) {
-    success
-    issue { identifier title url }
-  }
-}
-"""
-
-_UPDATE_ISSUE: Final = """
-mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
-  issueUpdate(id: $id, input: $input) {
-    success
-    issue { identifier title url state { name } }
-  }
-}
-"""
-
-_CREATE_COMMENT: Final = """
-mutation AddComment($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment { id }
-  }
-}
-"""
-
-_TEAM_BY_KEY: Final = """
-query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }
-"""
 
 
 async def _gql(
@@ -125,7 +60,7 @@ async def _gql(
     try:
         raw = await asyncio.to_thread(
             fetch,
-            url=_API_URL,
+            url="https://api.linear.app/graphql",
             request=RequestParams(
                 method="POST",
                 json={"query": query, "variables": variables},
@@ -160,7 +95,13 @@ async def _gql(
 
 async def _team_id(team_key: str, api_key: str) -> str | ToolResult:
     """Look up the opaque team id for a Linear team key (e.g. ``ENG``)."""
-    data = await _gql(_TEAM_BY_KEY, variables={"key": team_key}, api_key=api_key)
+    data = await _gql(
+        """
+query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }
+""",
+        variables={"key": team_key},
+        api_key=api_key,
+    )
     if isinstance(data, ToolResult):
         return data
     teams = cast(
@@ -358,7 +299,21 @@ class Linear:
         if assignee_email:
             issue_filter["assignee"] = {"email": {"eq": assignee_email}}
         data = await _gql(
-            _LIST_ISSUES,
+            """
+query ListIssues($filter: IssueFilter, $first: Int!) {
+  issues(first: $first, filter: $filter) {
+    nodes {
+      identifier
+      title
+      state { name }
+      assignee { name email }
+      priority
+      url
+      updatedAt
+    }
+  }
+}
+""",
             variables={
                 "filter": issue_filter or None,
                 "first": max(1, min(100, limit)),
@@ -380,7 +335,26 @@ class Linear:
         """Fetch one issue via ``GetIssue`` and render it."""
         if not issue_id:
             return ToolResult(call_id="", content="'id' required.", is_error=True)
-        data = await _gql(_GET_ISSUE, variables={"id": issue_id}, api_key=api_key)
+        data = await _gql(
+            """
+query GetIssue($id: String!) {
+  issue(id: $id) {
+    identifier
+    title
+    description
+    state { name }
+    assignee { name email }
+    priority
+    url
+    createdAt
+    updatedAt
+    comments(first: 20) { nodes { body user { name } createdAt } }
+  }
+}
+""",
+            variables={"id": issue_id},
+            api_key=api_key,
+        )
         if isinstance(data, ToolResult):
             return data
         issue = cast(MutableJSON | None, data.get("issue"))
@@ -407,7 +381,14 @@ class Linear:
         if isinstance(team_id, ToolResult):
             return team_id
         data = await _gql(
-            _CREATE_ISSUE,
+            """
+mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
+  issueCreate(input: { teamId: $teamId, title: $title, description: $description }) {
+    success
+    issue { identifier title url }
+  }
+}
+""",
             variables={
                 "teamId": team_id,
                 "title": title,
@@ -452,7 +433,14 @@ class Linear:
                 is_error=True,
             )
         data = await _gql(
-            _UPDATE_ISSUE,
+            """
+mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue { identifier title url state { name } }
+  }
+}
+""",
             variables={"id": issue_id, "input": update_input},
             api_key=api_key,
         )
@@ -483,7 +471,14 @@ class Linear:
                 is_error=True,
             )
         data = await _gql(
-            _CREATE_COMMENT,
+            """
+mutation AddComment($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id }
+  }
+}
+""",
             variables={"issueId": issue_id, "body": body},
             api_key=api_key,
         )

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import logging
@@ -272,27 +272,27 @@ def extract_retry_after(error: Exception) -> float | None:
     return None
 
 
-# Anthropic's per-window status headers. A ``rejected`` / ``rate_limited``
-# value on any window means the request was actually throttled, so the
-# ``-reset`` clock becomes a real retry-after. ``allowed`` and
-# ``allowed_warning`` are both non-blocking: ``allowed_warning`` is a heads-up
-# that a window is filling (it rides the always-present ``-reset`` clock, often
-# the 7d rollover ~24h away), NOT an instruction to wait -- honoring it halts a
-# still-serviceable session for hours (Issue#316). ``-overage-status`` is
-# excluded: it describes overage billing eligibility, not whether THIS request
-# was limited.
-_UNIFIED_STATUS_HEADERS: Final = (
-    "anthropic-ratelimit-unified-status",
-    "anthropic-ratelimit-unified-5h-status",
-    "anthropic-ratelimit-unified-7d-status",
-)
-
 _UNIFIED_REJECTED_STATUSES = frozenset({"rejected", "rate_limited"})
 
 
 def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
-    """True when a unified-ratelimit status header reports a blocked request."""
-    for name in _UNIFIED_STATUS_HEADERS:
+    """True when a unified-ratelimit status header reports a blocked request.
+
+    Consults Anthropic's per-window status headers. A ``rejected`` /
+    ``rate_limited`` value on any window means the request was actually
+    throttled, so the ``-reset`` clock becomes a real retry-after.
+    ``allowed`` and ``allowed_warning`` are both non-blocking:
+    ``allowed_warning`` is a heads-up that a window is filling (it rides the
+    always-present ``-reset`` clock, often the 7d rollover ~24h away), NOT an
+    instruction to wait -- honoring it halts a still-serviceable session for
+    hours (Issue#316). ``-overage-status`` is excluded: it describes overage
+    billing eligibility, not whether THIS request was limited.
+    """
+    for name in (
+        "anthropic-ratelimit-unified-status",
+        "anthropic-ratelimit-unified-5h-status",
+        "anthropic-ratelimit-unified-7d-status",
+    ):
         status = headers.get(name)
         if status is not None and status.strip().lower() in _UNIFIED_REJECTED_STATUSES:
             return True

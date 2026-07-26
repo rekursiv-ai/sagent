@@ -145,13 +145,6 @@ _NON_SUBSCRIPTION_AUTH_ENV = frozenset(
         "CLAUDE_CODE_USE_VERTEX",
     },
 )
-# Cap on waiting for the CLI to fetch the MCP catalog (proof the
-# in-process bridge connected) before feeding the first user line. The
-# CLI's MCP connect + catalog fetch is ~2-3s on a cold subprocess
-# locally; this bounds a pathologically slow connect before we give up
-# and proceed. Only paid once, on a cold spawn's first turn -- warm
-# subprocesses keep the connection and skip the wait entirely.
-_MCP_CONNECT_TIMEOUT_SEC: Final = 8.0
 _CREDENTIALS_SCHEMA: Final[JSON] = {
     "type": "object",
     "required": ["claudeAiOauth"],
@@ -512,6 +505,7 @@ class AnthropicCLI(Anthropic):
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
+        mcp_connect_timeout_sec: float = 8.0,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
 
@@ -545,6 +539,13 @@ class AnthropicCLI(Anthropic):
             commands (e.g. ``pre-commit run --files ...``,
             ``ty check``, big test suites) that legitimately go
             silent for >60s while claude awaits the result.
+          mcp_connect_timeout_sec: Cap (seconds) on waiting for the CLI to
+            fetch the MCP catalog (proof the in-process bridge connected)
+            before feeding the first user line. The CLI's MCP connect +
+            catalog fetch is ~2-3s on a cold subprocess locally; this bounds
+            a pathologically slow connect before we give up. Only paid once,
+            on a cold spawn's first turn -- warm subprocesses keep the
+            connection and skip the wait entirely.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -579,6 +580,7 @@ class AnthropicCLI(Anthropic):
             extra_mcp_servers=extra_mcp_servers,
             session_id=session_id,
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
+            mcp_connect_timeout_sec=mcp_connect_timeout_sec,
         )
 
     @override
@@ -618,11 +620,15 @@ class _AnthropicCLIModel:
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
+        mcp_connect_timeout_sec: float = 8.0,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
         self._profile = profile
         self._max_request_tokens = max_request_tokens
+        # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
+        # before feeding the first user line. See ``AnthropicCLI.model``.
+        self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -1585,7 +1591,7 @@ class _AnthropicCLIModel:
         already exceeded).
 
         No-op when the bridge has no tools. When tools ARE expected but
-        the catalog is not fetched within ``_MCP_CONNECT_TIMEOUT_SEC``,
+        the catalog is not fetched within ``_mcp_connect_timeout_sec``,
         raise :class:`SubprocessTransportError` rather than silently
         feeding the turn a tool-less context: a degraded "no tools have
         been provided" answer is worse than a respawn. The standard
@@ -1597,12 +1603,12 @@ class _AnthropicCLIModel:
             return
         baseline = self._mcp_baseline_by_proc.get(id(proc), 0)
         listed = await self._tools_bridge.wait_listed(
-            baseline, _MCP_CONNECT_TIMEOUT_SEC
+            baseline, self._mcp_connect_timeout_sec
         )
         if not listed:
             raise SubprocessTransportError(
                 "AnthropicCLI: MCP bridge catalog not fetched within "
-                f"{_MCP_CONNECT_TIMEOUT_SEC:.1f}s (CLI MCP client never "
+                f"{self._mcp_connect_timeout_sec:.1f}s (CLI MCP client never "
                 "connected); respawning rather than running a tool-less turn",
             )
         # Consumed: this proc has connected. Drop the baseline so the map

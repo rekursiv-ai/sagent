@@ -64,7 +64,6 @@ class SkillInfo:
 
 
 _USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("sagent") / "skills",)
-_PROJECT_SKILL_SUBDIRS: Final = (".sagent/skills",)
 _IMPORT_SKILL_SUBDIRS: Final = {
     "agents": ".agents/skills",
 }
@@ -90,11 +89,7 @@ def discover(
       skills: Deduplicated list of discovered skills, project-first.
 
     """
-    project_roots = [
-        d / subdir
-        for d in reversed(walk_up(Path(cwd)))
-        for subdir in _PROJECT_SKILL_SUBDIRS
-    ]
+    project_roots = [d / ".sagent/skills" for d in reversed(walk_up(Path(cwd)))]
     imported_roots = [
         d / subdir
         for d in reversed(walk_up(Path(cwd)))
