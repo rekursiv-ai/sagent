@@ -25,6 +25,7 @@ from sagent.providers.anthropic_cli import (
     _AnthropicCLIModel,
     _build_anthropic_argv,
     _build_model_response,
+    _claude_auth_status,
     _dispatch_stream_event,
     _extract_retry_after_ms,
     _hash_system,
@@ -87,6 +88,21 @@ def _which_claude_stub(_name: str) -> str | None:
     return "/usr/bin/claude"
 
 
+def _auth_status_unknown(_binary: str) -> bool | None:
+    """Pretend the installed CLI predates the native status command."""
+    return None
+
+
+def _auth_status_logged_in(_binary: str) -> bool | None:
+    """Pretend the native CLI reports an active login."""
+    return True
+
+
+def _auth_status_logged_out(_binary: str) -> bool | None:
+    """Pretend the native CLI reports no active login."""
+    return False
+
+
 def test_anthropic_cli_does_not_import_subscription_provider() -> None:
     source = inspect.getsource(anthropic_cli)
     assert "providers.anthropic_sub" not in source
@@ -95,13 +111,269 @@ def test_anthropic_cli_does_not_import_subscription_provider() -> None:
 def test_from_cli_requires_credentials(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``from_credentials`` raises ``FileNotFoundError`` if no creds file exists."""
+    """Legacy CLIs without auth status still require the credentials file."""
     monkeypatch.setattr(
         "sagent.providers.anthropic_cli._CREDS_PATH",
         tmp_path / "missing.json",
     )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._claude_auth_status",
+        _auth_status_unknown,
+    )
     with pytest.raises(FileNotFoundError, match="no credentials"):
         AnthropicCLI.from_credentials()
+
+
+def test_from_cli_accepts_native_login_without_credentials_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The native Keychain login is authoritative without the legacy file."""
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / "missing.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._claude_auth_status",
+        _auth_status_logged_in,
+    )
+
+    provider = AnthropicCLI.from_credentials()
+
+    assert provider.account is None
+
+
+def test_from_cli_treats_explicit_default_account_as_native_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--account default`` must not bypass the macOS Keychain login."""
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / "missing.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._claude_auth_status",
+        _auth_status_logged_in,
+    )
+
+    provider = AnthropicCLI.from_credentials(account="default")
+
+    assert provider.account is None
+
+
+def test_from_cli_missing_named_account_does_not_suggest_native_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Native login cannot create Sagent's legacy named credential file."""
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
+    )
+
+    with pytest.raises(FileNotFoundError) as exc:
+        AnthropicCLI.from_credentials(account="work")
+
+    assert "named-account credentials" in str(exc.value)
+    assert "claude auth login" not in str(exc.value)
+
+
+def test_from_cli_rejects_native_logged_out_state_even_with_stale_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale legacy JSON file must not override an explicit logged-out state."""
+    creds = _write_creds(tmp_path)
+    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        _which_claude_stub,
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._claude_auth_status",
+        _auth_status_logged_out,
+    )
+
+    with pytest.raises(FileNotFoundError, match=r"claude auth login"):
+        AnthropicCLI.from_credentials()
+
+
+def test_claude_auth_status_scrubs_non_subscription_auth_and_reads_boolean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native status checks subscription login without leaking API-key auth."""
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return MagicMock(
+            stdout=(
+                '{"loggedIn": true, "authMethod": "claude.ai", '
+                '"apiProvider": "firstParty"}'
+            ),
+            returncode=0,
+        )
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-test-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "secret-test-token")
+    monkeypatch.setenv("ANTHROPIC_AWS_API_KEY", "secret-aws-key")
+    monkeypatch.setenv("ANTHROPIC_UNIX_SOCKET", "/synthetic/claude.sock")
+    monkeypatch.setenv("CLAUDE_CODE_API_BASE_URL", "https://synthetic.invalid")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth-token")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ACCESS_TOKEN", "secret-session-token")
+    monkeypatch.setenv("CLAUDE_CODE_USE_ANTHROPIC_AWS", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_GATEWAY", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_MANTLE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_FOUNDRY", "1")
+    monkeypatch.setattr("sagent.providers.anthropic_cli.subprocess.run", fake_run)
+
+    assert _claude_auth_status("/opt/homebrew/bin/claude") is True
+    assert captured["args"] == (
+        [
+            "/opt/homebrew/bin/claude",
+            "auth",
+            "status",
+            "--json",
+        ],
+    )
+    env = cast(dict[str, str], captured["env"])
+    for key in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AWS_API_KEY",
+        "ANTHROPIC_UNIX_SOCKET",
+        "CLAUDE_CODE_API_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ):
+        assert key not in env
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+            },
+            True,
+        ),
+        ({"loggedIn": True, "authMethod": "console"}, False),
+        ({"loggedIn": True, "authMethod": "api_key"}, False),
+        ({"loggedIn": True}, None),
+        ({"loggedIn": False}, False),
+    ],
+)
+def test_claude_auth_status_requires_subscription_method(
+    monkeypatch: pytest.MonkeyPatch,
+    status: dict[str, object],
+    expected: bool | None,
+) -> None:
+    def fake_run(*_args: object, **_kwargs: object) -> object:
+        return MagicMock(
+            stdout=json.dumps(status),
+            returncode=0,
+        )
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.subprocess.run",
+        fake_run,
+    )
+
+    assert _claude_auth_status("/opt/homebrew/bin/claude") is expected
+
+
+def test_login_runs_native_claudeai_flow_with_scrubbed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return MagicMock(returncode=0)
+
+    def fake_which(_name: str) -> str:
+        return "/opt/homebrew/bin/claude"
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-test-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth-token")
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr("sagent.providers.anthropic_cli.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli._claude_auth_status",
+        _auth_status_logged_in,
+    )
+
+    AnthropicCLI.login()
+
+    assert captured["args"] == (
+        [
+            "/opt/homebrew/bin/claude",
+            "auth",
+            "login",
+            "--claudeai",
+        ],
+    )
+    env = cast(dict[str, str], captured["env"])
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_login_rejects_named_anthropic_account() -> None:
+    with pytest.raises(ValueError, match="named accounts"):
+        AnthropicCLI.login(account="work")
+
+
+def test_login_reports_native_cli_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_which(_name: str) -> str:
+        return "/opt/homebrew/bin/claude"
+
+    def fake_run(*_args: object, **_kwargs: object) -> object:
+        return MagicMock(returncode=7)
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.subprocess.run",
+        fake_run,
+    )
+
+    with pytest.raises(RuntimeError, match="exit code 7"):
+        AnthropicCLI.login()
 
 
 def test_from_cli_with_credentials(
@@ -452,14 +724,20 @@ def test_serialize_for_stdin_rejects_tool_result() -> None:
 
 
 def test_anthropic_subprocess_env_overrides_home_when_tmpdir_set(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Stateless mode (or session-persistent + per-account): tmpdir
     becomes HOME so the renamed credentials file is found.
     """
+    monkeypatch.setenv(
+        "CLAUDE_CONFIG_DIR",
+        "/operator/.claude",
+    )
     env = _anthropic_subprocess_env(tmp_path)
     assert env["HOME"] == str(tmp_path)
     assert env["USERPROFILE"] == str(tmp_path)
+    assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / ".claude")
     # Stateless default has CLAUDE_CODE_SKIP_PROMPT_HISTORY set.
     assert env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] == "1"
 
@@ -472,6 +750,42 @@ def test_anthropic_subprocess_env_skip_history_off_when_persistent(
     """
     env = _anthropic_subprocess_env(tmp_path, persist_session=True)
     assert "CLAUDE_CODE_SKIP_PROMPT_HISTORY" not in env
+
+
+def test_anthropic_subprocess_env_strips_non_subscription_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    keys = (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_AWS_API_KEY",
+        "ANTHROPIC_BEDROCK_MANTLE_API_KEY",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+        "ANTHROPIC_IDENTITY_TOKEN",
+        "ANTHROPIC_UNIX_SOCKET",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "CLAUDE_CODE_API_BASE_URL",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_GATEWAY",
+        "CLAUDE_CODE_USE_MANTLE",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    )
+    for key in keys:
+        monkeypatch.setenv(key, "synthetic-test-value")
+
+    env = _anthropic_subprocess_env(None)
+
+    for key in keys:
+        assert key not in env
 
 
 def test_anthropic_subprocess_env_always_disables_autocompact(
@@ -488,6 +802,90 @@ def test_anthropic_subprocess_env_always_disables_autocompact(
 
     env_stateless = _anthropic_subprocess_env(tmp_path, persist_session=False)
     assert env_stateless.get("DISABLE_AUTO_COMPACT") == "1"
+
+
+@pytest.mark.asyncio
+async def test_stateless_default_account_inherits_native_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default-account subprocesses retain macOS Keychain-backed CLI auth."""
+    operator_home = tmp_path / "operator-home"
+    monkeypatch.setenv("HOME", str(operator_home))
+    captured: dict[str, object] = {}
+
+    class _CaptureSubproc:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            captured["argv"] = argv
+            captured.update(kwargs)
+
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(anthropic_cli, "Subproc", _CaptureSubproc)
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    bridge = MagicMock()
+    bridge.url = "http://127.0.0.1:1234/mcp"
+    bridge.server_name = "sagent_test"
+    bridge.has_tools = False
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    await model._spawn_initialized()
+
+    env = cast(dict[str, str], captured["env"])
+    assert env["HOME"] == str(operator_home)
+    assert captured["tmpdir"] is None
+
+
+@pytest.mark.asyncio
+async def test_stateless_named_account_uses_isolated_file_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Named accounts retain the explicit file-isolation behavior."""
+    base = tmp_path / ".credentials.json"
+    named = tmp_path / ".credentials-work.json"
+    named.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
+    isolated = tmp_path / "isolated-home"
+    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", base)
+
+    def fake_mkdtemp(**_kwargs: object) -> str:
+        return str(isolated)
+
+    monkeypatch.setattr(
+        "sagent.providers.anthropic_cli.tempfile.mkdtemp",
+        fake_mkdtemp,
+    )
+    captured: dict[str, object] = {}
+
+    class _CaptureSubproc:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            captured["argv"] = argv
+            captured.update(kwargs)
+
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(anthropic_cli, "Subproc", _CaptureSubproc)
+    model = AnthropicCLI(account="work").model("claude-haiku-4-5")
+    bridge = MagicMock()
+    bridge.url = "http://127.0.0.1:1234/mcp"
+    bridge.server_name = "sagent_test"
+    bridge.has_tools = False
+    model._tools_bridge = cast(ToolsBridge, bridge)
+
+    await model._spawn_initialized()
+
+    env = cast(dict[str, str], captured["env"])
+    assert env["HOME"] == str(isolated)
+    assert captured["tmpdir"] == isolated
+    assert (isolated / ".claude" / ".credentials.json").exists()
 
 
 def test_build_model_response_normalizes_input_to_last_round() -> None:
