@@ -93,7 +93,9 @@ from sagent.types.runtime import (
 
 logger = logging.getLogger(__name__)
 
-_STREAM_IDLE_TIMEOUT = 600.0
+_STREAM_IDLE_TIMEOUT = (
+    600.0  # config-globals: ignore -- stream idle timeout, user-retunable
+)
 
 
 def openai_chat_reasoning_effort(model_id: str, effort: str) -> str | None:

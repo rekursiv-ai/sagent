@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import asyncio
 import time
@@ -29,10 +30,10 @@ from sagent.tools.lib.path_sort import (
 from sagent.types.runtime import ToolResult
 
 
-_NUDGE_PREFIX = "ls via Bash is a bad UX. Use the List tool"
-_NUDGE_GLOB = "ls glob via Bash is a bad UX. Use the Glob tool."
+_NUDGE_PREFIX: Final = "ls via Bash is a bad UX. Use the List tool"
+_NUDGE_GLOB: Final = "ls glob via Bash is a bad UX. Use the Glob tool."
 
-_DEFAULT_SORT = "name"
+_DEFAULT_SORT: Final = "name"
 
 
 class List:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from typing import Final
 
 import dataclasses
 
@@ -18,7 +19,7 @@ from sagent.types.runtime import (
 )
 
 
-ELIDED_TOOL_RESULT_TAG = "<elided>"
+ELIDED_TOOL_RESULT_TAG: Final = "<elided>"
 
 
 def materialize_request(

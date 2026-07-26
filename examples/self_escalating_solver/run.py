@@ -18,7 +18,7 @@ the harness, measures the self-mutate success rate over ``--trials`` runs (defau
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import argparse
 import asyncio
@@ -52,7 +52,7 @@ HERE = Path(__file__).parent
 # self-mutate agent UPGRADES to. For "cross" they differ on purpose — the
 # high-tier baseline is expensive Opus, while the self-mutator upgrades only to
 # the cheaper Sonnet, so adaptive self-mutation beats always-Opus on cost.
-CONFIGS = {
+CONFIGS: Final = {
     "google": {
         "cheap": ("Google", "gemini-2.5-flash-lite"),
         "high": ("Google", "gemini-3.1-pro-preview"),
@@ -70,8 +70,8 @@ CONFIGS = {
     },
 }
 
-_KEY_FILE = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
-_KEY_ENV = {
+_KEY_FILE: Final = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
+_KEY_ENV: Final = {
     "Google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "Anthropic": ("ANTHROPIC_API_KEY",),
 }
@@ -110,7 +110,7 @@ def build(provider_name: str, model_id: str):
 
 # Canonical biased/fixed sampler histograms for the viz (illustrative — the same
 # bias the agent hits). Run in a subprocess so numpy/scipy need not be in this env.
-_CANON_HIST = r"""
+_CANON_HIST: Final = r"""
 import json
 import numpy as np
 from scipy import stats

@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import dataclasses
 import logging
@@ -63,8 +64,8 @@ class SkillInfo:
 
 
 _USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("sagent") / "skills",)
-_PROJECT_SKILL_SUBDIRS = (".sagent/skills",)
-_IMPORT_SKILL_SUBDIRS = {
+_PROJECT_SKILL_SUBDIRS: Final = (".sagent/skills",)
+_IMPORT_SKILL_SUBDIRS: Final = {
     "agents": ".agents/skills",
 }
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")

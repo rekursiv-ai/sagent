@@ -30,7 +30,7 @@ __all__ = ["HotSpare"]
 
 logger = logging.getLogger(__name__)
 
-_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3
+_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3  # config-globals: ignore -- failure-count dial
 
 
 class HotSpare:

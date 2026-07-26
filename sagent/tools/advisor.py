@@ -16,6 +16,7 @@ and fully observable in the REPL.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from typing import Final
 
 from sagent.agent import runtime as agent_runtime
 from sagent.lib import debug_log
@@ -30,14 +31,14 @@ from sagent.types.runtime import (
 )
 
 
-_SYSTEM = (
+_SYSTEM: Final = (
     "You advise a coding agent that is stuck on a decision. Read the"
     " question and return a concise plan, correction, or stop signal."
     " You have no tools and cannot act - your reply goes only to the"
     " executor. Be direct and specific; skip preamble."
 )
 
-_DESCRIPTION = (
+_DESCRIPTION: Final = (
     "Consult a more capable advisor model for guidance. The advisor"
     " has no tools and sees only the prompt you send. Typical"
     " triggers: a tool call has failed twice, you're choosing between"
@@ -46,7 +47,7 @@ _DESCRIPTION = (
     " considered, and the specific decision you need help with."
 )
 
-SYSTEM_NUDGE = (
+SYSTEM_NUDGE: Final = (
     "# Advisor\n\n"
     "An `advisor` tool is available - a more capable model with no"
     " tools of its own. It returns a short plan, correction, or stop"

@@ -18,7 +18,7 @@ library; this file is intentionally not generic across surfaces.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import difflib
 import re
@@ -71,17 +71,17 @@ class _MonokaiStyle(Style):
     }
 
 
-_DIFF_CONTEXT_LINES = 3
+_DIFF_CONTEXT_LINES = 3  # config-globals: ignore -- diff context lines, display pref
 _DIFF_FORMATTER: Terminal256Formatter[str] = Terminal256Formatter(style=_MonokaiStyle)
 
 # Diff background colors (dark mode).
-_DIFF_ADDED_STYLE = "on rgb(34,92,43)"  # Dark green.
-_DIFF_REMOVED_STYLE = "on rgb(122,41,54)"  # Dark red.
-_DIFF_ADDED_WORD_STYLE = "on rgb(56,166,96)"  # Brighter green.
-_DIFF_REMOVED_WORD_STYLE = "on rgb(179,89,107)"  # Brighter red.
+_DIFF_ADDED_STYLE: Final = "on rgb(34,92,43)"  # Dark green.
+_DIFF_REMOVED_STYLE: Final = "on rgb(122,41,54)"  # Dark red.
+_DIFF_ADDED_WORD_STYLE: Final = "on rgb(56,166,96)"  # Brighter green.
+_DIFF_REMOVED_WORD_STYLE: Final = "on rgb(179,89,107)"  # Brighter red.
 
 # Muted gray for diff gutter line numbers.
-_GUTTER_FG = "rgb(160,160,160)"
+_GUTTER_FG: Final = "rgb(160,160,160)"
 
 # Word-diff falls back to line-level highlighting once the changed
 # characters exceed this fraction of the total compared characters.
@@ -89,7 +89,9 @@ _GUTTER_FG = "rgb(160,160,160)"
 # legible (a couple of changed tokens per line); above, the highlight
 # noise overwhelms the surrounding context and the line diff is
 # clearer. Adjust together with the diff fixtures.
-_WORD_DIFF_THRESHOLD = 0.4
+_WORD_DIFF_THRESHOLD = (
+    0.4  # config-globals: ignore -- word-diff fallback threshold, display pref
+)
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # Unified-diff file-header lines (``--- a/foo`` / ``+++ b/foo``) start

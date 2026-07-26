@@ -70,7 +70,9 @@ __all__ = [
 # summarization prompt + tools schema + the produced summary itself.
 # Without this, the planner's "partition fits the model" check rounds
 # right up to the cliff and the producer's own ``stream`` overflows.
-DEFAULT_SAFETY_FLOOR_TOKENS = 8_000
+DEFAULT_SAFETY_FLOOR_TOKENS = (
+    8_000  # config-globals: ignore -- safety floor token budget (runtime knob)
+)
 
 
 class ScrunchTooLargeError(RuntimeError):

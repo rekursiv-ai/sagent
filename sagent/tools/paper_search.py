@@ -9,7 +9,7 @@ limiting.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from wesearch.paper.custom_types import PaperRecord
 
 
-_VALID_SOURCES: tuple[Source, ...] = (
+_VALID_SOURCES: Final[tuple[Source, ...]] = (
     "s2",
     "openalex",
     "searxng",

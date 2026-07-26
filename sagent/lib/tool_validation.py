@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Final, cast
 
 from sagent.lib.custom_json import JSON, validate_json_schema
 
 
-_INPUT_VALIDATION_PREFIX = "InputValidationError:"
-_TOOL_INPUT_RECOVERY_HINT = (
+_INPUT_VALIDATION_PREFIX: Final = "InputValidationError:"
+_TOOL_INPUT_RECOVERY_HINT: Final = (
     "This tool call was not executed because its JSON directive was missing or "
     "misstated required fields. Do not repeat the same empty or incomplete call. "
     "Either retry this tool with the required fields, choose a different tool "
@@ -19,8 +19,8 @@ _TOOL_INPUT_RECOVERY_HINT = (
 # ``additionalProperties: false`` rejects a key. We branch on the literal
 # because the upstream function returns plain strings; changes to that prefix
 # must be reflected here.
-_UNEXPECTED_PARAMETER_PREFIX = "Unexpected parameter"
-_MAX_ADVERTISED_KEYS = 50
+_UNEXPECTED_PARAMETER_PREFIX: Final = "Unexpected parameter"
+_MAX_ADVERTISED_KEYS = 50  # config-globals: ignore -- max advertised keys in error
 
 
 def validate_tool_input(

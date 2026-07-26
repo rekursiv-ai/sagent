@@ -20,7 +20,7 @@ Supported operations:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import Final, cast
 
 import asyncio
 import json
@@ -34,10 +34,10 @@ from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
 
-_API_URL = "https://api.linear.app/graphql"
-_DEFAULT_TIMEOUT = 30.0
+_API_URL: Final = "https://api.linear.app/graphql"
+_DEFAULT_TIMEOUT = 30.0  # config-globals: ignore -- request timeout dial
 
-_LIST_ISSUES = """
+_LIST_ISSUES: Final = """
 query ListIssues($filter: IssueFilter, $first: Int!) {
   issues(first: $first, filter: $filter) {
     nodes {
@@ -53,7 +53,7 @@ query ListIssues($filter: IssueFilter, $first: Int!) {
 }
 """
 
-_GET_ISSUE = """
+_GET_ISSUE: Final = """
 query GetIssue($id: String!) {
   issue(id: $id) {
     identifier
@@ -70,7 +70,7 @@ query GetIssue($id: String!) {
 }
 """
 
-_CREATE_ISSUE = """
+_CREATE_ISSUE: Final = """
 mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
   issueCreate(input: { teamId: $teamId, title: $title, description: $description }) {
     success
@@ -79,7 +79,7 @@ mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
 }
 """
 
-_UPDATE_ISSUE = """
+_UPDATE_ISSUE: Final = """
 mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
@@ -88,7 +88,7 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
 }
 """
 
-_CREATE_COMMENT = """
+_CREATE_COMMENT: Final = """
 mutation AddComment($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
     success
@@ -97,7 +97,7 @@ mutation AddComment($issueId: String!, $body: String!) {
 }
 """
 
-_TEAM_BY_KEY = """
+_TEAM_BY_KEY: Final = """
 query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }
 """
 
@@ -176,7 +176,7 @@ async def _team_id(team_key: str, api_key: str) -> str | ToolResult:
     return str(teams[0]["id"])
 
 
-_OPERATIONS = (
+_OPERATIONS: Final = (
     "list_issues",
     "get_issue",
     "create_issue",

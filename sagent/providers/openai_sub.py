@@ -55,6 +55,7 @@ from typing import (
     IO,
     TYPE_CHECKING,
     ClassVar,
+    Final,
     NotRequired,
     Protocol,
     TypedDict,
@@ -157,33 +158,41 @@ logger = logging.getLogger(__name__)
 #   issuer:      codex-rs/login/src/server.rs:51
 #   scope:       codex-rs/login/src/server.rs:493 (verbatim match)
 #   base URL:    codex-rs/model-provider-info/src/lib.rs:237
-_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-_TOKEN_URL = "https://auth.openai.com/oauth/token"  # noqa: S105 -- not a secret; OAuth endpoint URL
-_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
-_BASE_URL = "https://chatgpt.com/backend-api/codex"
+_CLIENT_ID: Final = "app_EMoamEEZ73f0CkXaXp7hrann"
+_TOKEN_URL: Final = "https://auth.openai.com/oauth/token"  # noqa: S105 -- not a secret; OAuth endpoint URL
+_AUTHORIZE_URL: Final = "https://auth.openai.com/oauth/authorize"
+_BASE_URL: Final = "https://chatgpt.com/backend-api/codex"
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".codex" / "auth.json"
-_SCOPES = (
+_SCOPES: Final = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
-DEFAULT_REFRESH_BUFFER_SEC = 300.0
+DEFAULT_REFRESH_BUFFER_SEC = (
+    300.0  # config-globals: ignore -- OAuth refresh lead time, user-retunable
+)
 # OAuth-registered redirect URI port. Not user-tunable: the OAuth app
 # fingerprinted as Codex CLI has this port baked into its allowed
 # redirects on OpenAI's side.
-_CALLBACK_PORT = 1455
+_CALLBACK_PORT: Final = 1455
 # Codex's subscription backend currently exposes a smaller practical
 # context window than the public API model metadata. Local budgeting must
 # plan against the wire contract so auto-compaction runs before the backend
 # rejects an oversized request.
-_SUBSCRIPTION_MAX_REQUEST_TOKENS = 272_000
-_SUBSCRIPTION_MAX_RESPONSE_TOKENS = 32_000
-_STREAM_IDLE_TIMEOUT = 600.0
+_SUBSCRIPTION_MAX_REQUEST_TOKENS = (
+    272_000  # config-globals: ignore -- backend context budget, user-retunable
+)
+_SUBSCRIPTION_MAX_RESPONSE_TOKENS = (
+    32_000  # config-globals: ignore -- backend response budget, user-retunable
+)
+_STREAM_IDLE_TIMEOUT = (
+    600.0  # config-globals: ignore -- stream idle timeout, user-retunable
+)
 
 # Must stay identical to ``_OpenAIModel._is_effort_model``'s prefix set
 # (openai.py): the two OpenAI transports share one ``KNOWN_MODELS`` catalog and
 # the wire-mapping docstring requires them to agree on which ids are reasoning
 # models. A bare ``"o"`` over-matches (e.g. a future ``omni-*`` id), diverging
 # from the API-key path -- pin the exact reasoning families instead.
-_EFFORT_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+_EFFORT_PREFIXES: Final = ("o1", "o3", "o4", "gpt-5")
 
 
 def _default_credentials_path() -> Path:
@@ -194,7 +203,7 @@ def _default_credentials_path() -> Path:
     return DEFAULT_CREDENTIALS_PATH
 
 
-_FINISH_MAP: dict[str, str] = {
+_FINISH_MAP: Final[dict[str, str]] = {
     "completed": "stop",
     "incomplete": "length",
     "failed": "stop",
@@ -1237,7 +1246,7 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     )
 
 
-_STREAM_ERROR_STATUS: dict[str, int] = {
+_STREAM_ERROR_STATUS: Final[dict[str, int]] = {
     "rate_limit": 429,
     "rate_limit_error": 429,
     "rate_limit_exceeded": 429,

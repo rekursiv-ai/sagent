@@ -16,7 +16,7 @@ implementations live in :mod:`repl.console_pane` (rich-backed) and on
 from __future__ import annotations
 
 from collections.abc import Callable, Generator, Sequence
-from typing import Protocol
+from typing import Final, Protocol
 
 import contextlib
 import contextvars
@@ -66,7 +66,9 @@ logger = logging.getLogger(__name__)
 # ``_stream_buf`` until the next paragraph break. A 100K+-char in-progress
 # fenced block would let the buffer grow for the entire round; flush
 # unconditionally past this cap so memory stays bounded.
-_STREAM_BUF_FLUSH_BYTES = 64 * 1024
+_STREAM_BUF_FLUSH_BYTES = (
+    64 * 1024
+)  # config-globals: ignore -- stream-buf flush cap, display pref
 
 # Live-observer dispatch is wrapped in a broad ``except`` so a renderer
 # bug never tears down the agent loop. That same swallow hides real
@@ -94,11 +96,11 @@ def strict_observer() -> Generator[None, None, None]:
         _strict_observer.reset(token)
 
 
-HALT_MESSAGE = "agent halted -- type to retry, or /login, /model, /quit"
-HALT_MESSAGE_AUTH = (
+HALT_MESSAGE: Final = "agent halted -- type to retry, or /login, /model, /quit"
+HALT_MESSAGE_AUTH: Final = (
     "agent halted -- run /login to re-authenticate or /model to switch providers"
 )
-HALT_MESSAGE_CONTEXT = (
+HALT_MESSAGE_CONTEXT: Final = (
     "agent halted -- run /compact <hints>, /clear, or /model to reduce context"
 )
 
@@ -629,7 +631,7 @@ _CHILD_ITEM_TYPES = (
 )
 
 
-HELP_TEXT = """\
+HELP_TEXT: Final = """\
 sagent commands
 
   /help                       this list

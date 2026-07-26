@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Final
 
 import asyncio
 import difflib
@@ -69,7 +70,7 @@ def make_diff(old: str, new: str, offset: int) -> str:
     return "\n".join(result)
 
 
-_NUDGE = "sed via Bash is a bad UX. Use the Edit tool."
+_NUDGE: Final = "sed via Bash is a bad UX. Use the Edit tool."
 
 
 class Edit:

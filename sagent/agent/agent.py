@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Literal
+from typing import Final, Literal
 
 import asyncio
 import contextlib
@@ -111,15 +111,15 @@ SystemPromptArg = str | Callable[[], str]
 """System-prompt spec. ``str`` is literal; ``Callable[[], str]`` is
 re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
-ERROR_MAX_TOOL_CALL_ROUNDS = "error:max_tool_call_rounds"
-MAX_OVERFLOW_RECOVERY = 3
+ERROR_MAX_TOOL_CALL_ROUNDS: Final = "error:max_tool_call_rounds"
+MAX_OVERFLOW_RECOVERY = 3  # config-globals: ignore -- overflow-recovery retry count
 
 # Utilization fraction at which a rate-limit window earns a UI advisory.
 # Matches Anthropic's own ``surpassed-threshold`` warning point. A separate,
 # lower clear point gives hysteresis so a window oscillating around the warn
 # line does not re-fire the advisory every response.
-_USAGE_WARN_FRACTION = 0.75
-_USAGE_CLEAR_FRACTION = 0.60
+_USAGE_WARN_FRACTION = 0.75  # config-globals: ignore -- UI advisory warn threshold
+_USAGE_CLEAR_FRACTION = 0.60  # config-globals: ignore -- UI advisory clear threshold
 
 
 def _reject_bad_system_arg(system: object) -> None:

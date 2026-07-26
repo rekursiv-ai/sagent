@@ -36,7 +36,7 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_SEC = 10.0
+_DEFAULT_TIMEOUT_SEC = 10.0  # config-globals: ignore -- playback timeout dial
 
 
 class PlayAudio:

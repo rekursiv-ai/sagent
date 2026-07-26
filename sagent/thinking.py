@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, assert_never, cast
+from typing import Final, Literal, assert_never, cast
 
 
 type ThinkingState = Literal[
@@ -29,7 +29,7 @@ type ThinkingCommand = Literal[
     "hide",
 ]
 
-THINKING_STATES: tuple[ThinkingState, ...] = (
+THINKING_STATES: Final[tuple[ThinkingState, ...]] = (
     "adaptive-show",
     "adaptive-hide",
     "on-show",

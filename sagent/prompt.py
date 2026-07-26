@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import logging
 import os
@@ -54,7 +55,7 @@ def _load_static() -> str:
 
 # Per-model marketing name + knowledge cutoff.
 # Opus 4.8 and 4.7 cutoffs verified against Anthropic's docs (January 2026).
-_MODEL_INFO: dict[str, tuple[str, str]] = {
+_MODEL_INFO: Final[dict[str, tuple[str, str]]] = {
     "claude-fable-5": ("Claude Fable 5", "unknown"),
     "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
     "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
@@ -107,14 +108,16 @@ def _is_git_worktree(cwd: str) -> bool:
     return Path(parts[0]).resolve() != Path(parts[1]).resolve()
 
 
-_WORKTREE_LINE = (
+_WORKTREE_LINE: Final = (
     "\nThis working directory is a git worktree (not the primary"
     " checkout). Stay in this directory — do not `cd` to the"
     " main repository."
 )
 # On Windows, tell the model to use Unix shell syntax
 # (assumes Git Bash / WSL).
-_WINDOWS_SHELL_SUFFIX = " (prefer Unix shell conventions — /dev/null, forward slashes)"
+_WINDOWS_SHELL_SUFFIX: Final = (
+    " (prefer Unix shell conventions — /dev/null, forward slashes)"
+)
 
 
 def _load_env_template() -> str:
@@ -191,7 +194,7 @@ def build_system(
     return "\n\n".join(v() for v in d.values())
 
 
-_DEFAULT_SECTIONS: tuple[str, ...] = (
+_DEFAULT_SECTIONS: Final[tuple[str, ...]] = (
     "static",
     "environment",
     "agents_md",

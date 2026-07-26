@@ -16,6 +16,7 @@ Operates on ``ToolResult`` dataclasses.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import dataclasses
 import hashlib
@@ -29,9 +30,9 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-PREVIEW_CHARS = 2_000
-PERSISTED_TAG = "<persisted-output>"
-PERSISTED_CLOSE = "</persisted-output>"
+PREVIEW_CHARS = 2_000  # config-globals: ignore -- in-history preview length budget
+PERSISTED_TAG: Final = "<persisted-output>"
+PERSISTED_CLOSE: Final = "</persisted-output>"
 
 _FALLBACK_STORAGE_DIR = (
     Path(tempfile.gettempdir()) / "sagent_results" / f"{os.getpid()}-{uuid.uuid4().hex}"

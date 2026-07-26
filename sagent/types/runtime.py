@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import dataclasses
 import itertools
@@ -337,13 +337,13 @@ class ToolResult(SessionMessage):
 # - ``RUNNING_PREFIX`` (``kind=PENDING``): a tool promoted to a background job;
 #   the synchronous return is ``f"{RUNNING_PREFIX}<name>]"`` and the real result
 #   splices in later, exactly like ``DETACHED_PLACEHOLDER``.
-DETACHED_PLACEHOLDER = (
+DETACHED_PLACEHOLDER: Final = (
     "[detached: tool still running; real result arrives in a later message]"
 )
-CANCELLED_PLACEHOLDER = (
+CANCELLED_PLACEHOLDER: Final = (
     "[cancelled: tool killed before completion; no result will follow]"
 )
-RUNNING_PREFIX = "[Running in background: "
+RUNNING_PREFIX: Final = "[Running in background: "
 
 
 # Synthetic tool name for the forward delivery of a detached tool's real
@@ -353,8 +353,8 @@ RUNNING_PREFIX = "[Running in background: "
 # completed detached tool arrives as new context rather than a silent
 # back-patch of its stub slot. The synthetic pair is inert: it is appended
 # to history directly and never dispatched through ``_run_tool_and_post``.
-DETACHED_ARRIVED_TOOL = "DetachedArrived"
-DETACHED_ARRIVAL_SUFFIX = ":detached"
+DETACHED_ARRIVED_TOOL: Final = "DetachedArrived"
+DETACHED_ARRIVAL_SUFFIX: Final = ":detached"
 
 # Reserved id namespace for a *model-forged* ``DetachedArrived`` call. The
 # ``DETACHED_ARRIVED_TOOL`` name and the ``:detached`` arrival-id scheme are the
@@ -365,7 +365,7 @@ DETACHED_ARRIVAL_SUFFIX = ":detached"
 # namespace at the response boundary (``f"{MIMIC}{n}"``), so a forgery can never
 # occupy a real call's or arrival's id. Never produced by the genuine forward
 # path; the matcher and the rewriter share this one constant.
-DETACHED_ARRIVED_MIMIC_PREFIX = "DetachedArrived:mimic:"
+DETACHED_ARRIVED_MIMIC_PREFIX: Final = "DetachedArrived:mimic:"
 
 # System-prompt note teaching the model that ``DetachedArrived`` turns in its
 # history are runtime-synthesized result deliveries, not a callable tool --

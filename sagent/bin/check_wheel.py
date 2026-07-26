@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import Final, cast
 
 import re
 import tomllib
@@ -25,14 +25,14 @@ import zipfile
 import yaml
 
 
-_RECIPE_PATH = "sagent/assets/sagent.yaml"
-_ASSET_PREFIX = "sagent/assets/"
+_RECIPE_PATH: Final = "sagent/assets/sagent.yaml"
+_ASSET_PREFIX: Final = "sagent/assets/"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
-_REQUIRED_ENTRY_POINTS = (
+_REQUIRED_ENTRY_POINTS: Final = (
     "sagent = sagent.bin.cli:main",
     "sagent-slack = sagent.bin.slack:main",
 )
-_RECIPE_ASSET_SECTIONS = ("system_prompt", "compactor", "tool_descriptions")
+_RECIPE_ASSET_SECTIONS: Final = ("system_prompt", "compactor", "tool_descriptions")
 
 
 def main() -> int:

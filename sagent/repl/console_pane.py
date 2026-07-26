@@ -9,7 +9,7 @@ duplicate -- the formatting logic is already correct and battle-tested.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, assert_never, cast
+from typing import Final, Literal, assert_never, cast
 
 import io
 import re
@@ -238,10 +238,10 @@ class ConsolePrinter:
 # only the dim attribute (vs. ``\x1b[0m`` which resets everything).
 # We re-apply dim after every full reset so embedded per-span styles
 # from Rich don't drop the dim baseline.
-_ANSI_DIM = "\x1b[2m"
-_ANSI_RESET = "\x1b[0m"
+_ANSI_DIM: Final = "\x1b[2m"
+_ANSI_RESET: Final = "\x1b[0m"
 _ANSI_RESET_DIM = _ANSI_RESET + _ANSI_DIM
-_ANSI_DIM_OFF = "\x1b[22m"
+_ANSI_DIM_OFF: Final = "\x1b[22m"
 _ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -277,7 +277,7 @@ def _dim_baseline(line: str) -> str:
     return _ANSI_DIM + rebound + _ANSI_DIM_OFF
 
 
-_CHILD_INDENT = "  "
+_CHILD_INDENT: Final = "  "
 
 
 def _gutter_width(label: str) -> int:

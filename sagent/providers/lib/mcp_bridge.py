@@ -23,7 +23,7 @@ observer pane is v2 work (see ``docs/private/cli_provider.md`` §1.9).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
 import base64
@@ -79,8 +79,8 @@ __all__ = ["ToolsBridge"]
 logger = logging.getLogger(__name__)
 
 
-_MCP_PATH = "/mcp"
-_STARTUP_TIMEOUT_SEC = 10.0
+_MCP_PATH: Final = "/mcp"
+_STARTUP_TIMEOUT_SEC = 10.0  # config-globals: ignore -- startup timeout dial
 
 
 class _BridgeServer:

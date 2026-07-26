@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from html import escape
-from typing import Literal
+from typing import Final, Literal
 
 import dataclasses
 import logging
@@ -62,10 +62,10 @@ logger = logging.getLogger(__name__)
 _RE_ANALYSIS = re.compile(r"<analysis>[\s\S]*?</analysis>")
 _RE_SUMMARY = re.compile(r"<summary>([\s\S]*?)</summary>")
 
-_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS = 8_000
-_COMPACTOR_TOOL_RESULT_NOTICE = "[tool result truncated for compaction]"
-_SKILL_TOOL_NAME = "Skill"
-_SKILL_BODY_ELIDED_NOTICE = (
+_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS: Final = 8_000
+_COMPACTOR_TOOL_RESULT_NOTICE: Final = "[tool result truncated for compaction]"
+_SKILL_TOOL_NAME: Final = "Skill"
+_SKILL_BODY_ELIDED_NOTICE: Final = (
     "[Skill body elided for compaction; the skill catalog still lists triggers"
     " and the agent can re-invoke Skill on demand.]"
 )

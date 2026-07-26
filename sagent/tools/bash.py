@@ -54,11 +54,11 @@ def _suppress_oserror() -> contextlib.suppress:
 # Mid-stream bash output line cap. Large outputs (test suites, log
 # dumps) trim the middle to keep tool_result under the per-tool
 # persist threshold, preserving head/tail for diagnosis.
-_BASH_MAX_LINES = 500
-_BASH_HEAD_LINES = 250
-_BASH_TAIL_LINES = 250
-BASH_DEFAULT_TIMEOUT_MS = 120_000
-BASH_MAX_TIMEOUT_MS = 600_000
+_BASH_MAX_LINES = 500  # config-globals: ignore -- display line cap, user-retunable
+_BASH_HEAD_LINES = 250  # config-globals: ignore -- display line cap, user-retunable
+_BASH_TAIL_LINES = 250  # config-globals: ignore -- display line cap, user-retunable
+BASH_DEFAULT_TIMEOUT_MS = 120_000  # config-globals: ignore -- default timeout dial
+BASH_MAX_TIMEOUT_MS = 600_000  # config-globals: ignore -- max timeout dial
 
 # Kept-alive references to background subprocesses so their Popen
 # objects don't get garbage-collected mid-run.

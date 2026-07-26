@@ -9,6 +9,7 @@ microcompacted tool-call args.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import asyncio
 import html
@@ -24,9 +25,9 @@ from sagent.types.runtime import (
 
 logger = logging.getLogger(__name__)
 
-CLEARED = "[Prior tool output omitted]"
+CLEARED: Final = "[Prior tool output omitted]"
 
-MICROCOMPACTED_ARGS_KEY = "_microcompacted"
+MICROCOMPACTED_ARGS_KEY: Final = "_microcompacted"
 """Single args key used to stub a microcompacted ``ToolCall``.
 
 The value is the tool's ``summary(args)`` output (e.g. ``"Edit foo.py"``)

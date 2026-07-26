@@ -8,6 +8,8 @@ through the inbox.
 
 from __future__ import annotations
 
+from typing import Final
+
 import dataclasses
 
 from sagent.thinking import THINKING_COMMANDS
@@ -159,7 +161,7 @@ type SlashAction = (
 QUIT_WORDS: frozenset[str] = frozenset({"/quit", "/exit"})
 
 # Public list of supported commands; drives the unknown-command help line.
-_SUPPORTED = (
+_SUPPORTED: Final = (
     "/help /clear /compact /recompact /model /provider /thinking /effort /login"
     " /tasks /halt /kill /defer /send /quit /exit"
 )

@@ -56,7 +56,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import argparse
 import asyncio
@@ -789,7 +789,7 @@ def _extract_channel_from_text(text: str) -> str:
     return ""
 
 
-_SLACK_MSG_LIMIT = 3900
+_SLACK_MSG_LIMIT: Final = 3900
 
 
 async def _flush_log(

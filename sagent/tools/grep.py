@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import logging
 import os
@@ -30,7 +30,7 @@ from sagent.types.runtime import ToolResult
 logger = logging.getLogger(__name__)
 
 # File type extensions for grep --type filter.
-_TYPE_GLOBS: dict[str, list[str]] = {
+_TYPE_GLOBS: Final[dict[str, list[str]]] = {
     "py": ["*.py"],
     "js": ["*.js", "*.jsx", "*.mjs"],
     "ts": ["*.ts", "*.tsx"],
@@ -87,7 +87,7 @@ _GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
 # flags), so the same parsers apply; ripgrep-only flags like ``-U`` or
 # ``-t`` fall through and the nudge bails on those shapes.
 _GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
-_NUDGE = "grep/rg via Bash is a bad UX. Use the Grep tool."
+_NUDGE: Final = "grep/rg via Bash is a bad UX. Use the Grep tool."
 
 # Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
 # Validated at runtime so an unknown value errors instead of silently

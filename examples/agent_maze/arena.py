@@ -33,7 +33,7 @@ from sagent.types.model import Model
 from sagent.types.runtime import UserMessage
 
 
-SEED = "a0"
+SEED = "a0"  # config-globals: ignore -- level/seed tuning dial, retuned per run
 
 
 def _system(label: str, role: str, *, mesh: bool, told: bool, coordinator: str) -> str:

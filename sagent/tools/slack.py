@@ -19,7 +19,7 @@ Supported operations:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast
+from typing import Final, cast
 
 import asyncio
 import json
@@ -35,10 +35,10 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-_API_BASE = "https://slack.com/api"
-_DEFAULT_TIMEOUT = 30.0
+_API_BASE: Final = "https://slack.com/api"
+_DEFAULT_TIMEOUT = 30.0  # config-globals: ignore -- request timeout dial, retunable
 
-_OPERATIONS = (
+_OPERATIONS: Final = (
     "send",
     "list_channels",
     "list_messages",

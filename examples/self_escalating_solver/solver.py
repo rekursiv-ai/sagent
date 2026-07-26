@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import asyncio
 import re
@@ -49,7 +49,7 @@ from sagent.types.tools import Tool
 # additionally sees the SYS_UPGRADE_BLOCK. The naive symmetric rule is seeded in
 # the shared TASK so every arm's *first pass* is the same biased sampler.
 # --------------------------------------------------------------------------
-TASK = (
+TASK: Final = (
     "Use Metropolis-Hastings to draw 40000 samples from a target distribution.\n"
     "- Proposal: a MULTIPLICATIVE random walk, x_new = x * exp(eps), eps ~ Normal(0, "
     "0.6), starting from x = 4.0.\n"
@@ -62,7 +62,7 @@ TASK = (
     "re-check. Keep going until the grader returns PASS, then end with 'RESULT: SUCCESS'."
 )
 
-SYS_BASE = (
+SYS_BASE: Final = (
     "You are a computational statistician. You have a run_python tool (numpy and scipy "
     "available; each call runs a fresh, self-contained script — include all imports and "
     "definitions every time, and print what you want to inspect). A grader function "
@@ -73,7 +73,7 @@ SYS_BASE = (
 
 # MODEL-AGNOSTIC self-upgrade block (variant B empowerment + fresh-eyes ownership).
 # Only {strong_model} is injected — no model-specific or answer-specific content.
-SYS_UPGRADE_BLOCK = (
+SYS_UPGRADE_BLOCK: Final = (
     "\n\nYou also have an ability most agents do not: you can upgrade your own model. "
     "You are on a fast, lightweight model — fine for routine work, limited on subtle "
     "problems. Call the AgentSelf tool with a stronger model's id to promote YOURSELF to "
@@ -99,7 +99,7 @@ def system_for(*, allow_upgrade: bool, strong_model: str = "") -> str:
 # tokened verdict the agent can't easily forge. (Harder, mean-preserving bugs can
 # swap in an ESS / standard-error test here later.)
 # --------------------------------------------------------------------------
-_ORACLE_TOKEN = "ZK9Q7M"  # noqa: S105 -- grader marker, not a secret
+_ORACLE_TOKEN: Final = "ZK9Q7M"  # noqa: S105 -- grader marker, not a secret
 _ORACLE_SRC = f"""
 import numpy as _np
 from scipy import stats as _stats

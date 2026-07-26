@@ -34,7 +34,10 @@ import uuid as _uuid
 
 import pytest
 
-from sagent.providers.anthropic_cli import AnthropicCLI, _claude_auth_status
+from sagent.providers.anthropic_cli import (
+    AnthropicCLI,
+    _claude_auth_status,
+)
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.subproc import SubprocessTransportError
 from sagent.tools import tool

@@ -16,7 +16,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, NotRequired, TypedDict, cast, override
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Final,
+    NotRequired,
+    TypedDict,
+    cast,
+    override,
+)
 
 import asyncio
 import base64
@@ -40,7 +48,10 @@ from sagent.providers.lib.errors import (
 )
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.providers.lib.oauth import credentials_path, resolve_account
+from sagent.providers.lib.oauth import (
+    credentials_path,
+    resolve_account,
+)
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.subproc import (
     _READ_IDLE_TIMEOUT_SEC,
@@ -83,7 +94,9 @@ logger = logging.getLogger(__name__)
 
 
 _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
-_AUTH_STATUS_TIMEOUT_SEC = 5.0
+_AUTH_STATUS_TIMEOUT_SEC = (
+    5.0  # config-globals: ignore -- retunable auth-status probe timeout
+)
 _NON_SUBSCRIPTION_AUTH_ENV = frozenset(
     {
         "ANTHROPIC_BASE_URL",
@@ -138,8 +151,8 @@ _NON_SUBSCRIPTION_AUTH_ENV = frozenset(
 # locally; this bounds a pathologically slow connect before we give up
 # and proceed. Only paid once, on a cold spawn's first turn -- warm
 # subprocesses keep the connection and skip the wait entirely.
-_MCP_CONNECT_TIMEOUT_SEC = 8.0
-_CREDENTIALS_SCHEMA: JSON = {
+_MCP_CONNECT_TIMEOUT_SEC: Final = 8.0
+_CREDENTIALS_SCHEMA: Final[JSON] = {
     "type": "object",
     "required": ["claudeAiOauth"],
     "properties": {
@@ -2119,7 +2132,7 @@ def _dispatch_stream_event(
 
 # Single truncation cap for every tool-arg label branch (parsed, unparsed, and
 # fallback), so a label's length does not depend on which rendering path hit.
-_ARG_LABEL_MAX = 120
+_ARG_LABEL_MAX = 120  # config-globals: ignore -- display label truncation cap
 
 
 def _truncate_label(s: str) -> str:

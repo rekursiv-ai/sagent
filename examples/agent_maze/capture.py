@@ -22,7 +22,7 @@ from sagent.types.model import Model
 
 
 HERE = Path(__file__).parent
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retunes
 
 
 def _key() -> str:
