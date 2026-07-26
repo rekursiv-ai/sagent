@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Final, cast
+from typing import IO, cast
 
 import contextlib
 import json
@@ -44,7 +44,6 @@ from sagent.lib.userdirs import data_dir
 logger = logging.getLogger(__name__)
 
 _SAGENT_HOME = data_dir("sagent")
-_PICK_CAP: Final = 20
 _PROJECTS_DIR = _SAGENT_HOME / "projects"
 # Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
 # followed OS data-dir conventions). For most users that was a real directory.
@@ -56,10 +55,6 @@ _PROJECTS_DIR = _SAGENT_HOME / "projects"
 # a real dir or a symlink.
 _LEGACY_SAGENT_HOME = Path.home() / ".sagent"
 _LEGACY_CLAUDE_HOME = Path.home() / ".claude"
-# Subdirs of the Claude home that, when present, are bridged back via symlink so
-# skills authored in either tool stay unified. Only ``skills`` qualifies today;
-# papers/memory are sagent-owned and get copied, not bridged.
-_BRIDGE_SUBDIRS: Final = ("skills",)
 
 
 def _legacy_cwd_slug(cwd: str | Path) -> str:
@@ -202,7 +197,9 @@ def _bridge_shared_dirs() -> None:
     established sagent dir is never shadowed and a re-run is a no-op. Today only
     ``skills`` qualifies, and only if the user has authored Claude skills.
     """
-    for name in _BRIDGE_SUBDIRS:
+    # Only ``skills`` is bridged today; papers/memory are sagent-owned and
+    # get copied, not symlinked.
+    for name in ("skills",):
         claude_dir = _LEGACY_CLAUDE_HOME / name
         sagent_path = _SAGENT_HOME / name
         if not claude_dir.is_dir() or sagent_path.exists() or sagent_path.is_symlink():
@@ -222,20 +219,21 @@ def _bridge_shared_dirs() -> None:
 # boundary information without introducing characters outside
 # ``[A-Za-z0-9_-]`` (all filesystem-safe).
 _SLUG_NONALPHANUM_RE = re.compile(r"[^a-zA-Z0-9/]")
-_MAX_SLUG_LEN: Final = 200
 
 
-def cwd_slug(cwd: str | Path) -> str:
+def cwd_slug(cwd: str | Path, *, max_slug_len: int = 200) -> str:
     """Derive a directory-safe slug for ``cwd``.
 
     Maps path separators (``/``) to ``_`` and other non-alphanumerics
     to ``-``, then truncates with a stable hash suffix when the result
-    exceeds ``_MAX_SLUG_LEN``. The two-character mapping prevents
+    exceeds ``max_slug_len``. The two-character mapping prevents
     sibling directory paths that differ only in ``/`` vs ``-`` from
     aliasing to the same slug.
 
     Args:
       cwd: Current working directory.
+      max_slug_len: Longest slug kept verbatim; longer paths are
+        truncated with a stable hash suffix.
 
     Returns:
       slug: Directory-safe slug string drawn from ``[A-Za-z0-9_-]``.
@@ -243,14 +241,14 @@ def cwd_slug(cwd: str | Path) -> str:
     """
     s = str(Path(cwd).resolve())
     sanitized = _SLUG_NONALPHANUM_RE.sub("-", s).replace("/", "_")
-    if len(sanitized) <= _MAX_SLUG_LEN:
+    if len(sanitized) <= max_slug_len:
         return sanitized
     # Python hash is salted per-process; use a stable fnv-like
     # fold so the same cwd always hashes to the same slug.
     h = 0xCBF29CE484222325
     for ch in s.encode():
         h = ((h ^ ch) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return f"{sanitized[:_MAX_SLUG_LEN]}-{h:x}"
+    return f"{sanitized[:max_slug_len]}-{h:x}"
 
 
 def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
@@ -604,6 +602,8 @@ def pick_session(
     sessions: list[SessionInfo],
     stream_in: IO[str] | None = None,
     stream_out: IO[str] | None = None,
+    *,
+    pick_cap: int = 20,
 ) -> SessionInfo | None:
     """Interactive picker over ``sessions`` (stdin/stdout).
 
@@ -611,6 +611,7 @@ def pick_session(
       sessions: Available sessions to choose from.
       stream_in: Input stream override (defaults to stdin).
       stream_out: Output stream override (defaults to stdout).
+      pick_cap: Most recent sessions shown; older ones are hidden.
 
     Returns:
       session: Chosen session, or None if the user aborts.
@@ -620,10 +621,10 @@ def pick_session(
         return None
     sin = stream_in if stream_in is not None else sys.stdin
     sout = stream_out if stream_out is not None else sys.stdout
-    visible = sessions[:_PICK_CAP]
-    if len(sessions) > _PICK_CAP:
+    visible = sessions[:pick_cap]
+    if len(sessions) > pick_cap:
         sout.write(
-            f"  (showing {_PICK_CAP} of {len(sessions)} sessions; older ones hidden)\n"
+            f"  (showing {pick_cap} of {len(sessions)} sessions; older ones hidden)\n"
         )
     for i, s in enumerate(visible, start=1):
         rel = _format_relative_time(s.mtime)

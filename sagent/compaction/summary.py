@@ -62,9 +62,7 @@ logger = logging.getLogger(__name__)
 _RE_ANALYSIS = re.compile(r"<analysis>[\s\S]*?</analysis>")
 _RE_SUMMARY = re.compile(r"<summary>([\s\S]*?)</summary>")
 
-_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS: Final = 8_000
 _COMPACTOR_TOOL_RESULT_NOTICE: Final = "[tool result truncated for compaction]"
-_SKILL_TOOL_NAME: Final = "Skill"
 _SKILL_BODY_ELIDED_NOTICE: Final = (
     "[Skill body elided for compaction; the skill catalog still lists triggers"
     " and the agent can re-invoke Skill on demand.]"
@@ -109,6 +107,9 @@ class SummaryCompactor:
           asking the same model to critique the summary and fill gaps;
           use the improved output. Doubles compaction token cost and
           wall-clock; opt in when summary fidelity matters more.
+      retry_tool_result_cap_chars: On ``PromptTooLongError`` retry, oversized
+          ``ToolResult`` bodies are truncated to this many characters before
+          whole rounds are dropped. Default ``8000``.
       model: Optional model override; otherwise uses the caller's model.
 
     Raises:
@@ -129,6 +130,7 @@ class SummaryCompactor:
         direction: Literal["from", "up_to"] = "from",
         proactive: bool = False,
         verify_summary: bool = False,
+        retry_tool_result_cap_chars: int = 8_000,
         model: Model | None = None,
     ) -> None:
         if max_attempts < 1:
@@ -157,6 +159,7 @@ class SummaryCompactor:
         self._direction: Literal["from", "up_to"] = direction
         self._proactive = proactive
         self._verify_summary = verify_summary
+        self._retry_tool_result_cap_chars = retry_tool_result_cap_chars
         self._model = model
 
     @property
@@ -377,7 +380,9 @@ class SummaryCompactor:
                 summary_text = response.message.text
                 break
             except PromptTooLongError as exc:
-                if _shrink_groups_for_compaction(groups):
+                if _shrink_groups_for_compaction(
+                    groups, cap_chars=self._retry_tool_result_cap_chars
+                ):
                     logger.warning(
                         "Prompt too long (attempt %d/%d), shrinking tool results.",
                         attempt + 1,
@@ -505,7 +510,9 @@ class SummaryCompactor:
                 )
                 break
             except PromptTooLongError as exc:
-                if _shrink_groups_for_compaction(groups):
+                if _shrink_groups_for_compaction(
+                    groups, cap_chars=self._retry_tool_result_cap_chars
+                ):
                     logger.warning(
                         "Verifier prompt too long (attempt %d/%d), shrinking tool results.",
                         attempt + 1,
@@ -639,7 +646,7 @@ def _elide_skill_results(
         if not isinstance(entry, AssistantMessage):
             continue
         for tc in entry.tool_calls:
-            if tc.name == _SKILL_TOOL_NAME:
+            if tc.name == "Skill":
                 skill_call_ids.add(tc.id)
     if not skill_call_ids:
         return entries
@@ -656,7 +663,11 @@ def _elide_skill_results(
     return out
 
 
-def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool:
+def _shrink_groups_for_compaction(
+    groups: list[list[ModelContextEvent]],
+    *,
+    cap_chars: int = 8_000,
+) -> bool:
     """Shrink oversized tool results in-place before dropping whole groups."""
     changed = False
     for group_idx, group in enumerate(groups):
@@ -664,7 +675,7 @@ def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool
         for entry in group:
             if (
                 isinstance(entry, ToolResult)
-                and len(entry.content) > _COMPACT_RETRY_TOOL_RESULT_CAP_CHARS
+                and len(entry.content) > cap_chars
                 and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
             ):
                 shrunk.append(
@@ -672,7 +683,7 @@ def _shrink_groups_for_compaction(groups: list[list[ModelContextEvent]]) -> bool
                         entry,
                         content=(
                             f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n"
-                            f"{entry.content[:_COMPACT_RETRY_TOOL_RESULT_CAP_CHARS]}"
+                            f"{entry.content[:cap_chars]}"
                         ),
                     )
                 )

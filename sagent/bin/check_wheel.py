@@ -26,13 +26,7 @@ import yaml
 
 
 _RECIPE_PATH: Final = "sagent/assets/sagent.yaml"
-_ASSET_PREFIX: Final = "sagent/assets/"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
-_REQUIRED_ENTRY_POINTS: Final = (
-    "sagent = sagent.bin.cli:main",
-    "sagent-slack = sagent.bin.slack:main",
-)
-_RECIPE_ASSET_SECTIONS: Final = ("system_prompt", "compactor", "tool_descriptions")
 
 
 def main() -> int:
@@ -60,8 +54,12 @@ def main() -> int:
             raise SystemExit("wheel is missing *.dist-info/entry_points.txt")
         entry_points = archive.read(entry_points_name).decode()
         _validate_recipe_assets(archive, names)
+    required_entry_points = (
+        "sagent = sagent.bin.cli:main",
+        "sagent-slack = sagent.bin.slack:main",
+    )
     missing_entry_points = [
-        entry for entry in _REQUIRED_ENTRY_POINTS if entry not in entry_points
+        entry for entry in required_entry_points if entry not in entry_points
     ]
     if missing_entry_points:
         raise SystemExit(
@@ -127,7 +125,7 @@ def _load_recipe(archive: zipfile.ZipFile) -> dict[str, object]:
 def _recipe_assets(recipe: dict[str, object]) -> list[str]:
     """Return asset paths referenced by recipe sections that package prompts."""
     assets: list[str] = []
-    for section_name in _RECIPE_ASSET_SECTIONS:
+    for section_name in ("system_prompt", "compactor", "tool_descriptions"):
         section = recipe.get(section_name, {})
         if not isinstance(section, dict):
             continue
@@ -151,7 +149,7 @@ def _validate_asset(
     chain = (*parents, asset)
     if asset in parents:
         raise SystemExit("wheel asset include cycle: " + " -> ".join(chain))
-    wheel_path = _ASSET_PREFIX + asset
+    wheel_path = "sagent/assets/" + asset
     if wheel_path not in names:
         raise SystemExit("wheel is missing recipe asset: " + " -> ".join(chain))
     text = archive.read(wheel_path).decode()

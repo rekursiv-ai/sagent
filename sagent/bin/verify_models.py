@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
 
 import argparse
 import asyncio
@@ -58,8 +57,6 @@ class ModelLimits:
 # Source: https://ai.google.dev/api/models#method:-models.list
 # Returns inputTokenLimit and outputTokenLimit per model.
 
-_GOOGLE_API: Final = "https://generativelanguage.googleapis.com/v1beta/models"
-
 
 async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
     """Fetch model limits from the Google Generative Language API.
@@ -71,8 +68,9 @@ async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
       limits: Map of model ID to its token limits.
 
     """
+    api = "https://generativelanguage.googleapis.com/v1beta/models"
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{_GOOGLE_API}?key={api_key}")
+        r = await client.get(f"{api}?key={api_key}")
         r.raise_for_status()
         out: dict[str, ModelLimits] = {}
         for m in r.json().get("models", []):
@@ -90,8 +88,6 @@ async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
 # Source: https://developers.openai.com/api/docs/models/<model>
 # Each page SSR-renders "N context window" and "N max output tokens".
 
-_OPENAI_DOC: Final = "https://developers.openai.com/api/docs/models"
-
 
 async def fetch_openai(model_ids: list[str]) -> dict[str, ModelLimits]:
     """Scrape model limits from OpenAI documentation pages.
@@ -104,9 +100,10 @@ async def fetch_openai(model_ids: list[str]) -> dict[str, ModelLimits]:
 
     """
     out: dict[str, ModelLimits] = {}
+    doc = "https://developers.openai.com/api/docs/models"
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         for mid in model_ids:
-            url = f"{_OPENAI_DOC}/{mid}"
+            url = f"{doc}/{mid}"
             try:
                 r = await client.get(url)
                 r.raise_for_status()
@@ -137,8 +134,6 @@ def _parse_openai_page(html: str) -> ModelLimits | None:
 # Source: GET /v1/models/{model_id}
 # Returns max_tokens (max output) and max_input_tokens.
 
-_ANTHROPIC_API: Final = "https://api.anthropic.com/v1/models"
-
 
 async def fetch_anthropic(
     api_key: str,
@@ -155,6 +150,7 @@ async def fetch_anthropic(
 
     """
     out: dict[str, ModelLimits] = {}
+    api = "https://api.anthropic.com/v1/models"
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -162,7 +158,7 @@ async def fetch_anthropic(
     async with httpx.AsyncClient(timeout=30) as client:
         for mid in model_ids:
             try:
-                r = await client.get(f"{_ANTHROPIC_API}/{mid}", headers=headers)
+                r = await client.get(f"{api}/{mid}", headers=headers)
                 r.raise_for_status()
                 data = r.json()
                 max_input = data.get("max_input_tokens", 0)

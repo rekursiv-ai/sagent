@@ -122,8 +122,6 @@ class _AnthropicRawStreamSDK(Protocol):
     ) -> anthropic.APIStatusError: ...
 
 
-_CONTEXT_1M_BETA: Final = "context-1m-2025-08-07"
-_CONTEXT_MANAGEMENT_BETA: Final = "context-management-2025-06-27"
 _REDACT_THINKING_BETA: Final = "redact-thinking-2026-02-12"
 _FAST_MODE_BETA: Final = "fast-mode-2026-02-01"
 _DEFAULT_API_TARGET_INPUT_TOKENS = (
@@ -193,9 +191,9 @@ def context_betas(model_id: str) -> list[str]:
     base, tags = split_model_id(model_id)
     betas: list[str] = []
     if "+1m" in tags and base not in _DEFAULT_1M_MODELS:
-        betas.append(_CONTEXT_1M_BETA)
+        betas.append("context-1m-2025-08-07")
     if supports_native_context_management(model_id):
-        betas.append(_CONTEXT_MANAGEMENT_BETA)
+        betas.append("context-management-2025-06-27")
     return betas
 
 

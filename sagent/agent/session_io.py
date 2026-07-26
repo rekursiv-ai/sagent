@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Literal, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import base64
 import dataclasses
@@ -152,20 +152,19 @@ def _att_from_json(raw: object) -> BytesMessage | None:
         return None
 
 
-_KNOWN_ATTACHMENT_PREFIXES: Final[tuple[str, ...]] = (
-    "image/",
-    "audio/",
-    "video/",
-    "application/pdf",
-    "application/json",
-    "application/octet-stream",
-    "text/",
-)
-
-
 def _is_known_attachment_descriptor(mime: str) -> bool:
     """Return True when ``mime`` matches a wire-allowed attachment prefix."""
-    return any(mime.startswith(prefix) for prefix in _KNOWN_ATTACHMENT_PREFIXES)
+    return mime.startswith(
+        (
+            "image/",
+            "audio/",
+            "video/",
+            "application/pdf",
+            "application/json",
+            "application/octet-stream",
+            "text/",
+        )
+    )
 
 
 def _atts_to_json(atts: tuple[BytesMessage, ...]) -> list[dict[str, str]]:

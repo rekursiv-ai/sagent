@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_CHARS = 2_000  # config-globals: ignore -- in-history preview length budget
 PERSISTED_TAG: Final = "<persisted-output>"
-PERSISTED_CLOSE: Final = "</persisted-output>"
 
 _FALLBACK_STORAGE_DIR = (
     Path(tempfile.gettempdir()) / "sagent_results" / f"{os.getpid()}-{uuid.uuid4().hex}"
@@ -170,7 +169,7 @@ def _persist_oversized(
         f"Full output saved to: {filepath}\n\n"
         f"Preview (first {_format_size(PREVIEW_CHARS)}):\n"
         f"{preview}{more}"
-        f"{PERSISTED_CLOSE}"
+        "</persisted-output>"
     )
 
 

@@ -14,7 +14,6 @@ holds across providers.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final
 
 import math
 import re
@@ -132,13 +131,6 @@ def _finite_float(raw: str | None) -> float | None:
 # Duration segments like ``"6m"``, ``"0s"``, ``"500ms"``. ``ms`` precedes the
 # single-letter alternatives so it is matched before a bare ``m`` + ``s``.
 _DURATION_SEGMENT = re.compile(r"(\d+(?:\.\d+)?)(ms|[dhms])")
-_DURATION_UNIT_SEC: Final = {
-    "d": 86_400.0,
-    "h": 3_600.0,
-    "m": 60.0,
-    "s": 1.0,
-    "ms": 0.001,
-}
 
 
 def _openai_reset_seconds(raw: str | None) -> float | None:
@@ -152,6 +144,7 @@ def _openai_reset_seconds(raw: str | None) -> float | None:
     text = raw.strip().lower()
     if not text:
         return None
+    unit_sec = {"d": 86_400.0, "h": 3_600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
     matches = list(_DURATION_SEGMENT.finditer(text))
     consumed = sum(len(m.group(0)) for m in matches)
     if consumed != len(text):
@@ -160,4 +153,4 @@ def _openai_reset_seconds(raw: str | None) -> float | None:
             return max(0.0, float(text))
         except ValueError:
             return None
-    return sum(float(m.group(1)) * _DURATION_UNIT_SEC[m.group(2)] for m in matches)
+    return sum(float(m.group(1)) * unit_sec[m.group(2)] for m in matches)

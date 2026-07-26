@@ -31,22 +31,6 @@ from sagent.types.runtime import (
 )
 
 
-_SYSTEM: Final = (
-    "You advise a coding agent that is stuck on a decision. Read the"
-    " question and return a concise plan, correction, or stop signal."
-    " You have no tools and cannot act - your reply goes only to the"
-    " executor. Be direct and specific; skip preamble."
-)
-
-_DESCRIPTION: Final = (
-    "Consult a more capable advisor model for guidance. The advisor"
-    " has no tools and sees only the prompt you send. Typical"
-    " triggers: a tool call has failed twice, you're choosing between"
-    " two approaches without clear evidence, or you're about to make"
-    " a non-obvious design decision. Include the situation, options"
-    " considered, and the specific decision you need help with."
-)
-
 SYSTEM_NUDGE: Final = (
     "# Advisor\n\n"
     "An `advisor` tool is available - a more capable model with no"
@@ -101,7 +85,14 @@ class Advisor:
     name: str = "advisor"
     tool_id: str = "application/x-tool-advisor"
     clearable_results: bool = False
-    description: str = _DESCRIPTION
+    description: str = (
+        "Consult a more capable advisor model for guidance. The advisor"
+        " has no tools and sees only the prompt you send. Typical"
+        " triggers: a tool call has failed twice, you're choosing between"
+        " two approaches without clear evidence, or you're about to make"
+        " a non-obvious design decision. Include the situation, options"
+        " considered, and the specific decision you need help with."
+    )
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -159,7 +150,12 @@ class Advisor:
         *,
         model: Model,
         max_uses: int | None = None,
-        system: str = _SYSTEM,
+        system: str = (
+            "You advise a coding agent that is stuck on a decision. Read the"
+            " question and return a concise plan, correction, or stop signal."
+            " You have no tools and cannot act - your reply goes only to the"
+            " executor. Be direct and specific; skip preamble."
+        ),
     ) -> None:
         self._model = model
         self._max_uses = max_uses

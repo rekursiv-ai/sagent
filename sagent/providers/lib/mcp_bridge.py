@@ -23,7 +23,7 @@ observer pane is v2 work (see ``docs/private/cli_provider.md`` §1.9).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import base64
@@ -79,7 +79,6 @@ __all__ = ["ToolsBridge"]
 logger = logging.getLogger(__name__)
 
 
-_MCP_PATH: Final = "/mcp"
 _STARTUP_TIMEOUT_SEC = 10.0  # config-globals: ignore -- startup timeout dial
 
 
@@ -126,7 +125,7 @@ class _BridgeServer:
         async with self._loop_lock():
             await self._ensure_started()
             assert self._app is not None
-            mount = _starlette_routing.Mount(f"/{token}{_MCP_PATH}", app=handle_mcp)
+            mount = _starlette_routing.Mount(f"/{token}/mcp", app=handle_mcp)
             self._routes[token] = mount
             self._app.router.routes.append(mount)
 
@@ -382,7 +381,7 @@ class ToolsBridge:
         """
         if not self._mounted:
             raise RuntimeError("ToolsBridge.url read before start()")
-        return f"http://127.0.0.1:{_SHARED_SERVER.port}/{self._token}{_MCP_PATH}"
+        return f"http://127.0.0.1:{_SHARED_SERVER.port}/{self._token}/mcp"
 
     @property
     def server_name(self) -> str:

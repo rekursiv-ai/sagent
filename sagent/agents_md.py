@@ -56,13 +56,6 @@ logger = logging.getLogger(__name__)
 
 MemoryType = Literal["Managed", "User", "Project", "Local"]
 
-_DESCRIPTIONS: Final[dict[MemoryType, str]] = {
-    "Managed": "system-wide directives",
-    "User": "user-specific directives",
-    "Project": "project directives, version-controlled",
-    "Local": "project directives, user-local",
-}
-
 
 def _default_system_dir() -> Path:
     """Platform-appropriate system-wide config directory."""
@@ -384,7 +377,12 @@ class _AgentMdFile:
     @property
     def description(self) -> str:
         """Human-readable label for the memory tier (e.g. "user directives")."""
-        return _DESCRIPTIONS[self.memory_type]
+        return {
+            "Managed": "system-wide directives",
+            "User": "user-specific directives",
+            "Project": "project directives, version-controlled",
+            "Local": "project directives, user-local",
+        }[self.memory_type]
 
 
 def _dedup_key(p: Path) -> str:

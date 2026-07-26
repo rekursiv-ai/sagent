@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final
 
 import logging
 import os
@@ -51,21 +50,6 @@ def _load_static() -> str:
     if not base:
         return ""
     return read_asset(base)
-
-
-# Per-model marketing name + knowledge cutoff.
-# Opus 4.8 and 4.7 cutoffs verified against Anthropic's docs (January 2026).
-_MODEL_INFO: Final[dict[str, tuple[str, str]]] = {
-    "claude-fable-5": ("Claude Fable 5", "unknown"),
-    "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
-    "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
-    "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
-    "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
-    "claude-sonnet-5": ("Claude Sonnet 5", "unknown"),
-    "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
-    "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
-    "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
-}
 
 
 def _is_git_repo(cwd: str) -> bool:
@@ -108,18 +92,6 @@ def _is_git_worktree(cwd: str) -> bool:
     return Path(parts[0]).resolve() != Path(parts[1]).resolve()
 
 
-_WORKTREE_LINE: Final = (
-    "\nThis working directory is a git worktree (not the primary"
-    " checkout). Stay in this directory — do not `cd` to the"
-    " main repository."
-)
-# On Windows, tell the model to use Unix shell syntax
-# (assumes Git Bash / WSL).
-_WINDOWS_SHELL_SUFFIX: Final = (
-    " (prefer Unix shell conventions — /dev/null, forward slashes)"
-)
-
-
 def _load_env_template() -> str:
     """Load the environment template from the active recipe."""
     sp = recipe_dict("system_prompt")
@@ -149,14 +121,39 @@ def environment(model_id: str) -> str:
     """
     cwd = get_tool_state().bash_cwd
     is_git = _is_git_repo(cwd)
+    # Per-model marketing name + knowledge cutoff. Opus 4.8 and 4.7 cutoffs
+    # verified against Anthropic's docs (January 2026).
+    model_info: dict[str, tuple[str, str]] = {
+        "claude-fable-5": ("Claude Fable 5", "unknown"),
+        "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
+        "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
+        "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
+        "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
+        "claude-sonnet-5": ("Claude Sonnet 5", "unknown"),
+        "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
+        "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
+        "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
+    }
     # Context-window variants share their base model's metadata; key the
     # lookup on the canonical base id so ``claude-opus-4-8+1m`` resolves to
     # its base entry instead of falling back to "unknown".
-    marketing, cutoff = _MODEL_INFO.get(base_model_id(model_id), (model_id, "unknown"))
+    marketing, cutoff = model_info.get(base_model_id(model_id), (model_id, "unknown"))
     shell_name = _shell_name(os.environ.get("SHELL", "unknown"))
     on_windows = platform.system() == "Windows"
-    shell_line = shell_name + (_WINDOWS_SHELL_SUFFIX if on_windows else "")
-    worktree_line = _WORKTREE_LINE if is_git and _is_git_worktree(cwd) else ""
+    # On Windows, tell the model to use Unix shell syntax (assumes Git Bash / WSL).
+    windows_suffix = (
+        " (prefer Unix shell conventions — /dev/null, forward slashes)"
+        if on_windows
+        else ""
+    )
+    shell_line = shell_name + windows_suffix
+    worktree_line = (
+        "\nThis working directory is a git worktree (not the primary"
+        " checkout). Stay in this directory — do not `cd` to the"
+        " main repository."
+        if is_git and _is_git_worktree(cwd)
+        else ""
+    )
     return _load_env_template().format(
         cwd=cwd,
         is_git=str(is_git).lower(),
@@ -194,15 +191,6 @@ def build_system(
     return "\n\n".join(v() for v in d.values())
 
 
-_DEFAULT_SECTIONS: Final[tuple[str, ...]] = (
-    "static",
-    "environment",
-    "agents_md",
-    "memory",
-    "user_instructions",
-)
-
-
 def _enabled_sections() -> set[str]:
     """Return the section names the active recipe says to include.
 
@@ -210,7 +198,11 @@ def _enabled_sections() -> set[str]:
     restrict assembly. Absent ⇒ default = all five sections.
     """
     listed = recipe_list("system_prompt", "sections")
-    return set(listed) if listed else set(_DEFAULT_SECTIONS)
+    return (
+        set(listed)
+        if listed
+        else {"static", "environment", "agents_md", "memory", "user_instructions"}
+    )
 
 
 def build_system_dict(
