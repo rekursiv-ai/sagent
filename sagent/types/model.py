@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
@@ -51,10 +51,10 @@ __all__ = [
 ]
 
 
-CONTEXT_TAGS = ("+1m", "+200k")
+CONTEXT_TAGS: Final = ("+1m", "+200k")
 """Window-size suffixes a sagent model id may carry (e.g. ``...+1m``)."""
 
-LATENCY_TAGS = ("+fast",)
+LATENCY_TAGS: Final = ("+fast",)
 """Latency suffixes a sagent model id may carry (e.g. ``...+fast``)."""
 
 

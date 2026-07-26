@@ -20,7 +20,7 @@ switch behavior (mapped to ``enable_thinking`` in the body).
 
 from __future__ import annotations
 
-from typing import ClassVar, override
+from typing import ClassVar, Final, override
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.lib.cost import ModelProfile, Pricing
@@ -36,7 +36,7 @@ from sagent.types.model import ModelRequest
 # hyphenated ids (``qwen3-32b``) and the dotted generation ids
 # (``qwen3.6-plus``, the default). A bare ``qwen3-`` silently excluded the
 # entire qwen3.6 family -- including ``DEFAULT_MODEL`` -- from the effort knob.
-_THINKING_PREFIXES = (
+_THINKING_PREFIXES: Final = (
     "qwen3",
     "qwen-plus",
     "qwen-max",
@@ -65,7 +65,7 @@ def _is_non_reasoning_variant(model_id: str) -> bool:
 # tokens). ``none`` is absent: it toggles ``enable_thinking=False`` instead, so
 # no budget applies. Mirrors Google's per-level budget table so the effort knob
 # drives reasoning depth rather than collapsing to an on/off bool.
-_DASHSCOPE_THINKING_BUDGETS = {
+_DASHSCOPE_THINKING_BUDGETS: Final = {
     "minimal": 1_024,
     "low": 4_096,
     "medium": 8_192,
@@ -137,9 +137,9 @@ class _DashScopeModel(OpenAICompatModel):
 # request-body byte ceiling. Use the 0=unlimited sentinel rather than borrowing
 # OpenAI's caps (verified Jun 2026;
 # https://www.alibabacloud.com/help/en/model-studio/vision).
-_IMAGE_DIM = 0
-_IMAGE_BYTES = 0
-_REQUEST_BYTES = 0
+_IMAGE_DIM: Final = 0
+_IMAGE_BYTES: Final = 0
+_REQUEST_BYTES: Final = 0
 
 
 class DashScope(OpenAICompat):

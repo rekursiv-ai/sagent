@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 import logging
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MIN_PDF_BYTES = 128
+_MIN_PDF_BYTES: Final = 128
 
 
 def _is_cached_pdf(path: Path) -> bool:

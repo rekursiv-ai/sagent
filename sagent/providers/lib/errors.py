@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import RequestTooLargeError
@@ -20,7 +20,7 @@ else:
 # request-byte wire-limit: distinct from a token context-window overflow
 # and from rate limits. Anthropic, OpenAI, and Google all surface their
 # byte ceilings as 413. Body phrases catch the rare status-less variants.
-_REQUEST_TOO_LARGE_STATUS = 413
+_REQUEST_TOO_LARGE_STATUS: Final = 413
 # Unambiguous byte-limit phrases: each names the REQUEST/PAYLOAD/ENTITY size,
 # never the token window. These win over any co-occurring context phrase.
 # The looser prefix "request exceeds the maximum" is deliberately NOT here --
@@ -28,7 +28,7 @@ _REQUEST_TOO_LARGE_STATUS = 413
 # "...maximum context length" (token), so it cannot disambiguate on its own;
 # the fuller "...number of bytes" form is covered by "request entity too
 # large" / "maximum request size" instead.
-_REQUEST_TOO_LARGE_PHRASES = (
+_REQUEST_TOO_LARGE_PHRASES: Final = (
     "request_too_large",
     "maximum request size",
     "number of bytes",
@@ -40,7 +40,7 @@ _REQUEST_TOO_LARGE_PHRASES = (
 # (Gemini and OpenAI-compatible servers also sometimes return these on 413).
 # Bare "context length" is deliberately excluded: it is subsumed by the
 # specific forms below and would mismatch a byte error's remediation prose.
-_CONTEXT_OVERFLOW_PHRASES = (
+_CONTEXT_OVERFLOW_PHRASES: Final = (
     "context_length_exceeded",
     "maximum context length",
     "context window",

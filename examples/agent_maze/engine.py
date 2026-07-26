@@ -27,7 +27,7 @@ from examples.agent_maze.world import PLATE_LETTERS, World
 # A press stays live this many LOGICAL interactions. Short enough that an un-signalled
 # partner's natural (staggered) arrival misses it — so you must coordinate "press now" —
 # yet not wall-clock, so it's immune to model latency.
-PRESS_WINDOW = 8
+PRESS_WINDOW = 8  # config-globals: ignore -- game-balance tuning dial
 
 
 def _local_map(world: World, aid: str) -> str:

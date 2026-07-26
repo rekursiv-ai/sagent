@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Final
 
 import time
 
@@ -23,9 +24,9 @@ from sagent.tools.lib.path_sort import (
 from sagent.types.runtime import ToolResult
 
 
-_NUDGE = "find via Bash is a bad UX. Use the Glob tool."
+_NUDGE: Final = "find via Bash is a bad UX. Use the Glob tool."
 
-_DEFAULT_SORT = "name"
+_DEFAULT_SORT: Final = "name"
 
 
 class Glob:

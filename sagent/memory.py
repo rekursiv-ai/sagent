@@ -22,13 +22,14 @@ directory layout.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from sagent.sessions import project_dir
 
 
 # Index file truncation limits.
-_MAX_ENTRYPOINT_LINES = 200
-_MAX_ENTRYPOINT_BYTES = 25_000
+_MAX_ENTRYPOINT_LINES = 200  # config-globals: ignore -- entrypoint truncation cap
+_MAX_ENTRYPOINT_BYTES = 25_000  # config-globals: ignore -- entrypoint truncation cap
 
 
 def memory_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
@@ -110,7 +111,7 @@ def load_index(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
     return text
 
 
-_MEMORY_SECTION = """\
+_MEMORY_SECTION: Final = """\
 # auto memory
 
 Persistent memory lives at `{memory_dir}/`. The directory exists; \

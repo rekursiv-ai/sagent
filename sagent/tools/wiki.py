@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Final
 
 import logging
 import re
@@ -39,7 +40,7 @@ _FRONTMATTER_RE = re.compile(
     r"\A---\s*\n(?P<body>.*?)\n---\s*\n",
     re.DOTALL,
 )
-_REQUIRED_FRONTMATTER = ("title", "tags", "sources", "updated")
+_REQUIRED_FRONTMATTER: Final = ("title", "tags", "sources", "updated")
 
 
 def find_root(start: str | Path) -> Path | None:
@@ -180,7 +181,7 @@ def lint(root: Path) -> dict[str, list[str]]:
     return errors
 
 
-_OPERATIONS = ("locate", "list", "read_page", "read_index", "lint")
+_OPERATIONS: Final = ("locate", "list", "read_page", "read_index", "lint")
 
 
 class Wiki:

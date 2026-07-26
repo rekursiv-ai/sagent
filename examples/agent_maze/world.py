@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Literal, TypedDict
+from typing import Final, Literal, TypedDict
 
 
 CellType = Literal["wall", "floor", "diggable", "exit", "plate"]
@@ -45,17 +45,17 @@ class SpawnMeta(TypedDict):
     plates: list[PlateInfo]
 
 
-_CHAR_TO_CELL: dict[str, CellType] = {
+_CHAR_TO_CELL: Final[dict[str, CellType]] = {
     "#": "wall",
     ".": "floor",
     "%": "diggable",
     "E": "exit",
     "P": "plate",
 }
-_DIG_HP = 2  # ticks of digging to break a diggable wall
-PLATE_LETTERS = "abcdefgh"  # a paired-plate lock: two tiles sharing a letter
-PRESS_WINDOW = 10  # a press stays "armed" this many ticks (absorbs multi-agent jitter)
-PRESS_CHARGES = 6  # presses each agent gets -> can't spam; must time it (=> comms)
+_DIG_HP = 2  # config-globals: ignore -- ticks to break a diggable wall (retunable)
+PLATE_LETTERS: Final = "abcdefgh"  # a paired-plate lock: two tiles sharing a letter
+PRESS_WINDOW = 10  # config-globals: ignore -- ticks a press stays armed (retunable)
+PRESS_CHARGES = 6  # config-globals: ignore -- presses per agent (retunable)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -539,7 +539,7 @@ class World:
 # sits mid-maze, out of sight from every spawn; junk keys (`k`) are corner decoys;
 # the exit (`E`) is bottom-right. Agents 1 and 2 start on the left, 3 on the right.
 # Discoveries must be shared to converge quickly -- the mesh-vs-tree contrast.
-LEVEL_V1 = [
+LEVEL_V1: Final = [
     "###############",
     "#1...........k#",
     "#.#####.#####.#",
@@ -554,7 +554,7 @@ LEVEL_V1 = [
 # so the only thing that matters is COORDINATION: agents must divide the treasures
 # and not re-visit a collected spot. Poor claim-propagation -> wasted trips. Used to
 # test whether the hub-and-spoke tree wastes moves vs the peer mesh.
-LEVEL_TREASURE = [
+LEVEL_TREASURE: Final = [
     "###############",
     "#1.$.....$...2#",
     "#.............#",

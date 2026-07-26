@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import argparse
 import asyncio
@@ -106,7 +106,7 @@ from sagent.tools.core import set_recipe
 _DEFAULT_PROVIDER = "Anthropic"
 _DEFAULT_AUTH = "env"
 _PROVIDER_STARTUP_ERRORS = (FileNotFoundError, RuntimeError, ValueError)
-_PROVIDER_ENV_HINTS = {
+_PROVIDER_ENV_HINTS: Final = {
     "Anthropic": "ANTHROPIC_API_KEY",
     "Google": "GOOGLE_API_KEY",
 }
@@ -122,7 +122,7 @@ def _default_allow_providers() -> tuple[str, ...]:
     return (_DEFAULT_PROVIDER, *rest)
 
 
-DEFAULT_TOOLS = [
+DEFAULT_TOOLS: Final = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
@@ -716,8 +716,9 @@ def _build_provider_model_fallback(
             continue
         sys.stderr.write(
             f"[provider] {original_provider} unavailable: {error}\n"
-            f"[provider] using {fallback_provider} subscription login "
-            f"({model.model_id}).\n"
+            f"[provider] falling back to {fallback_provider} ({model.model_id}).\n"
+            f"[provider] To use {original_provider}, run: "
+            f"sagent --provider {original_provider} login\n"
         )
         return provider, model, auth
     args.provider = original_provider
@@ -751,7 +752,10 @@ def _credential_fallback_providers(
     allow_providers: tuple[str, ...] = PROVIDER_NAMES,
 ) -> tuple[str, ...]:
     """Return implicit subscription providers to try after ``provider_name``."""
-    candidates = ("AnthropicCLI", "OpenAISubscription")
+    candidates = (
+        "AnthropicCLI",
+        "OpenAISubscription",
+    )
     return tuple(
         candidate
         for candidate in candidates
@@ -782,6 +786,7 @@ def _credential_setup_commands(
         if account_args:
             return (login, run)
         return ("codex login", login, run)
+
     cls = getattr(providers, provider_name, None)
     env_var = _PROVIDER_ENV_HINTS.get(
         provider_name,

@@ -8,7 +8,7 @@ no system binaries required.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import io
 import re
@@ -30,19 +30,23 @@ if TYPE_CHECKING:
     from PIL import Image
 
 
-PDF_MAGIC = b"%PDF-"
-MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MB hard cap before rasterizing
-MAX_INLINE_PAGES = 10
+PDF_MAGIC: Final = b"%PDF-"
+MAX_PDF_BYTES = (
+    50 * 1024 * 1024
+)  # config-globals: ignore -- 50 MB hard cap before rasterizing
+MAX_INLINE_PAGES = 10  # config-globals: ignore -- inline page cap
 # Conservative ceiling on the cumulative rendered JPEG bytes a single read
 # may emit. A single fresh read's bytes are this turn's, not history, so
 # compaction cannot shed them; bounding here stops one read from authoring an
 # unshrinkable, over-the-wire-ceiling request. Sized below the smallest
 # provider request limit (~20 MB) with headroom for system prompt + history.
-MAX_RENDERED_BYTES = 12 * 1024 * 1024
+MAX_RENDERED_BYTES = (
+    12 * 1024 * 1024
+)  # config-globals: ignore -- cumulative rendered-bytes cap
 # pypdfium2 page.render(scale=N) renders at N * 72 DPI. 2 = 144 DPI,
 # which is a good vision/OCR sweet spot.
-_RENDER_SCALE = 2
-_JPEG_QUALITY = 85
+_RENDER_SCALE = 2  # config-globals: ignore -- render-scale dial (N * 72 DPI)
+_JPEG_QUALITY = 85  # config-globals: ignore -- jpeg-quality dial
 
 
 class PdfError(Exception):

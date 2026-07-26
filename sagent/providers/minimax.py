@@ -18,7 +18,7 @@ uses the standard ``tool_calls`` block.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Final
 
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import (
@@ -37,9 +37,9 @@ class _MiniMaxModel(OpenAICompatModel):
 # request-body byte ceiling; images are preprocessed server-side. Use the
 # 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
 # https://platform.minimax.io/docs/api-reference/text-openai-api).
-_IMAGE_DIM = 0
-_IMAGE_BYTES = 0
-_REQUEST_BYTES = 0
+_IMAGE_DIM: Final = 0
+_IMAGE_BYTES: Final = 0
+_REQUEST_BYTES: Final = 0
 
 
 class MiniMax(OpenAICompat):

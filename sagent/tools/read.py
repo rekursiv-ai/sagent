@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import asyncio
 import json
@@ -47,7 +47,7 @@ from sagent.types.runtime import BytesMessage, ToolResult
 # -- adding a format here is the only edit needed.
 # SVG is intentionally absent: it is XML, sent as text so providers do not
 # reject ``image/svg+xml``.
-_MIME_BY_EXT: dict[str, str] = {
+_MIME_BY_EXT: Final[dict[str, str]] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -56,9 +56,9 @@ _MIME_BY_EXT: dict[str, str] = {
     ".webp": "image/webp",
 }
 _IMAGE_EXTS = frozenset(_MIME_BY_EXT)
-_PDF_EXT = ".pdf"
-_NOTEBOOK_EXT = ".ipynb"
-_NUDGE = "cat via Bash is a bad UX. Use the Read tool."
+_PDF_EXT: Final = ".pdf"
+_NOTEBOOK_EXT: Final = ".ipynb"
+_NUDGE: Final = "cat via Bash is a bad UX. Use the Read tool."
 _CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
 
 

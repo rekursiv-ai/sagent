@@ -28,7 +28,9 @@ __all__ = [
 ]
 
 
-MAX_CONSECUTIVE_COMPACT_FAILURES = 3
+MAX_CONSECUTIVE_COMPACT_FAILURES = (
+    3  # config-globals: ignore -- circuit-breaker retry count (runtime knob)
+)
 """Auto-compaction circuit breaker.
 
 After this many consecutive auto-compact failures, ``compact_if_needed``

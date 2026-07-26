@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 import base64
 import dataclasses
@@ -152,7 +152,7 @@ def _att_from_json(raw: object) -> BytesMessage | None:
         return None
 
 
-_KNOWN_ATTACHMENT_PREFIXES: tuple[str, ...] = (
+_KNOWN_ATTACHMENT_PREFIXES: Final[tuple[str, ...]] = (
     "image/",
     "audio/",
     "video/",

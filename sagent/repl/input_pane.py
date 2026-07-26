@@ -38,7 +38,7 @@ keybinding/observer that commits or restores them.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, assert_never, override
+from typing import TYPE_CHECKING, Final, Protocol, assert_never, override
 
 import asyncio
 import fnmatch
@@ -117,11 +117,11 @@ __all__ = [
 ]
 
 # Stable key for the REPL pump entry in ``agent._bg``.
-REPL_PUMP_KEY = "__repl_pump__"
+REPL_PUMP_KEY: Final = "__repl_pump__"
 
 # Max characters of the discard-preview body. Long enough to be
 # recognisable, short enough to stay on one console line.
-_PREVIEW_CHARS = 80
+_PREVIEW_CHARS = 80  # config-globals: ignore -- discard-preview char cap, display pref
 
 
 class InputSource(Protocol):

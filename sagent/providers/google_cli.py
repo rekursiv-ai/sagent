@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NotRequired, TypedDict, cast, override
+from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast, override
 
 import asyncio
 import base64
@@ -89,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
-_CREDENTIALS_SCHEMA: JSON = {
+_CREDENTIALS_SCHEMA: Final[JSON] = {
     "type": "object",
     "required": ["access_token", "refresh_token", "expiry_date"],
     "properties": {

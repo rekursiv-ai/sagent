@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, cast
+from typing import IO, Final, cast
 
 import contextlib
 import json
@@ -44,7 +44,7 @@ from sagent.lib.userdirs import data_dir
 logger = logging.getLogger(__name__)
 
 _SAGENT_HOME = data_dir("sagent")
-_PICK_CAP = 20
+_PICK_CAP: Final = 20
 _PROJECTS_DIR = _SAGENT_HOME / "projects"
 # Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
 # followed OS data-dir conventions). For most users that was a real directory.
@@ -59,7 +59,7 @@ _LEGACY_CLAUDE_HOME = Path.home() / ".claude"
 # Subdirs of the Claude home that, when present, are bridged back via symlink so
 # skills authored in either tool stay unified. Only ``skills`` qualifies today;
 # papers/memory are sagent-owned and get copied, not bridged.
-_BRIDGE_SUBDIRS = ("skills",)
+_BRIDGE_SUBDIRS: Final = ("skills",)
 
 
 def _legacy_cwd_slug(cwd: str | Path) -> str:
@@ -222,7 +222,7 @@ def _bridge_shared_dirs() -> None:
 # boundary information without introducing characters outside
 # ``[A-Za-z0-9_-]`` (all filesystem-safe).
 _SLUG_NONALPHANUM_RE = re.compile(r"[^a-zA-Z0-9/]")
-_MAX_SLUG_LEN = 200
+_MAX_SLUG_LEN: Final = 200
 
 
 def cwd_slug(cwd: str | Path) -> str:

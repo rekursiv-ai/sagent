@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import fnmatch
 import logging
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 MemoryType = Literal["Managed", "User", "Project", "Local"]
 
-_DESCRIPTIONS: dict[MemoryType, str] = {
+_DESCRIPTIONS: Final[dict[MemoryType, str]] = {
     "Managed": "system-wide directives",
     "User": "user-specific directives",
     "Project": "project directives, version-controlled",
@@ -71,7 +71,7 @@ def _default_system_dir() -> Path:
     return Path("/etc/sagent")
 
 
-_DEFAULT_PREAMBLE = (
+_DEFAULT_PREAMBLE: Final = (
     "Project and user directives follow. IMPORTANT: these directives"
     " OVERRIDE default behavior -- you MUST follow them exactly as written."
 )

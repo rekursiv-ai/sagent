@@ -9,7 +9,7 @@ counters.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 import time
@@ -20,8 +20,10 @@ from sagent.repl.format import format_count, format_elapsed
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
 
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_WAIT_REASON_THRESHOLD_SEC = 15.0
+_SPINNER: Final = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_WAIT_REASON_THRESHOLD_SEC = (
+    15.0  # config-globals: ignore -- wait-reason display threshold, tunable
+)
 
 
 def render_status_pane(agent: Agent) -> str:

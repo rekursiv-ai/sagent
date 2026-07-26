@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, cast, get_args
+from typing import Any, Final, Literal, Protocol, cast, get_args
 from urllib.parse import quote, urlparse
 from xml.etree.ElementTree import Element, ParseError
 
@@ -44,9 +44,9 @@ trafilatura = lazy_import("trafilatura")
 HttpMethod = Literal["GET", "POST"]
 
 # Response kinds returned by ``_fetch_body``; controls extraction.
-_KIND_HTML = "html"  # raw HTML, needs trafilatura
-_KIND_MARKDOWN = "markdown"  # already-extracted markdown (reader proxy)
-_KIND_RSS = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
+_KIND_HTML: Final = "html"  # raw HTML, needs trafilatura
+_KIND_MARKDOWN: Final = "markdown"  # already-extracted markdown (reader proxy)
+_KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
 # HTTP statuses that trigger the bot-wall fallback ladder. Other
 # 4xx/5xx (404, 410, 451, 500, ...) are not signs of bot detection and
 # surface to the caller immediately.
@@ -58,7 +58,7 @@ _FALLBACK_STATUSES: frozenset[int] = frozenset({403, 429, 503})
 # touching TLS-layer details. URL templated so the proxy host can be
 # swapped (self-hosted, alternate provider) by overriding this module
 # attribute.
-_READER_PROXY_TEMPLATE = "https://r.jina.ai/{url}"
+_READER_PROXY_TEMPLATE: Final = "https://r.jina.ai/{url}"
 
 # Sentinel embedded in the markdown body when Jina's own backend got
 # bot-walled. Returned with HTTP 200, so we have to detect at the
@@ -671,7 +671,7 @@ class _GoogleNewsAdapter:
         return None
 
 
-_ALLOW_THIRD_PARTY_RENDER_ENV = "SAGENT_ALLOW_THIRD_PARTY_RENDER"
+_ALLOW_THIRD_PARTY_RENDER_ENV: Final = "SAGENT_ALLOW_THIRD_PARTY_RENDER"
 
 
 def _third_party_render_allowed() -> bool:
@@ -907,7 +907,7 @@ def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
     ]
 
 
-_NUDGE = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
+_NUDGE: Final = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
 _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
     {
         "-o",

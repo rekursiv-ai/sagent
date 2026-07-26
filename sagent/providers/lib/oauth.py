@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock as _ThreadLock
-from typing import cast, override
+from typing import Final, cast, override
 
 import asyncio
 import base64
@@ -37,7 +37,7 @@ import urllib.parse
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_ACCOUNT = "default"
+_DEFAULT_ACCOUNT: Final = "default"
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 

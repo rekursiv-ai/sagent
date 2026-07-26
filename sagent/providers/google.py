@@ -13,7 +13,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 import asyncio
 import base64
@@ -74,9 +74,9 @@ from sagent.types.runtime import (
 
 logger = logging.getLogger(__name__)
 
-_STREAM_IDLE_TIMEOUT = 600.0
-_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-_GOOGLE_THINKING_BUDGETS = {
+_STREAM_IDLE_TIMEOUT = 600.0  # config-globals: ignore -- stream idle timeout dial
+_API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
+_GOOGLE_THINKING_BUDGETS: Final = {
     "min": 1_024,
     "low": 4_096,
     "medium": 8_192,
@@ -95,9 +95,9 @@ _GOOGLE_THINKING_BUDGETS = {
 #   - The only documented limit is the 20 MB TOTAL inline request size
 #     (text + system + inline bytes), so ``max_request_bytes=20 MB``; the
 #     byte-aware compaction gate enforces it across the whole request.
-_IMAGE_DIM = 0
-_IMAGE_BYTES = 0
-_REQUEST_BYTES = 20 * 1024 * 1024
+_IMAGE_DIM: Final = 0
+_IMAGE_BYTES: Final = 0
+_REQUEST_BYTES: Final = 20 * 1024 * 1024
 
 
 class Google:

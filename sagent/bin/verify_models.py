@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Final
 
 import argparse
 import asyncio
@@ -57,7 +58,7 @@ class ModelLimits:
 # Source: https://ai.google.dev/api/models#method:-models.list
 # Returns inputTokenLimit and outputTokenLimit per model.
 
-_GOOGLE_API = "https://generativelanguage.googleapis.com/v1beta/models"
+_GOOGLE_API: Final = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
 async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
@@ -89,7 +90,7 @@ async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
 # Source: https://developers.openai.com/api/docs/models/<model>
 # Each page SSR-renders "N context window" and "N max output tokens".
 
-_OPENAI_DOC = "https://developers.openai.com/api/docs/models"
+_OPENAI_DOC: Final = "https://developers.openai.com/api/docs/models"
 
 
 async def fetch_openai(model_ids: list[str]) -> dict[str, ModelLimits]:
@@ -136,7 +137,7 @@ def _parse_openai_page(html: str) -> ModelLimits | None:
 # Source: GET /v1/models/{model_id}
 # Returns max_tokens (max output) and max_input_tokens.
 
-_ANTHROPIC_API = "https://api.anthropic.com/v1/models"
+_ANTHROPIC_API: Final = "https://api.anthropic.com/v1/models"
 
 
 async def fetch_anthropic(

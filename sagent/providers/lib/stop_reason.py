@@ -26,7 +26,7 @@ Without this, two failure modes happened in the wild:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 
 ProviderKind = Literal["anthropic", "openai", "google"]
@@ -43,7 +43,7 @@ BENIGN_STOP_REASONS: frozenset[str] = frozenset(
     },
 )
 
-_ANTHROPIC_MAP: dict[str, str] = {
+_ANTHROPIC_MAP: Final[dict[str, str]] = {
     "end_turn": "model_finished",
     "pause_turn": "model_continuing",
     "tool_use": "model_tool_use",
@@ -53,7 +53,7 @@ _ANTHROPIC_MAP: dict[str, str] = {
 }
 
 # OpenAI ``finish_reason`` → canonical vocabulary.
-_OPENAI_MAP: dict[str, str] = {
+_OPENAI_MAP: Final[dict[str, str]] = {
     "stop": "model_finished",
     "length": "max_tokens",
     "tool_calls": "model_tool_use",
@@ -62,7 +62,7 @@ _OPENAI_MAP: dict[str, str] = {
 }
 
 # Google ``finishReason`` (Gemini) → canonical.
-_GOOGLE_MAP: dict[str, str] = {
+_GOOGLE_MAP: Final[dict[str, str]] = {
     "STOP": "model_finished",
     "MAX_TOKENS": "max_tokens",
     "SAFETY": "model_refusal",

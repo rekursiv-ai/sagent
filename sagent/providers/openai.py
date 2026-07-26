@@ -12,7 +12,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import ClassVar, override
+from typing import ClassVar, Final, override
 
 import dataclasses
 
@@ -65,24 +65,24 @@ class _OpenAIModel(OpenAICompatModel):
 #   - The 20 MB byte ceilings preserve their established local resize/compaction
 #     behavior. They are not the current GPT-5.6 limits; those are declared
 #     separately below.
-_IMAGE_DIM = 2048
-_IMAGE_BYTES = 20 * 1024 * 1024
-_REQUEST_BYTES = 20 * 1024 * 1024
+_IMAGE_DIM: Final = 2048
+_IMAGE_BYTES: Final = 20 * 1024 * 1024
+_REQUEST_BYTES: Final = 20 * 1024 * 1024
 
 # GPT-5.6 ``auto``/``original`` preserves source dimensions. Current image
 # requirements publish a 512 MB TOTAL request-payload cap and no separate
 # per-image byte cap, so ``0`` keeps each image unmodified while the request
 # guard enforces the aggregate ceiling.
 # https://developers.openai.com/api/docs/guides/images-vision
-_GPT56_IMAGE_BYTES = 0
-_GPT56_REQUEST_BYTES = 512 * 1024 * 1024
+_GPT56_IMAGE_BYTES: Final = 0
+_GPT56_REQUEST_BYTES: Final = 512 * 1024 * 1024
 
 # Cheap-tier input window for models OpenAI prices in two tiers. For GPT-5.6,
 # gpt-5.5, gpt-5.4, and their applicable variants, prompts above 272K input
 # tokens bill at 2x input / 1.5x output for the whole session. The base profile
 # caps the window here; a ``+1m`` model id opts into the full window.
 # https://developers.openai.com/api/docs/models/gpt-5.6-sol
-_TWO_TIER_TOKENS = 272_000
+_TWO_TIER_TOKENS: Final = 272_000
 
 
 def _two_tier_pricing(

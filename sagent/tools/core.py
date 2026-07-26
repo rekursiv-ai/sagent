@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import cast, get_type_hints, overload
+from typing import Final, cast, get_type_hints, overload
 
 import asyncio
 import dataclasses
@@ -52,8 +52,8 @@ from sagent.types.runtime import ToolResult
 logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
-_NOW_PLACEHOLDER = "{{NOW}}"
-_DEFAULT_RECIPE = "sagent"
+_NOW_PLACEHOLDER: Final = "{{NOW}}"
+_DEFAULT_RECIPE: Final = "sagent"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
 _recipe_path_override: Path | None = None
 _recipe_cache: dict[str, object] | None = None
@@ -122,7 +122,7 @@ def read_asset(path: str | Path) -> str:
     return _read_asset(path, visited=set(), depth=0)
 
 
-_MAX_ASSET_DEPTH = 8
+_MAX_ASSET_DEPTH = 8  # config-globals: ignore -- include-recursion depth dial
 
 
 def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
@@ -184,7 +184,9 @@ def recipe_list(section: str, key: str) -> list[str]:
     return [str(x) for x in cast(list[object], items)]
 
 
-_MISSING_TOOL_DESCRIPTION = "Tool description unavailable; use the JSON schema exactly."
+_MISSING_TOOL_DESCRIPTION: Final = (
+    "Tool description unavailable; use the JSON schema exactly."
+)
 
 
 def load_tool_description(name: str) -> str:
@@ -265,7 +267,7 @@ def _ensure_locale_time() -> None:
 
 
 # 100K tokens × ~4 chars/token.
-TOOL_RESULT_MAX_CHARS = 400_000
+TOOL_RESULT_MAX_CHARS: Final = 400_000
 
 _TYPE_MAP: dict[type[object], str] = {
     str: "string",

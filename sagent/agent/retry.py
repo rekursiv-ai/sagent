@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
 import logging
@@ -50,25 +50,33 @@ from sagent.types.model import (
 
 logger = logging.getLogger(__name__)
 
-RETRY_BASE_SEC = 0.5
-MAX_RETRY_DELAY = 32.0
+RETRY_BASE_SEC = 0.5  # config-globals: ignore -- exponential backoff base
+MAX_RETRY_DELAY = 32.0  # config-globals: ignore -- normal-mode backoff cap
 # Interactive ceiling: in non-persistent mode a server-advertised backoff
 # longer than this is surfaced as a ``RateLimitError`` halt rather than a
 # blocking sleep, so a multi-hour rate-limit reset can't freeze the REPL.
-INTERACTIVE_MAX_SLEEP_SEC = 60.0
+INTERACTIVE_MAX_SLEEP_SEC = (
+    60.0  # config-globals: ignore -- interactive backoff ceiling
+)
 # Notification threshold for a LOCAL-backoff retry: at or below this the wait
 # is short enough to retry silently (a sub-5s transport blip the user never
 # perceives); a local backoff longer than this publishes the "model service
 # suspended" banner so the user understands the pause. Server-advertised waits
 # always notify regardless of length.
-SUSPENSION_NOTICE_SEC = 5.0
+SUSPENSION_NOTICE_SEC = (
+    5.0  # config-globals: ignore -- suspension-banner notice threshold
+)
 # A throttle without a long advertised reset clears in seconds-to-minutes
 # (Issue#424, session 6efa990c: every halt recovered on an immediate manual
 # retry), so rate-limit retries run on this wall-clock budget instead of the
 # attempt counter -- the generic ``max_attempts`` cap gives up after ~9s of
 # effective waiting, just before the limiter relents.
-RATE_LIMIT_RETRY_BUDGET_SEC = 180.0
-PERSISTENT_MAX_BACKOFF_SEC = 300.0
+RATE_LIMIT_RETRY_BUDGET_SEC = (
+    180.0  # config-globals: ignore -- rate-limit retry wall-clock budget
+)
+PERSISTENT_MAX_BACKOFF_SEC = (
+    300.0  # config-globals: ignore -- persistent-mode backoff cap
+)
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 
 # Persistent-retry cap. Without this, a permanently-429'ing server wedges
@@ -77,19 +85,23 @@ RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
 # is roughly 5 hours of wall-clock retry -- long enough that a transient
 # upstream outage typically clears, short enough that an unattended job
 # eventually fails loud instead of stalling forever.
-DEFAULT_MAX_PERSISTENT_ATTEMPTS = 60
+DEFAULT_MAX_PERSISTENT_ATTEMPTS = (
+    60  # config-globals: ignore -- persistent-retry attempt cap
+)
 
 # Depth cap when unwinding ``__cause__`` chains - a pathological
 # self-referencing cycle must not hang us.
-_MAX_CAUSE_DEPTH = 5
+_MAX_CAUSE_DEPTH = 5  # config-globals: ignore -- __cause__ unwind depth cap
 
 # Backstop on throttle retries: termination normally comes from the
 # wall-clock budget, which a frozen or mocked clock cannot advance. The
 # ramp reaches the budget in ~9 attempts, so a legitimate loop never
 # gets here -- mirrors the counter backstops on the other branches.
-_MAX_RATE_LIMIT_ATTEMPTS = 20
+_MAX_RATE_LIMIT_ATTEMPTS = 20  # config-globals: ignore -- rate-limit attempt backstop
 
-_MAX_STREAM_INTERRUPT_RETRIES = 2
+_MAX_STREAM_INTERRUPT_RETRIES = (
+    2  # config-globals: ignore -- stream-interrupt retry count
+)
 
 
 class RetriesExhaustedError(Exception):
@@ -269,7 +281,7 @@ def extract_retry_after(error: Exception) -> float | None:
 # still-serviceable session for hours (Issue#316). ``-overage-status`` is
 # excluded: it describes overage billing eligibility, not whether THIS request
 # was limited.
-_UNIFIED_STATUS_HEADERS = (
+_UNIFIED_STATUS_HEADERS: Final = (
     "anthropic-ratelimit-unified-status",
     "anthropic-ratelimit-unified-5h-status",
     "anthropic-ratelimit-unified-7d-status",
@@ -287,7 +299,9 @@ def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
     return False
 
 
-_MAX_SERVER_RETRY_AFTER_SEC = 24 * 60 * 60
+_MAX_SERVER_RETRY_AFTER_SEC = (
+    24 * 60 * 60
+)  # config-globals: ignore -- epoch-vs-delay Retry-After cutoff
 
 
 def _retry_after_seconds(value: float) -> float:
@@ -776,7 +790,7 @@ def _make_stream_sink(
     return _sink
 
 
-_BODY_EXCERPT_CHARS = 500
+_BODY_EXCERPT_CHARS = 500  # config-globals: ignore -- diagnostic body excerpt length
 
 
 def _diagnostic_headers(headers: object) -> dict[str, str]:

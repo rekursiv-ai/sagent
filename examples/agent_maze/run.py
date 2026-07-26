@@ -30,7 +30,7 @@ from examples.agent_maze.capture import capture
 
 
 HERE = Path(__file__).parent
-PORT = 8001
+PORT = 8001  # config-globals: ignore -- serve port, meant to be overridden
 
 
 def serve(port: int = PORT, host: str = "127.0.0.1") -> None:

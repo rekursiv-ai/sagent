@@ -14,6 +14,7 @@ holds across providers.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Final
 
 import math
 import re
@@ -131,7 +132,13 @@ def _finite_float(raw: str | None) -> float | None:
 # Duration segments like ``"6m"``, ``"0s"``, ``"500ms"``. ``ms`` precedes the
 # single-letter alternatives so it is matched before a bare ``m`` + ``s``.
 _DURATION_SEGMENT = re.compile(r"(\d+(?:\.\d+)?)(ms|[dhms])")
-_DURATION_UNIT_SEC = {"d": 86_400.0, "h": 3_600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
+_DURATION_UNIT_SEC: Final = {
+    "d": 86_400.0,
+    "h": 3_600.0,
+    "m": 60.0,
+    "s": 1.0,
+    "ms": 0.001,
+}
 
 
 def _openai_reset_seconds(raw: str | None) -> float | None:

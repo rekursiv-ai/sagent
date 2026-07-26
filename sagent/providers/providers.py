@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Final
+
 import inspect
 import sys
 
 from sagent.types.providers import Provider, ProviderOptions
 
 
-_MODEL_PROVIDER_MAP: list[tuple[str, str]] = [
+_MODEL_PROVIDER_MAP: Final[list[tuple[str, str]]] = [
     ("claude", "Anthropic"),
     ("gemini", "Google"),
     ("gpt", "OpenAI"),
@@ -23,15 +25,17 @@ _MODEL_PROVIDER_MAP: list[tuple[str, str]] = [
     ("minimax", "MiniMax"),
 ]
 
-# Maps API-key provider names to their same-vendor account-auth
-# (subscription / credentials-file) variant. ``infer_provider`` keeps
-# the current account variant only when the inferred model belongs to
-# that same vendor. Cross-vendor inference retains the destination's
-# API-key default; choosing another vendor's subscription provider must
-# be explicit.
+# Maps API-key provider names to their account-auth (subscription /
+# credentials-file) variant. When ``infer_provider`` sees a model_id
+# whose prefix maps to an API-key provider (e.g. ``claude-...`` →
+# ``Anthropic``) AND the user's *current* provider is the account
+# variant (e.g. ``AnthropicCLI``), the inference resolves to the
+# account variant + ``credentials`` auth instead of the API-key path.
+# Without this, ``AgentSelf(model_id="claude-sonnet-4-6")`` from an
+# AnthropicCLI-backed agent would silently try to build a fresh
+# Anthropic API provider, requiring ``ANTHROPIC_API_KEY`` to be set.
 _ACCOUNT_OVERRIDES: dict[str, str] = {
     "Anthropic": "AnthropicCLI",
-    "OpenAI": "OpenAISubscription",
 }
 _ACCOUNT_PROVIDERS: set[str] = set(_ACCOUNT_OVERRIDES.values())
 
@@ -57,6 +61,16 @@ def infer_provider(
 
     for prefix, base_prov in _MODEL_PROVIDER_MAP:
         if model_id.startswith(prefix):
+            if current_provider.startswith(base_prov):
+                # Same vendor family: the current provider is either the base
+                # itself or one of its variants (``OpenAISubscription``,
+                # ``AnthropicCLI``, ...). Preserve it rather than re-infer to
+                # the bare API-key sibling, which would demand a key the
+                # operator never set. This guard is independent of the account
+                # override table, so it holds for variants that table does not
+                # enumerate (e.g. ``OpenAISubscription`` in the public build).
+                return None
+
             account_target = _ACCOUNT_OVERRIDES.get(base_prov)
             target = (
                 account_target

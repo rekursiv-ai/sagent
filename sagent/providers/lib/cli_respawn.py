@@ -13,12 +13,14 @@ from __future__ import annotations
 # A subprocess is respawned after this many turns regardless of context size,
 # bounding per-process state (KV cache, MCP handshake drift) that accretes
 # across a long-lived ``--print`` session.
-TURN_RESPAWN_THRESHOLD = 100
+TURN_RESPAWN_THRESHOLD = 100  # config-globals: ignore -- respawn cadence threshold dial
 
 # ...or once the last request's input footprint crosses this fraction of the
 # model's context window, so the next turn starts from a fresh process before
 # the window fills.
-CONTEXT_FRACTION_RESPAWN_THRESHOLD = 0.5
+CONTEXT_FRACTION_RESPAWN_THRESHOLD = (
+    0.5  # config-globals: ignore -- context-fraction respawn threshold dial
+)
 
 
 def respawn_for_cadence(

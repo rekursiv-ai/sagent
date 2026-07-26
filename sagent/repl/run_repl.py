@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 import contextlib
@@ -596,9 +596,9 @@ def _write(printer: Printer | None, line: str) -> None:
         printer.write_slash_block(line)
 
 
-_FLAG_PROVIDER = ("--provider", "-p")
-_FLAG_AUTH = ("--auth", "-a")
-_FLAG_ACCOUNT = ("--account",)
+_FLAG_PROVIDER: Final = ("--provider", "-p")
+_FLAG_AUTH: Final = ("--auth", "-a")
+_FLAG_ACCOUNT: Final = ("--account",)
 _KV_KEYS = frozenset({"provider", "auth", "account", "model", "model_id"})
 
 

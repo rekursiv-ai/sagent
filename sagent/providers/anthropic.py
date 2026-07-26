@@ -16,7 +16,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast
 
 import asyncio
 import base64
@@ -101,7 +101,7 @@ _response_headers_var: contextvars.ContextVar[Mapping[str, str] | None] = (
     contextvars.ContextVar("anthropic_response_headers", default=None)
 )
 
-_STREAM_IDLE_TIMEOUT = 600.0
+_STREAM_IDLE_TIMEOUT = 600.0  # config-globals: ignore -- stream idle timeout dial
 
 
 class _AnthropicTransportClient(Protocol):
@@ -122,11 +122,13 @@ class _AnthropicRawStreamSDK(Protocol):
     ) -> anthropic.APIStatusError: ...
 
 
-_CONTEXT_1M_BETA = "context-1m-2025-08-07"
-_CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
-_REDACT_THINKING_BETA = "redact-thinking-2026-02-12"
-_FAST_MODE_BETA = "fast-mode-2026-02-01"
-_DEFAULT_API_TARGET_INPUT_TOKENS = 40_000
+_CONTEXT_1M_BETA: Final = "context-1m-2025-08-07"
+_CONTEXT_MANAGEMENT_BETA: Final = "context-management-2025-06-27"
+_REDACT_THINKING_BETA: Final = "redact-thinking-2026-02-12"
+_FAST_MODE_BETA: Final = "fast-mode-2026-02-01"
+_DEFAULT_API_TARGET_INPUT_TOKENS = (
+    40_000  # config-globals: ignore -- target input-token dial
+)
 
 # Models whose Pricing carries non-zero fast-mode rates AND whose API
 # accepts ``speed="fast"``. Same set on both API-key and subscription
@@ -318,10 +320,10 @@ _HAIKU = Pricing(
 #     ceiling) never trigger a useful client resize. Two tiers:
 #       * High-resolution models (Opus 4.7+, Fable 5, Mythos 5): 2576 px.
 #       * Prior models (Opus 4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5): 1568 px.
-_IMAGE_BYTES = 5 * 1024 * 1024
-_REQUEST_BYTES = 32 * 1024 * 1024
-_NATIVE_DIM_HIRES = 2576
-_NATIVE_DIM_STD = 1568
+_IMAGE_BYTES: Final = 5 * 1024 * 1024
+_REQUEST_BYTES: Final = 32 * 1024 * 1024
+_NATIVE_DIM_HIRES: Final = 2576
+_NATIVE_DIM_STD: Final = 1568
 
 
 class Anthropic:
