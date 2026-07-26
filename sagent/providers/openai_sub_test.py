@@ -611,6 +611,22 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     assert loaded["expires_at"] == 1700.0
 
 
+def test_default_credential_io_honors_codex_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Sagent follows the same relocated auth file as the Codex CLI."""
+    codex_home = tmp_path / "custom-codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    access = _make_jwt({"exp": 1700.0})
+
+    OpenAISubscription.save(_make_creds(access, expires_at=1700.0))
+    loaded = OpenAISubscription.load()
+
+    assert (codex_home / "auth.json").exists()
+    assert loaded["access_token"] == access
+
+
 def test_save_preserves_existing_fields(tmp_path: Path) -> None:
     target = tmp_path / "auth.json"
     _write_creds_file(target, {"keep_me": True, "tokens": {"old": "x"}})
