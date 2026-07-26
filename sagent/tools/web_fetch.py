@@ -3,30 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final, Literal, Protocol, cast, get_args
-from urllib.parse import quote, urlparse
-from xml.etree.ElementTree import Element, ParseError
+from typing import Any, Final, Literal, cast, get_args
+from urllib.parse import urlparse
 
 import asyncio
-import html
 import ipaddress
-import os
-import re
 import socket
 
 from wesearch.errors import BotDetectionError, FetchError
 from wesearch.fetch import (
-    RequestParams,
     Transport,
     ValidatedHost,
-    classify_challenge,
-    fetch,
 )
-from wrapt import lazy_import
+from wesearch.web import fetch_web
 
 import cachetools
-import defusedxml.common
-import defusedxml.ElementTree
 
 from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
 from sagent.tools.core import (
@@ -38,36 +29,8 @@ from sagent.tools.lib.bash import Node, unwrap_cd_prefix
 from sagent.types.runtime import ToolResult
 
 
-trafilatura = lazy_import("trafilatura")
-
 # The only HTTP methods this tool supports; enforced at the directive boundary.
 HttpMethod = Literal["GET", "POST"]
-
-# Response kinds returned by ``_fetch_body``; controls extraction.
-_KIND_HTML: Final = "html"  # raw HTML, needs trafilatura
-_KIND_MARKDOWN: Final = "markdown"  # already-extracted markdown (reader proxy)
-_KIND_RSS: Final = "rss"  # RSS 2.0 / Atom feed XML, needs feed formatter
-# HTTP statuses that trigger the bot-wall fallback ladder. Other
-# 4xx/5xx (404, 410, 451, 500, ...) are not signs of bot detection and
-# surface to the caller immediately.
-_FALLBACK_STATUSES: frozenset[int] = frozenset({403, 429, 503})
-
-# Reader-proxy fallback endpoint. Jina AI's free Reader API takes a
-# target URL as a path segment and returns clean markdown rendered by
-# its own browser stack -- which gets past bot walls without us
-# touching TLS-layer details. URL templated so the proxy host can be
-# swapped (self-hosted, alternate provider) by overriding this module
-# attribute.
-_READER_PROXY_TEMPLATE: Final = "https://r.jina.ai/{url}"
-
-# Sentinel embedded in the markdown body when Jina's own backend got
-# bot-walled. Returned with HTTP 200, so we have to detect at the
-# content level. Matches both ``Target URL returned error 4xx`` and
-# ``Target URL returned error 5xx``.
-_READER_PROXY_SOFT_FAIL_RE = re.compile(
-    rb"Warning:\s*Target URL returned error \d{3}",
-    re.IGNORECASE,
-)
 
 
 class WebFetch:
@@ -247,12 +210,18 @@ class WebFetch:
                 return ToolResult(call_id="", content=cached)
 
         try:
-            body, kind = await _fetch_body(
+            # No max_chars: fetch_web returns the full text, and truncate() below
+            # applies sagent's presentation cap WITH the truncation notice. Passing
+            # the cap here would pre-cut the text to exactly the limit, so truncate
+            # would see an at-limit string and append no notice.
+            result = await asyncio.to_thread(
+                fetch_web,
                 raw_url,
                 method=method,
                 json_body=json_body,
                 form_body=form_body,
                 transport=transport,
+                validated_hosts=_validated_host,
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
@@ -262,15 +231,10 @@ class WebFetch:
         except (FetchError, ValueError, OSError) as e:
             return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
 
-        text = await _extract_text(
-            body,
-            kind=kind,
-            method=method,
-        )
-        truncated = truncate(text, TOOL_RESULT_MAX_CHARS)
+        content = truncate(result.text, TOOL_RESULT_MAX_CHARS)
         if cache_key is not None:
-            self._cache[cache_key] = truncated
-        return ToolResult(call_id="", content=truncated)
+            self._cache[cache_key] = content
+        return ToolResult(call_id="", content=content)
 
 
 def _request_bodies(
@@ -304,212 +268,6 @@ def _request_bodies(
     return None, {
         str(k): str(v) for k, v in cast(dict[str, Any], unfrozen_form).items()
     }
-
-
-async def _extract_text(body: bytes, *, kind: str, method: HttpMethod) -> str:
-    """Extract tool result text from a response body.
-
-    ``kind`` selects the post-processing path:
-      - ``_KIND_RSS``: parse as RSS 2.0 / Atom XML and format as markdown.
-      - ``_KIND_MARKDOWN``: return as-is (the reader-proxy rung already
-        rendered to markdown; running trafilatura on it would strip
-        structure).
-      - ``_KIND_HTML``: trafilatura main-content extraction, with a
-        raw-content fallback when extraction returns nothing.
-    """
-    content = body.decode("utf-8", errors="replace")
-
-    if kind == _KIND_RSS:
-        return _format_rss(body)
-    if kind == _KIND_MARKDOWN:
-        return content[:TOOL_RESULT_MAX_CHARS]
-    if method == "POST" or content.lstrip().startswith(("{", "[")):
-        return content[:TOOL_RESULT_MAX_CHARS]
-    extracted = await asyncio.to_thread(
-        trafilatura.extract,
-        content,
-        include_links=True,
-        include_tables=True,
-    )
-    return extracted or content[:TOOL_RESULT_MAX_CHARS]
-
-
-async def _fetch_body(
-    raw_url: str,
-    *,
-    method: HttpMethod,
-    json_body: JSONValue,
-    form_body: dict[str, str] | None,
-    transport: Transport = "auto",
-) -> tuple[bytes, str]:
-    """Fetch a URL and classify the response for downstream extraction.
-
-    GET requests are first offered to each ``HostAdapter`` in
-    ``_ADAPTERS``; the first ``matches`` returning True takes over the
-    fetch and owns its own retry/fallback policy. URLs with no matching
-    adapter (and all non-GET requests) fall through to
-    ``_fetch_with_fallback``, a multi-rung ladder that handles bot-wall
-    403/429/503 responses transparently.
-
-    Args:
-      raw_url: Target URL to fetch.
-      method: HTTP method (``GET`` or ``POST``).
-      json_body: JSON-serializable body for POST requests.
-      form_body: Form-encoded body for POST requests.
-      transport: Retrieval transport for this request.
-
-    Returns:
-      body: Raw response bytes.
-      kind: One of the ``_KIND_*`` constants; selects the
-        post-processing branch in ``_extract_text``.
-
-    """
-    if method == "GET":
-        for adapter in _ADAPTERS:
-            if adapter.matches(raw_url):
-                return await adapter.fetch(raw_url, transport=transport)
-    return await asyncio.to_thread(
-        _fetch_with_fallback,
-        raw_url,
-        method=method,
-        json_body=json_body,
-        form_body=form_body,
-        transport=transport,
-    )
-
-
-def _fetch_with_fallback(
-    url: str,
-    *,
-    method: HttpMethod,
-    json_body: JSONValue,
-    form_body: dict[str, str] | None,
-    transport: Transport = "auto",
-) -> tuple[bytes, str]:
-    """Fetch ``url`` through a bot-wall-aware fallback ladder.
-
-    The direct path (``_safe_fetch`` -> :func:`wesearch.fetch.fetch`,
-    Chrome TLS/HTTP-2 impersonation) is always tried first. On a 403/429/503
-    response to a GET -- the signature of edge-side bot detection (Fastly,
-    Akamai, Cloudflare) -- the ladder falls through to a reader-proxy hop that
-    renders the URL with a third-party browser stack (a different egress).
-    Non-GET methods, non-fallback statuses (404, 500, ...), and SSRF / DNS
-    errors surface immediately; the ladder only engages on the specific
-    bot-wall signature.
-
-    Args:
-      url: Target URL (SSRF-checked by ``_safe_fetch`` on each rung).
-      method: HTTP method; the fallback path is GET-only.
-      json_body: POST JSON body (initial-rung only).
-      form_body: POST form body (initial-rung only).
-      transport: Retrieval transport for every fallback rung.
-
-    Returns:
-      body_kind: ``(bytes, kind)`` where kind is ``_KIND_HTML`` from
-        the HTTP rungs and ``_KIND_MARKDOWN`` from the reader proxy.
-
-    Raises:
-      FetchError: The original error, if every rung fails.
-
-    """
-    try:
-        body = _safe_fetch(
-            url,
-            method=method,
-            json_body=json_body,
-            form_body=form_body,
-            transport=transport,
-        )
-        _raise_success_challenge(url, body)
-        return body, _KIND_HTML
-    except FetchError as e:
-        if e.status not in _FALLBACK_STATUSES or method != "GET":
-            raise
-        rung1_err = e
-
-    # Reader-proxy fallback (final rung). The first rung already fetches with
-    # Chrome TLS/HTTP-2 impersonation via wesearch.fetch, so a same-egress
-    # curl retry would present an identical fingerprint and hit the same wall;
-    # the proxy is the only rung with a genuinely different egress.
-    try:
-        return _reader_proxy_fetch(url, transport=transport), _KIND_MARKDOWN
-    except (FetchError, ValueError, OSError) as e:
-        raise rung1_err from e
-
-
-def _reader_proxy_fetch(url: str, *, transport: Transport = "auto") -> bytes:
-    """Fetch ``url`` through the r.jina.ai reader proxy.
-
-    The proxy receives the target URL as a path segment, fetches it
-    with a full browser stack, and returns clean markdown. The proxy
-    URL itself goes through ``_safe_fetch`` so SSRF guards still apply
-    to the proxy host. The user URL travels as encoded path data; the
-    proxy -- not us -- is the one that contacts the target server.
-
-    Jina returns HTTP 200 even when its own backend was bot-walled,
-    embedding the diagnostic as a ``Warning:`` line in the markdown.
-    We detect that sentinel and raise ``FetchError`` so the ladder
-    treats it as a soft failure instead of handing the agent text
-    that looks like an article but is actually a proxy diagnostic.
-    """
-    proxy_url = _READER_PROXY_TEMPLATE.format(url=quote(url, safe=":/"))
-    body = _safe_fetch(proxy_url, transport=transport)
-    if _READER_PROXY_SOFT_FAIL_RE.search(body):
-        raise FetchError(
-            url=url,
-            status=502,
-            headers={},
-            body=body[:200],
-        )
-    _raise_success_challenge(url, body)
-    return body
-
-
-def _raise_success_challenge(url: str, body: bytes) -> None:
-    """Raise when a successful retrieval is a cross-site interstitial."""
-    error_type = classify_challenge(body, on_success_body=True)
-    if error_type is not None:
-        raise error_type(url=url, status=200, headers={}, body=body)
-
-
-def _safe_fetch(
-    url: str,
-    *,
-    method: HttpMethod = "GET",
-    json_body: JSONValue = None,
-    form_body: dict[str, str] | None = None,
-    headers: dict[str, str] | None = None,
-    transport: Transport = "auto",
-) -> bytes:
-    """Fetch with SSRF check on the initial URL and every redirect.
-
-    Delegates the transport -- Chrome TLS/HTTP-2 impersonation, redirect
-    following, retry, decompression -- to :func:`wesearch.fetch.fetch`. This
-    tool supplies only the app-level SSRF policy via ``validated_hosts`` and,
-    when a caller passes ``headers`` (e.g. Reddit's Android app User-Agent +
-    bearer token), the identity to present.
-    """
-    try:
-        parsed = urlparse(url)
-    except ValueError as e:
-        raise ValueError(f"Invalid URL: {e}") from e
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"Unsupported scheme {parsed.scheme!r}; only http(s) allowed.")
-    if not parsed.hostname:
-        raise ValueError("URL has no host.")
-    body, _session = fetch(
-        url,
-        request=RequestParams(
-            method=method,
-            json=json_body,
-            data=form_body,
-            headers=headers,
-            validated_hosts=_validated_host,
-            timeout_sec=15,
-            transport=transport,
-        ),
-    )
-    return body
 
 
 def _validated_host(hostname: str) -> ValidatedHost:
@@ -561,350 +319,6 @@ def _ip_is_safe(host: str, raw_ip: str) -> str | None:
     ):
         return f"Refusing to fetch {host!r} (resolves to non-public address {ip})."
     return None
-
-
-class HostAdapter(Protocol):
-    """Per-host fetch override for sites that need bespoke retrieval.
-
-    The dispatcher in ``_fetch_body`` walks ``_ADAPTERS`` in order and
-    delegates to the first adapter whose ``matches`` returns True. The
-    adapter then owns the full fetch, including any host-specific
-    fallbacks (Reddit's JS-verification → old.reddit hop, X's renderer
-    delegation). The dispatcher does not second-guess: an adapter that
-    raises propagates its exception up through ``WebFetch.run``.
-    """
-
-    def matches(self, url: str) -> bool:
-        """Return True iff this adapter handles ``url``."""
-        ...
-
-    async def fetch(
-        self, url: str, *, transport: Transport = "auto"
-    ) -> tuple[bytes, str]:
-        """Fetch ``url`` through host-specific logic.
-
-        Args:
-          url: Target URL (already SSRF-checked by the inner call to
-            ``_safe_fetch``).
-          transport: Retrieval transport for the adapter's requests.
-
-        Returns:
-          body: Raw response bytes.
-          kind: One of the ``_KIND_*`` constants identifying which
-            ``_extract_text`` branch to use.
-
-        """
-        ...
-
-
-class _RedditAdapter:
-    """Reddit via the public RSS/Atom feed.
-
-    Reddit bot-walls every datacenter-IP request to its JSON API
-    (``.json``), HTML pages, and ``old.reddit.com`` with a 403 wall;
-    reader proxies are blocked too. The ``.rss`` feed still serves
-    anonymously: a thread feed carries top-level comments as Atom
-    entries, so we keep titles, bodies, and comment text. Every Reddit
-    URL is normalized to its ``.rss`` form and parsed by ``_format_rss``.
-    """
-
-    _THREAD_RE = re.compile(r"/r/[^/?#]+/comments/\w+")
-
-    def matches(self, url: str) -> bool:
-        """Match ``reddit.com`` and any subdomain (``old``, ``np``, ``new``)."""
-        hostname = urlparse(url).hostname or ""
-        return hostname == "reddit.com" or hostname.endswith(".reddit.com")
-
-    async def fetch(
-        self, url: str, *, transport: Transport = "auto"
-    ) -> tuple[bytes, str]:
-        """Fetch the Reddit feed (RSS), or richer JSON when configured."""
-        body = await asyncio.to_thread(_safe_fetch, _rss_url(url), transport=transport)
-        _raise_success_challenge(url, body)
-        return body, _KIND_RSS
-
-
-# Google News front-page paths that route to the top-stories RSS feed.
-# Article-detail URLs (``/articles/...``) and topic URLs (``/topics/...``)
-# fall through unrewritten -- topic IDs don't map cleanly between the
-# SPA and RSS URL spaces, and article pages have no RSS equivalent.
-_GOOGLE_NEWS_TOP_PATHS: frozenset[str] = frozenset(
-    {"", "/home", "/topstories", "/foryou"},
-)
-
-
-class _GoogleNewsAdapter:
-    """Rewrite ``news.google.com`` SPA URLs to their RSS endpoints.
-
-    The SPA's server-side render only contains a sparse "Your briefing"
-    block; the bulk of the page is hydrated by JS we don't execute. The
-    public RSS feed at the same hostname serves the full set of story
-    clusters as structured XML, which ``_format_rss`` renders cleanly.
-    """
-
-    def matches(self, url: str) -> bool:
-        """Match the exact ``news.google.com`` hostname (no subdomains)."""
-        return urlparse(url).hostname == "news.google.com"
-
-    async def fetch(
-        self, url: str, *, transport: Transport = "auto"
-    ) -> tuple[bytes, str]:
-        """Fetch via RSS if the path has a known rewrite, else HTML."""
-        rewritten = self._rewrite(url)
-        target = rewritten if rewritten is not None else url
-        body = await asyncio.to_thread(_safe_fetch, target, transport=transport)
-        _raise_success_challenge(url, body)
-        kind = _KIND_RSS if urlparse(target).path.startswith("/rss") else _KIND_HTML
-        return body, kind
-
-    @staticmethod
-    def _rewrite(url: str) -> str | None:
-        """Return the RSS-equivalent URL, or None for paths we leave alone."""
-        parsed = urlparse(url)
-        path = parsed.path.rstrip("/")
-        if path.startswith("/rss"):
-            return None
-        if path in _GOOGLE_NEWS_TOP_PATHS:
-            return parsed._replace(path="/rss").geturl()
-        if path == "/search":
-            return parsed._replace(path="/rss/search").geturl()
-        return None
-
-
-_ALLOW_THIRD_PARTY_RENDER_ENV: Final = "SAGENT_ALLOW_THIRD_PARTY_RENDER"
-
-
-def _third_party_render_allowed() -> bool:
-    """Return whether the operator has opted into third-party rendering.
-
-    Default: refuse. X / Twitter content is fetched via ``r.jina.ai``
-    (a third-party renderer); a privacy-sensitive caller cannot opt
-    out at the URL level, so default to refusing the hop and require
-    explicit consent via the environment variable.
-    """
-    value = os.environ.get(_ALLOW_THIRD_PARTY_RENDER_ENV, "").strip().lower()
-    return value in ("1", "true", "yes", "on")
-
-
-class _XAdapter:
-    """X (Twitter) -- full SPA with no useful SSR; route via reader proxy.
-
-    X serves an empty shell to non-JS clients; tweet text only appears
-    after a JS hydration step. We delegate the render to the existing
-    reader-proxy rung (Jina) and return its markdown. Because every
-    fetch egresses to ``r.jina.ai``, this adapter is opt-in: callers
-    must set ``SAGENT_ALLOW_THIRD_PARTY_RENDER=1`` or the fetch raises
-    ``FetchError``.
-    """
-
-    def matches(self, url: str) -> bool:
-        """Match ``x.com``, ``twitter.com``, and their subdomains."""
-        hostname = urlparse(url).hostname or ""
-        if hostname in ("x.com", "twitter.com"):
-            return True
-        return hostname.endswith((".x.com", ".twitter.com"))
-
-    async def fetch(
-        self, url: str, *, transport: Transport = "auto"
-    ) -> tuple[bytes, str]:
-        """Fetch via reader proxy and tag as already-extracted markdown."""
-        if not _third_party_render_allowed():
-            message = (
-                f"X/Twitter fetch requires the third-party reader proxy"
-                f" ({_READER_PROXY_TEMPLATE.format(url='...')});"
-                f" set {_ALLOW_THIRD_PARTY_RENDER_ENV}=1 to allow."
-            )
-            raise FetchError(url, 0, {}, message.encode("utf-8"))
-        body = await asyncio.to_thread(_reader_proxy_fetch, url, transport=transport)
-        return body, _KIND_MARKDOWN
-
-
-# Registry of host adapters. Order matters: the first matching adapter
-# wins. New entries should be added in expected-match-frequency order
-# so a popular host doesn't pay for failed matches against niche ones.
-_ADAPTERS: tuple[HostAdapter, ...] = (
-    _RedditAdapter(),
-    _GoogleNewsAdapter(),
-    _XAdapter(),
-)
-
-
-def _rss_url(raw_url: str) -> str:
-    """Return the ``.rss`` feed URL for any Reddit URL.
-
-    Rewrites the path to end in ``.rss`` (dropping a trailing ``.json``
-    if present) while preserving the query string, which carries feed
-    options like ``?limit=100`` and ``?sort=top``. URLs whose path
-    already ends in ``.rss`` are returned unchanged.
-    """
-    parsed = urlparse(raw_url)
-    if parsed.path.endswith(".rss"):
-        return raw_url
-    path = re.sub(r"/?\.json$", "", parsed.path).rstrip("/")
-    return parsed._replace(path=f"{path}/.rss").geturl()
-
-
-# Matches one ``<li>`` entry in a Google News RSS cluster description.
-# The description body is a small fragment of HTML with the same shape
-# every time: ``<ol><li><a href="..">title</a> &nbsp;&nbsp;<font ..>source
-# </font></li>...</ol>``. We parse with a regex rather than an HTML
-# parser because the fragment is well-formed-by-construction and the
-# regex stays under ten lines.
-_RSS_CLUSTER_LINK_RE = re.compile(
-    r'<li>\s*<a\s+[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
-    r"(?:[^<]*<font[^>]*>([^<]+)</font>)?",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def _format_rss(body: bytes) -> str:
-    """Format an RSS or Atom feed as readable markdown.
-
-    Args:
-      body: Raw feed XML.
-
-    Returns:
-      formatted: Markdown text suitable for direct tool output.
-
-    """
-    try:
-        root = defusedxml.ElementTree.fromstring(body)
-    except (ParseError, defusedxml.common.DefusedXmlException):
-        return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
-    if _local_name(root.tag) == "feed":
-        return _format_atom(root).rstrip()
-    channel = root.find("channel") if _local_name(root.tag) == "rss" else root
-    if channel is None:
-        return body.decode("utf-8", errors="replace")[:TOOL_RESULT_MAX_CHARS]
-    lines: list[str] = []
-    feed_title = (_child_text(channel, "title") or "").strip()
-    if feed_title:
-        lines.append(f"# {feed_title}\n")
-    for item in _children(channel, "item"):
-        _append_rss_item(item, lines)
-    return "\n".join(lines).rstrip()
-
-
-def _format_atom(feed: Element[str]) -> str:
-    """Format an Atom feed as readable markdown."""
-    lines: list[str] = []
-    feed_title = (_child_text(feed, "title") or "").strip()
-    if feed_title:
-        lines.append(f"# {feed_title}\n")
-    for entry in _children(feed, "entry"):
-        _append_atom_entry(entry, lines)
-    return "\n".join(lines)
-
-
-def _append_atom_entry(entry: Element[str], lines: list[str]) -> None:
-    """Append one Atom entry to ``lines``."""
-    title = (_child_text(entry, "title") or "").strip()
-    author = _atom_author(entry)
-    updated = (
-        _child_text(entry, "updated") or _child_text(entry, "published") or ""
-    ).strip()
-    link = _atom_link(entry)
-    content = _atom_content(entry)
-    if title:
-        lines.append(f"## {title}")
-    meta_parts = [p for p in (author, updated) if p]
-    if meta_parts:
-        lines.append(" -- ".join(meta_parts))
-    if link:
-        lines.append(link)
-    if content:
-        lines.append(content[:500])
-    lines.append("")
-
-
-def _atom_author(entry: Element[str]) -> str:
-    """Return the Atom author name, if present."""
-    author = _child(entry, "author")
-    if author is None:
-        return ""
-    return (_child_text(author, "name") or "").strip()
-
-
-def _atom_link(entry: Element[str]) -> str:
-    """Return the first Atom link href, if present."""
-    for link in _children(entry, "link"):
-        href = link.attrib.get("href")
-        if href:
-            return href.strip()
-    return ""
-
-
-def _atom_content(entry: Element[str]) -> str:
-    """Return cleaned Atom content or summary text."""
-    raw = _child_text(entry, "content") or _child_text(entry, "summary") or ""
-    return " ".join(re.sub(r"<[^>]+>", " ", html.unescape(raw)).split())
-
-
-def _append_rss_item(item: Element[str], lines: list[str]) -> None:
-    """Append one feed item (heading + meta + cluster bullets) to ``lines``."""
-    title = (_child_text(item, "title") or "").strip()
-    link = (_child_text(item, "link") or "").strip()
-    source_elem = _child(item, "source")
-    source = (source_elem.text or "").strip() if source_elem is not None else ""
-    pub_date = (_child_text(item, "pubDate") or "").strip()
-    if title:
-        lines.append(f"## {title}")
-    meta_parts = [p for p in (source, pub_date) if p]
-    if meta_parts:
-        lines.append(" -- ".join(meta_parts))
-    if link:
-        lines.append(link)
-    # The first cluster entry duplicates the item title; siblings follow.
-    cluster = _parse_rss_cluster(_child_text(item, "description") or "")
-    for sibling_title, sibling_link, sibling_source in cluster[1:]:
-        suffix = f" -- {sibling_source}" if sibling_source else ""
-        lines.append(f"- [{sibling_title}]({sibling_link}){suffix}")
-    lines.append("")
-
-
-def _local_name(tag: str) -> str:
-    """Return an XML tag without its namespace."""
-    return tag.rsplit("}", 1)[-1]
-
-
-def _children(parent: Element[str], name: str) -> list[Element[str]]:
-    """Return direct children with local tag name ``name``."""
-    return [child for child in list(parent) if _local_name(child.tag) == name]
-
-
-def _child(parent: Element[str], name: str) -> Element[str] | None:
-    """Return the first direct child with local tag name ``name``."""
-    for child in list(parent):
-        if _local_name(child.tag) == name:
-            return child
-    return None
-
-
-def _child_text(parent: Element[str], name: str) -> str | None:
-    """Return text for the first direct child with local tag name ``name``."""
-    child = _child(parent, name)
-    return child.text if child is not None else None
-
-
-def _parse_rss_cluster(description_html: str) -> list[tuple[str, str, str]]:
-    """Parse the ``<ol>`` of sibling stories embedded in a feed item description.
-
-    Args:
-      description_html: HTML fragment from an ``<item><description>``.
-
-    Returns:
-      entries: ``(title, link, source)`` tuples, in document order. Empty
-        list when the fragment lacks Google-News-style cluster markup.
-
-    """
-    return [
-        (
-            html.unescape(match.group(2)).strip(),
-            match.group(1),
-            html.unescape(match.group(3) or "").strip(),
-        )
-        for match in _RSS_CLUSTER_LINK_RE.finditer(description_html)
-    ]
 
 
 _NUDGE: Final = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
